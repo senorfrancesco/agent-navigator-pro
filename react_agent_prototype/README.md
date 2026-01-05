@@ -110,7 +110,8 @@ python3.11 test_system.py
 	│       ├── ums_client.py          # UMS HTTP-клиент
 	│       └── models_config.py       # Конфигурация моделей
 	└── REQUIREMENTS_ANALYSIS.md
-	```}],path:
+```
+
 
 ## Следующие шаги
 
