@@ -6,12 +6,16 @@ Endpoints:
 - GET /agent/stream/{session_id} - SSE стриминг шагов
 - GET /health - статус всех сервисов
 - GET /status - информация о моделях и ресурсах
+- GET /resources - детальная информация о системных ресурсах
+- GET /cuda - проверка поддержки CUDA
 """
 
 import asyncio
 import json
 import uuid
 import time
+import sys
+import os
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 from contextlib import asynccontextmanager
@@ -21,6 +25,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import httpx
+
+# Добавляем путь к services для импорта resource_monitor
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'services'))
+
+from resource_monitor import get_resource_monitor, get_system_resources, check_cuda
 
 # Конфигурация сервисов
 UMS_URL = "http://localhost:8090"
@@ -64,8 +73,18 @@ class StatusResponse(BaseModel):
     backend_mode: str
     vram_used_gb: float
     vram_total_gb: float
+    vram_free_gb: float
     ram_used_gb: float
     ram_total_gb: float
+    ram_free_gb: float
+    ram_percent: float
+    cpu_percent: float
+    cpu_count: int
+    cuda_available: bool
+    cuda_version: Optional[str]
+    driver_version: Optional[str]
+    gpu_temperature: Optional[int]
+    gpu_utilization: Optional[int]
     queue_size: int
     mcp_servers: List[Dict[str, Any]]
 
@@ -457,7 +476,11 @@ async def health_check():
 
 @app.get("/status", response_model=StatusResponse)
 async def get_status():
-    """Получение статуса системы."""
+    """Получение статуса системы с реальными ресурсами."""
+    # Получаем реальные ресурсы через resource_monitor
+    resources = get_system_resources()
+    
+    # Получаем статус UMS (активная модель и т.д.)
     ums_status = await get_ums_status()
     
     # Проверяем MCP серверы
@@ -466,16 +489,45 @@ async def get_status():
         {"name": "Legal Server", "port": 8002, **await check_service_health(LEGAL_SERVER_URL)},
     ]
     
+    # Получаем температуру и загрузку GPU (если есть)
+    gpu_temp = None
+    gpu_util = None
+    if resources.get("gpus") and len(resources["gpus"]) > 0:
+        gpu_temp = resources["gpus"][0].get("temperature")
+        gpu_util = resources["gpus"][0].get("utilization")
+    
     return StatusResponse(
         active_model=ums_status.get("active_model"),
         backend_mode=ums_status.get("backend_mode", "llama-cpp-python"),
-        vram_used_gb=ums_status.get("vram_used_gb", 0),
-        vram_total_gb=ums_status.get("vram_total_gb", 12),
-        ram_used_gb=ums_status.get("ram_used_gb", 0),
-        ram_total_gb=ums_status.get("ram_total_gb", 32),
+        vram_used_gb=resources.get("vram_used_gb", 0),
+        vram_total_gb=resources.get("vram_total_gb", 0),
+        vram_free_gb=resources.get("vram_free_gb", 0),
+        ram_used_gb=resources.get("ram_used_gb", 0),
+        ram_total_gb=resources.get("ram_total_gb", 0),
+        ram_free_gb=resources.get("ram_free_gb", 0),
+        ram_percent=resources.get("ram_percent", 0),
+        cpu_percent=resources.get("cpu_percent", 0),
+        cpu_count=resources.get("cpu_count", 0),
+        cuda_available=resources.get("cuda_available", False),
+        cuda_version=resources.get("cuda_version"),
+        driver_version=resources.get("driver_version"),
+        gpu_temperature=gpu_temp,
+        gpu_utilization=gpu_util,
         queue_size=ums_status.get("queue_size", 0),
         mcp_servers=mcp_servers
     )
+
+
+@app.get("/resources")
+async def get_resources():
+    """Получение детальной информации о системных ресурсах."""
+    return get_system_resources()
+
+
+@app.get("/cuda")
+async def get_cuda_info():
+    """Проверка поддержки CUDA."""
+    return check_cuda()
 
 
 @app.post("/agent/chat", response_model=ChatResponse)

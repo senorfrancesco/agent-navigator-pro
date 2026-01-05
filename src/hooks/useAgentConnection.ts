@@ -10,16 +10,25 @@ import {
   getStatus, 
   deriveConnectionStatus, 
   deriveMCPServers,
-  StatusResponse 
 } from '@/services/agentApi';
 
-interface ResourceStatus {
+export interface ResourceStatus {
   vramUsedGb: number;
   vramTotalGb: number;
+  vramFreeGb: number;
   ramUsedGb: number;
   ramTotalGb: number;
+  ramFreeGb: number;
+  ramPercent: number;
+  cpuPercent: number;
+  cpuCount: number;
   activeModel: string | null;
   queueSize: number;
+  cudaAvailable: boolean;
+  cudaVersion: string | null;
+  driverVersion: string | null;
+  gpuTemperature: number | null;
+  gpuUtilization: number | null;
 }
 
 interface UseAgentConnectionResult {
@@ -36,11 +45,21 @@ interface UseAgentConnectionResult {
 
 const DEFAULT_RESOURCES: ResourceStatus = {
   vramUsedGb: 0,
-  vramTotalGb: 12,
+  vramTotalGb: 0,
+  vramFreeGb: 0,
   ramUsedGb: 0,
-  ramTotalGb: 32,
+  ramTotalGb: 0,
+  ramFreeGb: 0,
+  ramPercent: 0,
+  cpuPercent: 0,
+  cpuCount: 0,
   activeModel: null,
   queueSize: 0,
+  cudaAvailable: false,
+  cudaVersion: null,
+  driverVersion: null,
+  gpuTemperature: null,
+  gpuUtilization: null,
 };
 
 export function useAgentConnection(serverUrl: string): UseAgentConnectionResult {
@@ -79,10 +98,20 @@ export function useAgentConnection(serverUrl: string): UseAgentConnectionResult 
           setResources({
             vramUsedGb: statusData.vram_used_gb,
             vramTotalGb: statusData.vram_total_gb,
+            vramFreeGb: statusData.vram_free_gb,
             ramUsedGb: statusData.ram_used_gb,
             ramTotalGb: statusData.ram_total_gb,
+            ramFreeGb: statusData.ram_free_gb,
+            ramPercent: statusData.ram_percent,
+            cpuPercent: statusData.cpu_percent,
+            cpuCount: statusData.cpu_count,
             activeModel: statusData.active_model,
             queueSize: statusData.queue_size,
+            cudaAvailable: statusData.cuda_available,
+            cudaVersion: statusData.cuda_version,
+            driverVersion: statusData.driver_version,
+            gpuTemperature: statusData.gpu_temperature,
+            gpuUtilization: statusData.gpu_utilization,
           });
         } catch (statusError) {
           // Status endpoint may not be available, but connection is still valid

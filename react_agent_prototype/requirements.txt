@@ -1,14 +1,23 @@
+# Core
 langchain
 langgraph
 pydantic
+python-dotenv
+
+# API
 fastapi
 uvicorn
-requests
-python-dotenv
+httpx
 
 # Для работы с локальными моделями
 llama-cpp-python[server]
 
-# Для мониторинга ресурсов (опционально, для MMS)
+# Для мониторинга ресурсов
 psutil
-pynvml
+pynvml  # NVIDIA GPU monitoring
+
+# Для работы с документами
+pdfplumber
+python-docx
+pandas
+openpyxl

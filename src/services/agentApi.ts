@@ -26,13 +26,35 @@ export interface StatusResponse {
   backend_mode: BackendMode;
   vram_used_gb: number;
   vram_total_gb: number;
+  vram_free_gb: number;
   ram_used_gb: number;
   ram_total_gb: number;
+  ram_free_gb: number;
+  ram_percent: number;
+  cpu_percent: number;
+  cpu_count: number;
+  cuda_available: boolean;
+  cuda_version: string | null;
+  driver_version: string | null;
+  gpu_temperature: number | null;
+  gpu_utilization: number | null;
   queue_size: number;
   mcp_servers: Array<{
     name: string;
     port: number;
     status: string;
+  }>;
+}
+
+export interface CudaInfo {
+  cuda_available: boolean;
+  cuda_version: string | null;
+  driver_version: string | null;
+  gpu_count: number;
+  gpus: Array<{
+    index: number;
+    name: string;
+    vram_gb: number;
   }>;
 }
 
@@ -276,4 +298,50 @@ export async function deleteSession(baseUrl: string, sessionId: string): Promise
   await fetch(`${baseUrl}/agent/session/${sessionId}`, {
     method: 'DELETE',
   });
+}
+
+/**
+ * Get CUDA information
+ */
+export async function getCudaInfo(baseUrl: string): Promise<CudaInfo> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), HEALTH_CHECK_TIMEOUT);
+
+  try {
+    const response = await fetch(`${baseUrl}/cuda`, {
+      method: 'GET',
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    return await response.json();
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/**
+ * Get detailed system resources
+ */
+export async function getResources(baseUrl: string): Promise<Record<string, unknown>> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), HEALTH_CHECK_TIMEOUT);
+
+  try {
+    const response = await fetch(`${baseUrl}/resources`, {
+      method: 'GET',
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    return await response.json();
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }

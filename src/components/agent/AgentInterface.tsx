@@ -190,8 +190,6 @@ export function AgentInterface() {
         {showResourceMonitor && (
           <ResourceMonitor
             resources={resources}
-            activeModel={resources.activeModel}
-            queueSize={resources.queueSize}
             mcpServers={mcpServers}
           />
         )}
