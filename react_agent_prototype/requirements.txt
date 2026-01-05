@@ -1,23 +1,28 @@
-# Core
-langchain
-langgraph
-pydantic
-python-dotenv
+# Core frameworks
+langchain>=0.1.0
+langgraph>=0.0.30
+pydantic>=2.0.0
+python-dotenv>=1.0.0
 
-# API
-fastapi
-uvicorn
-httpx
+# Web frameworks and HTTP clients
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+httpx>=0.26.0
+requests>=2.31.0
 
-# Для работы с локальными моделями
-llama-cpp-python[server]
+# Local model inference
+llama-cpp-python[server]>=0.2.0
 
-# Для мониторинга ресурсов
-psutil
-pynvml  # NVIDIA GPU monitoring
+# System monitoring
+psutil>=5.9.0
+pynvml>=11.5.0
 
-# Для работы с документами
-pdfplumber
-python-docx
-pandas
-openpyxl
+# Document processing
+pdfplumber>=0.10.0
+python-docx>=1.1.0
+pandas>=2.0.0
+openpyxl>=3.1.0
+
+# Additional utilities
+aiofiles>=23.2.0
+python-multipart>=0.0.6
