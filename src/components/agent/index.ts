@@ -8,3 +8,4 @@ export { AgentStepComponent } from './AgentStep';
 export { ConnectionStatusBadge } from './ConnectionStatus';
 export { SettingsPanel } from './SettingsPanel';
 export { ExportButton } from './ExportButton';
+export { ResourceMonitor } from './ResourceMonitor';

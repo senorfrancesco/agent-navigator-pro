@@ -11,6 +11,7 @@ import { Separator } from '@/components/ui/separator';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { cn } from '@/lib/utils';
 import { Loader2, Check, X, Server } from 'lucide-react';
+import { ConnectionStatus } from '@/types/agent';
 
 interface SettingsPanelProps {
   open: boolean;
@@ -19,8 +20,10 @@ interface SettingsPanelProps {
   onUpdateServerUrl: (url: string) => void;
   onUpdateBackendMode: (mode: BackendMode) => void;
   onUpdateModelSettings: (settings: Partial<AppSettings['model']>) => void;
-  onCheckConnection: () => Promise<boolean>;
+  onCheckConnection: () => Promise<void>;
   onToggleShowJson: () => void;
+  connectionStatus?: ConnectionStatus;
+  isCheckingConnection?: boolean;
 }
 
 const backendOptions: { value: BackendMode; label: string; description: string }[] = [
@@ -60,10 +63,15 @@ export function SettingsPanel({
   onUpdateModelSettings,
   onCheckConnection,
   onToggleShowJson,
+  connectionStatus,
+  isCheckingConnection,
 }: SettingsPanelProps) {
   const handleCheckConnection = async () => {
     await onCheckConnection();
   };
+
+  const currentStatus = connectionStatus || settings.server.connectionStatus;
+  const isChecking = isCheckingConnection || currentStatus === 'connecting';
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -91,11 +99,11 @@ export function SettingsPanel({
                     variant="outline" 
                     size="icon"
                     onClick={handleCheckConnection}
-                    disabled={settings.server.connectionStatus === 'connecting'}
+                    disabled={isChecking}
                   >
-                    {settings.server.connectionStatus === 'connecting' ? (
+                    {isChecking ? (
                       <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : settings.server.isConnected ? (
+                    ) : currentStatus === 'connected' ? (
                       <Check className="h-4 w-4 text-[hsl(var(--success))]" />
                     ) : (
                       <X className="h-4 w-4" />
@@ -103,9 +111,9 @@ export function SettingsPanel({
                   </Button>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Статус: {settings.server.connectionStatus === 'connected' ? 'Подключено' : 
-                           settings.server.connectionStatus === 'connecting' ? 'Подключение...' :
-                           settings.server.connectionStatus === 'error' ? 'Ошибка' : 'Отключено'}
+                  Статус: {currentStatus === 'connected' ? 'Подключено' : 
+                           currentStatus === 'connecting' ? 'Подключение...' :
+                           currentStatus === 'error' ? 'Ошибка' : 'Отключено'}
                 </p>
               </div>
 

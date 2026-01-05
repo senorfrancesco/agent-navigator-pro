@@ -2,71 +2,40 @@ import { useState, useCallback } from 'react';
 import { useIsMobile } from '@/hooks/use-mobile';
 import { useAppSettings } from '@/hooks/useAppSettings';
 import { useChatHistory } from '@/hooks/useChatHistory';
+import { useAgentConnection } from '@/hooks/useAgentConnection';
 import { ChatSidebar } from './ChatSidebar';
 import { ChatHeader } from './ChatHeader';
 import { ChatArea } from './ChatArea';
 import { SettingsPanel } from './SettingsPanel';
-import { ExportButton } from './ExportButton';
+import { ResourceMonitor } from './ResourceMonitor';
 import { FileAttachment, AgentStep, Message } from '@/types/agent';
 import { Sheet, SheetContent } from '@/components/ui/sheet';
 import { toast } from '@/hooks/use-toast';
-
-// Demo data generator for testing
-function generateDemoSteps(): AgentStep[] {
-  return [
-    {
-      id: '1',
-      type: 'thought',
-      content: 'Пользователь хочет получить информацию о документе. Нужно использовать Document Server для загрузки и анализа.',
-      timestamp: Date.now(),
-      duration: 0.15,
-    },
-    {
-      id: '2',
-      type: 'action',
-      content: 'Вызываю инструмент для загрузки документа',
-      timestamp: Date.now(),
-      toolName: 'document_server.load_document',
-      toolParams: { path: '/docs/example.pdf' },
-      duration: 1.23,
-    },
-    {
-      id: '3',
-      type: 'observation',
-      content: 'Документ успешно загружен. Содержит 15 страниц, 3,500 символов текста.',
-      timestamp: Date.now(),
-      duration: 0.05,
-      rawJson: {
-        status: 'success',
-        pages: 15,
-        characters: 3500,
-        format: 'pdf',
-      },
-    },
-    {
-      id: '4',
-      type: 'thought',
-      content: 'Документ загружен. Теперь могу предоставить пользователю информацию о его содержимом.',
-      timestamp: Date.now(),
-      duration: 0.12,
-    },
-  ];
-}
+import { sendMessage, streamAgentSteps } from '@/services/agentApi';
 
 export function AgentInterface() {
   const isMobile = useIsMobile();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [showResourceMonitor, setShowResourceMonitor] = useState(false);
 
   const {
     settings,
     updateServerUrl,
     updateBackendMode,
     updateModelSettings,
-    checkConnection,
     toggleShowJson,
   } = useAppSettings();
+
+  const {
+    connectionStatus,
+    backendMode,
+    mcpServers,
+    resources,
+    isChecking,
+    checkConnection,
+  } = useAgentConnection(settings.server.url);
 
   const {
     chats,
@@ -87,31 +56,94 @@ export function AgentInterface() {
       attachments,
     });
 
+    // Create placeholder for assistant message
+    const assistantMessage = addMessage({
+      role: 'assistant',
+      content: '',
+      isStreaming: true,
+      steps: [],
+    });
+
     setIsProcessing(true);
 
-    // Simulate API call to the agent backend
-    // In real implementation, this would call settings.server.url
     try {
-      // Demo: simulate processing time
-      await new Promise(resolve => setTimeout(resolve, 1500));
+      // Send message to agent API
+      const response = await sendMessage(
+        settings.server.url,
+        content,
+        attachments.length > 0 ? attachments : undefined,
+        {
+          temperature: settings.model.temperature,
+          maxTokens: settings.model.maxTokens,
+        }
+      );
 
-      // Add agent response with demo steps
-      addMessage({
-        role: 'assistant',
-        content: 'Я проанализировал ваш запрос. Документ успешно загружен и обработан. Он содержит 15 страниц текста.',
-        steps: generateDemoSteps(),
-      });
+      const collectedSteps: AgentStep[] = [];
+      let finalAnswer = '';
+
+      // Stream agent steps
+      const cleanup = streamAgentSteps(
+        settings.server.url,
+        response.session_id,
+        (step) => {
+          // Handle final_answer type
+          if (step.type === 'final_answer' as string) {
+            finalAnswer = step.content;
+          } else {
+            collectedSteps.push(step);
+          }
+
+          // Update message with new steps
+          updateMessage(assistantMessage.id, {
+            steps: [...collectedSteps],
+            content: finalAnswer || 'Обрабатываю запрос...',
+            isStreaming: true,
+          });
+        },
+        (error) => {
+          console.error('Stream error:', error);
+          toast({
+            title: 'Ошибка соединения',
+            description: error.message,
+            variant: 'destructive',
+          });
+          setIsProcessing(false);
+          
+          updateMessage(assistantMessage.id, {
+            isStreaming: false,
+            content: finalAnswer || 'Произошла ошибка при получении ответа.',
+          });
+        },
+        () => {
+          // Stream completed
+          setIsProcessing(false);
+          
+          updateMessage(assistantMessage.id, {
+            isStreaming: false,
+            content: finalAnswer || 'Анализ завершен.',
+            steps: collectedSteps,
+          });
+        }
+      );
 
     } catch (error) {
+      console.error('Failed to send message:', error);
+      
       toast({
         title: 'Ошибка',
-        description: 'Не удалось получить ответ от агента',
+        description: error instanceof Error ? error.message : 'Не удалось отправить сообщение',
         variant: 'destructive',
       });
-    } finally {
+
+      // Update assistant message with error
+      updateMessage(assistantMessage.id, {
+        isStreaming: false,
+        content: 'Не удалось подключиться к агенту. Проверьте настройки сервера.',
+      });
+      
       setIsProcessing(false);
     }
-  }, [addMessage]);
+  }, [addMessage, updateMessage, settings.server.url, settings.model]);
 
   const handleExport = useCallback(() => {
     // Export handled by ExportButton component
@@ -145,12 +177,24 @@ export function AgentInterface() {
       {/* Main content */}
       <div className="flex flex-1 flex-col">
         <ChatHeader
-          connectionStatus={settings.server.connectionStatus}
-          backendMode={settings.server.backendMode}
+          connectionStatus={connectionStatus}
+          backendMode={backendMode}
           onExport={handleExport}
           onToggleSidebar={() => setSidebarOpen(true)}
+          onToggleResourceMonitor={() => setShowResourceMonitor(!showResourceMonitor)}
           isMobile={isMobile}
+          showResourceMonitor={showResourceMonitor}
         />
+
+        {/* Resource Monitor */}
+        {showResourceMonitor && (
+          <ResourceMonitor
+            resources={resources}
+            activeModel={resources.activeModel}
+            queueSize={resources.queueSize}
+            mcpServers={mcpServers}
+          />
+        )}
 
         <ChatArea
           chat={activeChat}
@@ -170,6 +214,8 @@ export function AgentInterface() {
         onUpdateModelSettings={updateModelSettings}
         onCheckConnection={checkConnection}
         onToggleShowJson={toggleShowJson}
+        connectionStatus={connectionStatus}
+        isCheckingConnection={isChecking}
       />
     </div>
   );
