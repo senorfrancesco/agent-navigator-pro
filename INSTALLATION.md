@@ -1,74 +1,74 @@
-# Installation Guide
+# Руководство по Установке
 
-This guide provides step-by-step instructions for setting up the Agent Navigator Pro project.
+Это руководство содержит пошаговые инструкции по настройке проекта Agent Navigator Pro.
 
-## Prerequisites
+## Предварительные Требования
 
-Before you begin, ensure you have the following installed:
+Перед началом убедитесь, что у вас установлено следующее:
 
-- **Python 3.11+**: Required for the backend services
-- **Node.js 18+**: Required for the frontend
-- **NVIDIA GPU with CUDA**: Recommended for optimal performance (RTX 3060 12GB or higher)
-- **Git**: For cloning the repository
+- **Python 3.11+**: Требуется для сервисов бэкенда
+- **Node.js 18+**: Требуется для фронтенда
+- **NVIDIA GPU с CUDA**: Рекомендуется для оптимальной производительности (RTX 3060 12GB или выше)
+- **Git**: Для клонирования репозитория
 
-## Step 1: Clone the Repository
+## Шаг 1: Клонирование Репозитория
 
 ```bash
 git clone https://github.com/senorfrancesco/agent-navigator-pro.git
 cd agent-navigator-pro
 ```
 
-## Step 2: Backend Setup
+## Шаг 2: Настройка Бэкенда (Backend)
 
-### Create a Virtual Environment
+### Создание Виртуального Окружения
 
 ```bash
-cd react_agent_prototype
+cd backend
 python3.11 -m venv venv
 ```
 
-### Activate the Virtual Environment
+### Активация Виртуального Окружения
 
-**On Linux/macOS:**
+**На Linux/macOS:**
 ```bash
 source venv/bin/activate
 ```
 
-**On Windows:**
+**На Windows:**
 ```bash
 venv\Scripts\activate
 ```
 
-### Install Python Dependencies
+### Установка Python Зависимостей
 
 ```bash
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### Optional: GPU Support
+### Опционально: Поддержка GPU
 
-For NVIDIA GPU monitoring and CUDA support:
+Для мониторинга NVIDIA GPU и поддержки CUDA:
 
 ```bash
 pip install pynvml
 ```
 
-### Download Models
+### Загрузка Моделей
 
-Place your GGUF model files in the `react_agent_prototype/models/` directory. You can download models from:
+Разместите файлы GGUF моделей в директории `backend/models/`. Вы можете скачать модели с:
 
 - [Hugging Face](https://huggingface.co/)
-- [TheBloke's GGUF models](https://huggingface.co/TheBloke)
+- [GGUF модели TheBloke](https://huggingface.co/TheBloke)
 
-Example models:
+Примеры моделей:
 - `Qwen2.5-14B-Instruct-Q4_K_M.gguf`
 - `Qwen3-VL-8B-Instruct-Q4_K_M.gguf`
 - `LaBSE-Q4_K_M.gguf`
 
-### Set Environment Variables
+### Настройка Переменных Окружения
 
-Create a `.env` file in the `react_agent_prototype` directory:
+Создайте файл `.env` в директории `backend`:
 
 ```bash
 MODEL_PATH_QWEN14B="./models/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
@@ -77,113 +77,115 @@ MODEL_PATH_LABSE="./models/LaBSE-Q4_K_M.gguf"
 MMPROJ_PATH="./models/mmproj-Qwen3-VL-8B-Instruct-F16.gguf"
 ```
 
-## Step 3: Frontend Setup
+## Шаг 3: Настройка Фронтенда (Frontend)
 
-Navigate to the project root and install Node.js dependencies:
+Перейдите в директорию фронтенда и установите Node.js зависимости:
 
 ```bash
-cd ..  # Return to project root
+cd ../frontend
 npm install
 ```
 
-## Step 4: Running the Application
+## Шаг 4: Запуск Приложения
 
-### Option 1: Manual Startup
+### Вариант 1: Ручной Запуск
 
-Start each service in a separate terminal window.
+Запустите каждый сервис в отдельном окне терминала.
 
-**Terminal 1: Agent API**
+**Терминал 1: Agent API**
 ```bash
-cd react_agent_prototype/orchestrator
+cd backend/orchestrator
 uvicorn agent_api:app --host 0.0.0.0 --port 8000
 ```
 
-**Terminal 2: Document Server**
+**Терминал 2: Сервер Документов**
 ```bash
-cd react_agent_prototype/services/document_server
+cd backend/services/document_server
 uvicorn mcp_document_server:app --host 0.0.0.0 --port 8001
 ```
 
-**Terminal 3: Legal Server**
+**Терминал 3: Юридический Сервер**
 ```bash
-cd react_agent_prototype/services/legal_server
+cd backend/services/legal_server
 uvicorn mcp_legal_server:app --host 0.0.0.0 --port 8002
 ```
 
-**Terminal 4: Unified Model Server (Optional)**
+**Терминал 4: Unified Model Server (Опционально)**
 ```bash
-cd react_agent_prototype/services/model_manager
+cd backend/services/model_manager
 python unified_model_server.py
 ```
 
-**Terminal 5: Frontend**
+**Терминал 5: Фронтенд**
 ```bash
+cd frontend
 npm run dev
 ```
 
-### Option 2: Automated Startup (Linux/macOS)
+### Вариант 2: Автоматический Запуск (Linux/macOS)
 
-Use the provided shell script to start all backend services:
+Используйте предоставленный shell-скрипт для запуска всех сервисов бэкенда:
 
 ```bash
-cd react_agent_prototype
+cd backend
 chmod +x run_all.sh
 ./run_all.sh
 ```
 
-Then start the frontend in a separate terminal:
+Затем запустите фронтенд в отдельном терминале:
 
 ```bash
+cd frontend
 npm run dev
 ```
 
-## Step 5: Verify Installation
+## Шаг 5: Проверка Установки
 
-Open your browser and navigate to:
+Откройте браузер и перейдите по адресам:
 
-- **Frontend**: `http://localhost:5173` (or the port shown by Vite)
+- **Фронтенд**: `http://localhost:5173` (или порт, указанный Vite)
 - **Agent API**: `http://localhost:8000/health`
 
-You should see the health status of all connected services.
+Вы должны увидеть статус здоровья всех подключенных сервисов.
 
-## Troubleshooting
+## Устранение Неполадок
 
-### Python Version Issues
+### Проблемы с Версией Python
 
-Ensure you are using Python 3.11 or higher:
+Убедитесь, что вы используете Python 3.11 или выше:
 
 ```bash
 python --version
 ```
 
-### Missing Dependencies
+### Отсутствующие Зависимости
 
-If you encounter import errors, reinstall dependencies:
+Если вы столкнулись с ошибками импорта, переустановите зависимости:
 
 ```bash
 pip install -r requirements.txt --force-reinstall
 ```
 
-### Port Already in Use
+### Порт Уже Используется
 
-If a port is already in use, you can change it in the startup commands or kill the process using that port:
+Если порт уже используется, вы можете изменить его в командах запуска или завершить процесс, использующий этот порт:
 
 ```bash
-# Find the process using port 8000
+# Найти процесс, использующий порт 8000
 lsof -i :8000
 
-# Kill the process
+# Завершить процесс
 kill -9 <PID>
 ```
 
-### CUDA Not Detected
+### CUDA Не Обнаружена
 
-Ensure you have the NVIDIA drivers and CUDA toolkit installed. Check CUDA availability:
+Убедитесь, что у вас установлены драйверы NVIDIA и инструментарий CUDA. Проверьте доступность CUDA:
 
 ```bash
 nvidia-smi
 ```
 
-## Next Steps
+## Следующие Шаги
 
-Once the installation is complete, refer to the main [README.md](README.md) for usage instructions and API documentation.
+После завершения установки обратитесь к основному [README.md](README.md) для получения инструкций по использованию и документации API.
