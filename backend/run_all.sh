@@ -8,6 +8,7 @@ set -e
 BACKEND_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # VENV_DIR="$BACKEND_DIR/venv"
 CONDA_ENV="diploma_llm"
+CONDA_ACTIVATE="~/anaconda3/bin/activate"
 
 # Цвета для вывода
 RED='\033[0;31m'
@@ -25,19 +26,13 @@ echo -e "${GREEN}=== Запуск системы Agent Navigator Pro ===${NC}"
 # source "$VENV_DIR/bin/activate"
 # -----------------------------------------------------------------------
 
-# Активация Conda окружения
-# Примечание: алиасы из .bashrc не работают в скриптах, используем прямую активацию
-echo -e "${YELLOW}Активация Conda окружения: $CONDA_ENV...${NC}"
-# Пытаемся найти conda и активировать окружение
-CONDA_BASE=$(conda info --base 2>/dev/null || echo "$HOME/anaconda3")
-if [ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]; then
-    source "$CONDA_BASE/etc/profile.d/conda.sh"
-    conda activate "$CONDA_ENV"
-else
-    # Если conda.sh не найден, пробуем просто вызвать conda activate
-    # (может не сработать в некоторых оболочках без инициализации)
-    conda activate "$CONDA_ENV" || echo -e "${RED}Ошибка: Не удалось активировать conda окружение $CONDA_ENV${NC}"
-fi
+# Активация Conda окружения согласно алиасу пользователя
+echo -e "${YELLOW}Активация Conda окружения: $CONDA_ENV через $CONDA_ACTIVATE...${NC}"
+source ~/anaconda3/bin/activate "$CONDA_ENV" || {
+    echo -e "${RED}Ошибка: Не удалось активировать conda окружение $CONDA_ENV${NC}"
+    # Попытка альтернативного метода активации, если первый не сработал
+    source "$HOME/anaconda3/etc/profile.d/conda.sh" && conda activate "$CONDA_ENV"
+}
 
 # Проверяем наличие tmux
 if ! command -v tmux &> /dev/null; then
@@ -55,9 +50,8 @@ fi
 
 tmux new-session -d -s "$SESSION_NAME" -x 200 -y 50
 
-# Команда активации для tmux окон
-# Используем bash -i для загрузки .bashrc и алиасов, либо прямую активацию
-ACTIVATE_CMD="source $CONDA_BASE/etc/profile.d/conda.sh && conda activate $CONDA_ENV"
+# Команда активации для tmux окон (согласно алиасу пользователя)
+ACTIVATE_CMD="source ~/anaconda3/bin/activate $CONDA_ENV"
 
 # Окно 1: Agent API (Main)
 echo -e "${GREEN}Запуск Agent API на порту 8000...${NC}"
