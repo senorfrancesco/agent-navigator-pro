@@ -7,4 +7,6 @@ __pycache__/
 models/*
 !models/README.md
 
+open_webui_data/*
+
 .env

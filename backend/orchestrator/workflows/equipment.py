@@ -5,6 +5,7 @@ Workflow: Analyze Equipment (Equipment vs Specs)
 
 import json
 import os
+import re
 import httpx
 from typing import TypedDict, List, Dict, Any, Annotated, Optional
 import operator
@@ -68,7 +69,7 @@ async def extract_data_map_node(state: EquipmentState):
                 try:
                     content = res.get("content", "[]")
                     # Ищем JSON блок
-                    json_match = re.search(r'\[.*\]', content, re.DOTALL)
+                    json_match = re.search(r'[[.*]]', content, re.DOTALL)
                     if json_match:
                         items = json.loads(json_match.group())
                         all_requirements.extend(items)
@@ -94,7 +95,7 @@ async def extract_data_map_node(state: EquipmentState):
                 res = ums_client.infer("qwen-14b-llm", {"prompt": prompt, "temperature": 0.1})
                 try:
                     content = res.get("content", "[]")
-                    json_match = re.search(r'\[.*\]', content, re.DOTALL)
+                    json_match = re.search(r'[[.*]]', content, re.DOTALL)
                     if json_match:
                         items = json.loads(json_match.group())
                         all_offers.extend(items)
@@ -125,7 +126,10 @@ async def match_and_evaluate_node(state: EquipmentState):
         
         try:
             res_eval = ums_client.infer("qwen-14b-llm", {"prompt": prompt_eval, "temperature": 0.1})
-            eval_data = json.loads(res_eval.get("content", "{{\\"pass\\": false}}"))
+            # ИСПРАВЛЕНО: Безопасное получение контента с простым дефолтным JSON
+            content_str = res_eval.get("content", '{"pass": false}')
+            eval_data = json.loads(content_str)
+            
             matches.append({
                 "requirement": req,
                 "offer": state['offers'][0] if state['offers'] else None,
@@ -138,14 +142,36 @@ async def match_and_evaluate_node(state: EquipmentState):
     return {"matches": matches}
 
 async def generate_equipment_report_node(state: EquipmentState):
-    """Формирует итоговый отчет-сравнение."""
+    """Формирует итоговый отчет-сравнение и сохраняет его в файл."""
+    import time
+    
     report = "# Анализ соответствия оборудования\n\n"
+    report += f"**Дата:** {time.strftime('%Y-%m-%d %H:%M')}\n"
+    report += f"**ТЗ:** {os.path.basename(state['input_tz'])}\n"
+    report += f"**Смета:** {os.path.basename(state['input_smeta'])}\n\n"
+    
     report += "| Статус | Требование | Предложение | Примечание |\n"
     report += "| :--- | :--- | :--- | :--- |\n"
     
     for m in state['matches']:
         icon = "✅" if m['status'] == "OK" else "❌"
         report += f"| {icon} | {m['requirement'].get('item')} | {m['offer'].get('name') if m['offer'] else '-'} | {m['reason']} |\n"
+        
+    # Сохранение в файл
+    try:
+        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+        uploads_dir = os.path.join(base_dir, 'backend', 'open_webui_uploads')
+        os.makedirs(uploads_dir, exist_ok=True)
+            
+        filename = f"Report_Equipment_{int(time.time())}.md"
+        filepath = os.path.join(uploads_dir, filename)
+        
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(report)
+            
+        report += f"\n\n---\n**Отчет сохранен:** `{filename}`"
+    except Exception as e:
+        report += f"\n\n---\n**Ошибка сохранения:** {e}"
         
     return {"final_report": report}
 

@@ -114,41 +114,101 @@ async def analyze_differences_node(state: CompareState):
     
     results = []
     for m in state['matches']:
-        # Формируем промпт для Qwen
+        m_type = m.get('type', 'MODIFIED')
+        
+        # Если это добавление или удаление - помечаем как структурное изменение
+        if m_type in ['ADDED', 'DELETED']:
+            results.append({
+                **m,
+                "is_critical": True, # Добавление/удаление целых пунктов обычно критично
+                "diff": "Структурное изменение (добавлен или удален блок текста)",
+                "impact": "Требуется проверка на соответствие интересам компании"
+            })
+            continue
+            
+        # Для измененных блоков вызываем LLM
         prompt = f"""<|im_start|>system
-Ты эксперт-юрист. Проанализируй изменение в документе.
+Ты эксперт-юрист. Проанализируй изменение в документе. Игнорируй изменения стиля или пунктуации.
+Фокусируйся на: сроках, суммах, ответственности, правах и обязанностях.
 <|im_end|>
 <|im_start|>user
 БЫЛО: {m.get('old_text', '')}
 СТАЛО: {m.get('new_text', '')}
-Ответь в формате JSON: {{"is_critical": true/false, "impact": "описание последствия"}}
+Ответь в формате JSON: {{"is_critical": true/false, "diff": "краткая суть изменения", "impact": "последствие для компании"}}
 <|im_end|>
 <|im_start|>assistant
 {{"""
         
         try:
-            # Вызов через UMS
-            payload = {"prompt": prompt, "max_tokens": 300, "temperature": 0.1}
+            payload = {"prompt": prompt, "max_tokens": 400, "temperature": 0.1}
             response = ums_client.infer("qwen-14b-llm", payload)
             
-            # Парсим JSON
-            analysis = json.loads("{" + response.get("content", "").strip())
+            # Умный парсинг JSON контента
+            content = response.get("content", "")
+            if not content and "choices" in response:
+                content = response["choices"][0].get("text", "")
+            
+            # Добавляем открывающую скобку, если модель её не вернула
+            json_str = content.strip()
+            if not json_str.startswith("{"): json_str = "{" + json_str
+            
+            analysis = json.loads(json_str)
             results.append({**m, **analysis})
-        except:
-            results.append({**m, "is_critical": False, "impact": "Ошибка анализа"})
+        except Exception as e:
+            print(f"Error analyzing chunk: {e}")
+            results.append({**m, "is_critical": False, "diff": "Изменение текста", "impact": "Требуется ручной анализ"})
             
     return {"analysis_results": results}
 
 async def generate_report_node(state: CompareState):
-    """Формирует финальный Markdown отчет."""
+    """Формирует финальный Markdown отчет и сохраняет его."""
+    import time
+    
     report = "# Отчет о сравнении документов\n\n"
+    report += f"**Дата:** {time.strftime('%Y-%m-%d %H:%M')}\n"
+    report += f"**Файлы:**\n- {os.path.basename(state['input_1'])}\n- {os.path.basename(state['input_2'])}\n\n"
+    report += f"**Найдено изменений:** {len(state['analysis_results'])}\n\n"
+    
     for r in state['analysis_results']:
-        icon = "🔴 КРИТИЧНО" if r.get('is_critical') else "📝 ИЗМЕНЕНО"
-        report += f"### {icon}\n"
-        report += f"**Суть:** {r.get('type', 'Modification')}\n"
-        report += f"**Влияние:** {r.get('impact', '')}\n"
-        report += f"> Было: {r.get('old_text', '')[:200]}...\n"
-        report += f"> Стало: {r.get('new_text', '')[:200]}...\n\n"
+        diff_type = r.get('type', 'MODIFIED')
+        
+        if diff_type == 'MODIFIED':
+            icon = "🔴 КРИТИЧНО" if r.get('is_critical') else "📝 ИЗМЕНЕНО"
+            report += f"### {icon}\n"
+            report += f"**Суть:** {r.get('diff', r.get('type'))}\n"
+            if r.get('impact'):
+                report += f"**Влияние:** {r.get('impact')}\n"
+            report += f"> **Было:** {r.get('old_text', '')[:200]}...\n"
+            report += f"> **Стало:** {r.get('new_text', '')[:200]}...\n\n"
+            
+        elif diff_type == 'ADDED':
+            report += f"### ✅ ДОБАВЛЕНО\n"
+            report += f"> {r.get('new_text', '')[:200]}...\n\n"
+            
+        elif diff_type == 'DELETED':
+            report += f"### ❌ УДАЛЕНО\n"
+            report += f"> {r.get('old_text', '')[:200]}...\n\n"
+            
+    # Сохранение в файл
+    try:
+        # Определяем путь к папке загрузок (общая с Open WebUI)
+        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+        uploads_dir = os.path.join(base_dir, 'backend', 'open_webui_uploads')
+        
+        if not os.path.exists(uploads_dir):
+            os.makedirs(uploads_dir, exist_ok=True)
+            
+        filename = f"Report_Compare_{int(time.time())}.md"
+        filepath = os.path.join(uploads_dir, filename)
+        
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(report)
+            
+        # Добавляем информацию о файле в конец отчета
+        report += f"\n---\n**Отчет сохранен:** `{filename}`"
+        
+    except Exception as e:
+        report += f"\n---\n**Ошибка сохранения отчета:** {e}"
         
     return {"final_report": report}
 

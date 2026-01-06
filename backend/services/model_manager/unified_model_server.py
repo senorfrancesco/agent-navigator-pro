@@ -154,28 +154,45 @@ def _start_server(model_id: str, device_mode: DeviceMode):
     gpu_info = _get_gpu_info()
     n_gpu = len(gpu_info)
     
-    cmd = [
-        "llama-server",
-        "-m", model_path,
-        "--port", str(config["port"]),
-        "--host", "0.0.0.0",
-        "-c", str(config["ctx_size"]),
-        "-ngl", str(config["gpu_layers"] if device_mode != DeviceMode.CPU else 0)
-    ]
+    if config.get("type") == "st":
+        # Запуск Sentence Transformers Server
+        # Определяем устройство: если device_mode == GPU и есть GPU, используем cuda
+        use_gpu = device_mode != DeviceMode.CPU and n_gpu > 0
+        device_arg = "cuda" if use_gpu else "cpu"
+        
+        cmd = [
+            sys.executable,
+            str(Path(__file__).parent / "st_server.py"),
+            "--model", model_path,
+            "--port", str(config["port"]),
+            "--device", device_arg
+        ]
+        logger.info(f"Starting ST Server: {' '.join(cmd)}")
+    else:
+        # Запуск llama-server (GGUF)
+        cmd = [
+            "llama-server",
+            "-m", model_path,
+            "--port", str(config["port"]),
+            "--host", "0.0.0.0",
+            "-c", str(config["ctx_size"]),
+            "-ngl", str(config["gpu_layers"] if device_mode != DeviceMode.CPU else 0)
+        ]
 
-    # Поддержка Multi-GPU
-    if n_gpu > 1 and device_mode != DeviceMode.CPU:
-        logger.info(f"Detected {n_gpu} GPUs. Enabling multi-GPU support.")
-        # Распределяем тензоры поровну между картами
-        split = ",".join(["1"] * n_gpu)
-        cmd.extend(["--tensor-split", split])
+        # Поддержка Multi-GPU
+        if n_gpu > 1 and device_mode != DeviceMode.CPU:
+            logger.info(f"Detected {n_gpu} GPUs. Enabling multi-GPU support.")
+            # Распределяем тензоры поровну между картами
+            split = ",".join(["1"] * n_gpu)
+            cmd.extend(["--tensor-split", split])
 
-    if config["type"] == "gguf-vl" and "mmproj" in config:
-        mmproj_path = resolve_model_path(config["mmproj"])
-        if os.path.exists(mmproj_path):
-            cmd.extend(["--mmproj", mmproj_path])
+        if config["type"] == "gguf-vl" and "mmproj" in config:
+            mmproj_path = resolve_model_path(config["mmproj"])
+            if os.path.exists(mmproj_path):
+                cmd.extend(["--mmproj", mmproj_path])
 
-    logger.info(f"Starting llama-server: {' '.join(cmd)}")
+        logger.info(f"Starting llama-server: {' '.join(cmd)}")
+
     try:
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, preexec_fn=os.setsid)
         
@@ -183,7 +200,7 @@ def _start_server(model_id: str, device_mode: DeviceMode):
         while time.time() - start_time < 60:
             if process.poll() is not None:
                 _, stderr = process.communicate()
-                raise RuntimeError(f"llama-server exited: {stderr}")
+                raise RuntimeError(f"Server exited: {stderr}")
             try:
                 with httpx.Client(timeout=1.0) as client:
                     if client.get(f"http://localhost:{config['port']}/health").status_code == 200:
@@ -192,7 +209,7 @@ def _start_server(model_id: str, device_mode: DeviceMode):
                         return
             except: pass
             time.sleep(1)
-        raise TimeoutError("llama-server timeout")
+        raise TimeoutError("Server start timeout")
     except Exception as e:
         logger.error(f"Start failed: {e}")
         raise

@@ -91,8 +91,54 @@ async def run_workflow_stream(session_id: str, query: str, attachments: List[Fil
         }
         task_name = "Анализ оборудования"
     else:
-        # Fallback на простой чат (ReAct или просто ответ)
-        yield {"type": "final_answer", "content": "Я могу сравнить юридические документы или проанализировать смету. Пожалуйста, прикрепите файлы и уточните задачу."}
+        # Режим простого чата (General Chat), если не выбраны спец. навыки
+        yield {"type": "thought", "content": "Это общий запрос. Отвечаю как ассистент."}
+        
+        from services.model_manager.ums_client import ums_client
+        
+        # Формируем контекст (историю пока не храним в этом MVP, только текущий запрос)
+        prompt = f"""<|im_start|>system
+Ты — полезный AI-ассистент Agent Navigator. Ты помогаешь пользователю, отвечаешь на вопросы и поддерживаешь диалог.
+Твои спец. навыки (сравнение документов, анализ смет) активируются автоматически при наличии файлов.
+Сейчас файлов нет, просто ответь пользователю.
+<|im_end|>
+<|im_start|>user
+{query}
+<|im_end|>
+<|im_start|>assistant
+"""
+        try:
+            # Стримим ответ от Qwen через UMS
+            # Примечание: ums_client.infer сейчас не поддерживает стриминг генератором, 
+            # поэтому получим ответ целиком и отдадим как один чанк (для MVP).
+            response = ums_client.infer("qwen-14b-llm", {"prompt": prompt, "temperature": 0.7})
+            
+            # Умный парсинг ответа
+            content = ""
+            if isinstance(response, dict):
+                if "content" in response:
+                    content = response["content"]
+                elif "choices" in response and len(response["choices"]) > 0:
+                    choice = response["choices"][0]
+                    if isinstance(choice, dict):
+                        if "text" in choice:
+                            content = choice["text"]
+                        elif "message" in choice and "content" in choice["message"]:
+                            content = choice["message"]["content"]
+            elif isinstance(response, str):
+                content = response
+            
+            content = str(content).strip()
+            
+            if content:
+                yield {"type": "final_answer", "content": content}
+            else:
+                # Отладочная информация, если ответ пустой
+                yield {"type": "final_answer", "content": f"Извините, я получил пустой ответ от модели. Raw: {str(response)[:200]}"}
+                
+        except Exception as e:
+            yield {"type": "error", "content": f"Ошибка генерации: {str(e)}"}
+        
         return
 
     yield {"type": "thought", "content": f"Запускаю процесс: {task_name}..."}
@@ -146,29 +192,94 @@ async def stream_agent_steps(session_id: str):
 
 # === OpenAI Compatible API (for Open WebUI) ===
 
+@app.get("/v1/models")
+async def list_models():
+    """Эндпоинт для списка моделей (OpenAI compatible)."""
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": "agent-navigator",
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "agent-navigator-pro"
+            }
+        ]
+    }
+
 @app.post("/v1/chat/completions")
 async def openai_completions(request: Request):
+    print(">>> NEW REQUEST (V2.1 - Chat Enabled) <<<")
     data = await request.json()
     messages = data.get("messages", [])
     user_query = messages[-1].get("content", "") if messages else ""
     
     # В Open WebUI файлы могут приходить как URL или текст в контексте.
     # Здесь мы будем парсить контекст для поиска путей к файлам.
-    # Для MVP: просто запускаем воркфлоу.
     
+    found_files = []
+    
+    try:
+        # ПРАВИЛЬНЫЙ ПУТЬ к монтированной папке uploads
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        WEBUI_UPLOADS_PATH = os.path.join(base_dir, 'open_webui_uploads')
+        
+        # 1. Ищем файлы, которые были загружены недавно (или просто есть в папке)
+        if os.path.exists(WEBUI_UPLOADS_PATH):
+            recent_files = []
+            current_time = time.time()
+            for root, dirs, files in os.walk(WEBUI_UPLOADS_PATH):
+                for file in files:
+                    full_path = os.path.join(root, file)
+                    try:
+                        # Берем файлы, измененные за последние 10 минут (600 сек)
+                        if current_time - os.path.getmtime(full_path) < 600:
+                            recent_files.append(full_path)
+                    except OSError: pass
+            
+            recent_files.sort(key=os.path.getmtime, reverse=True)
+            for rf in recent_files:
+                found_files.append(FileAttachment(
+                    name=os.path.basename(rf),
+                    path=rf,
+                    size=os.path.getsize(rf),
+                    type="webui_upload"
+                ))
+    except Exception as e:
+        print(f"Error scanning WebUI uploads: {e}")
+
+    # 2. Парсинг путей из текста (если пользователь указал путь явно)
+    try:
+        path_pattern = r'(?:/[\w\-. /]+|\bbackend/[\w\-. /]+)'
+        potential_paths = re.findall(path_pattern, user_query)
+        for p in potential_paths:
+            clean_path = p.strip()
+            if any(f.path == clean_path for f in found_files): continue
+            if "." in os.path.basename(clean_path) and os.path.exists(clean_path): 
+                 found_files.append(FileAttachment(
+                     name=os.path.basename(clean_path),
+                     path=clean_path, size=0, type="manual_path"
+                 ))
+    except Exception as e:
+        print(f"Error parsing paths: {e}")
+
     async def generate():
         # Притворяемся OpenAI стримингом
-        yield f"data: {json.dumps({'choices': [{'delta': {'role': 'assistant', 'content': 'Анализирую ваш запрос...\n\n'}}]})}
-
-"
-        # Запускаем воркфлоу (без аттачментов в этом примере, нужно доработать парсинг)
-        async for step in run_workflow_stream("openai-session", user_query, []):
+        start_chunk = {
+            "choices": [{
+                "delta": {"role": "assistant", "content": "Анализирую ваш запрос...\n\n"}
+            }]
+        }
+        yield "data: " + json.dumps(start_chunk) + "\n\n"
+        
+        # Запускаем воркфлоу с найденными файлами
+        async for step in run_workflow_stream("openai-session", user_query, found_files):
             if step["type"] == "thought":
-                content = f"*[Thought: {step['content']}]*\n"
+                content = "*[Thought: " + step["content"] + "]*\n"
             elif step["type"] == "final_answer":
                 content = step["content"]
             else:
-                content = f"\n{step['content']}\n"
+                content = "\n" + step["content"] + "\n"
                 
             chunk = {
                 "choices": [{
@@ -176,13 +287,9 @@ async def openai_completions(request: Request):
                     "finish_reason": None
                 }]
             }
-            yield f"data: {json.dumps(chunk)}
-
-"
+            yield "data: " + json.dumps(chunk) + "\n\n"
             
-        yield f"data: [DONE]
-
-"
+        yield "data: [DONE]\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 

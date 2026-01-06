@@ -150,25 +150,38 @@ async def match_batches(request: MatchBatchesRequest):
         if not request.list_old or not request.list_new:
             return MatchBatchesResponse(status="success", matches=[])
 
-        # 1. Получаем эмбеддинги батчем
-        # UMS поддерживает батчинг, если мы передадим список строк в 'input'
-        # Но ums_client.get_embeddings_via_ums сейчас принимает только одну строку.
-        # Поэтому мы вызываем ums_client.infer напрямую для батча.
+        # 1. Получаем эмбеддинги батчем с разбивкой на мини-батчи
+        # UMS/Llama-server имеет лимит на размер контекста, поэтому разбиваем большие списки
         
-        payload_old = {"input": request.list_old, "normalize": True}
-        payload_new = {"input": request.list_new, "normalize": True}
-        
-        emb_old_res = ums_client.infer("labse-embedding", payload_old, device_mode="cpu")
-        emb_new_res = ums_client.infer("labse-embedding", payload_new, device_mode="cpu")
-        
-        # Извлекаем вектора
-        def extract_embs(res):
-            if "data" in res: return [item["embedding"] for item in res["data"]]
-            if "embedding" in res: return res["embedding"] if isinstance(res["embedding"][0], list) else [res["embedding"]]
-            return []
+        def get_batch_embeddings(texts: List[str], batch_size: int = 32) -> List[List[float]]:
+            all_embeddings = []
+            for i in range(0, len(texts), batch_size):
+                batch = texts[i:i + batch_size]
+                payload = {"input": batch, "normalize": True}
+                try:
+                    # Используем cpu для эмбеддингов, чтобы не занимать VRAM LLM-модели
+                    emb_res = ums_client.infer("labse-embedding", payload, device_mode="cpu")
+                    
+                    if "data" in emb_res:
+                        batch_embs = [item["embedding"] for item in emb_res["data"]]
+                    elif "embedding" in emb_res:
+                        # Обработка случая, если вернулся один эмбеддинг (хотя отправляли список)
+                        e = emb_res["embedding"]
+                        if isinstance(e[0], list): batch_embs = e
+                        else: batch_embs = [e]
+                    else:
+                        batch_embs = []
+                        print(f"[LEGAL_SERVER] Warning: No embeddings returned for batch {i}")
+                    
+                    all_embeddings.extend(batch_embs)
+                except Exception as e:
+                    print(f"[LEGAL_SERVER] Error in embedding batch {i}: {e}")
+                    # В случае ошибки заполняем нулями, чтобы не ломать индексы
+                    all_embeddings.extend([[0.0]*768] * len(batch))
+            return all_embeddings
 
-        embs_old = extract_embs(emb_old_res)
-        embs_new = extract_embs(emb_new_res)
+        embs_old = get_batch_embeddings(request.list_old)
+        embs_new = get_batch_embeddings(request.list_new)
         
         if not embs_old or not embs_new:
             raise ValueError("Failed to get embeddings from UMS")
@@ -176,6 +189,9 @@ async def match_batches(request: MatchBatchesRequest):
         # 2. Вычисляем сходство и сопоставляем (Greedy approach для скорости)
         matches = []
         matched_new_indices = set()
+        
+        # Статистика для отладки
+        stats = {"UNCHANGED": 0, "MODIFIED": 0, "DELETED": 0, "ADDED": 0}
         
         for i, v_old in enumerate(embs_old):
             best_score = -1.0
@@ -189,14 +205,17 @@ async def match_batches(request: MatchBatchesRequest):
                     best_score = score
                     best_idx = j
             
+            # Порог сходства
             if best_idx != -1 and best_score >= request.threshold:
+                match_type = "MODIFIED" if best_score < 0.99 else "UNCHANGED"
                 matches.append({
-                    "type": "MODIFIED" if best_score < 0.99 else "UNCHANGED",
+                    "type": match_type,
                     "old_text": request.list_old[i],
                     "new_text": request.list_new[best_idx],
                     "similarity_score": best_score
                 })
                 matched_new_indices.add(best_idx)
+                stats[match_type] += 1
             else:
                 matches.append({
                     "type": "DELETED",
@@ -204,6 +223,7 @@ async def match_batches(request: MatchBatchesRequest):
                     "new_text": None,
                     "similarity_score": 0.0
                 })
+                stats["DELETED"] += 1
         
         # Добавляем новые чанки, которые не нашли пару
         for j, text in enumerate(request.list_new):
@@ -214,7 +234,9 @@ async def match_batches(request: MatchBatchesRequest):
                     "new_text": text,
                     "similarity_score": 0.0
                 })
+                stats["ADDED"] += 1
 
+        print(f"[LEGAL_SERVER] Match stats: {stats}")
         return MatchBatchesResponse(status="success", matches=matches)
     
     except Exception as e:
