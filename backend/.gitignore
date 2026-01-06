@@ -6,3 +6,5 @@ __pycache__/
 # Models directory (ignore all model files)
 models/*
 !models/README.md
+
+.env
