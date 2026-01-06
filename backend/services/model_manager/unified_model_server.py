@@ -16,10 +16,20 @@ import json
 import psutil
 import traceback
 from typing import Optional, Dict, Any, List
+from pathlib import Path
 from dotenv import load_dotenv
 
-# Загрузка переменных окружения из .env файла
-load_dotenv()
+# Определяем корень бэкенда (на две папки выше текущего файла)
+BACKEND_ROOT = Path(__file__).resolve().parent.parent.parent
+ENV_PATH = BACKEND_ROOT / ".env"
+
+# Загрузка переменных окружения из .env файла в корне бэкенда
+if ENV_PATH.exists():
+    load_dotenv(dotenv_path=ENV_PATH)
+    print(f"[UMS] Loaded .env from {ENV_PATH}")
+else:
+    load_dotenv() # Fallback на стандартный поиск
+    print(f"[UMS] .env not found at {ENV_PATH}, using default environment")
 
 from dataclasses import dataclass, asdict
 from enum import Enum
@@ -57,6 +67,30 @@ class LoadStrategy(str, Enum):
     SMART = "smart"        # Автоматическая выгрузка LRU
 
 # ============================================================================
+# Helper Functions for Paths
+# ============================================================================
+
+def resolve_model_path(path_str: str) -> str:
+    """
+    Разрешает путь к модели:
+    1. Поддерживает ~ (домашняя директория)
+    2. Если путь относительный, считает его относительно корня бэкенда
+    """
+    if not path_str:
+        return ""
+    
+    # Расширяем ~
+    expanded_path = os.path.expanduser(path_str)
+    
+    # Если путь абсолютный, возвращаем как есть
+    if os.path.isabs(expanded_path):
+        return expanded_path
+    
+    # Если относительный, делаем его абсолютным относительно BACKEND_ROOT
+    resolved_path = (BACKEND_ROOT / expanded_path).resolve()
+    return str(resolved_path)
+
+# ============================================================================
 # Model Configuration
 # ============================================================================
 
@@ -73,27 +107,27 @@ class ModelConfig:
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
-# Конфигурация доступных моделей (используем пути из .env)
+# Конфигурация доступных моделей (используем пути из .env с разрешением)
 MODELS_CONFIG: Dict[str, ModelConfig] = {
     "qwen-14b-llm": ModelConfig(
         model_id="qwen-14b-llm",
         model_type="text",
-        path=os.getenv("MODEL_PATH_QWEN14B", "./models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"),
+        path=resolve_model_path(os.getenv("MODEL_PATH_QWEN14B", "./models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf")),
         n_gpu_layers=30,
         context_size=16384
     ),
     "qwen-vl-8b": ModelConfig(
         model_id="qwen-vl-8b",
         model_type="vision",
-        path=os.getenv("MODEL_PATH_QWENVL", "./models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"),
+        path=resolve_model_path(os.getenv("MODEL_PATH_QWENVL", "./models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf")),
         n_gpu_layers=20,
         context_size=16384,
-        mmproj_path=os.getenv("MMPROJ_PATH", "./models/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf")
+        mmproj_path=resolve_model_path(os.getenv("MMPROJ_PATH", "./models/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf"))
     ),
     "labse-embedding": ModelConfig(
         model_id="labse-embedding",
         model_type="embedding",
-        path=os.getenv("MODEL_PATH_LABSE", "./models/st/LaBSE"),
+        path=resolve_model_path(os.getenv("MODEL_PATH_LABSE", "./models/st/LaBSE")),
         n_gpu_layers=10,
         context_size=512
     )
@@ -110,7 +144,7 @@ LOAD_STRATEGY: LoadStrategy = LoadStrategy.LAZY
 MODEL_ACCESS_LOG: Dict[str, float] = {}  # Для LRU
 
 # ============================================================================
-# Helper Functions
+# Resource Helpers
 # ============================================================================
 
 def _get_available_vram() -> float:
@@ -169,7 +203,7 @@ def _start_server(model_id: str, device_mode: DeviceMode = DeviceMode.HYBRID):
     
     # Проверяем наличие файла модели
     if not os.path.exists(config.path):
-        error_msg = f"Model file not found at: {os.path.abspath(config.path)}"
+        error_msg = f"Model file not found at: {config.path}"
         print(f"[UMS] ERROR: {error_msg}")
         raise FileNotFoundError(error_msg)
     
@@ -344,5 +378,9 @@ atexit.register(cleanup)
 
 if __name__ == "__main__":
     print("[UMS] Starting Unified Model Server...")
+    print(f"[UMS] Backend Root: {BACKEND_ROOT}")
     print(f"[UMS] Available models: {list(MODELS_CONFIG.keys())}")
+    for mid, cfg in MODELS_CONFIG.items():
+        print(f"  - {mid}: {cfg.path} ({'EXISTS' if os.path.exists(cfg.path) else 'NOT FOUND'})")
+    
     uvicorn.run(app, host="0.0.0.0", port=UMS_PORT)
