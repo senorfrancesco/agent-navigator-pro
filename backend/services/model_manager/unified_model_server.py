@@ -99,13 +99,29 @@ state = {
 
 # === Resource Helpers ===
 
-def _get_available_vram() -> float:
-    if not PYNVML_AVAILABLE: return 0.0
+def _get_gpu_info() -> List[Dict[str, Any]]:
+    if not PYNVML_AVAILABLE: return []
     try:
         pynvml.nvmlInit()
-        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-        return pynvml.nvmlDeviceGetMemoryInfo(handle).free / (1024 ** 3)
-    except: return 0.0
+        device_count = pynvml.nvmlDeviceGetCount()
+        gpus = []
+        for i in range(device_count):
+            handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+            info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            name = pynvml.nvmlDeviceGetName(handle)
+            gpus.append({
+                "index": i,
+                "name": name,
+                "free_gb": info.free / (1024 ** 3),
+                "total_gb": info.total / (1024 ** 3)
+            })
+        return gpus
+    except: return []
+
+def _get_available_vram() -> float:
+    gpus = _get_gpu_info()
+    if not gpus: return 0.0
+    return sum(gpu["free_gb"] for gpu in gpus)
 
 def _get_available_ram() -> float:
     try: return psutil.virtual_memory().available / (1024 ** 3)
@@ -135,6 +151,9 @@ def _start_server(model_id: str, device_mode: DeviceMode):
     if state["active_model"] and state["active_model"] != model_id:
         _stop_all_servers()
 
+    gpu_info = _get_gpu_info()
+    n_gpu = len(gpu_info)
+    
     cmd = [
         "llama-server",
         "-m", model_path,
@@ -143,6 +162,13 @@ def _start_server(model_id: str, device_mode: DeviceMode):
         "-c", str(config["ctx_size"]),
         "-ngl", str(config["gpu_layers"] if device_mode != DeviceMode.CPU else 0)
     ]
+
+    # Поддержка Multi-GPU
+    if n_gpu > 1 and device_mode != DeviceMode.CPU:
+        logger.info(f"Detected {n_gpu} GPUs. Enabling multi-GPU support.")
+        # Распределяем тензоры поровну между картами
+        split = ",".join(["1"] * n_gpu)
+        cmd.extend(["--tensor-split", split])
 
     if config["type"] == "gguf-vl" and "mmproj" in config:
         mmproj_path = resolve_model_path(config["mmproj"])
