@@ -12,10 +12,15 @@ import subprocess
 import asyncio
 import logging
 import psutil
+import warnings
 from enum import Enum
 from typing import Dict, List, Optional, Any, AsyncGenerator
 from pathlib import Path
+from contextlib import asynccontextmanager
 from dotenv import load_dotenv
+
+# Подавление предупреждений pynvml
+warnings.filterwarnings("ignore", category=FutureWarning, module="pynvml")
 
 # Настройка логирования
 logging.basicConfig(
@@ -48,8 +53,6 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import httpx
 import uvicorn
-
-app = FastAPI(title="Unified Model Server", version="1.3.0")
 
 # === Configuration ===
 
@@ -172,6 +175,19 @@ def switch_model(model_id: str, device_mode: DeviceMode = DeviceMode.HYBRID):
     if state["active_model"] == model_id: return
     _start_server(model_id, device_mode)
 
+# === Lifespan ===
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    logger.info("UMS Starting...")
+    yield
+    # Shutdown
+    logger.info("UMS Shutting down...")
+    _stop_all_servers()
+
+app = FastAPI(title="Unified Model Server", version="1.3.1", lifespan=lifespan)
+
 # === API Endpoints ===
 
 class InferRequest(BaseModel):
@@ -189,11 +205,9 @@ async def infer(request: InferRequest):
         switch_model(model_id, device_mode)
         config = MODELS_CONFIG[model_id]
         
-        # Поддержка стриминга
         is_chat = "messages" in request.payload
         url = f"http://localhost:{config['port']}/v1/{'chat/' if is_chat else ''}completions"
         
-        # Принудительно ставим stream в payload если запрошен стриминг
         payload = request.payload.copy()
         if request.stream:
             payload["stream"] = True
@@ -235,10 +249,6 @@ async def get_status():
 @app.get("/health")
 async def health():
     return {"status": "ok"}
-
-@app.on_event("shutdown")
-def shutdown_event():
-    _stop_all_servers()
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8090)
