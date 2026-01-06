@@ -16,6 +16,7 @@ import uuid
 import time
 import sys
 import os
+import re
 from typing import Dict, Any, Optional, List
 from dotenv import load_dotenv
 
@@ -95,7 +96,7 @@ class StatusResponse(BaseModel):
 
 class AgentStep(BaseModel):
     id: str
-    type: str  # thought, action, observation, final_answer
+    type: str  # thought, action, observation, final_answer, error
     content: str
     timestamp: float
     duration_ms: Optional[float] = None
@@ -212,10 +213,8 @@ async def get_llm_response(prompt: str, model_settings: Optional[Dict[str, Any]]
             )
             if response.status_code == 200:
                 result = response.json()
-                # UMS возвращает { "status": "success", "result": { ... } }
                 if result.get("status") == "success":
                     inner_result = result.get("result", {})
-                    # llama-cpp-python возвращает текст в поле 'choices' или 'text'
                     if "choices" in inner_result:
                         return inner_result["choices"][0].get("text", inner_result["choices"][0].get("message", {}).get("content", ""))
                     return inner_result.get("text", inner_result.get("content", ""))
@@ -234,7 +233,7 @@ def build_react_prompt(query: str, history: List[Dict], tools: Dict) -> str:
     ])
     
     history_text = ""
-    for item in history[-10:]:  # Последние 10 элементов истории
+    for item in history[-10:]:
         if item["type"] == "thought":
             history_text += f"Thought: {item['content']}\n"
         elif item["type"] == "action":
@@ -242,7 +241,12 @@ def build_react_prompt(query: str, history: List[Dict], tools: Dict) -> str:
         elif item["type"] == "observation":
             history_text += f"Observation: {item['content']}\n"
     
-    prompt = f"""Ты — интеллектуальный ассистент с доступом к инструментам. Используй формат ReAct:
+    prompt = f"""Ты — интеллектуальный ассистент Agent Navigator Pro. Твоя задача — помогать пользователю с анализом документов и юридических текстов.
+
+ИНСТРУКЦИЯ:
+1. Если запрос пользователя — это простое приветствие, светская беседа или вопрос общего характера, на который ты можешь ответить сам, используй формат 'Final Answer' сразу.
+2. Если для ответа требуются инструменты (анализ файлов, сравнение текстов), используй формат ReAct.
+3. Если инструментов для решения задачи нет, честно скажи об этом в 'Final Answer'.
 
 Доступные инструменты:
 {tools_desc}
@@ -254,7 +258,7 @@ Action Input: <параметры в JSON>
 
 ИЛИ если готов дать финальный ответ:
 Thought: <финальные рассуждения>
-Final Answer: <ответ пользователю>
+Final Answer: <ответ пользователю на русском языке>
 
 {history_text}
 
@@ -274,95 +278,59 @@ def parse_llm_response(response: str) -> Dict[str, Any]:
         "final_answer": None
     }
     
-    lines = response.strip().split("\n")
-    current_key = None
-    current_value = []
+    # Пытаемся найти блоки через регулярные выражения для большей надежности
+    thought_match = re.search(r"Thought:(.*?)(?=Action:|Final Answer:|$)", response, re.DOTALL | re.IGNORECASE)
+    action_match = re.search(r"Action:(.*?)(?=Action Input:|$)", response, re.DOTALL | re.IGNORECASE)
+    action_input_match = re.search(r"Action Input:(.*?)(?=Observation:|Final Answer:|$)", response, re.DOTALL | re.IGNORECASE)
+    final_answer_match = re.search(r"Final Answer:(.*)", response, re.DOTALL | re.IGNORECASE)
     
-    for line in lines:
-        line_lower = line.lower().strip()
+    if thought_match:
+        result["thought"] = thought_match.group(1).strip()
+    if action_match:
+        result["action"] = action_match.group(1).strip()
+    if action_input_match:
+        result["action_input"] = action_input_match.group(1).strip()
+    if final_answer_match:
+        result["final_answer"] = final_answer_match.group(1).strip()
         
-        if line_lower.startswith("thought:"):
-            if current_key and current_value:
-                result[current_key] = "\n".join(current_value).strip()
-            current_key = "thought"
-            current_value = [line.split(":", 1)[1].strip() if ":" in line else ""]
-        elif line_lower.startswith("action:"):
-            if current_key and current_value:
-                result[current_key] = "\n".join(current_value).strip()
-            current_key = "action"
-            current_value = [line.split(":", 1)[1].strip() if ":" in line else ""]
-        elif line_lower.startswith("action input:"):
-            if current_key and current_value:
-                result[current_key] = "\n".join(current_value).strip()
-            current_key = "action_input"
-            current_value = [line.split(":", 1)[1].strip() if ":" in line else ""]
-        elif line_lower.startswith("final answer:"):
-            if current_key and current_value:
-                result[current_key] = "\n".join(current_value).strip()
-            current_key = "final_answer"
-            current_value = [line.split(":", 1)[1].strip() if ":" in line else ""]
-        else:
-            current_value.append(line)
-    
-    if current_key and current_value:
-        result[current_key] = "\n".join(current_value).strip()
-    
-    # Парсинг action_input как JSON
-    if result["action_input"]:
-        try:
-            result["action_input"] = json.loads(result["action_input"])
-        except json.JSONDecodeError:
-            pass
-    
+    # Если ничего не распарсилось, но текст есть — считаем это финальным ответом
+    if not any([result["action"], result["final_answer"]]) and response.strip():
+        result["final_answer"] = response.strip()
+        
     return result
 
 
-async def run_react_agent(
-    session_id: str,
-    query: str,
-    attachments: Optional[List[FileAttachment]] = None,
-    model_settings: Optional[Dict[str, Any]] = None,
-    max_iterations: int = 10
-):
-    """Запуск ReAct агента с генерацией шагов."""
+async def run_react_agent(session_id: str, query: str, attachments: Optional[List[FileAttachment]] = None, model_settings: Optional[Dict[str, Any]] = None):
+    """Основной цикл ReAct агента."""
+    history = []
+    max_steps = 5
     
-    history: List[Dict] = []
-    
-    # Добавляем информацию о вложениях в запрос
+    # Если есть вложения, добавляем информацию о них в первый Thought
     if attachments:
-        files_info = ", ".join([f"{a.name} ({a.path})" for a in attachments])
-        query = f"{query}\n\nПрикрепленные файлы: {files_info}"
-    
-    for iteration in range(max_iterations):
-        # Генерируем промпт
+        file_info = ", ".join([f"{a.name} ({a.path})" for a in attachments])
+        history.append({
+            "type": "thought",
+            "content": f"Пользователь предоставил файлы: {file_info}. Мне нужно проанализировать их содержимое."
+        })
+
+    for step_idx in range(max_steps):
         prompt = build_react_prompt(query, history, TOOLS)
-        
-        # Получаем ответ LLM
-        start_time = time.time()
         llm_response = await get_llm_response(prompt, model_settings)
-        duration_ms = (time.time() - start_time) * 1000
         
-        # Парсим ответ
         parsed = parse_llm_response(llm_response)
         
-        # Генерируем Thought step
+        # 1. Thought
         if parsed["thought"]:
             thought_step = AgentStep(
                 id=str(uuid.uuid4()),
                 type="thought",
                 content=parsed["thought"],
-                timestamp=time.time(),
-                duration_ms=duration_ms
+                timestamp=time.time()
             )
-            history.append({"type": "thought", "content": parsed["thought"]})
-            
-            # Сохраняем в сессию и отправляем
-            if session_id in sessions:
-                sessions[session_id]["steps"].append(thought_step.model_dump())
-            
             yield thought_step
-        
-        # Проверяем на финальный ответ
+            history.append({"type": "thought", "content": parsed["thought"]})
+
+        # 2. Final Answer
         if parsed["final_answer"]:
             final_step = AgentStep(
                 id=str(uuid.uuid4()),
@@ -370,115 +338,85 @@ async def run_react_agent(
                 content=parsed["final_answer"],
                 timestamp=time.time()
             )
-            
-            if session_id in sessions:
-                sessions[session_id]["steps"].append(final_step.model_dump())
-                sessions[session_id]["status"] = "completed"
-            
             yield final_step
-            return
-        
-        # Выполняем action если есть
+            break
+
+        # 3. Action
         if parsed["action"]:
+            tool_name = parsed["action"]
+            tool_params = {}
+            
+            try:
+                if parsed["action_input"]:
+                    # Очистка JSON от возможных артефактов разметки
+                    clean_json = re.sub(r"```json\s*|\s*```", "", parsed["action_input"]).strip()
+                    tool_params = json.loads(clean_json)
+            except Exception as e:
+                error_step = AgentStep(
+                    id=str(uuid.uuid4()),
+                    type="error",
+                    content=f"Ошибка парсинга параметров инструмента: {str(e)}",
+                    timestamp=time.time()
+                )
+                yield error_step
+                history.append({"type": "observation", "content": f"Error parsing params: {str(e)}"})
+                continue
+
             action_step = AgentStep(
                 id=str(uuid.uuid4()),
                 type="action",
-                content=f"Вызов {parsed['action']}",
+                content=f"Вызываю {tool_name}...",
                 timestamp=time.time(),
-                tool_name=parsed["action"],
-                tool_params=parsed["action_input"] if isinstance(parsed["action_input"], dict) else {}
+                tool_name=tool_name,
+                tool_params=tool_params
             )
-            history.append({
-                "type": "action",
-                "tool_name": parsed["action"],
-                "tool_params": action_step.tool_params
-            })
-            
-            if session_id in sessions:
-                sessions[session_id]["steps"].append(action_step.model_dump())
-            
             yield action_step
+            history.append({"type": "action", "tool_name": tool_name, "tool_params": tool_params})
+
+            # Вызов инструмента
+            tool_result = await call_tool(tool_name, tool_params)
             
-            # Вызываем инструмент
-            start_time = time.time()
-            tool_result = await call_tool(parsed["action"], action_step.tool_params)
-            duration_ms = (time.time() - start_time) * 1000
-            
-            # Генерируем Observation
-            observation_content = json.dumps(tool_result, ensure_ascii=False, indent=2)
+            observation_content = ""
+            if tool_result.get("success"):
+                observation_content = json.dumps(tool_result["result"], ensure_ascii=False, indent=2)
+            else:
+                observation_content = f"Ошибка: {tool_result.get('error')}"
+
             observation_step = AgentStep(
                 id=str(uuid.uuid4()),
                 type="observation",
-                content=observation_content[:500] + "..." if len(observation_content) > 500 else observation_content,
-                timestamp=time.time(),
-                duration_ms=duration_ms,
-                raw_json=tool_result
+                content=observation_content,
+                timestamp=time.time()
             )
-            history.append({"type": "observation", "content": observation_content})
-            
-            if session_id in sessions:
-                sessions[session_id]["steps"].append(observation_step.model_dump())
-            
             yield observation_step
-    
-    # Превышено максимальное количество итераций
-    error_step = AgentStep(
-        id=str(uuid.uuid4()),
-        type="final_answer",
-        content="Превышено максимальное количество итераций. Пожалуйста, уточните запрос.",
-        timestamp=time.time()
-    )
-    
-    if session_id in sessions:
-        sessions[session_id]["steps"].append(error_step.model_dump())
-        sessions[session_id]["status"] = "error"
-    
-    yield error_step
+            history.append({"type": "observation", "content": observation_content})
+        
+        # Если нет ни действия, ни ответа — прерываемся
+        if not parsed["action"] and not parsed["final_answer"]:
+            yield AgentStep(
+                id=str(uuid.uuid4()),
+                type="final_answer",
+                content="Извините, я не смог определить следующий шаг. Попробуйте переформулировать запрос.",
+                timestamp=time.time()
+            )
+            break
 
 
-# === FastAPI Application ===
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Lifecycle manager для приложения."""
-    print("🚀 Agent API запущен")
-    yield
-    print("👋 Agent API остановлен")
-
-
-app = FastAPI(
-    title="ReAct Agent API",
-    description="API для взаимодействия с ReAct агентом",
-    version="1.0.0",
-    lifespan=lifespan
-)
-
-# CORS для доступа из UI
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
+# === API Endpoints ===
 
 @app.get("/health", response_model=HealthResponse)
-async def health_check():
+async def health():
     """Проверка здоровья всех сервисов."""
     services = {
-        "agent": {"status": "connected"},
         "ums": await check_service_health(UMS_URL),
         "document_server": await check_service_health(DOCUMENT_SERVER_URL),
-        "legal_server": await check_service_health(LEGAL_SERVER_URL),
+        "legal_server": await check_service_health(LEGAL_SERVER_URL)
     }
     
-    overall_status = "healthy" if all(
-        s.get("status") == "connected" for s in services.values()
-    ) else "degraded"
+    all_connected = all(s["status"] == "connected" for s in services.values())
     
     return HealthResponse(
-        status=overall_status,
+        status="healthy" if all_connected else "degraded",
         services=services,
         timestamp=datetime.now().isoformat()
     )
@@ -486,17 +424,14 @@ async def health_check():
 
 @app.get("/status", response_model=StatusResponse)
 async def get_status():
-    """Получение статуса системы с реальными ресурсами."""
-    # Получаем реальные ресурсы через resource_monitor
+    """Получение расширенного статуса системы."""
+    ums_status = await get_ums_status()
     resources = get_system_resources()
     
-    # Получаем статус UMS (активная модель и т.д.)
-    ums_status = await get_ums_status()
-    
-    # Проверяем MCP серверы
+    # Список MCP серверов
     mcp_servers = [
-        {"name": "Document Server", "port": 8001, **await check_service_health(DOCUMENT_SERVER_URL)},
-        {"name": "Legal Server", "port": 8002, **await check_service_health(LEGAL_SERVER_URL)},
+        {"id": "document_server", "name": "Document Processor", "url": DOCUMENT_SERVER_URL},
+        {"id": "legal_server", "name": "Legal Analyzer", "url": LEGAL_SERVER_URL}
     ]
     
     # Получаем температуру и загрузку GPU (если есть)
@@ -617,6 +552,19 @@ async def delete_session(session_id: str):
         del sessions[session_id]
     return {"status": "deleted"}
 
+
+# === App Initialization ===
+
+app = FastAPI(title="Agent Navigator Pro API", version="1.0.0")
+
+# Настройка CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 if __name__ == "__main__":
     import uvicorn
