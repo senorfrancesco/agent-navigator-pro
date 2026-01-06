@@ -1,232 +1,173 @@
 # Agent Navigator Pro
 
-Agent Navigator Pro — это прототип, демонстрирующий микросервисную архитектуру для агентной системы анализа документов. Он реализует концепцию **Unified Model Server (UMS)** для эффективного управления ресурсами на одной машине.
+**Agent Navigator Pro** — это агентная система для анализа юридических документов и смет, построенная на микросервисной архитектуре. Проект использует локальные LLM (Qwen) и Embedding модели (LaBSE) для обеспечения приватности и безопасности данных.
 
-В проекте используются **LangGraph** для оркестрации, **FastAPI** для создания независимых микросервисов (MCP-серверов) и **llama-cpp-python** для инференса локальных моделей.
+В качестве пользовательского интерфейса используется **Open WebUI**, работающий в Docker, который взаимодействует с Python-бэкендом на хосте через OpenAI-compatible API.
 
-## Архитектура
+## 🏗 Архитектура
 
-Система разделена на несколько уровней, от пользовательского интерфейса (frontend) до бэкенда управления моделями.
+Система разделена на два слоя: **Host Backend** (микросервисы) и **Docker Frontend** (Open WebUI).
 
 ```mermaid
 graph TD
-    subgraph UI ["Уровень Frontend"]
-        U["React UI (Vite)"]
+    subgraph Docker ["Docker Container"]
+        UI["Open WebUI (Port 3000)"]
     end
     
-    subgraph API ["Уровень API"]
-        AG["Agent API (8000)"]
+    subgraph Host ["Local Host System"]
+        AG["Agent API (Port 8000)"]
+        W["Workflows (LangGraph)"]
+        
+        subgraph Services ["Microservices"]
+            DS["Document Server (8001)"]
+            LS["Legal Server (8002)"]
+            UMS["Unified Model Server (8090)"]
+        end
+        
+        subgraph Inference ["Inference Engines"]
+            LSVR["llama-server (Qwen)"]
+            ST["st_server (LaBSE)"]
+        end
     end
     
-    subgraph S1 ["Уровень Оркестрации"]
-        A["ReAct Агент (LangGraph)"]
+    subgraph Storage ["Shared Storage"]
+        FS["backend/open_webui_uploads"]
     end
     
-    subgraph S2 ["Уровень Микросервисов (MCP Серверы)"]
-        B["MCP Сервер Документов (8001)"]
-        C["MCP Юридический Сервер (8002)"]
-    end
+    UI -- "OpenAI API (HTTP)" --> AG
+    UI -- "Bind Mount" --> FS
+    AG -- "Read Files" --> FS
     
-    subgraph S3 ["Уровень Управления Моделями"]
-        D["UMS Клиент (HTTP)"]
-        E["Unified Model Server (UMS: 8090)"]
-        F["llama-server (llama-cpp-python)"]
-    end
-    
-    subgraph MON ["Мониторинг"]
-        RM["Монитор Ресурсов"]
-    end
-    
-    U --> AG
-    AG --> A
-    AG --> RM
-    A --> B
-    A --> C
-    B --> D
-    C --> D
-    D --> E
-    E --> F
-    
-    style U fill:#9cf,stroke:#333,stroke-width:2px,color:#000
-    style AG fill:#fc9,stroke:#333,stroke-width:2px,color:#000
-    style A fill:#f9f,stroke:#333,stroke-width:2px,color:#000
-    style E fill:#ccf,stroke:#333,stroke-width:2px,color:#000
-    style F fill:#9f9,stroke:#333,stroke-width:2px,color:#000
-    style RM fill:#ff9,stroke:#333,stroke-width:2px,color:#000
+    AG --> W
+    W --> DS
+    W --> LS
+    DS --> UMS
+    LS --> UMS
+    UMS --> LSVR
+    UMS --> ST
 ```
 
 ### Ключевые Компоненты
 
-| Компонент | Путь | Порт | Роль |
+| Компонент | Технология | Порт | Роль |
 | :--- | :--- | :--- | :--- |
-| **React UI** | `frontend/src/` | - | Пользовательский интерфейс (чат, настройки, мониторинг) |
-| **Agent API** | `backend/orchestrator/agent_api.py` | 8000 | FastAPI обёртка с SSE стримингом шагов ReAct |
-| **ReAct Агент** | `backend/orchestrator/react_agent_http.py` | - | Главный оркестратор (LangGraph) |
-| **Сервер Документов** | `backend/services/document_server/mcp_document_server.py` | 8001 | Сервис для работы с документами (загрузка, чанкинг, OCR) |
-| **Юридический Сервер** | `backend/services/legal_server/mcp_legal_server.py` | 8002 | Сервис для юридического анализа (сравнение, анализ изменений) |
-| **Монитор Ресурсов** | `backend/services/resource_monitor.py` | - | Мониторинг VRAM, RAM, CPU и CUDA |
-| **UMS Клиент** | `backend/services/model_manager/ums_client.py` | - | HTTP-клиент для UMS |
-| **UMS** | `backend/services/model_manager/unified_model_server.py` | 8090 | Управляет загрузкой/выгрузкой моделей для оптимизации VRAM |
+| **Open WebUI** | Docker | 3000 | Интерфейс чата, управление историей, загрузка файлов. |
+| **Agent API** | FastAPI | 8000 | Точка входа, совместимая с OpenAI. Оркестратор агентов. |
+| **Orchestrator** | LangGraph | - | Логика воркфлоу (`compare`, `equipment`). |
+| **Document Server** | FastAPI | 8001 | Парсинг документов (PDF, DOCX) с поддержкой OCR. |
+| **Legal Server** | FastAPI | 8002 | Юридический анализ, сравнение текстов (Batch Matching). |
+| **UMS** | FastAPI | 8090 | Единый сервер управления моделями. |
+| **ST Server** | FastAPI | 8093 | Сервер для SentenceTransformers (LaBSE). |
 
-## Особенности
+## 🚀 Быстрый Старт
 
-- **Стриминг Агента в Реальном Времени**: SSE стриминг отображает шаги ReAct (Thought → Action → Observation) в UI.
-- **Мониторинг Ресурсов**: Отслеживает использование VRAM, RAM и CPU через `psutil` и `pynvml`.
-- **Динамическое Управление Моделями (UMS)**: Загружает и выгружает модели по требованию для экономии VRAM.
-- **Гибкие Режимы Работы**: Поддерживает режимы GPU, CPU и Hybrid (`--n_gpu_layers`) для адаптации к различному оборудованию.
+### 1. Предварительные требования
 
-## Требования
+*   **OS:** Linux (рекомендуется Ubuntu).
+*   **GPU:** NVIDIA GPU с драйверами и CUDA 12+ (протестировано на RTX 2070 x2).
+*   **Docker:** Установлен и настроен (с поддержкой `host-gateway`).
+*   **Conda:** Anaconda или Miniconda.
 
-- Python 3.11+
-- Node.js 18+
-- NVIDIA GPU с CUDA (рекомендуется: RTX 3060 12GB или выше)
+### 2. Установка Бэкенда
 
-## Установка
+1.  Создайте окружение Conda:
+    ```bash
+    conda create -n diploma_llm python=3.11
+    conda activate diploma_llm
+    ```
 
-Для подробной инструкции по установке, пожалуйста, обратитесь к [INSTALLATION.md](INSTALLATION.md).
+2.  Установите зависимости:
+    ```bash
+    cd backend
+    pip install -r requirements.txt
+    ```
 
-**Быстрый старт:**
+3.  Скачайте модели (Qwen, LaBSE) в папку `backend/models` (структура описана в `backend/models/README.md` или `.env.example`).
 
-```bash
-# Backend
-cd backend
-python3.11 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+4.  Настройте `.env`:
+    ```bash
+    cp .env.example .env
+    # Убедитесь, что пути к моделям верны
+    ```
 
-# Frontend
-cd ../frontend
-npm install
-```
+### 3. Запуск Системы
 
-## Запуск Приложения
+Система запускается в два этапа: Бэкенд и Фронтенд.
 
-### 1. Запуск Сервисов Бэкенда
+#### Шаг А: Запуск Бэкенда (на Хосте)
 
-Вы можете запустить все сервисы вручную в отдельных терминалах или использовать предоставленный скрипт.
-
-**Ручной Запуск:**
-
-```bash
-# Терминал 1: Agent API (Главный Сервер)
-cd backend/orchestrator
-uvicorn agent_api:app --host 0.0.0.0 --port 8000
-
-# Терминал 2: Сервер Документов
-cd backend/services/document_server
-uvicorn mcp_document_server:app --host 0.0.0.0 --port 8001
-
-# Терминал 3: Юридический Сервер
-cd backend/services/legal_server
-uvicorn mcp_legal_server:app --host 0.0.0.0 --port 8002
-
-# Терминал 4: Unified Model Server (UMS)
-cd backend/services/model_manager
-python unified_model_server.py
-```
-
-**Автоматический Запуск (через tmux):**
+Используйте скрипт `run_all.sh` (рекомендуется запускать в отдельном терминале):
 
 ```bash
 cd backend
 ./run_all.sh
 ```
+*Этот скрипт запустит `tmux` сессию с 5 окнами для всех микросервисов.*
 
-### 2. Запуск Frontend
+#### Шаг Б: Запуск Open WebUI (в Docker)
 
-```bash
-# Из директории frontend
-cd frontend
-npm run dev
-```
-
-## Тестирование
-
-Для проверки системы используйте встроенные тесты:
+Запустите контейнер с монтированием папки загрузок, чтобы агент видел файлы:
 
 ```bash
-# Тест всей системы
-python3 backend/test_system.py
+# Создаем папку для обмена файлами
+mkdir -p backend/open_webui_uploads
+chmod 777 backend/open_webui_uploads
 
-# Тест на галлюцинации
-python3 backend/tests/test_agent_hallucinations.py
-
-# Через pytest (если установлен)
-pytest backend/tests/
+# Запускаем контейнер
+docker run -d -p 3000:8080 \
+  --add-host=host.docker.internal:host-gateway \
+  -v open-webui:/app/backend/data \
+  -v $(pwd)/backend/open_webui_uploads:/app/backend/data/uploads \
+  --name open-webui \
+  --restart always \
+  ghcr.io/open-webui/open-webui:main
 ```
 
-## API Эндпоинты
+### 4. Настройка Подключения
 
-Основной **Agent API** доступен по адресу `http://localhost:8000`.
+1.  Откройте браузер: `http://localhost:3000`.
+2.  Создайте аккаунт администратора.
+3.  Перейдите в **Settings -> Admin Settings -> Connections**.
+4.  В разделе **OpenAI API**:
+    *   **URL:** `http://172.17.0.1:8000/v1` (или IP вашего `docker0` интерфейса).
+    *   **Key:** `sk-any-key` (любой текст).
+5.  Нажмите "Сохранить" и проверьте соединение.
+6.  В списке моделей должна появиться `agent-navigator`.
 
-| Метод | Эндпоинт | Описание |
-| :--- | :--- | :--- |
-| GET | `/health` | Проверка статуса всех подключенных сервисов. |
-| GET | `/status` | Получение информации о ресурсах (VRAM, RAM, CPU, CUDA). |
-| POST | `/agent/chat` | Отправка запроса агенту. |
-| GET | `/agent/stream/{session_id}` | Стриминг шагов агента ReAct через SSE. |
+## 💡 Использование
 
-### Пример Использования
+1.  **Простой чат:** Выберите модель `agent-navigator` и общайтесь как с обычным ассистентом.
+2.  **Сравнение документов:**
+    *   Загрузите два файла (PDF, DOCX) через скрепку 📎.
+    *   Напишите: *"Сравни эти документы"* или *"Проанализируй юридические риски"*.
+    *   Агент автоматически найдет файлы в общей папке, запустит воркфлоу сравнения и выдаст подробный Markdown отчет.
+    *   Отчет также сохранится в папке `backend/open_webui_uploads`.
+3.  **Анализ сметы:**
+    *   Загрузите ТЗ и Смету.
+    *   Напишите: *"Проверь соответствие сметы техническому заданию"*.
 
-```bash
-# Проверка здоровья сервисов
-curl http://localhost:8000/health
+## 🛠 Разработка и Отладка
 
-# Отправка запроса агенту
-curl -X POST http://localhost:8000/agent/chat \
-  -H "Content-Type: application/json" \
-  -d '{"query": "Загрузи документ /tmp/test.pdf"}'
-```
-
-## Конфигурация
-
-### Настройка через .env
-
-Все конфигурации загружаются из файла `.env`. Создайте его из шаблона:
-
-```bash
-cd backend
-cp .env.example .env
-```
-
-Отредактируйте `.env`, указав пути к вашим моделям и параметры:
-
-```bash
-# Пути к моделям
-MODEL_PATH_QWEN14B="./models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
-MODEL_PATH_QWENVL="./models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
-MODEL_PATH_LABSE="./models/st/LaBSE"
-
-# Параметры генерации (для снижения галлюцинаций)
-TEMPERATURE=0.5
-REPETITION_PENALTY=1.2
-```
-
-Все сервисы автоматически загружают переменные при запуске.
-
-### Параметры Модели для Снижения Галлюцинаций
-
-| Параметр | Значение | Описание |
-| :--- | :--- | :--- |
-| `TEMPERATURE` | 0.5 | Снижено для более детерминированных ответов |
-| `TOP_P` | 0.9 | Ограничение выбора токенов |
-| `REPETITION_PENALTY` | 1.2 | Штраф за повторения |
+*   **Логи:** Логи микросервисов доступны в `tmux` сессии (`tmux attach -t agent-navigator`) или в файлах `*.log` в папках сервисов.
+*   **Перезапуск API:** Если вы меняете код оркестратора, нужно перезапустить только `agent_api.py`.
+*   **Ошибки 500:** Чаще всего связаны с правами доступа к папке `backend/open_webui_uploads` или недоступностью UMS.
 
 ## Структура Проекта
 
 ```
 .
-├── README.md                          # Основная документация проекта
-├── INSTALLATION.md                    # Подробное руководство по установке
-├── frontend/                          # Код React Frontend
-│   ├── src/                           # Исходный код
-│   ├── package.json                   # Зависимости Node.js
-│   └── ...
-└── backend/                           # Код Python Backend
-    ├── orchestrator/                  # Agent API и оркестратор LangGraph
-    ├── services/                      # Микросервисы (Document, Legal, UMS)
-    ├── models/                        # Директория для GGUF моделей (игнорируется git)
-    ├── requirements.txt               # Зависимости Python
-    ├── run_all.sh                     # Скрипт для запуска всех сервисов
-    └── tests/                         # Тесты (включая тесты на галлюцинации)
+├── backend/                           # Python Backend
+│   ├── orchestrator/                  # Agent API и LangGraph Workflows
+│   │   ├── agent_api.py               # Точка входа
+│   │   └── workflows/                 # Логика агентов (compare.py, equipment.py)
+│   ├── services/                      # Микросервисы
+│   │   ├── document_server/           # Работа с файлами
+│   │   ├── legal_server/              # Юридическая логика
+│   │   └── model_manager/             # UMS и ST Server
+│   ├── models/                        # Локальные модели (GGUF, ST)
+│   ├── open_webui_uploads/            # Общая папка с Docker
+│   └── run_all.sh                     # Скрипт запуска
+├── for_cli/                           # Логи контекста и отчеты
+├── docker-compose.yaml                # (Опционально)
+└── README.md                          # Этот файл
 ```
