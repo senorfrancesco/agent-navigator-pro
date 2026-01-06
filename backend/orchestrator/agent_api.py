@@ -330,15 +330,23 @@ async def get_llm_stream(prompt: str, model_settings: Optional[Dict[str, Any]] =
         yield f"\n[Ошибка стриминга: {str(e)}]\n"
 
 async def run_react_agent(session_id: str, query: str, attachments: Optional[List[FileAttachment]] = None, model_settings: Optional[Dict[str, Any]] = None):
-    """Цикл ReAct агента с поддержкой стриминга."""
+    """Цикл ReAct агента с поддержкой стриминга и реальным вызовом инструментов."""
     
-    # Исправление путей: если фронтенд прислал blob:, заменяем на локальные пути из attachments
+    # Мапа для исправления blob URL
+    path_map = {}
     if attachments:
         for att in attachments:
             if att.path.startswith("blob:"):
-                # В реальной системе тут должна быть мапа blob -> local_path
-                # Пока просто используем имя файла, если оно есть в системе
-                pass
+                # Пытаемся найти локальный путь в /tmp или текущей папке по имени файла
+                # В реальной системе фронтенд должен присылать корректный путь после загрузки
+                local_path = os.path.join("/tmp", att.name)
+                if os.path.exists(local_path):
+                    path_map[att.path] = local_path
+                else:
+                    # Если файла нет в /tmp, используем имя как есть (предполагая, что сервер знает где искать)
+                    path_map[att.path] = att.name
+            else:
+                path_map[att.path] = att.path
 
     # Проверка на неопределенные запросы
     ambiguous_queries = ["что", "что?", "как", "как?", "почему", "почему?", "зачем", "зачем?", "где", "где?"]
@@ -346,46 +354,89 @@ async def run_react_agent(session_id: str, query: str, attachments: Optional[Lis
         yield AgentStep(id=str(uuid.uuid4()), type="final_answer", content="Ваш запрос слишком неопределён. Пожалуйста, уточните, что именно вас интересует.", timestamp=time.time())
         return
     
-    # Для ReAct нам нужно реально вызывать инструменты, а не просто стримить ответ
-    # Если есть вложения или запрос сложный - используем логику ReAct
-    is_complex = bool(attachments) or len(query.split()) > 15
+    chat_history = []
+    max_iterations = 5
     
-    if not is_complex:
-        prompt = render_template(SYSTEM_PROMPT_TEMPLATE, query=query, files=attachments)
-        full_content = ""
+    for i in range(max_iterations):
+        # Формируем промпт для текущего шага
+        if not chat_history:
+            prompt = render_template(REACT_PROMPT_TEMPLATE, query=query, thought="", files=attachments)
+        else:
+            history_str = "\n".join(chat_history)
+            prompt = f"{render_template(REACT_PROMPT_TEMPLATE, query=query, thought='', files=attachments)}\n{history_str}\nThought:"
+
+        full_response = ""
         async for chunk in get_llm_stream(prompt, model_settings):
             full_response += chunk
             yield AgentStep(id=str(uuid.uuid4()), type="chunk", content=chunk, timestamp=time.time())
         
-        cleaned_content = clean_response(full_content)
-        yield AgentStep(id=str(uuid.uuid4()), type="final_answer", content=cleaned_content, timestamp=time.time())
-        return
-    
-    # Логика ReAct (упрощенная для примера, должна интегрироваться с react_agent_http.py)
-    thought = "Мне нужно проанализировать ваши документы. Сначала я загружу их."
-    yield AgentStep(id=str(uuid.uuid4()), type="thought", content=thought, timestamp=time.time())
-    
-    # Имитация вызова инструментов (в реальности тут должен быть вызов langgraph)
-    for att in attachments or []:
-        yield AgentStep(
-            id=str(uuid.uuid4()), 
-            type="action", 
-            content=f"Загрузка документа {att.name}...", 
-            tool_name="document_server.load_document",
-            tool_params={"path": att.path},
-            timestamp=time.time()
-        )
-        await asyncio.sleep(0.5)
-        yield AgentStep(id=str(uuid.uuid4()), type="observation", content=f"Документ {att.name} успешно загружен.", timestamp=time.time())
+        # Парсинг ответа
+        response = full_response.strip()
+        
+        # Извлекаем Thought
+        thought = ""
+        if "Thought:" in response:
+            thought = response.split("Thought:")[1].split("Action:")[0].split("Final Answer:")[0].strip()
+        elif not any(k in response for k in ["Action:", "Final Answer:"]):
+            thought = response
+            
+        if thought:
+            yield AgentStep(id=str(uuid.uuid4()), type="thought", content=thought, timestamp=time.time())
+            chat_history.append(f"Thought: {thought}")
 
-    prompt = render_template(SYSTEM_PROMPT_TEMPLATE, query=f"Проанализируй загруженные файлы и ответь на запрос: {query}", files=attachments)
-    full_content = ""
-    async for chunk in get_llm_stream(prompt, model_settings):
-        full_content += chunk
-        yield AgentStep(id=str(uuid.uuid4()), type="chunk", content=chunk, timestamp=time.time())
-    
-    cleaned_content = clean_response(full_content)
-    yield AgentStep(id=str(uuid.uuid4()), type="final_answer", content=cleaned_content, timestamp=time.time())
+        # Извлекаем Action
+        if "Action:" in response:
+            action_str = response.split("Action:")[1].strip()
+            try:
+                tool_name = action_str.split("(")[0].strip()
+                params_str = action_str.split("(")[1].split(")")[0]
+                
+                # Упрощенный парсинг параметров (key="value")
+                params = {}
+                for part in re.split(r',\s*(?=[a-zA-Z_][a-zA-Z0-9_]*\s*=)', params_str):
+                    if '=' in part:
+                        key, value = part.split('=', 1)
+                        val = value.strip().strip('"').strip("'")
+                        # Исправляем blob URL в параметрах
+                        if val in path_map: val = path_map[val]
+                        params[key.strip()] = val
+                
+                yield AgentStep(
+                    id=str(uuid.uuid4()), 
+                    type="action", 
+                    content=f"Выполнение {tool_name}...", 
+                    tool_name=tool_name,
+                    tool_params=params,
+                    timestamp=time.time()
+                )
+                
+                # Реальный вызов инструмента
+                if tool_name in TOOLS:
+                    observation = await TOOLS[tool_name](**params)
+                else:
+                    observation = f"Error: Tool {tool_name} not found."
+                
+                yield AgentStep(id=str(uuid.uuid4()), type="observation", content=str(observation), timestamp=time.time())
+                chat_history.append(f"Action: {tool_name}({params_str})")
+                chat_history.append(f"Observation: {observation}")
+                continue # Переходим к следующей итерации ReAct
+            except Exception as e:
+                error_msg = f"Error parsing or calling tool: {str(e)}"
+                yield AgentStep(id=str(uuid.uuid4()), type="error", content=error_msg, timestamp=time.time())
+                break
+
+        # Извлекаем Final Answer
+        if "Final Answer:" in response:
+            final_answer = response.split("Final Answer:")[1].strip()
+            yield AgentStep(id=str(uuid.uuid4()), type="final_answer", content=final_answer, timestamp=time.time())
+            return
+        
+        # Если нет ни Action, ни Final Answer, но есть текст - считаем это финальным ответом
+        if not "Action:" in response and not "Final Answer:" in response:
+            yield AgentStep(id=str(uuid.uuid4()), type="final_answer", content=clean_response(response), timestamp=time.time())
+            return
+
+    yield AgentStep(id=str(uuid.uuid4()), type="final_answer", content="Превышено количество итераций анализа.", timestamp=time.time())
 
 # === API Endpoints ===
 
@@ -395,27 +446,34 @@ async def health():
 
 @app.get("/status")
 async def get_status():
-    resources = get_system_resources()
+    try:
+        resources = get_system_resources()
+    except Exception as e:
+        print(f"Error getting resources: {e}")
+        resources = {}
+        
     # Адаптация под формат фронтенда (StatusResponse в agentApi.ts)
-    primary_gpu = resources.get("gpus", [{}])[0] if resources.get("gpus") else {}
+    gpus = resources.get("gpus", [])
+    primary_gpu = gpus[0] if gpus else {}
     
+    # Гарантируем наличие всех полей с правильными типами
     return {
         "active_model": "qwen-14b-llm",
         "backend_mode": "llama-cpp-python",
-        "vram_used_gb": resources.get("vram_used_gb", 0),
-        "vram_total_gb": resources.get("vram_total_gb", 0),
-        "vram_free_gb": resources.get("vram_free_gb", 0),
-        "ram_used_gb": resources.get("ram_used_gb", 0),
-        "ram_total_gb": resources.get("ram_total_gb", 0),
-        "ram_free_gb": resources.get("ram_free_gb", 0),
-        "ram_percent": resources.get("ram_percent", 0),
-        "cpu_percent": resources.get("cpu_percent", 0),
-        "cpu_count": resources.get("cpu_count", 0),
-        "cuda_available": resources.get("cuda_available", False),
-        "cuda_version": resources.get("cuda_version"),
-        "driver_version": resources.get("driver_version"),
-        "gpu_temperature": primary_gpu.get("temperature"),
-        "gpu_utilization": primary_gpu.get("utilization"),
+        "vram_used_gb": float(resources.get("vram_used_gb", 0.0)),
+        "vram_total_gb": float(resources.get("vram_total_gb", 0.0)),
+        "vram_free_gb": float(resources.get("vram_free_gb", 0.0)),
+        "ram_used_gb": float(resources.get("ram_used_gb", 0.0)),
+        "ram_total_gb": float(resources.get("ram_total_gb", 0.0)),
+        "ram_free_gb": float(resources.get("ram_free_gb", 0.0)),
+        "ram_percent": float(resources.get("ram_percent", 0.0)),
+        "cpu_percent": float(resources.get("cpu_percent", 0.0)),
+        "cpu_count": int(resources.get("cpu_count", 0)),
+        "cuda_available": bool(resources.get("cuda_available", False)),
+        "cuda_version": str(resources.get("cuda_version", "")) if resources.get("cuda_version") else None,
+        "driver_version": str(resources.get("driver_version", "")) if resources.get("driver_version") else None,
+        "gpu_temperature": float(primary_gpu.get("temperature")) if primary_gpu.get("temperature") is not None else None,
+        "gpu_utilization": float(primary_gpu.get("utilization")) if primary_gpu.get("utilization") is not None else None,
         "queue_size": 0,
         "mcp_servers": [
             {"name": "document_server", "port": 8001, "status": "connected"},
