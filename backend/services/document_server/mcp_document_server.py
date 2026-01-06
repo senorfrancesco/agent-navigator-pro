@@ -145,6 +145,18 @@ def smart_chunk(text: str, max_tokens: int = 8000, overlap: int = 100) -> List[s
     
     return chunks
 
+def load_pdf_pages(path: str) -> List[str]:
+    """Извлечение текста из PDF постранично."""
+    try:
+        import pdfplumber
+        pages = []
+        with pdfplumber.open(path) as pdf:
+            for page in pdf.pages:
+                pages.append(page.extract_text() or "")
+        return pages
+    except Exception as e:
+        raise RuntimeError(f"Error reading PDF pages: {e}")
+
 # ============================================================================
 # API Endpoints
 # ============================================================================
@@ -157,9 +169,7 @@ async def health():
 @app.post("/load_document")
 async def load_document(request: LoadDocumentRequest):
     """
-    Загружает документ и извлекает текст.
-    
-    Поддерживаемые форматы: PDF, DOCX, TXT.
+    Загружает документ и извлекает текст целиком.
     """
     try:
         path = request.path
@@ -178,8 +188,7 @@ async def load_document(request: LoadDocumentRequest):
                 "status": "success",
                 "text": text,
                 "path": path,
-                "format": "mock",
-                "length": len(text)
+                "format": "mock"
             }
         
         # Определяем формат файла
@@ -195,29 +204,44 @@ async def load_document(request: LoadDocumentRequest):
             text = load_txt(path)
             format_type = "txt"
         else:
-            return {
-                "status": "error",
-                "error": f"Unsupported file format: {file_ext}. Supported: PDF, DOCX, TXT"
-            }
-        
-        # Если нужно, используем OCR для изображений
-        if request.use_ocr and file_ext in [".jpg", ".png", ".jpeg"]:
-            text = process_vision_via_ums(path, "Extract all text from this image")
-            format_type = "image_ocr"
+            return {"status": "error", "error": f"Unsupported format: {file_ext}"}
         
         return {
             "status": "success",
             "text": text,
             "path": path,
-            "format": format_type,
-            "length": len(text)
+            "format": format_type
         }
-    
     except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+@app.post("/load_pages")
+async def load_pages(request: LoadDocumentRequest):
+    """
+    Загружает документ и возвращает список страниц (текст каждой страницы).
+    Используется для Map-Reduce анализа.
+    """
+    try:
+        path = request.path
+        if not os.path.exists(path):
+            return {"status": "success", "pages": ["Mock Page 1", "Mock Page 2"], "path": path}
+
+        file_ext = Path(path).suffix.lower()
+        if file_ext == ".pdf":
+            pages = load_pdf_pages(path)
+        else:
+            # Для не-PDF просто возвращаем весь текст как одну страницу
+            full_text = load_txt(path) if file_ext == ".txt" else load_docx(path)
+            pages = [full_text]
+            
         return {
-            "status": "error",
-            "error": str(e)
+            "status": "success",
+            "pages": pages,
+            "page_count": len(pages),
+            "path": path
         }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
 
 @app.post("/smart_chunk")
 async def smart_chunk_endpoint(request: SmartChunkRequest):

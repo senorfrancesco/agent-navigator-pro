@@ -45,6 +45,16 @@ class CompareChunksResponse(BaseModel):
     differences: Optional[List[DifferenceItem]] = None
     error: Optional[str] = None
 
+class MatchBatchesRequest(BaseModel):
+    list_old: List[str]
+    list_new: List[str]
+    threshold: float = 0.72
+
+class MatchBatchesResponse(BaseModel):
+    status: str
+    matches: List[Dict[str, Any]]
+    error: Optional[str] = None
+
 class AnalyzeImpactRequest(BaseModel):
     differences: List[DifferenceItem]
 
@@ -124,6 +134,92 @@ async def compare_chunks(request: CompareChunksRequest):
             status="error",
             error=str(e)
         )
+
+@app.post("/match_batches", response_model=MatchBatchesResponse)
+async def match_batches(request: MatchBatchesRequest):
+    """
+    Эффективно сопоставляет два списка чанков.
+    
+    1. Получает эмбеддинги для всех чанков батчем.
+    2. Вычисляет матрицу сходства.
+    3. Находит лучшие пары.
+    """
+    print(f"[LEGAL_SERVER] Matching batches: {len(request.list_old)} vs {len(request.list_new)}")
+    
+    try:
+        if not request.list_old or not request.list_new:
+            return MatchBatchesResponse(status="success", matches=[])
+
+        # 1. Получаем эмбеддинги батчем
+        # UMS поддерживает батчинг, если мы передадим список строк в 'input'
+        # Но ums_client.get_embeddings_via_ums сейчас принимает только одну строку.
+        # Поэтому мы вызываем ums_client.infer напрямую для батча.
+        
+        payload_old = {"input": request.list_old, "normalize": True}
+        payload_new = {"input": request.list_new, "normalize": True}
+        
+        emb_old_res = ums_client.infer("labse-embedding", payload_old, device_mode="cpu")
+        emb_new_res = ums_client.infer("labse-embedding", payload_new, device_mode="cpu")
+        
+        # Извлекаем вектора
+        def extract_embs(res):
+            if "data" in res: return [item["embedding"] for item in res["data"]]
+            if "embedding" in res: return res["embedding"] if isinstance(res["embedding"][0], list) else [res["embedding"]]
+            return []
+
+        embs_old = extract_embs(emb_old_res)
+        embs_new = extract_embs(emb_new_res)
+        
+        if not embs_old or not embs_new:
+            raise ValueError("Failed to get embeddings from UMS")
+
+        # 2. Вычисляем сходство и сопоставляем (Greedy approach для скорости)
+        matches = []
+        matched_new_indices = set()
+        
+        for i, v_old in enumerate(embs_old):
+            best_score = -1.0
+            best_idx = -1
+            
+            for j, v_new in enumerate(embs_new):
+                if j in matched_new_indices: continue
+                
+                score = _cosine_similarity(v_old, v_new)
+                if score > best_score:
+                    best_score = score
+                    best_idx = j
+            
+            if best_idx != -1 and best_score >= request.threshold:
+                matches.append({
+                    "type": "MODIFIED" if best_score < 0.99 else "UNCHANGED",
+                    "old_text": request.list_old[i],
+                    "new_text": request.list_new[best_idx],
+                    "similarity_score": best_score
+                })
+                matched_new_indices.add(best_idx)
+            else:
+                matches.append({
+                    "type": "DELETED",
+                    "old_text": request.list_old[i],
+                    "new_text": None,
+                    "similarity_score": 0.0
+                })
+        
+        # Добавляем новые чанки, которые не нашли пару
+        for j, text in enumerate(request.list_new):
+            if j not in matched_new_indices:
+                matches.append({
+                    "type": "ADDED",
+                    "old_text": None,
+                    "new_text": text,
+                    "similarity_score": 0.0
+                })
+
+        return MatchBatchesResponse(status="success", matches=matches)
+    
+    except Exception as e:
+        print(f"[LEGAL_SERVER] Error in match_batches: {e}")
+        return MatchBatchesResponse(status="error", error=str(e), matches=[])
 
 @app.post("/analyze_impact", response_model=AnalyzeImpactResponse)
 async def analyze_impact(request: AnalyzeImpactRequest):
