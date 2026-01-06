@@ -20,11 +20,17 @@ except ImportError:
     print("[Warning] psutil not installed, RAM monitoring disabled")
 
 try:
+    # Пытаемся импортировать pynvml (который теперь nvidia-ml-py)
     import pynvml
     PYNVML_AVAILABLE = True
 except ImportError:
-    PYNVML_AVAILABLE = False
-    print("[Warning] pynvml not installed, GPU monitoring disabled")
+    try:
+        # На всякий случай пробуем альтернативное имя
+        import nvidia_smi as pynvml
+        PYNVML_AVAILABLE = True
+    except ImportError:
+        PYNVML_AVAILABLE = False
+        print("[Warning] nvidia-ml-py (pynvml) not installed, GPU monitoring disabled")
 
 
 @dataclass
