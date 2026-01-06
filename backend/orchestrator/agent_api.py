@@ -31,6 +31,19 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import httpx
 
+# === App Initialization ===
+# Инициализируем app в начале, чтобы избежать NameError в декораторах
+app = FastAPI(title="Agent Navigator Pro API", version="1.0.0")
+
+# Настройка CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Добавляем путь к services для импорта resource_monitor
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'services'))
 
@@ -103,6 +116,12 @@ class AgentStep(BaseModel):
     tool_name: Optional[str] = None
     tool_params: Optional[Dict[str, Any]] = None
     raw_json: Optional[Dict[str, Any]] = None
+
+    def to_json(self) -> str:
+        """Совместимость с Pydantic v1 и v2."""
+        if hasattr(self, "model_dump_json"):
+            return self.model_dump_json()
+        return self.json()
 
 
 # === Helper Functions ===
@@ -519,7 +538,7 @@ async def stream_agent_steps(session_id: str):
             attachments=attachments if attachments else None,
             model_settings=session.get("model_settings")
         ):
-            yield f"data: {step.model_dump_json()}\n\n"
+            yield f"data: {step.to_json()}\n\n"
             await asyncio.sleep(0.01)  # Небольшая задержка для flush
         
         # Отправляем завершающее событие
@@ -552,19 +571,6 @@ async def delete_session(session_id: str):
         del sessions[session_id]
     return {"status": "deleted"}
 
-
-# === App Initialization ===
-
-app = FastAPI(title="Agent Navigator Pro API", version="1.0.0")
-
-# Настройка CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 if __name__ == "__main__":
     import uvicorn
