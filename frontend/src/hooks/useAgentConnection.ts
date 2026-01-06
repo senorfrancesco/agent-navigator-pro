@@ -155,12 +155,15 @@ export function useAgentConnection(serverUrl: string): UseAgentConnectionResult 
     };
   }, [stopAutoRefresh]);
 
-  // Check connection when URL changes
+  // Check connection when URL changes and start auto-refresh
   useEffect(() => {
     if (serverUrl) {
-      checkConnection();
+      // Start auto-refresh with 5 seconds interval for real-time monitoring
+      startAutoRefresh(5000);
+    } else {
+      stopAutoRefresh();
     }
-  }, [serverUrl, checkConnection]);
+  }, [serverUrl, startAutoRefresh, stopAutoRefresh]);
 
   return {
     connectionStatus,

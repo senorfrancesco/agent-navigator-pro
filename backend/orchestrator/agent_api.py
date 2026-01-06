@@ -212,12 +212,18 @@ async def get_llm_response(prompt: str, model_settings: Optional[Dict[str, Any]]
             )
             if response.status_code == 200:
                 result = response.json()
-                return result.get("text", result.get("content", ""))
+                # UMS возвращает { "status": "success", "result": { ... } }
+                if result.get("status") == "success":
+                    inner_result = result.get("result", {})
+                    # llama-cpp-python возвращает текст в поле 'choices' или 'text'
+                    if "choices" in inner_result:
+                        return inner_result["choices"][0].get("text", inner_result["choices"][0].get("message", {}).get("content", ""))
+                    return inner_result.get("text", inner_result.get("content", ""))
+                return f"[UMS Error] {result.get('detail', 'Unknown error')}"
+            else:
+                return f"[UMS HTTP {response.status_code}] {response.text}"
     except Exception as e:
-        # Fallback: возвращаем демо-ответ для тестирования UI
-        return f"[Demo mode] Не удалось подключиться к UMS: {str(e)}"
-    
-    return "[Error] Не удалось получить ответ от LLM"
+        return f"[Connection Error] Не удалось подключиться к UMS: {str(e)}"
 
 
 def build_react_prompt(query: str, history: List[Dict], tools: Dict) -> str:
