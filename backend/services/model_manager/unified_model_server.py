@@ -73,7 +73,7 @@ MODELS_CONFIG = {
         "type": "gguf",
         "path": os.getenv("MODEL_PATH_QWEN14B", "./models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"),
         "ctx_size": 16384,
-        "gpu_layers": 15,
+        "gpu_layers": -1,
         "port": 8091
     },
     "qwen-vl-8b": {
