@@ -1,7 +1,7 @@
 """
 Agent API - FastAPI wrapper для ReAct-агента с SSE стримингом.
 Поддерживает сквозной стриминг генерации текста.
-ИСПРАВЛЕНА ПРОБЛЕМА С ГАЛЛЮЦИНАЦИЯМИ И САМОДИАЛОГОМ.
+ИСПРАВЛЕНО: Восстановлен мониторинг ресурсов и улучшена защита от галлюцинаций.
 """
 
 import asyncio
@@ -27,7 +27,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import httpx
 
-app = FastAPI(title="Agent Navigator Pro API", version="1.2.0")
+app = FastAPI(title="Agent Navigator Pro API", version="1.2.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -37,8 +37,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Подключаем путь к сервисам для мониторинга ресурсов
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'services'))
-from resource_monitor import get_system_resources
+try:
+    from resource_monitor import get_system_resources
+except ImportError:
+    def get_system_resources():
+        return {"error": "Resource monitor not found"}
 
 UMS_URL = os.getenv("UMS_URL", "http://localhost:8090")
 sessions: Dict[str, Dict[str, Any]] = {}
@@ -80,16 +85,25 @@ def clean_response(text: str) -> str:
     text = re.sub(r'```plaintext.*?```', '', text, flags=re.DOTALL)
     text = re.sub(r'```\s*```', '', text, flags=re.DOTALL)
     
-    # Обрезка при обнаружении самодиалога
+    # Обрезка при обнаружении самодиалога и галлюцинаций
     stop_patterns = [
-        r'\n\n(User:|Human:|Вопрос:|Понял[,\s]|Спасибо[,\s])',
-        r'\n\nОтвет:',
-        r'\n\n###',
-        r'\n\n\n',
-        r'Если у вас есть',
-        r'Пожалуйста, уточните'
+        r'\n+(User:|Human:|Вопрос:|Понял[,\s]|Спасибо[,\s])',
+        r'\n+Ответ:',
+        r'\n+###',
+        r'\n{3,}',
+        r'\n+Если у вас есть',
+        r'\n+Пожалуйста, уточните',
+        r'Корректированный ответ:',
+        r'Корректный ответ:',
+        r'Ответ окончен\.',
+        r'Прекращаю отвечать\.',
+        r'Твой ответ:'
     ]
     
+    # Удаление множественных пробелов и переносов ПЕРЕД обрезкой
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    text = re.sub(r' {2,}', ' ', text)
+
     earliest_match = len(text)
     for pattern in stop_patterns:
         match = re.search(pattern, text, re.IGNORECASE)
@@ -99,10 +113,6 @@ def clean_response(text: str) -> str:
     if earliest_match < len(text):
         text = text[:earliest_match]
     
-    # Удаление множественных пробелов и переносов
-    text = re.sub(r'\n{3,}', '\n\n', text)
-    text = re.sub(r' {2,}', ' ', text)
-    
     return text.strip()
 
 # === Core Logic ===
@@ -110,11 +120,10 @@ def clean_response(text: str) -> str:
 async def get_llm_stream(prompt: str, model_settings: Optional[Dict[str, Any]] = None) -> AsyncGenerator[str, None]:
     """
     Получение потокового ответа от LLM через UMS.
-    ИСПРАВЛЕНО: Добавлены стоп-токены и параметры контроля повторений.
     """
     settings = model_settings or {}
     
-    # ИСПРАВЛЕНИЕ 1: Расширенный список стоп-токенов для предотвращения самодиалога
+    # Расширенный список стоп-токенов
     stop_sequences = [
         "Observation:",
         "Human:",
@@ -128,17 +137,18 @@ async def get_llm_stream(prompt: str, model_settings: Optional[Dict[str, Any]] =
         "Понял, спасибо",
         "```plaintext",
         "Если у вас есть",
-        "Пожалуйста, уточните"
+        "Пожалуйста, уточните",
+        "Корректный ответ:",
+        "Ответ окончен."
     ]
     
     payload = {
         "prompt": prompt,
         "max_tokens": settings.get("maxTokens", 2048),
         "temperature": settings.get("temperature", 0.7),
-        # ИСПРАВЛЕНИЕ 2: Добавлены параметры контроля повторений
-        "frequency_penalty": settings.get("frequency_penalty", 0.3),
-        "presence_penalty": settings.get("presence_penalty", 0.3),
-        "repetition_penalty": settings.get("repetition_penalty", 1.1),
+        "frequency_penalty": settings.get("frequency_penalty", 0.5), # Увеличено для борьбы с повторами
+        "presence_penalty": settings.get("presence_penalty", 0.5),   # Увеличено
+        "repetition_penalty": settings.get("repetition_penalty", 1.2), # Увеличено
         "stop": stop_sequences
     }
     
@@ -169,10 +179,9 @@ async def get_llm_stream(prompt: str, model_settings: Optional[Dict[str, Any]] =
 async def run_react_agent(session_id: str, query: str, attachments: Optional[List[FileAttachment]] = None, model_settings: Optional[Dict[str, Any]] = None):
     """
     Цикл ReAct агента с поддержкой стриминга финального ответа.
-    ИСПРАВЛЕНО: Добавлена проверка на неопределенные запросы и улучшен промпт.
     """
     
-    # ИСПРАВЛЕНИЕ 3: Проверка на неопределенные запросы
+    # Проверка на неопределенные запросы
     ambiguous_queries = ["что", "что?", "как", "как?", "почему", "почему?", "зачем", "зачем?", "где", "где?"]
     if query.strip().lower() in ambiguous_queries:
         yield AgentStep(
@@ -186,7 +195,7 @@ async def run_react_agent(session_id: str, query: str, attachments: Optional[Lis
     is_simple = not attachments and len(query.split()) < 10
     
     if is_simple:
-        # ИСПРАВЛЕНИЕ 4: Улучшенный системный промпт с четкими инструкциями
+        # Улучшенный системный промпт
         prompt = f"""Ты — ассистент Agent Navigator Pro. 
 
 ВАЖНЫЕ ПРАВИЛА:
@@ -194,6 +203,7 @@ async def run_react_agent(session_id: str, query: str, attachments: Optional[Lis
 - НЕ придумывай дополнительные вопросы или ответы
 - НЕ имитируй диалог с пользователем
 - НЕ добавляй фразы типа "Если у вас есть вопросы" или "Пожалуйста, уточните"
+- НЕ используй фразы "Корректный ответ" или "Ответ окончен"
 - Закончи ответ сразу после того, как ответишь на вопрос
 - Не используй эмодзи
 
@@ -206,16 +216,13 @@ async def run_react_agent(session_id: str, query: str, attachments: Optional[Lis
             full_content += chunk
             yield AgentStep(id=str(uuid.uuid4()), type="chunk", content=chunk, timestamp=time.time())
         
-        # ИСПРАВЛЕНИЕ 5: Постобработка ответа для удаления артефактов
         cleaned_content = clean_response(full_content)
-        
         yield AgentStep(id=str(uuid.uuid4()), type="final_answer", content=cleaned_content, timestamp=time.time())
         return
 
     thought = "Мне нужно проанализировать ваш запрос."
     yield AgentStep(id=str(uuid.uuid4()), type="thought", content=thought, timestamp=time.time())
     
-    # ИСПРАВЛЕНИЕ 6: Улучшенный промпт для сложных запросов
     prompt = f"""Ты — ассистент Agent Navigator Pro.
 
 ВАЖНЫЕ ПРАВИЛА:
@@ -235,9 +242,7 @@ Final Answer:"""
         full_content += chunk
         yield AgentStep(id=str(uuid.uuid4()), type="chunk", content=chunk, timestamp=time.time())
     
-    # ИСПРАВЛЕНИЕ 7: Постобработка ответа для удаления артефактов
     cleaned_content = clean_response(full_content)
-    
     yield AgentStep(id=str(uuid.uuid4()), type="final_answer", content=cleaned_content, timestamp=time.time())
 
 # === API Endpoints ===
@@ -245,10 +250,11 @@ Final Answer:"""
 @app.get("/health")
 async def health():
     """Проверка работоспособности API."""
-    return {"status": "ok", "timestamp": time.time(), "version": "1.2.0"}
+    return {"status": "ok", "timestamp": time.time(), "version": "1.2.1"}
 
 @app.get("/status")
 async def get_status():
+    """Получение статуса системных ресурсов."""
     return get_system_resources()
 
 @app.post("/agent/chat")
