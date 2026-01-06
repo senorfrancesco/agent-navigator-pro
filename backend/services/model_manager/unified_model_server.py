@@ -1,23 +1,30 @@
 """
-Unified Model Server (UMS) - Реальный прототип с управлением llama-server.
-
-Функции:
-- Динамическая загрузка/выгрузка моделей через llama-cpp-python
-- Поддержка режимов: GPU, CPU, Hybrid
-- Smart Swapping (LRU) для оптимизации VRAM
-- HTTP API для взаимодействия с MCP-серверами
+Unified Model Server (UMS) - Управляет жизненным циклом LLM и Embedding моделей.
+Поддерживает динамическое переключение моделей и мониторинг ресурсов.
+Использует бинарный llama-server для инференса GGUF моделей.
 """
 
 import os
-import subprocess
-import time
-import requests
+import sys
 import json
+import time
+import signal
+import subprocess
+import asyncio
+import logging
 import psutil
 import traceback
-from typing import Optional, Dict, Any, List
+from enum import Enum
+from typing import Dict, List, Optional, Any
 from pathlib import Path
 from dotenv import load_dotenv
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='[UMS] %(levelname)s: %(message)s'
+)
+logger = logging.getLogger("UMS")
 
 # Определяем корень бэкенда (на две папки выше текущего файла)
 BACKEND_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -26,16 +33,10 @@ ENV_PATH = BACKEND_ROOT / ".env"
 # Загрузка переменных окружения из .env файла в корне бэкенда
 if ENV_PATH.exists():
     load_dotenv(dotenv_path=ENV_PATH)
-    print(f"[UMS] Loaded .env from {ENV_PATH}")
+    logger.info(f"Loaded .env from {ENV_PATH}")
 else:
     load_dotenv() # Fallback на стандартный поиск
-    print(f"[UMS] .env not found at {ENV_PATH}, using default environment")
-
-from dataclasses import dataclass, asdict
-from enum import Enum
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-import uvicorn
+    logger.warning(f".env not found at {ENV_PATH}, using default environment")
 
 # Безопасный импорт pynvml
 try:
@@ -43,344 +44,225 @@ try:
     PYNVML_AVAILABLE = True
 except ImportError:
     PYNVML_AVAILABLE = False
-    print("[Warning] pynvml (nvidia-ml-py) not installed, GPU monitoring disabled")
+    logger.warning("nvidia-ml-py (pynvml) не установлен, мониторинг GPU ограничен")
 
-# ============================================================================
-# Configuration & Constants
-# ============================================================================
+from fastapi import FastAPI, HTTPException, Request
+from pydantic import BaseModel
+import httpx
+import uvicorn
 
-UMS_PORT = 8090
-LLAMA_SERVER_PORT = 8091  # Порт для llama-server
-LLAMA_SERVER_URL = f"http://localhost:{LLAMA_SERVER_PORT}"
+app = FastAPI(title="Unified Model Server", version="1.2.0")
+
+# === Configuration ===
 
 class DeviceMode(str, Enum):
-    """Режимы работы GPU/CPU."""
-    GPU = "gpu"
     CPU = "cpu"
+    GPU = "gpu"
     HYBRID = "hybrid"
 
 class LoadStrategy(str, Enum):
-    """Стратегии загрузки моделей."""
-    EAGER = "eager"        # Загрузить при старте
-    LAZY = "lazy"          # Загрузить при первом запросе
-    ON_DEMAND = "on_demand" # Загрузить на каждый запрос
-    SMART = "smart"        # Автоматическая выгрузка LRU
+    LAZY = "lazy"      # Загрузка при первом запросе
+    EAGER = "eager"    # Загрузка при старте сервера
 
-# ============================================================================
-# Helper Functions for Paths
-# ============================================================================
-
+# Конфигурация моделей из .env
 def resolve_model_path(path_str: str) -> str:
-    """
-    Разрешает путь к модели:
-    1. Поддерживает ~ (домашняя директория)
-    2. Если путь относительный, считает его относительно корня бэкенда
-    """
+    """Разрешает путь к модели (поддержка ~ и относительных путей от корня backend)."""
     if not path_str:
         return ""
-    
-    # Расширяем ~
-    expanded_path = os.path.expanduser(path_str)
-    
-    # Если путь абсолютный, возвращаем как есть
-    if os.path.isabs(expanded_path):
-        return expanded_path
-    
-    # Если относительный, делаем его абсолютным относительно BACKEND_ROOT
-    resolved_path = (BACKEND_ROOT / expanded_path).resolve()
-    return str(resolved_path)
+    path = Path(os.path.expanduser(path_str))
+    if not path.is_absolute():
+        path = BACKEND_ROOT / path_str
+    return str(path.resolve())
 
-# ============================================================================
-# Model Configuration
-# ============================================================================
-
-@dataclass
-class ModelConfig:
-    """Конфигурация модели."""
-    model_id: str
-    model_type: str  # "text", "vision", "embedding"
-    path: str
-    n_gpu_layers: int = 0
-    context_size: int = 512
-    mmproj_path: Optional[str] = None
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
-
-# Конфигурация доступных моделей (используем пути из .env с разрешением)
-MODELS_CONFIG: Dict[str, ModelConfig] = {
-    "qwen-14b-llm": ModelConfig(
-        model_id="qwen-14b-llm",
-        model_type="text",
-        path=resolve_model_path(os.getenv("MODEL_PATH_QWEN14B", "./models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf")),
-        n_gpu_layers=30,
-        context_size=16384
-    ),
-    "qwen-vl-8b": ModelConfig(
-        model_id="qwen-vl-8b",
-        model_type="vision",
-        path=resolve_model_path(os.getenv("MODEL_PATH_QWENVL", "./models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf")),
-        n_gpu_layers=20,
-        context_size=16384,
-        mmproj_path=resolve_model_path(os.getenv("MMPROJ_PATH", "./models/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf"))
-    ),
-    "labse-embedding": ModelConfig(
-        model_id="labse-embedding",
-        model_type="embedding",
-        path=resolve_model_path(os.getenv("MODEL_PATH_LABSE", "./models/st/LaBSE")),
-        n_gpu_layers=10,
-        context_size=512
-    )
+MODELS_CONFIG = {
+    "qwen-14b-llm": {
+        "type": "gguf",
+        "path": os.getenv("MODEL_PATH_QWEN14B", "./models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"),
+        "ctx_size": 16384,
+        "gpu_layers": 15,
+        "port": 8091
+    },
+    "qwen-vl-8b": {
+        "type": "gguf-vl",
+        "path": os.getenv("MODEL_PATH_QWENVL", "./models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"),
+        "mmproj": os.getenv("MMPROJ_PATH", "./models/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf"),
+        "ctx_size": 8192,
+        "gpu_layers": 20,
+        "port": 8092
+    },
+    "labse-embedding": {
+        "type": "st",
+        "path": os.getenv("MODEL_PATH_LABSE", "./models/st/LaBSE"),
+        "port": 8093
+    }
 }
 
-# ============================================================================
-# Global State
-# ============================================================================
+# Состояние сервера
+state = {
+    "active_model": None,
+    "processes": {},  # model_id -> subprocess.Popen
+    "device_mode": DeviceMode.HYBRID,
+    "load_strategy": LoadStrategy.LAZY
+}
 
-LLAMA_SERVER_PROCESS: Optional[subprocess.Popen] = None
-ACTIVE_MODEL_ID: str = "none"
-DEVICE_MODE: DeviceMode = DeviceMode.HYBRID  # По умолчанию
-LOAD_STRATEGY: LoadStrategy = LoadStrategy.LAZY
-MODEL_ACCESS_LOG: Dict[str, float] = {}  # Для LRU
-
-# ============================================================================
-# Resource Helpers
-# ============================================================================
+# === Resource Helpers ===
 
 def _get_available_vram() -> float:
-    """Получает доступную VRAM в ГБ."""
-    if not PYNVML_AVAILABLE:
-        return 0.0
+    if not PYNVML_AVAILABLE: return 0.0
     try:
         pynvml.nvmlInit()
         handle = pynvml.nvmlDeviceGetHandleByIndex(0)
         info = pynvml.nvmlDeviceGetMemoryInfo(handle)
         return info.free / (1024 ** 3)
-    except Exception:
-        return 0.0
+    except: return 0.0
 
 def _get_available_ram() -> float:
-    """Получает доступную RAM в ГБ."""
-    try:
-        mem = psutil.virtual_memory()
-        return mem.available / (1024 ** 3)
-    except Exception:
-        return 0.0
+    try: return psutil.virtual_memory().available / (1024 ** 3)
+    except: return 0.0
 
-def _is_server_running() -> bool:
-    """Проверяет, запущен ли llama-server."""
-    try:
-        response = requests.get(f"{LLAMA_SERVER_URL}/health", timeout=1)
-        return response.status_code == 200
-    except requests.exceptions.RequestException:
-        return False
+# === Model Management ===
 
-def _stop_server():
-    """Останавливает текущий llama-server."""
-    global LLAMA_SERVER_PROCESS, ACTIVE_MODEL_ID
-    
-    if LLAMA_SERVER_PROCESS:
-        print(f"[UMS] Stopping model: {ACTIVE_MODEL_ID}")
+def _stop_all_servers():
+    """Остановка всех запущенных процессов llama-server."""
+    for model_id, proc in list(state["processes"].items()):
+        logger.info(f"Stopping server for {model_id}...")
         try:
-            LLAMA_SERVER_PROCESS.terminate()
-            LLAMA_SERVER_PROCESS.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            print(f"[UMS] Force killing llama-server")
-            LLAMA_SERVER_PROCESS.kill()
-        except Exception as e:
-            print(f"[UMS] Error stopping server: {e}")
-        finally:
-            LLAMA_SERVER_PROCESS = None
-            ACTIVE_MODEL_ID = "none"
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            proc.wait(timeout=5)
+        except:
+            try: os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except: pass
+    state["processes"] = {}
+    state["active_model"] = None
 
-def _start_server(model_id: str, device_mode: DeviceMode = DeviceMode.HYBRID):
-    """Запускает llama-server с указанной моделью."""
-    global LLAMA_SERVER_PROCESS, ACTIVE_MODEL_ID
+def _start_server(model_id: str, device_mode: DeviceMode):
+    """Запуск бинарного llama-server для GGUF модели."""
+    if model_id not in MODELS_CONFIG:
+        raise ValueError(f"Unknown model: {model_id}")
     
-    config = MODELS_CONFIG.get(model_id)
-    if not config:
-        raise ValueError(f"Model ID '{model_id}' not found in config.")
+    config = MODELS_CONFIG[model_id]
+    model_path = resolve_model_path(config["path"])
     
-    # Проверяем наличие файла модели
-    if not os.path.exists(config.path):
-        error_msg = f"Model file not found at: {config.path}"
-        print(f"[UMS] ERROR: {error_msg}")
+    if not os.path.exists(model_path):
+        error_msg = f"Model file not found at: {model_path}"
+        logger.error(error_msg)
         raise FileNotFoundError(error_msg)
-    
-    # Формируем команду запуска
+
+    if state["active_model"] and state["active_model"] != model_id:
+        _stop_all_servers()
+
+    # Формируем команду для бинарного llama-server (используем флаги из help)
     cmd = [
-        "python3.11", "-m", "llama_cpp.server",
-        "--model", config.path,
-        "--port", str(LLAMA_SERVER_PORT),
+        "llama-server",
+        "-m", model_path,
+        "--port", str(config["port"]),
         "--host", "0.0.0.0",
-        "--n_ctx", str(config.context_size),
+        "-c", str(config["ctx_size"]),
     ]
-    
-    # Добавляем параметры в зависимости от режима
-    if device_mode == DeviceMode.GPU:
-        cmd.extend(["--n_gpu_layers", str(config.n_gpu_layers)])
-    elif device_mode == DeviceMode.HYBRID:
-        cmd.extend(["--n_gpu_layers", str(max(1, config.n_gpu_layers // 2))])
-    
-    if config.mmproj_path and os.path.exists(config.mmproj_path):
-        cmd.extend(["--mmproj", config.mmproj_path])
-    
-    print(f"[UMS] Starting llama-server for model: {model_id}")
-    print(f"[UMS] Command: {' '.join(cmd)}")
-    
+
+    # Настройка GPU слоев (-ngl)
+    ngl = config["gpu_layers"] if device_mode != DeviceMode.CPU else 0
+    cmd.extend(["-ngl", str(ngl)])
+
+    if config["type"] == "gguf-vl" and "mmproj" in config:
+        mmproj_path = resolve_model_path(config["mmproj"])
+        if os.path.exists(mmproj_path):
+            cmd.extend(["--mmproj", mmproj_path])
+
+    logger.info(f"Starting llama-server for model: {model_id}")
+    logger.info(f"Command: {' '.join(cmd)}")
+
     try:
-        LLAMA_SERVER_PROCESS = subprocess.Popen(
+        process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True
+            text=True,
+            preexec_fn=os.setsid
         )
         
-        # Ожидаем готовности сервера
+        # Ожидание готовности
         start_time = time.time()
-        timeout = 120
-        
+        timeout = 60
         while time.time() - start_time < timeout:
-            if _is_server_running():
-                ACTIVE_MODEL_ID = model_id
-                MODEL_ACCESS_LOG[model_id] = time.time()
-                print(f"[UMS] Model {model_id} loaded successfully")
-                return
-            
-            # Проверяем, не упал ли процесс сразу
-            if LLAMA_SERVER_PROCESS.poll() is not None:
-                stdout, stderr = LLAMA_SERVER_PROCESS.communicate()
+            if process.poll() is not None:
+                _, stderr = process.communicate()
                 raise RuntimeError(f"llama-server exited immediately. Stderr: {stderr}")
-                
+            
+            try:
+                with httpx.Client(timeout=1.0) as client:
+                    resp = client.get(f"http://localhost:{config['port']}/health")
+                    if resp.status_code == 200:
+                        state["processes"][model_id] = process
+                        state["active_model"] = model_id
+                        logger.info(f"Server for {model_id} started on port {config['port']}")
+                        return
+            except: pass
             time.sleep(1)
-        
-        _stop_server()
+            
         raise TimeoutError(f"llama-server failed to start within {timeout}s")
-    
     except Exception as e:
-        _stop_server()
-        print(f"[UMS] CRITICAL ERROR starting server: {e}")
-        raise RuntimeError(f"Failed to start llama-server: {e}")
-
-# ============================================================================
-# Core Functions
-# ============================================================================
+        logger.error(f"Failed to start llama-server: {str(e)}")
+        raise
 
 def switch_model(model_id: str, device_mode: DeviceMode = DeviceMode.HYBRID):
-    """Переключает активную модель."""
-    global ACTIVE_MODEL_ID
-    
-    if model_id == ACTIVE_MODEL_ID:
-        return
-    
-    _stop_server()
+    if state["active_model"] == model_id: return
     _start_server(model_id, device_mode)
 
-def infer(model_id: str, payload: Dict[str, Any], device_mode: DeviceMode = DeviceMode.HYBRID) -> Dict[str, Any]:
-    """Выполняет инференс."""
-    try:
-        if model_id != ACTIVE_MODEL_ID:
-            switch_model(model_id, device_mode)
-        
-        config = MODELS_CONFIG.get(model_id)
-        if not config:
-            raise ValueError(f"Model ID '{model_id}' not found")
-        
-        # Определяем endpoint
-        if config.model_type == "text":
-            endpoint = "/v1/completions"
-        elif config.model_type == "vision":
-            endpoint = "/v1/chat/completions"
-        elif config.model_type == "embedding":
-            endpoint = "/v1/embeddings"
-        else:
-            raise ValueError(f"Unknown model type: {config.model_type}")
-        
-        url = f"{LLAMA_SERVER_URL}{endpoint}"
-        print(f"[UMS] Sending inference request to {url}")
-        
-        response = requests.post(url, json=payload, timeout=300)
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        print(f"[UMS] Inference error: {e}")
-        print(traceback.format_exc())
-        raise e
+# === API Endpoints ===
 
-def get_status() -> Dict[str, Any]:
-    """Возвращает статус UMS."""
-    return {
-        "active_model": ACTIVE_MODEL_ID,
-        "device_mode": DEVICE_MODE.value,
-        "load_strategy": LOAD_STRATEGY.value,
-        "available_vram_gb": _get_available_vram(),
-        "available_ram_gb": _get_available_ram(),
-        "server_running": _is_server_running(),
-        "models_config": {k: v.to_dict() for k, v in MODELS_CONFIG.items()},
-        "model_access_log": MODEL_ACCESS_LOG
-    }
-
-# ============================================================================
-# FastAPI App
-# ============================================================================
-
-app = FastAPI(title="Unified Model Server", version="1.0.0")
-
-class InferenceRequest(BaseModel):
+class InferRequest(BaseModel):
     model_id: str
     payload: Dict[str, Any]
-    device_mode: str = "hybrid"
+    device_mode: Optional[DeviceMode] = DeviceMode.HYBRID
 
-class SwitchModelRequest(BaseModel):
-    model_id: str
-    device_mode: str = "hybrid"
+@app.post("/infer")
+async def infer(request: InferRequest):
+    model_id = request.model_id
+    device_mode = request.device_mode or state["device_mode"]
+    try:
+        switch_model(model_id, device_mode)
+        config = MODELS_CONFIG[model_id]
+        url = f"http://localhost:{config['port']}/v1/chat/completions" if "messages" in request.payload else f"http://localhost:{config['port']}/v1/completions"
+
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            response = await client.post(url, json=request.payload)
+            return {"status": "success", "model": model_id, "result": response.json()}
+    except Exception as e:
+        logger.error(f"API Error in /infer: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/status")
+async def get_status():
+    models_status = {}
+    for mid in MODELS_CONFIG:
+        path = resolve_model_path(MODELS_CONFIG[mid]["path"])
+        models_status[mid] = {
+            "available": os.path.exists(path),
+            "active": state["active_model"] == mid,
+            "path": path
+        }
+    return {
+        "active_model": state["active_model"],
+        "vram_free_gb": _get_available_vram(),
+        "ram_free_gb": _get_available_ram(),
+        "models": models_status
+    }
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "service": "ums"}
+    return {"status": "ok", "timestamp": time.time()}
 
-@app.get("/status")
-async def status():
-    return get_status()
+@app.on_event("startup")
+async def startup_event():
+    logger.info(f"UMS Starting. Backend Root: {BACKEND_ROOT}")
+    for mid, cfg in MODELS_CONFIG.items():
+        path = resolve_model_path(cfg["path"])
+        logger.info(f"Model {mid}: {'EXISTS' if os.path.exists(path) else 'NOT FOUND'} at {path}")
 
-@app.post("/infer")
-async def infer_endpoint(request: InferenceRequest):
-    try:
-        device_mode = DeviceMode(request.device_mode)
-        result = infer(request.model_id, request.payload, device_mode)
-        return {"status": "success", "result": result}
-    except Exception as e:
-        print(f"[UMS] API Error in /infer: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/switch_model")
-async def switch_model_endpoint(request: SwitchModelRequest):
-    try:
-        device_mode = DeviceMode(request.device_mode)
-        switch_model(request.model_id, device_mode)
-        return {"status": "success", "active_model": request.model_id}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/stop")
-async def stop_server_endpoint():
-    _stop_server()
-    return {"status": "success", "message": "Server stopped"}
-
-# ============================================================================
-# Cleanup on Exit
-# ============================================================================
-
-import atexit
-def cleanup():
-    _stop_server()
-atexit.register(cleanup)
+@app.on_event("shutdown")
+def shutdown_event():
+    _stop_all_servers()
 
 if __name__ == "__main__":
-    print("[UMS] Starting Unified Model Server...")
-    print(f"[UMS] Backend Root: {BACKEND_ROOT}")
-    print(f"[UMS] Available models: {list(MODELS_CONFIG.keys())}")
-    for mid, cfg in MODELS_CONFIG.items():
-        print(f"  - {mid}: {cfg.path} ({'EXISTS' if os.path.exists(cfg.path) else 'NOT FOUND'})")
-    
-    uvicorn.run(app, host="0.0.0.0", port=UMS_PORT)
+    uvicorn.run(app, host="0.0.0.0", port=8090)
