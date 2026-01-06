@@ -143,6 +143,9 @@ export function deriveConnectionStatus(health: HealthResponse): ConnectionStatus
  * Derive MCP server statuses from status response
  */
 export function deriveMCPServers(status: StatusResponse): MCPServerStatus[] {
+  if (!status.mcp_servers || !Array.isArray(status.mcp_servers)) {
+    return [];
+  }
   return status.mcp_servers.map(server => ({
     name: server.name,
     port: server.port,

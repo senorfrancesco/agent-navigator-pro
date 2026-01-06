@@ -9,15 +9,19 @@ System Resources Monitor - Мониторинг системных ресурс�
 """
 
 import os
+import logging
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, asdict
+
+# Настройка логирования
+logger = logging.getLogger(__name__)
 
 try:
     import psutil
     PSUTIL_AVAILABLE = True
 except ImportError:
     PSUTIL_AVAILABLE = False
-    print("[Warning] psutil not installed, RAM monitoring disabled")
+    logger.warning("psutil not installed, RAM monitoring disabled")
 
 try:
     # Библиотека nvidia-ml-py устанавливается как pynvml
@@ -25,7 +29,7 @@ try:
     PYNVML_AVAILABLE = True
 except ImportError:
     PYNVML_AVAILABLE = False
-    print("[Warning] pynvml (nvidia-ml-py) not installed, GPU monitoring disabled")
+    logger.warning("pynvml (nvidia-ml-py) not installed, GPU monitoring disabled")
 
 
 @dataclass
@@ -83,6 +87,10 @@ class ResourceMonitor:
         
         self._init_nvml()
     
+    def __del__(self):
+        """Деструктор - гарантированное освобождение ресурсов NVML."""
+        self._shutdown_nvml()
+    
     def _init_nvml(self):
         """Инициализация NVML для работы с GPU."""
         if not PYNVML_AVAILABLE:
@@ -111,12 +119,12 @@ class ResourceMonitor:
             except Exception:
                 pass
                 
-            print(f"[ResourceMonitor] NVIDIA GPU detected")
-            print(f"[ResourceMonitor] Driver: {self._driver_version}")
-            print(f"[ResourceMonitor] CUDA: {self._cuda_version}")
+            logger.info(f"NVIDIA GPU detected")
+            logger.info(f"Driver: {self._driver_version}")
+            logger.info(f"CUDA: {self._cuda_version}")
             
         except Exception as e:
-            print(f"[ResourceMonitor] NVML init failed: {e}")
+            logger.warning(f"NVML init failed: {e}")
             self._cuda_available = False
     
     def _shutdown_nvml(self):
@@ -124,9 +132,11 @@ class ResourceMonitor:
         if self._nvml_initialized:
             try:
                 pynvml.nvmlShutdown()
-            except Exception:
-                pass
-            self._nvml_initialized = False
+                logger.debug("NVML shutdown successful")
+            except Exception as e:
+                logger.warning(f"NVML shutdown error: {e}")
+            finally:
+                self._nvml_initialized = False
     
     def get_ram_info(self) -> Dict[str, float]:
         """Получение информации о RAM."""
@@ -147,7 +157,7 @@ class ResourceMonitor:
                 "percent": mem.percent
             }
         except Exception as e:
-            print(f"[ResourceMonitor] RAM info error: {e}")
+            logger.error(f"RAM info error: {e}")
             return {
                 "total_gb": 0.0,
                 "used_gb": 0.0,
@@ -169,7 +179,7 @@ class ResourceMonitor:
                 "count": psutil.cpu_count()
             }
         except Exception as e:
-            print(f"[ResourceMonitor] CPU info error: {e}")
+            logger.error(f"CPU info error: {e}")
             return {
                 "percent": 0.0,
                 "count": 0
@@ -226,12 +236,31 @@ class ResourceMonitor:
                     ))
                     
                 except Exception as e:
-                    print(f"[ResourceMonitor] Error reading GPU {i}: {e}")
+                    logger.error(f"Error reading GPU {i}: {e}")
                     
         except Exception as e:
-            print(f"[ResourceMonitor] Error getting GPU count: {e}")
+            logger.error(f"Error getting GPU count: {e}")
         
         return gpus
+    
+    def get_primary_gpu_stats(self) -> Dict[str, Any]:
+        """Получение данных первого (основного) GPU."""
+        gpus = self.get_gpu_info()
+        if gpus:
+            return {
+                "temperature": gpus[0].temperature,
+                "utilization": gpus[0].utilization,
+                "name": gpus[0].name,
+                "vram_used_gb": gpus[0].vram_used_gb,
+                "vram_total_gb": gpus[0].vram_total_gb
+            }
+        return {
+            "temperature": None,
+            "utilization": None,
+            "name": None,
+            "vram_used_gb": 0.0,
+            "vram_total_gb": 0.0
+        }
     
     def get_all_resources(self) -> SystemResources:
         """Получение полной информации о ресурсах."""
@@ -288,7 +317,7 @@ class ResourceMonitor:
                         "vram_gb": round(mem.total / (1024 ** 3), 2)
                     })
             except Exception as e:
-                print(f"[ResourceMonitor] Error checking CUDA: {e}")
+                logger.error(f"Error checking CUDA: {e}")
         
         return result
 
@@ -311,6 +340,12 @@ def get_system_resources() -> Dict[str, Any]:
     return monitor.get_all_resources().to_dict()
 
 
+def get_primary_gpu_stats() -> Dict[str, Any]:
+    """Быстрый способ получить данные основного GPU."""
+    monitor = get_resource_monitor()
+    return monitor.get_primary_gpu_stats()
+
+
 def check_cuda() -> Dict[str, Any]:
     """Быстрый способ проверить CUDA."""
     monitor = get_resource_monitor()
@@ -319,6 +354,8 @@ def check_cuda() -> Dict[str, Any]:
 
 # Тестирование при запуске напрямую
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format='%(levelname)s - %(message)s')
+    
     print("=" * 50)
     print("System Resources Monitor Test")
     print("=" * 50)
@@ -342,3 +379,7 @@ if __name__ == "__main__":
                 print(f"  Load: {gpu.utilization}%")
     else:
         print("\nCUDA: Not available")
+    
+    # Test primary GPU stats
+    primary = monitor.get_primary_gpu_stats()
+    print(f"\nPrimary GPU stats: {primary}")
