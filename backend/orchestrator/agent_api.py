@@ -1,6 +1,7 @@
 """
 Agent API - FastAPI wrapper для ReAct-агента с SSE стримингом.
 Поддерживает сквозной стриминг генерации текста.
+ИСПРАВЛЕНА ПРОБЛЕМА С ГАЛЛЮЦИНАЦИЯМИ И САМОДИАЛОГОМ.
 """
 
 import asyncio
@@ -26,7 +27,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import httpx
 
-app = FastAPI(title="Agent Navigator Pro API", version="1.1.1")
+app = FastAPI(title="Agent Navigator Pro API", version="1.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -68,16 +69,77 @@ class AgentStep(BaseModel):
         if hasattr(self, "model_dump_json"): return self.model_dump_json()
         return self.json()
 
+# === Helper Functions ===
+
+def clean_response(text: str) -> str:
+    """
+    Очистка ответа от артефактов и самодиалога.
+    Удаляет служебную разметку и обрезает текст при обнаружении самодиалога.
+    """
+    # Удаление служебной разметки
+    text = re.sub(r'```plaintext.*?```', '', text, flags=re.DOTALL)
+    text = re.sub(r'```\s*```', '', text, flags=re.DOTALL)
+    
+    # Обрезка при обнаружении самодиалога
+    stop_patterns = [
+        r'\n\n(User:|Human:|Вопрос:|Понял[,\s]|Спасибо[,\s])',
+        r'\n\nОтвет:',
+        r'\n\n###',
+        r'\n\n\n',
+        r'Если у вас есть',
+        r'Пожалуйста, уточните'
+    ]
+    
+    earliest_match = len(text)
+    for pattern in stop_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match and match.start() < earliest_match:
+            earliest_match = match.start()
+    
+    if earliest_match < len(text):
+        text = text[:earliest_match]
+    
+    # Удаление множественных пробелов и переносов
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    text = re.sub(r' {2,}', ' ', text)
+    
+    return text.strip()
+
 # === Core Logic ===
 
 async def get_llm_stream(prompt: str, model_settings: Optional[Dict[str, Any]] = None) -> AsyncGenerator[str, None]:
-    """Получение потокового ответа от LLM через UMS."""
+    """
+    Получение потокового ответа от LLM через UMS.
+    ИСПРАВЛЕНО: Добавлены стоп-токены и параметры контроля повторений.
+    """
     settings = model_settings or {}
+    
+    # ИСПРАВЛЕНИЕ 1: Расширенный список стоп-токенов для предотвращения самодиалога
+    stop_sequences = [
+        "Observation:",
+        "Human:",
+        "\n\nHuman:",
+        "User:",
+        "\n\nUser:",
+        "Вопрос:",
+        "\n\nВопрос:",
+        "###",
+        "\n\n\n",
+        "Понял, спасибо",
+        "```plaintext",
+        "Если у вас есть",
+        "Пожалуйста, уточните"
+    ]
+    
     payload = {
         "prompt": prompt,
         "max_tokens": settings.get("maxTokens", 2048),
         "temperature": settings.get("temperature", 0.7),
-        "stop": ["Observation:", "Human:", "\n\nHuman:"]
+        # ИСПРАВЛЕНИЕ 2: Добавлены параметры контроля повторений
+        "frequency_penalty": settings.get("frequency_penalty", 0.3),
+        "presence_penalty": settings.get("presence_penalty", 0.3),
+        "repetition_penalty": settings.get("repetition_penalty", 1.1),
+        "stop": stop_sequences
     }
     
     try:
@@ -105,36 +167,85 @@ async def get_llm_stream(prompt: str, model_settings: Optional[Dict[str, Any]] =
         yield f"\n[Ошибка стриминга: {str(e)}]\n"
 
 async def run_react_agent(session_id: str, query: str, attachments: Optional[List[FileAttachment]] = None, model_settings: Optional[Dict[str, Any]] = None):
-    """Цикл ReAct агента с поддержкой стриминга финального ответа."""
+    """
+    Цикл ReAct агента с поддержкой стриминга финального ответа.
+    ИСПРАВЛЕНО: Добавлена проверка на неопределенные запросы и улучшен промпт.
+    """
+    
+    # ИСПРАВЛЕНИЕ 3: Проверка на неопределенные запросы
+    ambiguous_queries = ["что", "что?", "как", "как?", "почему", "почему?", "зачем", "зачем?", "где", "где?"]
+    if query.strip().lower() in ambiguous_queries:
+        yield AgentStep(
+            id=str(uuid.uuid4()), 
+            type="final_answer", 
+            content="Ваш запрос слишком неопределён. Пожалуйста, уточните, что именно вас интересует. Например, вы можете спросить о конкретной теме, технологии или задаче.", 
+            timestamp=time.time()
+        )
+        return
+    
     is_simple = not attachments and len(query.split()) < 10
     
     if is_simple:
-        prompt = f"Ты — ассистент Agent Navigator Pro. Ответь на запрос пользователя: {query}\n\nОтвет:"
+        # ИСПРАВЛЕНИЕ 4: Улучшенный системный промпт с четкими инструкциями
+        prompt = f"""Ты — ассистент Agent Navigator Pro. 
+
+ВАЖНЫЕ ПРАВИЛА:
+- Ответь ТОЛЬКО на текущий запрос пользователя
+- НЕ придумывай дополнительные вопросы или ответы
+- НЕ имитируй диалог с пользователем
+- НЕ добавляй фразы типа "Если у вас есть вопросы" или "Пожалуйста, уточните"
+- Закончи ответ сразу после того, как ответишь на вопрос
+- Не используй эмодзи
+
+Запрос пользователя: {query}
+
+Твой ответ:"""
+        
         full_content = ""
         async for chunk in get_llm_stream(prompt, model_settings):
             full_content += chunk
             yield AgentStep(id=str(uuid.uuid4()), type="chunk", content=chunk, timestamp=time.time())
         
-        yield AgentStep(id=str(uuid.uuid4()), type="final_answer", content=full_content, timestamp=time.time())
+        # ИСПРАВЛЕНИЕ 5: Постобработка ответа для удаления артефактов
+        cleaned_content = clean_response(full_content)
+        
+        yield AgentStep(id=str(uuid.uuid4()), type="final_answer", content=cleaned_content, timestamp=time.time())
         return
 
     thought = "Мне нужно проанализировать ваш запрос."
     yield AgentStep(id=str(uuid.uuid4()), type="thought", content=thought, timestamp=time.time())
     
-    prompt = f"Запрос: {query}\nThought: {thought}\nFinal Answer:"
+    # ИСПРАВЛЕНИЕ 6: Улучшенный промпт для сложных запросов
+    prompt = f"""Ты — ассистент Agent Navigator Pro.
+
+ВАЖНЫЕ ПРАВИЛА:
+- Ответь ТОЛЬКО на текущий запрос пользователя
+- НЕ придумывай дополнительные вопросы или ответы
+- НЕ имитируй диалог с пользователем
+- Закончи ответ сразу после того, как ответишь на вопрос
+- Не используй эмодзи
+
+Запрос: {query}
+Thought: {thought}
+
+Final Answer:"""
+    
     full_content = ""
     async for chunk in get_llm_stream(prompt, model_settings):
         full_content += chunk
         yield AgentStep(id=str(uuid.uuid4()), type="chunk", content=chunk, timestamp=time.time())
     
-    yield AgentStep(id=str(uuid.uuid4()), type="final_answer", content=full_content, timestamp=time.time())
+    # ИСПРАВЛЕНИЕ 7: Постобработка ответа для удаления артефактов
+    cleaned_content = clean_response(full_content)
+    
+    yield AgentStep(id=str(uuid.uuid4()), type="final_answer", content=cleaned_content, timestamp=time.time())
 
 # === API Endpoints ===
 
 @app.get("/health")
 async def health():
     """Проверка работоспособности API."""
-    return {"status": "ok", "timestamp": time.time()}
+    return {"status": "ok", "timestamp": time.time(), "version": "1.2.0"}
 
 @app.get("/status")
 async def get_status():
@@ -174,4 +285,5 @@ async def stream_agent_steps(session_id: str):
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 if __name__ == "__main__":
+    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
