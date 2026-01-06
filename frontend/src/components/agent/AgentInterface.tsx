@@ -86,14 +86,16 @@ export function AgentInterface() {
         settings.server.url,
         response.session_id,
         (step) => {
-          // Handle final_answer type
-          if (step.type === 'final_answer' as string) {
+          // Handle streaming chunks and final answer
+          if (step.type === 'chunk') {
+            finalAnswer += step.content;
+          } else if (step.type === 'final_answer') {
             finalAnswer = step.content;
           } else {
             collectedSteps.push(step);
           }
 
-          // Update message with new steps
+          // Update message with new steps and content
           updateMessage(assistantMessage.id, {
             steps: [...collectedSteps],
             content: finalAnswer || 'Обрабатываю запрос...',
