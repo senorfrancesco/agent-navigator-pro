@@ -1,46 +1,90 @@
 #!/bin/bash
 
-# Скрипт для запуска всех компонентов системы на одной машине
+# ===========================================
+# Скрипт для запуска всех компонентов системы
+# Agent Navigator Pro
+# ===========================================
 # Использует tmux для управления несколькими процессами
 
 set -e
 
 BACKEND_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# VENV_DIR="$BACKEND_DIR/venv"
-CONDA_ENV="diploma_llm"
-CONDA_ACTIVATE="~/anaconda3/bin/activate"
+ENV_FILE="$BACKEND_DIR/.env"
 
 # Цвета для вывода
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 echo -e "${GREEN}=== Запуск системы Agent Navigator Pro ===${NC}"
 
-# --- Virtual Environment (Закомментировано по просьбе пользователя) ---
-# if [ ! -d "$VENV_DIR" ]; then
-#     echo -e "${YELLOW}Создание виртуального окружения...${NC}"
-#     python3.11 -m venv "$VENV_DIR"
-# fi
-# source "$VENV_DIR/bin/activate"
-# -----------------------------------------------------------------------
+# -------------------------------------------
+# Загрузка переменных окружения из .env
+# -------------------------------------------
+if [ -f "$ENV_FILE" ]; then
+    echo -e "${BLUE}Загрузка переменных из .env...${NC}"
+    set -a
+    source "$ENV_FILE"
+    set +a
+else
+    echo -e "${YELLOW}Предупреждение: .env файл не найден. Используются значения по умолчанию.${NC}"
+    echo -e "${YELLOW}Создайте .env из .env.example: cp .env.example .env${NC}"
+fi
 
-# Активация Conda окружения согласно алиасу пользователя
-echo -e "${YELLOW}Активация Conda окружения: $CONDA_ENV через $CONDA_ACTIVATE...${NC}"
-source ~/anaconda3/bin/activate "$CONDA_ENV" || {
-    echo -e "${RED}Ошибка: Не удалось активировать conda окружение $CONDA_ENV${NC}"
-    # Попытка альтернативного метода активации, если первый не сработал
-    source "$HOME/anaconda3/etc/profile.d/conda.sh" && conda activate "$CONDA_ENV"
+# -------------------------------------------
+# Определение Conda окружения
+# -------------------------------------------
+CONDA_ENV="${CONDA_ENV:-diploma_llm}"
+
+# Функция для поиска и активации conda
+activate_conda() {
+    # Попытка 1: Стандартные пути
+    local conda_paths=(
+        "$HOME/anaconda3"
+        "$HOME/miniconda3"
+        "/opt/conda"
+        "/opt/anaconda3"
+        "/usr/local/anaconda3"
+    )
+    
+    for conda_path in "${conda_paths[@]}"; do
+        if [ -f "$conda_path/etc/profile.d/conda.sh" ]; then
+            source "$conda_path/etc/profile.d/conda.sh"
+            conda activate "$CONDA_ENV" 2>/dev/null && return 0
+        fi
+    done
+    
+    # Попытка 2: Через which conda
+    if command -v conda &> /dev/null; then
+        eval "$(conda shell.bash hook)"
+        conda activate "$CONDA_ENV" 2>/dev/null && return 0
+    fi
+    
+    return 1
 }
 
+echo -e "${YELLOW}Активация Conda окружения: $CONDA_ENV...${NC}"
+if ! activate_conda; then
+    echo -e "${RED}Ошибка: Не удалось активировать conda окружение $CONDA_ENV${NC}"
+    echo -e "${YELLOW}Попробуйте активировать вручную: conda activate $CONDA_ENV${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}Conda окружение активировано: $CONDA_ENV${NC}"
+
+# -------------------------------------------
 # Проверяем наличие tmux
+# -------------------------------------------
 if ! command -v tmux &> /dev/null; then
     echo -e "${YELLOW}tmux не найден. Установка...${NC}"
     sudo apt-get update && sudo apt-get install -y tmux
 fi
 
+# -------------------------------------------
 # Создаем новую tmux сессию
+# -------------------------------------------
 SESSION_NAME="agent-navigator"
 
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
@@ -50,55 +94,73 @@ fi
 
 tmux new-session -d -s "$SESSION_NAME" -x 200 -y 50
 
-# Команда активации для tmux окон (согласно алиасу пользователя)
-ACTIVATE_CMD="source ~/anaconda3/bin/activate $CONDA_ENV"
+# Команда активации для tmux окон
+# Используем eval для корректной активации внутри tmux
+ACTIVATE_CMD="eval \"\$(conda shell.bash hook)\" && conda activate $CONDA_ENV"
+
+# Порты из .env или значения по умолчанию
+AGENT_PORT="${AGENT_API_PORT:-8000}"
+DOC_PORT=8001
+LEGAL_PORT=8002
+UMS_PORT="${UMS_PORT:-8090}"
+
+# -------------------------------------------
+# Запуск сервисов
+# -------------------------------------------
 
 # Окно 1: Agent API (Main)
-echo -e "${GREEN}Запуск Agent API на порту 8000...${NC}"
+echo -e "${GREEN}Запуск Agent API на порту $AGENT_PORT...${NC}"
 tmux new-window -t "$SESSION_NAME" -n "agent-api"
-tmux send-keys -t "$SESSION_NAME:agent-api" "cd $BACKEND_DIR/orchestrator && $ACTIVATE_CMD && uvicorn agent_api:app --host 0.0.0.0 --port 8000" Enter
+tmux send-keys -t "$SESSION_NAME:agent-api" "cd $BACKEND_DIR/orchestrator && $ACTIVATE_CMD && python agent_api.py 2>&1 | tee agent-api.log" Enter
 sleep 2
 
 # Окно 2: Document Server
-echo -e "${GREEN}Запуск Document Server на порту 8001...${NC}"
+echo -e "${GREEN}Запуск Document Server на порту $DOC_PORT...${NC}"
 tmux new-window -t "$SESSION_NAME" -n "doc-server"
-tmux send-keys -t "$SESSION_NAME:doc-server" "cd $BACKEND_DIR/services/document_server && $ACTIVATE_CMD && uvicorn mcp_document_server:app --host 0.0.0.0 --port 8001" Enter
+tmux send-keys -t "$SESSION_NAME:doc-server" "cd $BACKEND_DIR/services/document_server && $ACTIVATE_CMD && uvicorn mcp_document_server:app --host 0.0.0.0 --port $DOC_PORT 2>&1 | tee doc-server.log" Enter
 sleep 2
 
 # Окно 3: Legal Server
-echo -e "${GREEN}Запуск Legal Server на порту 8002...${NC}"
+echo -e "${GREEN}Запуск Legal Server на порту $LEGAL_PORT...${NC}"
 tmux new-window -t "$SESSION_NAME" -n "legal-server"
-tmux send-keys -t "$SESSION_NAME:legal-server" "cd $BACKEND_DIR/services/legal_server && $ACTIVATE_CMD && uvicorn mcp_legal_server:app --host 0.0.0.0 --port 8002" Enter
+tmux send-keys -t "$SESSION_NAME:legal-server" "cd $BACKEND_DIR/services/legal_server && $ACTIVATE_CMD && uvicorn mcp_legal_server:app --host 0.0.0.0 --port $LEGAL_PORT 2>&1 | tee legal-server.log" Enter
 sleep 2
 
-# Окно 4: UMS (Optional)
-echo -e "${GREEN}Запуск Unified Model Server на порту 8090...${NC}"
+# Окно 4: UMS (Unified Model Server)
+echo -e "${GREEN}Запуск Unified Model Server на порту $UMS_PORT...${NC}"
 tmux new-window -t "$SESSION_NAME" -n "ums"
-tmux send-keys -t "$SESSION_NAME:ums" "cd $BACKEND_DIR/services/model_manager && $ACTIVATE_CMD && python3.11 unified_model_server.py" Enter
+tmux send-keys -t "$SESSION_NAME:ums" "cd $BACKEND_DIR/services/model_manager && $ACTIVATE_CMD && python unified_model_server.py 2>&1 | tee ums.log" Enter
 
 # Окно 5: Monitor/Logs
 echo -e "${GREEN}Открытие окна мониторинга...${NC}"
 tmux new-window -t "$SESSION_NAME" -n "monitor"
-tmux send-keys -t "$SESSION_NAME:monitor" "cd $BACKEND_DIR && echo 'Система запущена. Используйте Ctrl+C для остановки.' && sleep infinity" Enter
+tmux send-keys -t "$SESSION_NAME:monitor" "cd $BACKEND_DIR && echo 'Система запущена. Используйте Ctrl+C для остановки.' && htop 2>/dev/null || top" Enter
 
+# -------------------------------------------
 # Выводим информацию
-echo -e "${GREEN}=== Система Запущена ===${NC}"
-echo -e "Имя сессии: ${YELLOW}$SESSION_NAME${NC}"
-echo -e "Conda окружение: ${YELLOW}$CONDA_ENV${NC}"
-echo -e "Agent API: ${YELLOW}http://localhost:8000${NC}"
-echo -e "Document Server: ${YELLOW}http://localhost:8001${NC}"
-echo -e "Legal Server: ${YELLOW}http://localhost:8002${NC}"
-echo -e "UMS: ${YELLOW}http://localhost:8090${NC}"
+# -------------------------------------------
 echo ""
-echo -e "Доступные окна tmux:"
-echo -e "  - ${YELLOW}agent-api${NC}: Главный API"
-echo -e "  - ${YELLOW}doc-server${NC}: Сервер документов"
-echo -e "  - ${YELLOW}legal-server${NC}: Юридический сервер"
-echo -e "  - ${YELLOW}ums${NC}: Менеджер моделей"
-echo -e "  - ${YELLOW}monitor${NC}: Мониторинг/Логи"
-echo ""
-echo -e "Для подключения к сессии: ${YELLOW}tmux attach-session -t $SESSION_NAME${NC}"
-echo -e "Для завершения сессии: ${YELLOW}tmux kill-session -t $SESSION_NAME${NC}"
+echo -e "${GREEN}╔════════════════════════════════════════════════════════════╗${NC}"
+echo -e "${GREEN}║            Agent Navigator Pro - Запущен                   ║${NC}"
+echo -e "${GREEN}╠════════════════════════════════════════════════════════════╣${NC}"
+echo -e "${GREEN}║${NC} Сессия tmux: ${YELLOW}$SESSION_NAME${NC}"
+echo -e "${GREEN}║${NC} Conda окружение: ${YELLOW}$CONDA_ENV${NC}"
+echo -e "${GREEN}╠════════════════════════════════════════════════════════════╣${NC}"
+echo -e "${GREEN}║${NC} Agent API:       ${YELLOW}http://localhost:$AGENT_PORT${NC}"
+echo -e "${GREEN}║${NC} Document Server: ${YELLOW}http://localhost:$DOC_PORT${NC}"
+echo -e "${GREEN}║${NC} Legal Server:    ${YELLOW}http://localhost:$LEGAL_PORT${NC}"
+echo -e "${GREEN}║${NC} UMS:             ${YELLOW}http://localhost:$UMS_PORT${NC}"
+echo -e "${GREEN}╠════════════════════════════════════════════════════════════╣${NC}"
+echo -e "${GREEN}║${NC} Окна tmux:"
+echo -e "${GREEN}║${NC}   - ${YELLOW}agent-api${NC}:   Главный API агента"
+echo -e "${GREEN}║${NC}   - ${YELLOW}doc-server${NC}:  Сервер документов"
+echo -e "${GREEN}║${NC}   - ${YELLOW}legal-server${NC}: Юридический сервер"
+echo -e "${GREEN}║${NC}   - ${YELLOW}ums${NC}:         Менеджер моделей"
+echo -e "${GREEN}║${NC}   - ${YELLOW}monitor${NC}:     Мониторинг системы"
+echo -e "${GREEN}╠════════════════════════════════════════════════════════════╣${NC}"
+echo -e "${GREEN}║${NC} Подключение: ${BLUE}tmux attach-session -t $SESSION_NAME${NC}"
+echo -e "${GREEN}║${NC} Завершение:  ${BLUE}tmux kill-session -t $SESSION_NAME${NC}"
+echo -e "${GREEN}╚════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
 # Attach к сессии

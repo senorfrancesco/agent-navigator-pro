@@ -142,14 +142,17 @@ npm run dev
 
 ## Тестирование
 
-Для проверки отсутствия галлюцинаций и корректности работы очистки ответов используйте встроенный тест:
+Для проверки системы используйте встроенные тесты:
 
 ```bash
-# Запуск через python
+# Тест всей системы
+python3 backend/test_system.py
+
+# Тест на галлюцинации
 python3 backend/tests/test_agent_hallucinations.py
 
-# Или через pytest (если установлен)
-pytest backend/tests/test_agent_hallucinations.py
+# Через pytest (если установлен)
+pytest backend/tests/
 ```
 
 ## API Эндпоинты
@@ -175,16 +178,39 @@ curl -X POST http://localhost:8000/agent/chat \
   -d '{"query": "Загрузи документ /tmp/test.pdf"}'
 ```
 
-## Конфигурация Моделей
+## Конфигурация
 
-Модели конфигурируются через переменные окружения. Разместите файлы моделей в директории `backend/models` и установите пути.
+### Настройка через .env
+
+Все конфигурации загружаются из файла `.env`. Создайте его из шаблона:
 
 ```bash
-export MODEL_PATH_QWEN14B="./models/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
-export MODEL_PATH_QWENVL="./models/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
-export MODEL_PATH_LABSE="./models/LaBSE-Q4_K_M.gguf"
-export MMPROJ_PATH="./models/mmproj-Qwen3-VL-8B-Instruct-F16.gguf"
+cd backend
+cp .env.example .env
 ```
+
+Отредактируйте `.env`, указав пути к вашим моделям и параметры:
+
+```bash
+# Пути к моделям
+MODEL_PATH_QWEN14B="./models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
+MODEL_PATH_QWENVL="./models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
+MODEL_PATH_LABSE="./models/st/LaBSE"
+
+# Параметры генерации (для снижения галлюцинаций)
+TEMPERATURE=0.5
+REPETITION_PENALTY=1.2
+```
+
+Все сервисы автоматически загружают переменные при запуске.
+
+### Параметры Модели для Снижения Галлюцинаций
+
+| Параметр | Значение | Описание |
+| :--- | :--- | :--- |
+| `TEMPERATURE` | 0.5 | Снижено для более детерминированных ответов |
+| `TOP_P` | 0.9 | Ограничение выбора токенов |
+| `REPETITION_PENALTY` | 1.2 | Штраф за повторения |
 
 ## Структура Проекта
 

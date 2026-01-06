@@ -93,25 +93,25 @@ export function useAgentConnection(serverUrl: string): UseAgentConnectionResult 
         try {
           const statusData = await getStatus(serverUrl);
           
-          setBackendMode(statusData.backend_mode);
+          setBackendMode(statusData.backend_mode || 'llama-cpp-python');
           setMcpServers(deriveMCPServers(statusData));
           setResources({
-            vramUsedGb: statusData.vram_used_gb,
-            vramTotalGb: statusData.vram_total_gb,
-            vramFreeGb: statusData.vram_free_gb,
-            ramUsedGb: statusData.ram_used_gb,
-            ramTotalGb: statusData.ram_total_gb,
-            ramFreeGb: statusData.ram_free_gb,
-            ramPercent: statusData.ram_percent,
-            cpuPercent: statusData.cpu_percent,
-            cpuCount: statusData.cpu_count,
-            activeModel: statusData.active_model,
-            queueSize: statusData.queue_size,
-            cudaAvailable: statusData.cuda_available,
-            cudaVersion: statusData.cuda_version,
-            driverVersion: statusData.driver_version,
-            gpuTemperature: statusData.gpu_temperature,
-            gpuUtilization: statusData.gpu_utilization,
+            vramUsedGb: statusData.vram_used_gb ?? 0,
+            vramTotalGb: statusData.vram_total_gb ?? 0,
+            vramFreeGb: statusData.vram_free_gb ?? 0,
+            ramUsedGb: statusData.ram_used_gb ?? 0,
+            ramTotalGb: statusData.ram_total_gb ?? 0,
+            ramFreeGb: statusData.ram_free_gb ?? 0,
+            ramPercent: statusData.ram_percent ?? 0,
+            cpuPercent: statusData.cpu_percent ?? 0,
+            cpuCount: statusData.cpu_count ?? 0,
+            activeModel: statusData.active_model ?? null,
+            queueSize: statusData.queue_size ?? 0,
+            cudaAvailable: statusData.cuda_available ?? false,
+            cudaVersion: statusData.cuda_version ?? null,
+            driverVersion: statusData.driver_version ?? null,
+            gpuTemperature: statusData.gpu_temperature ?? null,
+            gpuUtilization: statusData.gpu_utilization ?? null,
           });
         } catch (statusError) {
           // Status endpoint may not be available, but connection is still valid
