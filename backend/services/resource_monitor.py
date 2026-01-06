@@ -20,17 +20,12 @@ except ImportError:
     print("[Warning] psutil not installed, RAM monitoring disabled")
 
 try:
-    # Пытаемся импортировать pynvml (который теперь nvidia-ml-py)
+    # Библиотека nvidia-ml-py устанавливается как pynvml
     import pynvml
     PYNVML_AVAILABLE = True
 except ImportError:
-    try:
-        # На всякий случай пробуем альтернативное имя
-        import nvidia_smi as pynvml
-        PYNVML_AVAILABLE = True
-    except ImportError:
-        PYNVML_AVAILABLE = False
-        print("[Warning] nvidia-ml-py (pynvml) not installed, GPU monitoring disabled")
+    PYNVML_AVAILABLE = False
+    print("[Warning] pynvml (nvidia-ml-py) not installed, GPU monitoring disabled")
 
 
 @dataclass
@@ -101,6 +96,8 @@ class ResourceMonitor:
             # Получаем версии драйвера и CUDA
             try:
                 self._driver_version = pynvml.nvmlSystemGetDriverVersion()
+                if isinstance(self._driver_version, bytes):
+                    self._driver_version = self._driver_version.decode('utf-8')
             except Exception:
                 pass
             
@@ -118,7 +115,7 @@ class ResourceMonitor:
             print(f"[ResourceMonitor] Driver: {self._driver_version}")
             print(f"[ResourceMonitor] CUDA: {self._cuda_version}")
             
-        except pynvml.NVMLError as e:
+        except Exception as e:
             print(f"[ResourceMonitor] NVML init failed: {e}")
             self._cuda_available = False
     
@@ -228,10 +225,10 @@ class ResourceMonitor:
                         driver_version=self._driver_version
                     ))
                     
-                except pynvml.NVMLError as e:
+                except Exception as e:
                     print(f"[ResourceMonitor] Error reading GPU {i}: {e}")
                     
-        except pynvml.NVMLError as e:
+        except Exception as e:
             print(f"[ResourceMonitor] Error getting GPU count: {e}")
         
         return gpus

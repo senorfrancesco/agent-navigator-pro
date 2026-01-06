@@ -51,7 +51,7 @@ pip install -r requirements.txt
 Для мониторинга NVIDIA GPU и поддержки CUDA:
 
 ```bash
-pip install pynvml
+pip install nvidia-ml-py
 ```
 
 ### Загрузка Моделей
@@ -66,16 +66,30 @@ pip install pynvml
 - `Qwen3-VL-8B-Instruct-Q4_K_M.gguf`
 - `LaBSE-Q4_K_M.gguf`
 
-### Настройка Переменных Окружения
+### Настройка Конфигурации (.env)
 
-Создайте файл `.env` в директории `backend`:
+1. **Создайте файл `.env`** в директории `backend`, скопировав содержимое из `.env.example`:
 
 ```bash
-MODEL_PATH_QWEN14B="./models/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
-MODEL_PATH_QWENVL="./models/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
-MODEL_PATH_LABSE="./models/LaBSE-Q4_K_M.gguf"
-MMPROJ_PATH="./models/mmproj-Qwen3-VL-8B-Instruct-F16.gguf"
+cd backend
+cp .env.example .env
 ```
+
+2. **Отредактируйте файл `.env`**, указав актуальные пути к вашим моделям в подпапках `models/gguf/` и `models/st/`.
+
+**Пример содержимого `.env`:**
+```
+# GGUF Модели (LLM)
+MODEL_PATH_QWEN14B="./models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
+MODEL_PATH_QWENVL="./models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
+MMPROJ_PATH="./models/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf"
+
+# Sentence Transformer Модели (Эмбеддинги)
+MODEL_PATH_LABSE="./models/st/LaBSE"
+MODEL_PATH_E5_LEGAL="./models/st/E5-legal"
+MODEL_PATH_RUBERT="./models/st/Rubert"
+```
+Все сервисы бэкенда автоматически загружают эти переменные при старте.
 
 ## Шаг 3: Настройка Фронтенда (Frontend)
 

@@ -15,6 +15,10 @@ import requests
 import json
 import psutil
 from typing import Optional, Dict, Any, List
+from dotenv import load_dotenv
+
+# Загрузка переменных окружения из .env файла
+load_dotenv()
 from dataclasses import dataclass, asdict
 from enum import Enum
 from fastapi import FastAPI, HTTPException

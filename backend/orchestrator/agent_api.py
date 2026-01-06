@@ -17,6 +17,10 @@ import time
 import sys
 import os
 from typing import Dict, Any, Optional, List
+from dotenv import load_dotenv
+
+# Загрузка переменных окружения из .env файла
+load_dotenv()
 from datetime import datetime
 from contextlib import asynccontextmanager
 
@@ -32,9 +36,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'services'))
 from resource_monitor import get_resource_monitor, get_system_resources, check_cuda
 
 # Конфигурация сервисов
-UMS_URL = "http://localhost:8090"
-DOCUMENT_SERVER_URL = "http://localhost:8001"
-LEGAL_SERVER_URL = "http://localhost:8002"
+UMS_URL = os.getenv("UMS_URL", "http://localhost:8090")
+DOCUMENT_SERVER_URL = os.getenv("DOCUMENT_SERVER_URL", "http://localhost:8001")
+LEGAL_SERVER_URL = os.getenv("LEGAL_SERVER_URL", "http://localhost:8002")
 
 # Хранилище сессий (в production использовать Redis)
 sessions: Dict[str, Dict[str, Any]] = {}
