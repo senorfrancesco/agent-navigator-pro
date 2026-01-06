@@ -10,8 +10,12 @@ import time
 import sys
 import os
 import re
+import warnings
 from typing import Dict, Any, Optional, List, AsyncGenerator
 from dotenv import load_dotenv
+
+# Подавление предупреждений pynvml
+warnings.filterwarnings("ignore", category=FutureWarning, module="pynvml")
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -22,7 +26,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import httpx
 
-app = FastAPI(title="Agent Navigator Pro API", version="1.1.0")
+app = FastAPI(title="Agent Navigator Pro API", version="1.1.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -89,7 +93,6 @@ async def get_llm_stream(prompt: str, model_settings: Optional[Dict[str, Any]] =
                         if data_str == "[DONE]": break
                         try:
                             data = json.loads(data_str)
-                            # Обработка формата llama-server
                             chunk = ""
                             if "choices" in data:
                                 chunk = data["choices"][0].get("text", data["choices"][0].get("delta", {}).get("content", ""))
@@ -103,13 +106,9 @@ async def get_llm_stream(prompt: str, model_settings: Optional[Dict[str, Any]] =
 
 async def run_react_agent(session_id: str, query: str, attachments: Optional[List[FileAttachment]] = None, model_settings: Optional[Dict[str, Any]] = None):
     """Цикл ReAct агента с поддержкой стриминга финального ответа."""
-    history = []
-    
-    # Простейшая классификация: если нет вложений и запрос короткий - отвечаем сразу
     is_simple = not attachments and len(query.split()) < 10
     
     if is_simple:
-        # Стриминг прямого ответа
         prompt = f"Ты — ассистент Agent Navigator Pro. Ответь на запрос пользователя: {query}\n\nОтвет:"
         full_content = ""
         async for chunk in get_llm_stream(prompt, model_settings):
@@ -119,8 +118,6 @@ async def run_react_agent(session_id: str, query: str, attachments: Optional[Lis
         yield AgentStep(id=str(uuid.uuid4()), type="final_answer", content=full_content, timestamp=time.time())
         return
 
-    # ReAct цикл (упрощенно для примера стриминга)
-    # В реальности здесь будет логика Thought -> Action -> Observation
     thought = "Мне нужно проанализировать ваш запрос."
     yield AgentStep(id=str(uuid.uuid4()), type="thought", content=thought, timestamp=time.time())
     
@@ -133,6 +130,11 @@ async def run_react_agent(session_id: str, query: str, attachments: Optional[Lis
     yield AgentStep(id=str(uuid.uuid4()), type="final_answer", content=full_content, timestamp=time.time())
 
 # === API Endpoints ===
+
+@app.get("/health")
+async def health():
+    """Проверка работоспособности API."""
+    return {"status": "ok", "timestamp": time.time()}
 
 @app.get("/status")
 async def get_status():
