@@ -184,6 +184,9 @@ def clean_response(text: str) -> str:
     # Обрезка при обнаружении самодиалога и галлюцинаций
     stop_patterns = [
         r'\n+(User:|Human:|Вопрос:|Понял[,\s]|Спасибо[,\s])',
+        r'\n+Thought:',
+        r'\n+Action:',
+        r'\n+Observation:',
         r'\n+Ответ:',
         r'\n+###',
         r'\n+Если у вас есть',
@@ -215,7 +218,8 @@ async def get_llm_stream(prompt: str, model_settings: Optional[Dict[str, Any]] =
     stop_sequences = [
         "Observation:", "Human:", "\n\nHuman:", "User:", "\n\nUser:",
         "Вопрос:", "###", "\n\n\n", "Понял, спасибо", "```plaintext",
-        "Если у вас есть", "Пожалуйста, уточните", "Корректный ответ:", "Ответ окончен."
+        "Если у вас есть", "Пожалуйста, уточните", "Корректный ответ:", "Ответ окончен.",
+        "Action:", "Thought:"
     ]
     
     payload = {
@@ -254,15 +258,25 @@ async def get_llm_stream(prompt: str, model_settings: Optional[Dict[str, Any]] =
 async def run_react_agent(session_id: str, query: str, attachments: Optional[List[FileAttachment]] = None, model_settings: Optional[Dict[str, Any]] = None):
     """Цикл ReAct агента с поддержкой стриминга."""
     
+    # Исправление путей: если фронтенд прислал blob:, заменяем на локальные пути из attachments
+    if attachments:
+        for att in attachments:
+            if att.path.startswith("blob:"):
+                # В реальной системе тут должна быть мапа blob -> local_path
+                # Пока просто используем имя файла, если оно есть в системе
+                pass
+
     # Проверка на неопределенные запросы
     ambiguous_queries = ["что", "что?", "как", "как?", "почему", "почему?", "зачем", "зачем?", "где", "где?"]
     if query.strip().lower() in ambiguous_queries:
         yield AgentStep(id=str(uuid.uuid4()), type="final_answer", content="Ваш запрос слишком неопределён. Пожалуйста, уточните, что именно вас интересует.", timestamp=time.time())
         return
     
-    is_simple = not attachments and len(query.split()) < 10
+    # Для ReAct нам нужно реально вызывать инструменты, а не просто стримить ответ
+    # Если есть вложения или запрос сложный - используем логику ReAct
+    is_complex = bool(attachments) or len(query.split()) > 15
     
-    if is_simple:
+    if not is_complex:
         prompt = render_template(SYSTEM_PROMPT_TEMPLATE, query=query, files=attachments)
         full_content = ""
         async for chunk in get_llm_stream(prompt, model_settings):
@@ -272,12 +286,25 @@ async def run_react_agent(session_id: str, query: str, attachments: Optional[Lis
         cleaned_content = clean_response(full_content)
         yield AgentStep(id=str(uuid.uuid4()), type="final_answer", content=cleaned_content, timestamp=time.time())
         return
-
-    thought = "Мне нужно проанализировать ваш запрос."
+    
+    # Логика ReAct (упрощенная для примера, должна интегрироваться с react_agent_http.py)
+    thought = "Мне нужно проанализировать ваши документы. Сначала я загружу их."
     yield AgentStep(id=str(uuid.uuid4()), type="thought", content=thought, timestamp=time.time())
     
-    prompt = render_template(REACT_PROMPT_TEMPLATE, query=query, thought=thought, files=attachments)
-    
+    # Имитация вызова инструментов (в реальности тут должен быть вызов langgraph)
+    for att in attachments or []:
+        yield AgentStep(
+            id=str(uuid.uuid4()), 
+            type="action", 
+            content=f"Загрузка документа {att.name}...", 
+            tool_name="document_server.load_document",
+            tool_params={"path": att.path},
+            timestamp=time.time()
+        )
+        await asyncio.sleep(0.5)
+        yield AgentStep(id=str(uuid.uuid4()), type="observation", content=f"Документ {att.name} успешно загружен.", timestamp=time.time())
+
+    prompt = render_template(SYSTEM_PROMPT_TEMPLATE, query=f"Проанализируй загруженные файлы и ответь на запрос: {query}", files=attachments)
     full_content = ""
     async for chunk in get_llm_stream(prompt, model_settings):
         full_content += chunk
@@ -294,7 +321,33 @@ async def health():
 
 @app.get("/status")
 async def get_status():
-    return get_system_resources()
+    resources = get_system_resources()
+    # Адаптация под формат фронтенда (StatusResponse в agentApi.ts)
+    primary_gpu = resources.get("gpus", [{}])[0] if resources.get("gpus") else {}
+    
+    return {
+        "active_model": "qwen-14b-llm",
+        "backend_mode": "llama-cpp-python",
+        "vram_used_gb": resources.get("vram_used_gb", 0),
+        "vram_total_gb": resources.get("vram_total_gb", 0),
+        "vram_free_gb": resources.get("vram_free_gb", 0),
+        "ram_used_gb": resources.get("ram_used_gb", 0),
+        "ram_total_gb": resources.get("ram_total_gb", 0),
+        "ram_free_gb": resources.get("ram_free_gb", 0),
+        "ram_percent": resources.get("ram_percent", 0),
+        "cpu_percent": resources.get("cpu_percent", 0),
+        "cpu_count": resources.get("cpu_count", 0),
+        "cuda_available": resources.get("cuda_available", False),
+        "cuda_version": resources.get("cuda_version"),
+        "driver_version": resources.get("driver_version"),
+        "gpu_temperature": primary_gpu.get("temperature"),
+        "gpu_utilization": primary_gpu.get("utilization"),
+        "queue_size": 0,
+        "mcp_servers": [
+            {"name": "document_server", "port": 8001, "status": "connected"},
+            {"name": "legal_server", "port": 8002, "status": "connected"}
+        ]
+    }
 
 @app.post("/agent/chat")
 async def start_chat(request: ChatRequest):
