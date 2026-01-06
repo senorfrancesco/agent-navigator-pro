@@ -14,16 +14,26 @@ import time
 import requests
 import json
 import psutil
+import traceback
 from typing import Optional, Dict, Any, List
 from dotenv import load_dotenv
 
 # Загрузка переменных окружения из .env файла
 load_dotenv()
+
 from dataclasses import dataclass, asdict
 from enum import Enum
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import uvicorn
+
+# Безопасный импорт pynvml
+try:
+    import pynvml
+    PYNVML_AVAILABLE = True
+except ImportError:
+    PYNVML_AVAILABLE = False
+    print("[Warning] pynvml (nvidia-ml-py) not installed, GPU monitoring disabled")
 
 # ============================================================================
 # Configuration & Constants
@@ -63,27 +73,27 @@ class ModelConfig:
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
-# Конфигурация доступных моделей
+# Конфигурация доступных моделей (используем пути из .env)
 MODELS_CONFIG: Dict[str, ModelConfig] = {
     "qwen-14b-llm": ModelConfig(
         model_id="qwen-14b-llm",
         model_type="text",
-        path=os.getenv("MODEL_PATH_QWEN14B", "/models/Qwen2.5-14B-Instruct-Q4_K_M.gguf"),
+        path=os.getenv("MODEL_PATH_QWEN14B", "./models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"),
         n_gpu_layers=30,
         context_size=16384
     ),
     "qwen-vl-8b": ModelConfig(
         model_id="qwen-vl-8b",
         model_type="vision",
-        path=os.getenv("MODEL_PATH_QWENVL", "/models/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"),
+        path=os.getenv("MODEL_PATH_QWENVL", "./models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"),
         n_gpu_layers=20,
         context_size=16384,
-        mmproj_path=os.getenv("MMPROJ_PATH", "/models/mmproj-Qwen3-VL-8B-Instruct-F16.gguf")
+        mmproj_path=os.getenv("MMPROJ_PATH", "./models/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf")
     ),
     "labse-embedding": ModelConfig(
         model_id="labse-embedding",
         model_type="embedding",
-        path=os.getenv("MODEL_PATH_LABSE", "/models/LaBSE-Q4_K_M.gguf"),
+        path=os.getenv("MODEL_PATH_LABSE", "./models/st/LaBSE"),
         n_gpu_layers=10,
         context_size=512
     )
@@ -105,8 +115,9 @@ MODEL_ACCESS_LOG: Dict[str, float] = {}  # Для LRU
 
 def _get_available_vram() -> float:
     """Получает доступную VRAM в ГБ."""
+    if not PYNVML_AVAILABLE:
+        return 0.0
     try:
-        import pynvml
         pynvml.nvmlInit()
         handle = pynvml.nvmlDeviceGetHandleByIndex(0)
         info = pynvml.nvmlDeviceGetMemoryInfo(handle)
@@ -158,7 +169,9 @@ def _start_server(model_id: str, device_mode: DeviceMode = DeviceMode.HYBRID):
     
     # Проверяем наличие файла модели
     if not os.path.exists(config.path):
-        raise FileNotFoundError(f"Model file not found: {config.path}")
+        error_msg = f"Model file not found at: {os.path.abspath(config.path)}"
+        print(f"[UMS] ERROR: {error_msg}")
+        raise FileNotFoundError(error_msg)
     
     # Формируем команду запуска
     cmd = [
@@ -173,16 +186,12 @@ def _start_server(model_id: str, device_mode: DeviceMode = DeviceMode.HYBRID):
     if device_mode == DeviceMode.GPU:
         cmd.extend(["--n_gpu_layers", str(config.n_gpu_layers)])
     elif device_mode == DeviceMode.HYBRID:
-        # Гибридный режим: часть слоёв на GPU, часть на CPU
         cmd.extend(["--n_gpu_layers", str(max(1, config.n_gpu_layers // 2))])
-    # Для CPU режима не добавляем --n_gpu_layers (или устанавливаем в 0)
     
-    # Добавляем multimodal projection для Vision моделей
     if config.mmproj_path and os.path.exists(config.mmproj_path):
         cmd.extend(["--mmproj", config.mmproj_path])
     
     print(f"[UMS] Starting llama-server for model: {model_id}")
-    print(f"[UMS] Device mode: {device_mode}")
     print(f"[UMS] Command: {' '.join(cmd)}")
     
     try:
@@ -203,6 +212,12 @@ def _start_server(model_id: str, device_mode: DeviceMode = DeviceMode.HYBRID):
                 MODEL_ACCESS_LOG[model_id] = time.time()
                 print(f"[UMS] Model {model_id} loaded successfully")
                 return
+            
+            # Проверяем, не упал ли процесс сразу
+            if LLAMA_SERVER_PROCESS.poll() is not None:
+                stdout, stderr = LLAMA_SERVER_PROCESS.communicate()
+                raise RuntimeError(f"llama-server exited immediately. Stderr: {stderr}")
+                
             time.sleep(1)
         
         _stop_server()
@@ -210,6 +225,7 @@ def _start_server(model_id: str, device_mode: DeviceMode = DeviceMode.HYBRID):
     
     except Exception as e:
         _stop_server()
+        print(f"[UMS] CRITICAL ERROR starting server: {e}")
         raise RuntimeError(f"Failed to start llama-server: {e}")
 
 # ============================================================================
@@ -221,47 +237,41 @@ def switch_model(model_id: str, device_mode: DeviceMode = DeviceMode.HYBRID):
     global ACTIVE_MODEL_ID
     
     if model_id == ACTIVE_MODEL_ID:
-        print(f"[UMS] Model {model_id} is already active")
         return
     
-    # Останавливаем текущую модель
     _stop_server()
-    
-    # Запускаем новую
     _start_server(model_id, device_mode)
 
 def infer(model_id: str, payload: Dict[str, Any], device_mode: DeviceMode = DeviceMode.HYBRID) -> Dict[str, Any]:
-    """
-    Выполняет инференс. Если модель не активна, переключает её.
-    """
-    if model_id != ACTIVE_MODEL_ID:
-        switch_model(model_id, device_mode)
-    
-    config = MODELS_CONFIG.get(model_id)
-    if not config:
-        raise ValueError(f"Model ID '{model_id}' not found")
-    
-    # Определяем endpoint в зависимости от типа модели
-    if config.model_type == "text":
-        endpoint = "/v1/completions"
-    elif config.model_type == "vision":
-        endpoint = "/v1/chat/completions"
-    elif config.model_type == "embedding":
-        endpoint = "/v1/embeddings"
-    else:
-        raise ValueError(f"Unknown model type: {config.model_type}")
-    
-    url = f"{LLAMA_SERVER_URL}{endpoint}"
-    
-    print(f"[UMS] Sending inference request to {url}")
-    
+    """Выполняет инференс."""
     try:
+        if model_id != ACTIVE_MODEL_ID:
+            switch_model(model_id, device_mode)
+        
+        config = MODELS_CONFIG.get(model_id)
+        if not config:
+            raise ValueError(f"Model ID '{model_id}' not found")
+        
+        # Определяем endpoint
+        if config.model_type == "text":
+            endpoint = "/v1/completions"
+        elif config.model_type == "vision":
+            endpoint = "/v1/chat/completions"
+        elif config.model_type == "embedding":
+            endpoint = "/v1/embeddings"
+        else:
+            raise ValueError(f"Unknown model type: {config.model_type}")
+        
+        url = f"{LLAMA_SERVER_URL}{endpoint}"
+        print(f"[UMS] Sending inference request to {url}")
+        
         response = requests.post(url, json=payload, timeout=300)
         response.raise_for_status()
         return response.json()
-    except requests.exceptions.RequestException as e:
+    except Exception as e:
         print(f"[UMS] Inference error: {e}")
-        raise RuntimeError(f"Inference failed: {e}")
+        print(traceback.format_exc())
+        raise e
 
 def get_status() -> Dict[str, Any]:
     """Возвращает статус UMS."""
@@ -286,7 +296,6 @@ class InferenceRequest(BaseModel):
     model_id: str
     payload: Dict[str, Any]
     device_mode: str = "hybrid"
-    priority: str = "normal"
 
 class SwitchModelRequest(BaseModel):
     model_id: str
@@ -294,27 +303,24 @@ class SwitchModelRequest(BaseModel):
 
 @app.get("/health")
 async def health():
-    """Health check."""
     return {"status": "healthy", "service": "ums"}
 
 @app.get("/status")
 async def status():
-    """Получить статус UMS."""
     return get_status()
 
 @app.post("/infer")
 async def infer_endpoint(request: InferenceRequest):
-    """Выполнить инференс."""
     try:
         device_mode = DeviceMode(request.device_mode)
         result = infer(request.model_id, request.payload, device_mode)
         return {"status": "success", "result": result}
     except Exception as e:
+        print(f"[UMS] API Error in /infer: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/switch_model")
 async def switch_model_endpoint(request: SwitchModelRequest):
-    """Переключить активную модель."""
     try:
         device_mode = DeviceMode(request.device_mode)
         switch_model(request.model_id, device_mode)
@@ -323,35 +329,20 @@ async def switch_model_endpoint(request: SwitchModelRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/stop")
-async def stop_server():
-    """Остановить текущий llama-server."""
-    try:
-        _stop_server()
-        return {"status": "success", "message": "Server stopped"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+async def stop_server_endpoint():
+    _stop_server()
+    return {"status": "success", "message": "Server stopped"}
 
 # ============================================================================
 # Cleanup on Exit
 # ============================================================================
 
 import atexit
-
 def cleanup():
-    """Очистка при завершении."""
-    print("[UMS] Cleaning up...")
     _stop_server()
-
 atexit.register(cleanup)
-
-# ============================================================================
-# Main
-# ============================================================================
 
 if __name__ == "__main__":
     print("[UMS] Starting Unified Model Server...")
     print(f"[UMS] Available models: {list(MODELS_CONFIG.keys())}")
-    print(f"[UMS] Device mode: {DEVICE_MODE}")
-    print(f"[UMS] Load strategy: {LOAD_STRATEGY}")
-    
     uvicorn.run(app, host="0.0.0.0", port=UMS_PORT)
