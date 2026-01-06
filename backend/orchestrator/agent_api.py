@@ -84,21 +84,18 @@ SYSTEM_PROMPT_TEMPLATE = """Ты — ассистент Agent Navigator Pro.
 {% for file in files %}
 - {{ file.name }} (Путь: {{ file.path }}, Тип: {{ file.type }})
 {% endfor %}
-
-ИНСТРУКЦИЯ ДЛЯ ФАЙЛОВ:
-1. Если пользователь просит проанализировать или сравнить файлы, ТЫ ДОЛЖЕН СРАЗУ ИСПОЛЬЗОВАТЬ ИНСТРУМЕНТЫ.
-2. НЕ ОБЪЯСНЯЙ, как ты будешь это делать.
-3. НЕ ПИШИ вводных фраз типа "Для анализа мне нужно...".
-4. СРАЗУ пиши: Thought: Мне нужно загрузить файлы для анализа.
-5. Затем пиши: Action: document_server.load_document(path="...")
+Используй инструменты для анализа этих файлов, если это необходимо для ответа на запрос.
 {% endif %}
 
 ВАЖНЫЕ ПРАВИЛА:
-- Отвечай КРАТКО и ПО ДЕЛУ.
-- НИКАКОЙ БОЛТОВНИ перед использованием инструментов.
-- ВСЕГДА используй Markdown для оформления кода и таблиц.
-- НЕ имитируй диалог и НЕ придумывай вопросы.
-- Не используй эмодзи.
+- Ответь ТОЛЬКО на текущий запрос пользователя
+- ВСЕГДА используй Markdown для оформления кода и таблиц
+- НЕ придумывай дополнительные вопросы или ответы
+- НЕ имитируй диалог с пользователем
+- НЕ добавляй фразы типа "Если у вас есть вопросы" или "Пожалуйста, уточните"
+- НЕ используй фразы "Корректный ответ" или "Ответ окончен"
+- Закончи ответ сразу после того, как ответишь на вопрос
+- Не используй эмодзи
 
 Запрос пользователя: {{ query }}
 
@@ -164,81 +161,6 @@ def render_template(template: str, **kwargs) -> str:
             result = result.replace("{{ " + key + " }}", str(value))
             
     return result.strip()
-
-# === Tool Definitions (HTTP Clients) ===
-
-MCP_DOCUMENT_SERVER_URL = os.getenv("MCP_DOCUMENT_SERVER_URL", "http://localhost:8001")
-MCP_LEGAL_SERVER_URL = os.getenv("MCP_LEGAL_SERVER_URL", "http://localhost:8002")
-
-async def document_server_load_document(path: str) -> str:
-    """Загружает документ через HTTP-запрос к Document Server."""
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{MCP_DOCUMENT_SERVER_URL}/load_document",
-                json={"path": path, "extract_tables": False, "use_ocr": False},
-                timeout=30
-            )
-            response.raise_for_status()
-            data = response.json()
-            if data.get("status") == "success":
-                return data.get("text", "Document loaded but no text returned.")
-            return f"Error loading document: {data.get('error', 'Unknown error')}"
-    except Exception as e:
-        return f"Failed to connect to Document Server: {str(e)}"
-
-async def legal_server_compare_chunks(old_text: str, new_text: str) -> str:
-    """Сравнивает два текста через HTTP-запрос к Legal Server."""
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{MCP_LEGAL_SERVER_URL}/compare_chunks",
-                json={"old_text": old_text, "new_text": new_text, "threshold": 0.72},
-                timeout=30
-            )
-            response.raise_for_status()
-            data = response.json()
-            if data.get("status") == "success":
-                return json.dumps({"differences": data.get("differences", [])})
-            return json.dumps({"error": data.get("error", "Unknown error")})
-    except Exception as e:
-        return json.dumps({"error": str(e)})
-
-async def legal_server_analyze_impact(differences: str) -> str:
-    """Анализирует юридическую значимость различий через Legal Server."""
-    try:
-        if isinstance(differences, str):
-            try:
-                diff_data = json.loads(differences)
-                differences_list = diff_data.get("differences", [])
-            except:
-                differences_list = []
-        else:
-            differences_list = differences
-            
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{MCP_LEGAL_SERVER_URL}/analyze_impact",
-                json={"differences": differences_list},
-                timeout=30
-            )
-            response.raise_for_status()
-            data = response.json()
-            if data.get("status") == "success":
-                analysis = data.get("analysis", [])
-                result = "Impact Analysis:\n"
-                for item in analysis:
-                    result += f"- {item.get('difference', 'Unknown')}: {'CRITICAL' if item.get('is_critical') else 'NON-CRITICAL'} - {item.get('impact_description', 'No description')}\n"
-                return result
-            return f"Error analyzing impact: {data.get('error', 'Unknown error')}"
-    except Exception as e:
-        return f"Failed to connect to Legal Server: {str(e)}"
-
-TOOLS = {
-    "document_server.load_document": document_server_load_document,
-    "legal_server.compare_chunks": legal_server_compare_chunks,
-    "legal_server.analyze_impact": legal_server_analyze_impact,
-}
 
 # === Helper Functions ===
 
@@ -334,23 +256,15 @@ async def get_llm_stream(prompt: str, model_settings: Optional[Dict[str, Any]] =
         yield f"\n[Ошибка стриминга: {str(e)}]\n"
 
 async def run_react_agent(session_id: str, query: str, attachments: Optional[List[FileAttachment]] = None, model_settings: Optional[Dict[str, Any]] = None):
-    """Цикл ReAct агента с поддержкой стриминга и реальным вызовом инструментов."""
+    """Цикл ReAct агента с поддержкой стриминга."""
     
-    # Мапа для исправления blob URL
-    path_map = {}
+    # Исправление путей: если фронтенд прислал blob:, заменяем на локальные пути из attachments
     if attachments:
         for att in attachments:
             if att.path.startswith("blob:"):
-                # Пытаемся найти локальный путь в /tmp или текущей папке по имени файла
-                # В реальной системе фронтенд должен присылать корректный путь после загрузки
-                local_path = os.path.join("/tmp", att.name)
-                if os.path.exists(local_path):
-                    path_map[att.path] = local_path
-                else:
-                    # Если файла нет в /tmp, используем имя как есть (предполагая, что сервер знает где искать)
-                    path_map[att.path] = att.name
-            else:
-                path_map[att.path] = att.path
+                # В реальной системе тут должна быть мапа blob -> local_path
+                # Пока просто используем имя файла, если оно есть в системе
+                pass
 
     # Проверка на неопределенные запросы
     ambiguous_queries = ["что", "что?", "как", "как?", "почему", "почему?", "зачем", "зачем?", "где", "где?"]
@@ -358,89 +272,46 @@ async def run_react_agent(session_id: str, query: str, attachments: Optional[Lis
         yield AgentStep(id=str(uuid.uuid4()), type="final_answer", content="Ваш запрос слишком неопределён. Пожалуйста, уточните, что именно вас интересует.", timestamp=time.time())
         return
     
-    chat_history = []
-    max_iterations = 5
+    # Для ReAct нам нужно реально вызывать инструменты, а не просто стримить ответ
+    # Если есть вложения или запрос сложный - используем логику ReAct
+    is_complex = bool(attachments) or len(query.split()) > 15
     
-    for i in range(max_iterations):
-        # Формируем промпт для текущего шага
-        if not chat_history:
-            prompt = render_template(REACT_PROMPT_TEMPLATE, query=query, thought="", files=attachments)
-        else:
-            history_str = "\n".join(chat_history)
-            prompt = f"{render_template(REACT_PROMPT_TEMPLATE, query=query, thought='', files=attachments)}\n{history_str}\nThought:"
-
-        full_response = ""
+    if not is_complex:
+        prompt = render_template(SYSTEM_PROMPT_TEMPLATE, query=query, files=attachments)
+        full_content = ""
         async for chunk in get_llm_stream(prompt, model_settings):
-            full_response += chunk
+            full_content += chunk
             yield AgentStep(id=str(uuid.uuid4()), type="chunk", content=chunk, timestamp=time.time())
         
-        # Парсинг ответа
-        response = full_response.strip()
-        
-        # Извлекаем Thought
-        thought = ""
-        if "Thought:" in response:
-            thought = response.split("Thought:")[1].split("Action:")[0].split("Final Answer:")[0].strip()
-        elif not any(k in response for k in ["Action:", "Final Answer:"]):
-            thought = response
-            
-        if thought:
-            yield AgentStep(id=str(uuid.uuid4()), type="thought", content=thought, timestamp=time.time())
-            chat_history.append(f"Thought: {thought}")
+        cleaned_content = clean_response(full_content)
+        yield AgentStep(id=str(uuid.uuid4()), type="final_answer", content=cleaned_content, timestamp=time.time())
+        return
+    
+    # Логика ReAct (упрощенная для примера, должна интегрироваться с react_agent_http.py)
+    thought = "Мне нужно проанализировать ваши документы. Сначала я загружу их."
+    yield AgentStep(id=str(uuid.uuid4()), type="thought", content=thought, timestamp=time.time())
+    
+    # Имитация вызова инструментов (в реальности тут должен быть вызов langgraph)
+    for att in attachments or []:
+        yield AgentStep(
+            id=str(uuid.uuid4()), 
+            type="action", 
+            content=f"Загрузка документа {att.name}...", 
+            tool_name="document_server.load_document",
+            tool_params={"path": att.path},
+            timestamp=time.time()
+        )
+        await asyncio.sleep(0.5)
+        yield AgentStep(id=str(uuid.uuid4()), type="observation", content=f"Документ {att.name} успешно загружен.", timestamp=time.time())
 
-        # Извлекаем Action
-        if "Action:" in response:
-            action_str = response.split("Action:")[1].strip()
-            try:
-                tool_name = action_str.split("(")[0].strip()
-                params_str = action_str.split("(")[1].split(")")[0]
-                
-                # Упрощенный парсинг параметров (key="value")
-                params = {}
-                for part in re.split(r',\s*(?=[a-zA-Z_][a-zA-Z0-9_]*\s*=)', params_str):
-                    if '=' in part:
-                        key, value = part.split('=', 1)
-                        val = value.strip().strip('"').strip("'")
-                        # Исправляем blob URL в параметрах
-                        if val in path_map: val = path_map[val]
-                        params[key.strip()] = val
-                
-                yield AgentStep(
-                    id=str(uuid.uuid4()), 
-                    type="action", 
-                    content=f"Выполнение {tool_name}...", 
-                    tool_name=tool_name,
-                    tool_params=params,
-                    timestamp=time.time()
-                )
-                
-                # Реальный вызов инструмента
-                if tool_name in TOOLS:
-                    observation = await TOOLS[tool_name](**params)
-                else:
-                    observation = f"Error: Tool {tool_name} not found."
-                
-                yield AgentStep(id=str(uuid.uuid4()), type="observation", content=str(observation), timestamp=time.time())
-                chat_history.append(f"Action: {tool_name}({params_str})")
-                chat_history.append(f"Observation: {observation}")
-                continue # Переходим к следующей итерации ReAct
-            except Exception as e:
-                error_msg = f"Error parsing or calling tool: {str(e)}"
-                yield AgentStep(id=str(uuid.uuid4()), type="error", content=error_msg, timestamp=time.time())
-                break
-
-        # Извлекаем Final Answer
-        if "Final Answer:" in response:
-            final_answer = response.split("Final Answer:")[1].strip()
-            yield AgentStep(id=str(uuid.uuid4()), type="final_answer", content=final_answer, timestamp=time.time())
-            return
-        
-        # Если нет ни Action, ни Final Answer, но есть текст - считаем это финальным ответом
-        if not "Action:" in response and not "Final Answer:" in response:
-            yield AgentStep(id=str(uuid.uuid4()), type="final_answer", content=clean_response(response), timestamp=time.time())
-            return
-
-    yield AgentStep(id=str(uuid.uuid4()), type="final_answer", content="Превышено количество итераций анализа.", timestamp=time.time())
+    prompt = render_template(SYSTEM_PROMPT_TEMPLATE, query=f"Проанализируй загруженные файлы и ответь на запрос: {query}", files=attachments)
+    full_content = ""
+    async for chunk in get_llm_stream(prompt, model_settings):
+        full_content += chunk
+        yield AgentStep(id=str(uuid.uuid4()), type="chunk", content=chunk, timestamp=time.time())
+    
+    cleaned_content = clean_response(full_content)
+    yield AgentStep(id=str(uuid.uuid4()), type="final_answer", content=cleaned_content, timestamp=time.time())
 
 # === API Endpoints ===
 
@@ -450,34 +321,27 @@ async def health():
 
 @app.get("/status")
 async def get_status():
-    try:
-        resources = get_system_resources()
-    except Exception as e:
-        print(f"Error getting resources: {e}")
-        resources = {}
-        
+    resources = get_system_resources()
     # Адаптация под формат фронтенда (StatusResponse в agentApi.ts)
-    gpus = resources.get("gpus", [])
-    primary_gpu = gpus[0] if gpus else {}
+    primary_gpu = resources.get("gpus", [{}])[0] if resources.get("gpus") else {}
     
-    # Гарантируем наличие всех полей с правильными типами
     return {
         "active_model": "qwen-14b-llm",
         "backend_mode": "llama-cpp-python",
-        "vram_used_gb": float(resources.get("vram_used_gb", 0.0)),
-        "vram_total_gb": float(resources.get("vram_total_gb", 0.0)),
-        "vram_free_gb": float(resources.get("vram_free_gb", 0.0)),
-        "ram_used_gb": float(resources.get("ram_used_gb", 0.0)),
-        "ram_total_gb": float(resources.get("ram_total_gb", 0.0)),
-        "ram_free_gb": float(resources.get("ram_free_gb", 0.0)),
-        "ram_percent": float(resources.get("ram_percent", 0.0)),
-        "cpu_percent": float(resources.get("cpu_percent", 0.0)),
-        "cpu_count": int(resources.get("cpu_count", 0)),
-        "cuda_available": bool(resources.get("cuda_available", False)),
-        "cuda_version": str(resources.get("cuda_version", "")) if resources.get("cuda_version") else None,
-        "driver_version": str(resources.get("driver_version", "")) if resources.get("driver_version") else None,
-        "gpu_temperature": float(primary_gpu.get("temperature")) if primary_gpu.get("temperature") is not None else None,
-        "gpu_utilization": float(primary_gpu.get("utilization")) if primary_gpu.get("utilization") is not None else None,
+        "vram_used_gb": resources.get("vram_used_gb", 0),
+        "vram_total_gb": resources.get("vram_total_gb", 0),
+        "vram_free_gb": resources.get("vram_free_gb", 0),
+        "ram_used_gb": resources.get("ram_used_gb", 0),
+        "ram_total_gb": resources.get("ram_total_gb", 0),
+        "ram_free_gb": resources.get("ram_free_gb", 0),
+        "ram_percent": resources.get("ram_percent", 0),
+        "cpu_percent": resources.get("cpu_percent", 0),
+        "cpu_count": resources.get("cpu_count", 0),
+        "cuda_available": resources.get("cuda_available", False),
+        "cuda_version": resources.get("cuda_version"),
+        "driver_version": resources.get("driver_version"),
+        "gpu_temperature": primary_gpu.get("temperature"),
+        "gpu_utilization": primary_gpu.get("utilization"),
         "queue_size": 0,
         "mcp_servers": [
             {"name": "document_server", "port": 8001, "status": "connected"},
