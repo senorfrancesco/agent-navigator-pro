@@ -140,6 +140,18 @@ cd frontend
 npm run dev
 ```
 
+## Тестирование
+
+Для проверки отсутствия галлюцинаций и корректности работы очистки ответов используйте встроенный тест:
+
+```bash
+# Запуск через python
+python3 backend/tests/test_agent_hallucinations.py
+
+# Или через pytest (если установлен)
+pytest backend/tests/test_agent_hallucinations.py
+```
+
 ## API Эндпоинты
 
 Основной **Agent API** доступен по адресу `http://localhost:8000`.
@@ -189,5 +201,6 @@ export MMPROJ_PATH="./models/mmproj-Qwen3-VL-8B-Instruct-F16.gguf"
     ├── services/                      # Микросервисы (Document, Legal, UMS)
     ├── models/                        # Директория для GGUF моделей (игнорируется git)
     ├── requirements.txt               # Зависимости Python
-    └── run_all.sh                     # Скрипт для запуска всех сервисов
+    ├── run_all.sh                     # Скрипт для запуска всех сервисов
+    └── tests/                         # Тесты (включая тесты на галлюцинации)
 ```
