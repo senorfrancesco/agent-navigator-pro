@@ -24,7 +24,7 @@ dist-ssr
 *.sw?
 .pytest_cache
 
-for_cli/
+for_cli/*
 
 open_webui_uploads
 
