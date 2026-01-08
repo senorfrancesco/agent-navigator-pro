@@ -8,6 +8,17 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - open-webui:/app/backend/data
+      - ./backend/open_webui_uploads:/app/backend/data/uploads
+    environment:
+      - OPENAI_API_BASE_URL=http://host.docker.internal:8000/v1
+      - OPENAI_API_KEY=sk-dummy
+      - HF_HUB_OFFLINE=1
+      - ENABLE_RAG_WEB_SEARCH=False
+      - ENABLE_RAG_LOCAL_WEB_FETCH=False
+      - WEBUI_NAME=Agent Navigator
+      # Отключаем встроенный RAG, так как он требует загрузки моделей из интернета
+      - RAG_EMBEDDING_ENGINE=
+      - RAG_RERANKING_ENGINE=
     restart: always
 
 volumes:

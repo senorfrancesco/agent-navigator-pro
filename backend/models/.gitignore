@@ -1,5 +1,0 @@
-# Игнорируем все модели, но оставляем структуру и README
-gguf/*
-!gguf/README.md
-st/*
-!st/README.md

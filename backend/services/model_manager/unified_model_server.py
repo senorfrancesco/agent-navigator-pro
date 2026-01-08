@@ -1,6 +1,6 @@
 """
 Unified Model Server (UMS) - Управляет жизненным циклом LLM и Embedding моделей.
-Поддерживает динамическое переключение моделей, мониторинг ресурсов и стриминг.
+Поддерживает динамическое переключение моделей на основе файловой системы.
 """
 
 import os
@@ -38,7 +38,6 @@ if ENV_PATH.exists():
     logger.info(f"Loaded .env from {ENV_PATH}")
 else:
     load_dotenv()
-    logger.warning(f".env not found at {ENV_PATH}")
 
 # Безопасный импорт pynvml
 try:
@@ -46,7 +45,6 @@ try:
     PYNVML_AVAILABLE = True
 except ImportError:
     PYNVML_AVAILABLE = False
-    logger.warning("nvidia-ml-py (pynvml) не установлен")
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -61,14 +59,10 @@ class DeviceMode(str, Enum):
     GPU = "gpu"
     HYBRID = "hybrid"
 
-def resolve_model_path(path_str: str) -> str:
-    if not path_str: return ""
-    path = Path(os.path.expanduser(path_str))
-    if not path.is_absolute():
-        path = BACKEND_ROOT / path_str
-    return str(path.resolve())
+MODELS_DIR = BACKEND_ROOT / "models" / "gguf"
 
-MODELS_CONFIG = {
+# Хардкодные конфиги для системных моделей
+STATIC_MODELS_CONFIG = {
     "qwen-14b-llm": {
         "type": "gguf",
         "path": os.getenv("MODEL_PATH_QWEN14B", "./models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"),
@@ -92,9 +86,10 @@ MODELS_CONFIG = {
 }
 
 state = {
-    "active_model": None,
-    "processes": {},
-    "device_mode": DeviceMode.HYBRID
+    "active_model": None, # Последняя запрошенная "тяжелая" модель
+    "processes": {},      # model_id -> process
+    "device_mode": DeviceMode.HYBRID,
+    "dynamic_ports": 8100 # Начальный порт для динамических моделей
 }
 
 # === Resource Helpers ===
@@ -110,8 +105,7 @@ def _get_gpu_info() -> List[Dict[str, Any]]:
             info = pynvml.nvmlDeviceGetMemoryInfo(handle)
             name = pynvml.nvmlDeviceGetName(handle)
             gpus.append({
-                "index": i,
-                "name": name,
+                "index": i, "name": name,
                 "free_gb": info.free / (1024 ** 3),
                 "total_gb": info.total / (1024 ** 3)
             })
@@ -119,18 +113,40 @@ def _get_gpu_info() -> List[Dict[str, Any]]:
     except: return []
 
 def _get_available_vram() -> float:
-    gpus = _get_gpu_info()
-    if not gpus: return 0.0
-    return sum(gpu["free_gb"] for gpu in gpus)
+    return sum(gpu["free_gb"] for gpu in _get_gpu_info())
 
-def _get_available_ram() -> float:
-    try: return psutil.virtual_memory().available / (1024 ** 3)
-    except: return 0.0
+def resolve_model_path(path_str: str) -> str:
+    path = Path(os.path.expanduser(path_str))
+    if not path.is_absolute():
+        path = BACKEND_ROOT / path_str
+    return str(path.resolve())
+
+# === Dynamic Model Discovery ===
+
+def get_model_config(model_id: str) -> Optional[Dict[str, Any]]:
+    """Возвращает конфиг модели, либо из статики, либо из файловой системы."""
+    if model_id in STATIC_MODELS_CONFIG:
+        return STATIC_MODELS_CONFIG[model_id]
+    
+    # Ищем файл в папке gguf
+    for root, dirs, files in os.walk(MODELS_DIR):
+        for file in files:
+            if file.endswith(".gguf") and os.path.splitext(file)[0] == model_id:
+                full_path = os.path.join(root, file)
+                return {
+                    "type": "gguf",
+                    "path": full_path,
+                    "ctx_size": 8192,  # Дефолт для новых моделей
+                    "gpu_layers": -1,  # Пытаемся все на GPU
+                    "port": state["dynamic_ports"] # TODO: сделать пул портов
+                }
+    return None
 
 # === Model Management ===
 
-def _stop_all_servers():
-    for model_id, proc in list(state["processes"].items()):
+def _stop_model(model_id: str):
+    if model_id in state["processes"]:
+        proc = state["processes"].pop(model_id)
         logger.info(f"Stopping server for {model_id}...")
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
@@ -138,74 +154,60 @@ def _stop_all_servers():
         except:
             try: os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except: pass
-    state["processes"] = {}
-    state["active_model"] = None
+        if state["active_model"] == model_id:
+            state["active_model"] = None
+
+def _stop_all_servers():
+    for model_id in list(state["processes"].keys()):
+        _stop_model(model_id)
 
 def _start_server(model_id: str, device_mode: DeviceMode):
-    config = MODELS_CONFIG[model_id]
+    config = get_model_config(model_id)
+    if not config:
+        raise HTTPException(status_code=404, detail=f"Model {model_id} not found in filesystem.")
+
     model_path = resolve_model_path(config["path"])
+    is_heavy = config["type"] in ["gguf", "gguf-vl"]
     
-    if not os.path.exists(model_path):
-        raise FileNotFoundError(f"Model file not found at: {model_path}")
+    if is_heavy:
+        active_heavy = None
+        for pid in state["processes"]:
+            p_config = get_model_config(pid)
+            if p_config and p_config["type"] in ["gguf", "gguf-vl"]:
+                active_heavy = pid
+                break
+        if active_heavy and active_heavy != model_id:
+            logger.info(f"Stopping {active_heavy} to free memory for {model_id}")
+            _stop_model(active_heavy)
 
-    if state["active_model"] and state["active_model"] != model_id:
-        _stop_all_servers()
+    if model_id in state["processes"]:
+        return # Уже работает
 
-    gpu_info = _get_gpu_info()
-    n_gpu = len(gpu_info)
+    n_gpu = len(_get_gpu_info())
     
-    if config.get("type") == "st":
-        # Запуск Sentence Transformers Server
-        # Определяем устройство: если device_mode == GPU и есть GPU, используем cuda
-        use_gpu = device_mode != DeviceMode.CPU and n_gpu > 0
-        device_arg = "cuda" if use_gpu else "cpu"
-        
-        cmd = [
-            sys.executable,
-            str(Path(__file__).parent / "st_server.py"),
-            "--model", model_path,
-            "--port", str(config["port"]),
-            "--device", device_arg
-        ]
-        logger.info(f"Starting ST Server: {' '.join(cmd)}")
+    if config["type"] == "st":
+        device_arg = "cuda" if (device_mode != DeviceMode.CPU and n_gpu > 0) else "cpu"
+        cmd = [sys.executable, str(Path(__file__).parent / "st_server.py"),
+               "--model", model_path, "--port", str(config["port"]), "--device", device_arg]
     else:
-        # Запуск llama-server (GGUF)
-        cmd = [
-            "llama-server",
-            "-m", model_path,
-            "--port", str(config["port"]),
-            "--host", "0.0.0.0",
-            "-c", str(config["ctx_size"]),
-            "-ngl", str(config["gpu_layers"] if device_mode != DeviceMode.CPU else 0)
-        ]
-
-        # Поддержка Multi-GPU
+        cmd = ["llama-server", "-m", model_path, "--port", str(config["port"]),
+               "--host", "0.0.0.0", "-c", str(config["ctx_size"]),
+               "-ngl", str(config["gpu_layers"] if device_mode != DeviceMode.CPU else 0)]
         if n_gpu > 1 and device_mode != DeviceMode.CPU:
-            logger.info(f"Detected {n_gpu} GPUs. Enabling multi-GPU support.")
-            # Распределяем тензоры поровну между картами
-            split = ",".join(["1"] * n_gpu)
-            cmd.extend(["--tensor-split", split])
-
+            cmd.extend(["--tensor-split", ",".join(["1"] * n_gpu)])
         if config["type"] == "gguf-vl" and "mmproj" in config:
-            mmproj_path = resolve_model_path(config["mmproj"])
-            if os.path.exists(mmproj_path):
-                cmd.extend(["--mmproj", mmproj_path])
+            cmd.extend(["--mmproj", resolve_model_path(config["mmproj"])])
 
-        logger.info(f"Starting llama-server: {' '.join(cmd)}")
-
+    logger.info(f"Executing: {' '.join(cmd)}")
     try:
-        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, preexec_fn=os.setsid)
-        
+        process = subprocess.Popen(cmd, preexec_fn=os.setsid)
         start_time = time.time()
-        while time.time() - start_time < 60:
-            if process.poll() is not None:
-                _, stderr = process.communicate()
-                raise RuntimeError(f"Server exited: {stderr}")
+        while time.time() - start_time < 120:
             try:
                 with httpx.Client(timeout=1.0) as client:
                     if client.get(f"http://localhost:{config['port']}/health").status_code == 200:
                         state["processes"][model_id] = process
-                        state["active_model"] = model_id
+                        if is_heavy: state["active_model"] = model_id
                         return
             except: pass
             time.sleep(1)
@@ -214,24 +216,7 @@ def _start_server(model_id: str, device_mode: DeviceMode):
         logger.error(f"Start failed: {e}")
         raise
 
-def switch_model(model_id: str, device_mode: DeviceMode = DeviceMode.HYBRID):
-    if state["active_model"] == model_id: return
-    _start_server(model_id, device_mode)
-
-# === Lifespan ===
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Startup
-    logger.info("UMS Starting...")
-    yield
-    # Shutdown
-    logger.info("UMS Shutting down...")
-    _stop_all_servers()
-
-app = FastAPI(title="Unified Model Server", version="1.3.1", lifespan=lifespan)
-
-# === API Endpoints ===
+# === API ===
 
 class InferRequest(BaseModel):
     model_id: str
@@ -239,59 +224,50 @@ class InferRequest(BaseModel):
     device_mode: Optional[DeviceMode] = DeviceMode.HYBRID
     stream: bool = False
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    _stop_all_servers()
+
+app = FastAPI(title="Unified Model Server", lifespan=lifespan)
+
 @app.post("/infer")
 async def infer(request: InferRequest):
-    model_id = request.model_id
-    device_mode = request.device_mode or state["device_mode"]
-    
     try:
-        switch_model(model_id, device_mode)
-        config = MODELS_CONFIG[model_id]
+        _start_server(request.model_id, request.device_mode or state["device_mode"])
+        config = get_model_config(request.model_id)
         
         is_chat = "messages" in request.payload
-        url = f"http://localhost:{config['port']}/v1/{'chat/' if is_chat else ''}completions"
+        url_suffix = "v1/embeddings" if config["type"] == "st" else f"v1/{'chat/' if is_chat else ''}completions"
+        url = f"http://localhost:{config['port']}/{url_suffix}"
         
         payload = request.payload.copy()
-        if request.stream:
-            payload["stream"] = True
+        if request.stream: payload["stream"] = True
 
-        if request.stream:
-            async def stream_generator():
-                async with httpx.AsyncClient(timeout=120.0) as client:
-                    async with client.stream("POST", url, json=payload) as response:
-                        async for line in response.aiter_lines():
-                            if line:
-                                yield f"{line}\n\n"
-            
-            return StreamingResponse(stream_generator(), media_type="text/event-stream")
-        else:
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                response = await client.post(url, json=payload)
-                return {"status": "success", "model": model_id, "result": response.json()}
-                
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            if request.stream:
+                async def gen():
+                    async with client.stream("POST", url, json=payload) as resp:
+                        async for line in resp.aiter_lines():
+                            if line: yield f"{line}\n\n"
+                return StreamingResponse(gen(), media_type="text/event-stream")
+            else:
+                resp = await client.post(url, json=payload)
+                return {"status": "success", "model": request.model_id, "result": resp.json()}
     except Exception as e:
-        logger.error(f"API Error: {e}")
+        logger.error(f"Inference Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/status")
 async def get_status():
-    models_status = {}
-    for mid in MODELS_CONFIG:
-        path = resolve_model_path(MODELS_CONFIG[mid]["path"])
-        models_status[mid] = {
-            "available": os.path.exists(path),
-            "active": state["active_model"] == mid
-        }
     return {
-        "active_model": state["active_model"],
-        "vram_free_gb": _get_available_vram(),
-        "ram_free_gb": _get_available_ram(),
-        "models": models_status
+        "active_heavy_model": state["active_model"],
+        "running": list(state["processes"].keys()),
+        "vram_free_gb": _get_available_vram()
     }
 
 @app.get("/health")
-async def health():
-    return {"status": "ok"}
+async def health(): return {"status": "ok"}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8090)

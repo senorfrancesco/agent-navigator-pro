@@ -25,6 +25,14 @@ except ImportError:
     sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
     from services.model_manager.ums_client import ums_client
 
+# Импортируем утилиты
+try:
+    from orchestrator.utils import parse_json_garbage
+except ImportError:
+    import sys
+    sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+    from utils import parse_json_garbage
+
 # === State Definition ===
 
 class CompareState(TypedDict):
@@ -38,6 +46,23 @@ class CompareState(TypedDict):
     errors: List[str]
 
 # === Nodes ===
+
+def truncate_text(text: str, max_chars: int = 2000) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rsplit(' ', 1)[0] + "..."
+
+def dc_create_prompt(old, new):
+    return f"""<|im_start|>system
+Ты эксперт-юрист.<|im_end|>
+<|im_start|>user
+Сравни тексты.
+СТАРЫЙ: {truncate_text(old, 2000)}
+НОВЫЙ: {truncate_text(new, 2000)}
+Найди юридические изменения (сроки, права, обязанности, штрафы). Игнорируй стиль.
+Ответ JSON: {{"is_critical": true/false, "diff": "описание изменения", "impact": "последствия"}}<|im_end|>
+<|im_start|>assistant
+"""
 
 async def load_documents_node(state: CompareState):
     """Загружает и разбивает документы на чанки через Document Server."""
@@ -55,9 +80,7 @@ async def load_documents_node(state: CompareState):
             resp2.raise_for_status()
             text2 = resp2.json().get("text", "")
             
-            # Разбиваем на чанки (упрощенно или через эндпоинт smart_chunk)
-            # В идеале Document Server должен иметь эндпоинт для этого.
-            # Для начала используем простой сплит по секциям, как в монолите
+            # Разбиваем на чанки
             def dc_smart_chunk(text: str) -> List[str]:
                 chunks = []
                 section_pattern = r'\n(?=\d+\.(?:\d+\.)*\s+[А-ЯA])'
@@ -113,50 +136,68 @@ async def analyze_differences_node(state: CompareState):
     print(f"[Workflow] Analyzing {len(state['matches'])} differences")
     
     results = []
-    for m in state['matches']:
+    critical_kw = ["обязан", "штраф", "срок", "рублей", "не вправе", "запрещено"]
+    
+    for i, m in enumerate(state['matches']):
         m_type = m.get('type', 'MODIFIED')
+        old_txt = m.get('old_text', '')
+        new_txt = m.get('new_text', '')
         
         # Если это добавление или удаление - помечаем как структурное изменение
         if m_type in ['ADDED', 'DELETED']:
+            content = new_txt if m_type == 'ADDED' else old_txt
             results.append({
-                **m,
-                "is_critical": True, # Добавление/удаление целых пунктов обычно критично
-                "diff": "Структурное изменение (добавлен или удален блок текста)",
-                "impact": "Требуется проверка на соответствие интересам компании"
+                "type": m_type,
+                "diff": "Структурное изменение",
+                "content": content
             })
             continue
             
-        # Для измененных блоков вызываем LLM
-        prompt = f"""<|im_start|>system
-Ты эксперт-юрист. Проанализируй изменение в документе. Игнорируй изменения стиля или пунктуации.
-Фокусируйся на: сроках, суммах, ответственности, правах и обязанностях.
-<|im_end|>
-<|im_start|>user
-БЫЛО: {m.get('old_text', '')}
-СТАЛО: {m.get('new_text', '')}
-Ответь в формате JSON: {{"is_critical": true/false, "diff": "краткая суть изменения", "impact": "последствие для компании"}}
-<|im_end|>
-<|im_start|>assistant
-{{"""
+        # Фильтрация незначительных изменений
+        txt = (old_txt + new_txt).lower()
+        score = m.get('score', 0)
         
-        try:
-            payload = {"prompt": prompt, "max_tokens": 400, "temperature": 0.1}
-            response = ums_client.infer("qwen-14b-llm", payload)
+        # Анализируем только если низкий скор или есть ключевые слова
+        if score < 0.9 or any(k in txt for k in critical_kw):
+            prompt = dc_create_prompt(old_txt, new_txt)
             
-            # Умный парсинг JSON контента
-            content = response.get("content", "")
-            if not content and "choices" in response:
-                content = response["choices"][0].get("text", "")
-            
-            # Добавляем открывающую скобку, если модель её не вернула
-            json_str = content.strip()
-            if not json_str.startswith("{"): json_str = "{" + json_str
-            
-            analysis = json.loads(json_str)
-            results.append({**m, **analysis})
-        except Exception as e:
-            print(f"Error analyzing chunk: {e}")
-            results.append({**m, "is_critical": False, "diff": "Изменение текста", "impact": "Требуется ручной анализ"})
+            try:
+                # Используем параметры как в монолите
+                payload = {"prompt": prompt, "max_tokens": 300, "temperature": 0.1, "echo": False}
+                response = ums_client.infer("qwen-14b-llm", payload)
+                
+                # Извлекаем текст
+                content = response.get("content", "")
+                if not content and "choices" in response:
+                    content = response["choices"][0].get("text", "")
+                elif not content and "result" in response and "choices" in response["result"]:
+                     content = response["result"]["choices"][0].get("text", "")
+
+                # Используем мощный парсер
+                data = parse_json_garbage(content)
+                
+                if data and (data.get("is_critical") or len(data.get("diff"," ")) > 5):
+                    results.append({
+                        "type": "MODIFIED",
+                        "is_critical": data.get("is_critical"),
+                        "diff": data.get("diff"),
+                        "impact": data.get("impact"),
+                        "old_text": old_txt, "new_text": new_txt
+                    })
+                else:
+                    # Если LLM не вернула полезного, но изменение есть - сохраняем как есть
+                    # Но только если это не пустой JSON
+                    pass 
+
+            except Exception as e:
+                print(f"Error analyzing chunk {i}: {e}")
+                results.append({
+                    "type": "MODIFIED",
+                    "is_critical": False, 
+                    "diff": "Ошибка анализа", 
+                    "impact": "Требуется ручной анализ",
+                    "old_text": old_txt, "new_text": new_txt
+                })
             
     return {"analysis_results": results}
 
@@ -175,7 +216,7 @@ async def generate_report_node(state: CompareState):
         if diff_type == 'MODIFIED':
             icon = "🔴 КРИТИЧНО" if r.get('is_critical') else "📝 ИЗМЕНЕНО"
             report += f"### {icon}\n"
-            report += f"**Суть:** {r.get('diff', r.get('type'))}\n"
+            report += f"**Суть:** {r.get('diff', 'Изменение текста')}\n"
             if r.get('impact'):
                 report += f"**Влияние:** {r.get('impact')}\n"
             report += f"> **Было:** {r.get('old_text', '')[:200]}...\n"
@@ -183,11 +224,11 @@ async def generate_report_node(state: CompareState):
             
         elif diff_type == 'ADDED':
             report += f"### ✅ ДОБАВЛЕНО\n"
-            report += f"> {r.get('new_text', '')[:200]}...\n\n"
+            report += f"> {r.get('content', '')[:200]}...\n\n"
             
         elif diff_type == 'DELETED':
             report += f"### ❌ УДАЛЕНО\n"
-            report += f"> {r.get('old_text', '')[:200]}...\n\n"
+            report += f"> {r.get('content', '')[:200]}...\n\n"
             
     # Сохранение в файл
     try:
@@ -198,7 +239,7 @@ async def generate_report_node(state: CompareState):
         if not os.path.exists(uploads_dir):
             os.makedirs(uploads_dir, exist_ok=True)
             
-        filename = f"Report_Compare_{int(time.time())}.md"
+        filename = f"Report_Compare_{{int(time.time())}}.md"
         filepath = os.path.join(uploads_dir, filename)
         
         with open(filepath, "w", encoding="utf-8") as f:

@@ -1,6 +1,6 @@
 """
 Agent API - Умный оркестратор на базе LangGraph.
-Поддерживает микросервисную архитектуру и OpenAI-совместимый API.
+Поддерживает микросервисную архитектуру, динамический список моделей и OpenAI-совместимый API.
 """
 
 import asyncio
@@ -36,7 +36,7 @@ try:
 except ImportError:
     def get_system_resources(): return {"error": "Resource monitor not found"}
 
-app = FastAPI(title="Agent Navigator Pro Orchestrator", version="2.0.0")
+app = FastAPI(title="Agent Navigator Pro Orchestrator", version="2.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -64,243 +64,235 @@ class ChatRequest(BaseModel):
 
 # === Workflow Dispatcher ===
 
-async def run_workflow_stream(session_id: str, query: str, attachments: List[FileAttachment]):
-    """Запускает нужный LangGraph в зависимости от контекста."""
+async def run_workflow_stream(session_id: str, query: str, attachments: List[FileAttachment], target_model: str = "agent-navigator"):
+    """Запускает нужный LangGraph или прямой инференс в зависимости от контекста и модели."""
     
-    # 1. Логика выбора воркфлоу
-    if len(attachments) >= 2 and any(kw in query.lower() for kw in ["сравни", "различия", "изменения"]):
-        workflow = create_compare_graph()
-        initial_state = {
-            "input_1": attachments[0].path,
-            "input_2": attachments[1].path,
-            "chunks_old": [], "chunks_new": [], "matches": [],
-            "analysis_results": [], "final_report": "", "errors": []
-        }
-        task_name = "Сравнение документов"
-    elif any(kw in query.lower() for kw in ["смета", "оборудование", "тз", "закупка"]):
-        workflow = create_equipment_graph()
-        # Пытаемся определить где ТЗ, а где Смета по имени файла
-        tz_path = next((a.path for a in attachments if "тз" in a.name.lower() or "req" in a.name.lower()), attachments[0].path if attachments else "")
-        smeta_path = next((a.path for a in attachments if "смет" in a.name.lower() or "offer" in a.name.lower()), attachments[1].path if len(attachments) > 1 else "")
-        
-        initial_state = {
-            "input_tz": tz_path,
-            "input_smeta": smeta_path,
-            "requirements": [], "offers": [], "matches": [],
-            "final_report": "", "errors": []
-        }
-        task_name = "Анализ оборудования"
-    else:
-        # Режим простого чата (General Chat), если не выбраны спец. навыки
-        yield {"type": "thought", "content": "Это общий запрос. Отвечаю как ассистент."}
+    # 1. Прямой доступ к модели (Direct Model Access)
+    if target_model != "agent-navigator":
+        yield {"type": "thought", "content": f"Использую прямую модель: {target_model}"}
         
         from services.model_manager.ums_client import ums_client
+        prompt = f"<|im_start|>user\n{query}\n<|im_end|>\n<|im_start|>assistant\n"
         
-        # Формируем контекст (историю пока не храним в этом MVP, только текущий запрос)
-        prompt = f"""<|im_start|>system
-Ты — полезный AI-ассистент Agent Navigator. Ты помогаешь пользователю, отвечаешь на вопросы и поддерживаешь диалог.
-Твои спец. навыки (сравнение документов, анализ смет) активируются автоматически при наличии файлов.
-Сейчас файлов нет, просто ответь пользователю.
-<|im_end|>
-<|im_start|>user
-{query}
-<|im_end|>
-<|im_start|>assistant
-"""
         try:
-            # Стримим ответ от Qwen через UMS
-            # Примечание: ums_client.infer сейчас не поддерживает стриминг генератором, 
-            # поэтому получим ответ целиком и отдадим как один чанк (для MVP).
-            response = ums_client.infer("qwen-14b-llm", {"prompt": prompt, "temperature": 0.7})
-            
-            # Умный парсинг ответа
-            content = ""
-            if isinstance(response, dict):
-                if "content" in response:
-                    content = response["content"]
-                elif "choices" in response and len(response["choices"]) > 0:
-                    choice = response["choices"][0]
-                    if isinstance(choice, dict):
-                        if "text" in choice:
-                            content = choice["text"]
-                        elif "message" in choice and "content" in choice["message"]:
-                            content = choice["message"]["content"]
-            elif isinstance(response, str):
-                content = response
-            
-            content = str(content).strip()
-            
-            if content:
-                yield {"type": "final_answer", "content": content}
-            else:
-                # Отладочная информация, если ответ пустой
-                yield {"type": "final_answer", "content": f"Извините, я получил пустой ответ от модели. Raw: {str(response)[:200]}"}
-                
+            response = ums_client.infer(target_model, {"prompt": prompt, "temperature": 0.7})
+            content = _extract_content(response)
+            yield {"type": "final_answer", "content": content}
         except Exception as e:
-            yield {"type": "error", "content": f"Ошибка генерации: {str(e)}"}
-        
+            yield {"type": "error", "content": f"Ошибка инференса {target_model}: {str(e)}"}
         return
 
-    yield {"type": "thought", "content": f"Запускаю процесс: {task_name}..."}
-
-    # 2. Выполнение графа
-    try:
-        # LangGraph invoke или stream
-        async for event in workflow.astream(initial_state):
-            # Извлекаем текущий узел и его результат
-            for node_name, output in event.items():
-                if "final_report" in output and output["final_report"]:
-                    yield {"type": "final_answer", "content": output["final_report"]}
-                elif "errors" in output and output["errors"]:
-                    yield {"type": "error", "content": "; ".join(output["errors"])}
-                else:
-                    yield {"type": "thought", "content": f"Завершено: {node_name}"}
-    except Exception as e:
-        yield {"type": "error", "content": f"Ошибка воркфлоу: {str(e)}"}
-
-# === API Endpoints ===
-
-@app.post("/agent/chat")
-async def start_chat(request: ChatRequest):
-    session_id = request.session_id or str(uuid.uuid4())
-    sessions[session_id] = {
-        "query": request.query,
-        "attachments": [a.model_dump() for a in request.attachments] if request.attachments else [],
-        "created_at": time.time()
-    }
-    return {"session_id": session_id, "status": "processing"}
-
-@app.get("/agent/stream/{session_id}")
-async def stream_agent_steps(session_id: str):
-    if session_id not in sessions: raise HTTPException(status_code=404)
-    session = sessions[session_id]
+    # 2. Логика АГЕНТА (agent-navigator) - Soft ReAct Router
+    query_lower = query.lower()
+    is_compare_intent = any(kw in query_lower for kw in ["сравни", "различия", "изменения"])
+    is_equipment_intent = any(kw in query_lower for kw in ["смета", "оборудование", "тз", "закупка"])
+    file_count = len(attachments)
     
-    async def event_generator():
-        yield f"data: {json.dumps({'type': 'start', 'session_id': session_id})}\n\n"
-        attachments = [FileAttachment(**a) for a in session.get("attachments", [])]
+    workflow = None
+    initial_state = {}
+    task_name = "Чат"
+    
+    # Сценарий A: 2+ файла и интент -> Графы (Compare или Equipment)
+    if file_count >= 2 and (is_compare_intent or is_equipment_intent):
+        active_attachments = attachments[:2]
         
-        async for step in run_workflow_stream(session_id, session["query"], attachments):
-            # Добавляем timestamp и id для совместимости с фронтендом
-            step["id"] = str(uuid.uuid4())
-            step["timestamp"] = time.time()
-            yield f"data: {json.dumps(step)}\n\n"
-            await asyncio.sleep(0.01)
-            
-        yield f"data: {json.dumps({'type': 'end', 'session_id': session_id})}\n\n"
-    
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+        if is_compare_intent:
+            workflow = create_compare_graph()
+            initial_state = {
+                "input_1": active_attachments[0].path, "input_2": active_attachments[1].path,
+                "chunks_old": [], "chunks_new": [], "matches": [],
+                "analysis_results": [], "final_report": "", "errors": []
+            }
+            task_name = "Сравнение документов"
+        elif is_equipment_intent:
+            workflow = create_equipment_graph()
+            tz_path = next((a.path for a in active_attachments if "тз" in a.name.lower() or "req" in a.name.lower()), active_attachments[0].path)
+            smeta_path = next((a.path for a in active_attachments if "смет" in a.name.lower() or "offer" in a.name.lower()), active_attachments[1].path)
+            initial_state = {
+                "input_tz": tz_path, "input_smeta": smeta_path,
+                "requirements": [], "offers": [], "matches": [],
+                "final_report": "", "errors": []
+            }
+            task_name = "Анализ оборудования"
 
-# === OpenAI Compatible API (for Open WebUI) ===
+    # Сценарий B: 1 файл и интент "Смета" -> Извлечение позиций через Map-Reduce
+    elif file_count == 1 and is_equipment_intent:
+        yield {"type": "thought", "content": "Вижу запрос на анализ сметы, но файл один. Извлекаю данные..."}
+        file_path = attachments[0].path
+        MCP_DOCUMENT_SERVER_URL = os.getenv("MCP_DOCUMENT_SERVER_URL", "http://localhost:8001")
+        
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            try:
+                resp = await client.post(f"{MCP_DOCUMENT_SERVER_URL}/load_document", json={"path": file_path})
+                if resp.status_code == 200:
+                    text = resp.json().get("text", "")
+                    chunk_size = 10000
+                    chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+                    all_items = []
+                    for i, chunk in enumerate(chunks):
+                        yield {"type": "thought", "content": f"Извлекаю позиции ({i+1}/{len(chunks)})..."}
+                        prompt = f"<|im_start|>system\nТы аналитик смет. Извлеки товары в формате JSON: [{{'item': '...', 'price': '...', 'qty': '...'}}]. Отвечай только JSON.\n<|im_end|>\n<|im_start|>user\n{chunk}\n<|im_end|>\n<|im_start|>assistant\n["
+                        from services.model_manager.ums_client import ums_client
+                        response = ums_client.infer("qwen-14b-llm", {"prompt": prompt, "temperature": 0.1})
+                        all_items.append(_extract_content(response))
+                    
+                    final_data = "".join(all_items)
+                    yield {"type": "final_answer", "content": f"**Данные извлечены из сметы:**\n\n{final_data}"}
+                    return
+            except Exception as e:
+                yield {"type": "error", "content": f"Ошибка анализа сметы: {e}"}
+                return
+
+    # Сценарий C: 1 файл и нет интента -> Глубокий анализ (Map-Reduce) / Vision
+    elif file_count == 1:
+        file_path = attachments[0].path
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext in ['.jpg', '.jpeg', '.png', '.webp']:
+            yield {"type": "final_answer", "content": f"Обнаружено изображение {os.path.basename(file_path)}. Vision-анализ в разработке."}
+            return
+
+        yield {"type": "thought", "content": "Запускаю глубокий анализ документа..."}
+        MCP_DOCUMENT_SERVER_URL = os.getenv("MCP_DOCUMENT_SERVER_URL", "http://localhost:8001")
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            try:
+                resp = await client.post(f"{MCP_DOCUMENT_SERVER_URL}/load_document", json={"path": file_path})
+                text = resp.json().get("text", "")
+                if not text:
+                    yield {"type": "final_answer", "content": "Не удалось извлечь текст из документа."}; return
+                
+                chunk_size = 8000
+                chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+                
+                if len(chunks) == 1:
+                    prompt = f"<|im_start|>system\nТы аналитик. Сделай подробное резюме документа.\n<|im_end|>\n<|im_start|>user\n{text}\n<|im_end|>\n<|im_start|>assistant\n"
+                    from services.model_manager.ums_client import ums_client
+                    response = ums_client.infer("qwen-14b-llm", {"prompt": prompt, "temperature": 0.3})
+                    yield {"type": "final_answer", "content": _extract_content(response)}
+                    return
+
+                summaries = []
+                for i, chunk in enumerate(chunks):
+                    yield {"type": "thought", "content": f"Анализ части {i+1}/{len(chunks)}..."}
+                    prompt = f"<|im_start|>system\nСделай подробный конспект фрагмента документа. Сохрани важные детали.\n<|im_end|>\n<|im_start|>user\n{chunk}\n<|im_end|>\n<|im_start|>assistant\n"
+                    from services.model_manager.ums_client import ums_client
+                    summaries.append(_extract_content(ums_client.infer("qwen-14b-llm", {"prompt": prompt, "temperature": 0.3})))
+                
+                yield {"type": "thought", "content": "Финализация общего отчета..."}
+                combined = "\n\n".join(summaries)
+                prompt = f"<|im_start|>system\nОбъедини эти конспекты в единый связный подробный отчет.\n<|im_end|>\n<|im_start|>user\n{combined}\n<|im_end|>\n<|im_start|>assistant\n"
+                from services.model_manager.ums_client import ums_client
+                yield {"type": "final_answer", "content": _extract_content(ums_client.infer("qwen-14b-llm", {"prompt": prompt, "temperature": 0.3}))}
+                return
+            except Exception as e:
+                yield {"type": "error", "content": f"Ошибка: {str(e)}"}; return
+
+    # Запуск графа (Compare/Equipment) или Чат
+    if workflow:
+        yield {"type": "thought", "content": f"Запускаю процесс: {task_name}..."}
+        try:
+            async for event in workflow.astream(initial_state):
+                for node_name, output in event.items():
+                    if "final_report" in output and output["final_report"]:
+                        yield {"type": "final_answer", "content": output["final_report"]}
+                    elif "errors" in output and output["errors"]:
+                        yield {"type": "error", "content": "; ".join(output["errors"])}
+                    else:
+                        yield {"type": "thought", "content": f"Завершено: {node_name}"}
+        except Exception as e: yield {"type": "error", "content": f"Ошибка графа: {e}"}
+    else:
+        from services.model_manager.ums_client import ums_client
+        prompt = f"<|im_start|>system\nТы помощник Agent Navigator. Помогай пользователю.\n<|im_end|>\n<|im_start|>user\n{query}\n<|im_end|>\n<|im_start|>assistant\n"
+        try:
+            response = ums_client.infer("qwen-14b-llm", {"prompt": prompt, "temperature": 0.7})
+            yield {"type": "final_answer", "content": _extract_content(response)}
+        except Exception as e: yield {"type": "error", "content": f"Ошибка генерации: {e}"}
+
+def _extract_content(response):
+    if isinstance(response, dict):
+        if "content" in response: return response["content"]
+        if "choices" in response and len(response["choices"]) > 0:
+            choice = response["choices"][0]
+            if isinstance(choice, dict):
+                return choice.get("text", "") or choice.get("message", {}).get("content", "")
+    return str(response).strip()
+
+# === OpenAI Compatible API ===
 
 @app.get("/v1/models")
-async def list_models():
-    """Эндпоинт для списка моделей (OpenAI compatible)."""
-    return {
-        "object": "list",
-        "data": [
-            {
-                "id": "agent-navigator",
-                "object": "model",
-                "created": int(time.time()),
-                "owned_by": "agent-navigator-pro"
-            }
-        ]
-    }
+def list_models():
+    """Возвращает динамический список доступных GGUF моделей."""
+    models = [{"id": "agent-navigator", "object": "model", "created": int(time.time()), "owned_by": "agent-navigator-pro"}]
+    try:
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        models_dir = os.path.join(base_dir, 'models', 'gguf')
+        if os.path.exists(models_dir):
+            for root, dirs, files in os.walk(models_dir):
+                for file in files:
+                    if file.endswith(".gguf"):
+                        mid = os.path.splitext(file)[0]
+                        models.append({"id": mid, "object": "model", "created": int(os.path.getctime(os.path.join(root, file))), "owned_by": "local-fs"})
+    except Exception as e: print(f"Error scanning models: {e}")
+    return {"object": "list", "data": models}
 
 @app.post("/v1/chat/completions")
 async def openai_completions(request: Request):
-    print(">>> NEW REQUEST (V2.1 - Chat Enabled) <<<")
+    print(">>> NEW REQUEST (V2.2 - Multi-Model) <<<")
     data = await request.json()
     messages = data.get("messages", [])
-    user_query = messages[-1].get("content", "") if messages else ""
+    target_model = data.get("model", "agent-navigator")
     
-    # В Open WebUI файлы могут приходить как URL или текст в контексте.
-    # Здесь мы будем парсить контекст для поиска путей к файлам.
+    # Парсинг текста запроса
+    user_query = ""
+    if messages:
+        content = messages[-1].get("content", "")
+        if isinstance(content, str): user_query = content
+        elif isinstance(content, list):
+            user_query = " ".join([p.get("text", "") for p in content if p.get("type") == "text"])
     
+    # Поиск файлов в папке uploads
     found_files = []
-    
     try:
-        # ПРАВИЛЬНЫЙ ПУТЬ к монтированной папке uploads
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        WEBUI_UPLOADS_PATH = os.path.join(base_dir, 'open_webui_uploads')
-        
-        # 1. Ищем файлы, которые были загружены недавно (или просто есть в папке)
-        if os.path.exists(WEBUI_UPLOADS_PATH):
-            recent_files = []
-            current_time = time.time()
-            for root, dirs, files in os.walk(WEBUI_UPLOADS_PATH):
-                for file in files:
-                    full_path = os.path.join(root, file)
-                    try:
-                        # Берем файлы, измененные за последние 10 минут (600 сек)
-                        if current_time - os.path.getmtime(full_path) < 600:
-                            recent_files.append(full_path)
-                    except OSError: pass
-            
-            recent_files.sort(key=os.path.getmtime, reverse=True)
-            for rf in recent_files:
-                found_files.append(FileAttachment(
-                    name=os.path.basename(rf),
-                    path=rf,
-                    size=os.path.getsize(rf),
-                    type="webui_upload"
-                ))
-    except Exception as e:
-        print(f"Error scanning WebUI uploads: {e}")
+        WEBUI_PATH = os.path.join(base_dir, 'open_webui_uploads')
+        if os.path.exists(WEBUI_PATH):
+            recent = []
+            now = time.time()
+            for root, _, files in os.walk(WEBUI_PATH):
+                for f in files:
+                    p = os.path.join(root, f)
+                    if now - os.path.getmtime(p) < 600 and not f.startswith("Report_"):
+                        recent.append(p)
+            recent.sort(key=os.path.getmtime, reverse=True)
+            for rf in recent:
+                found_files.append(FileAttachment(name=os.path.basename(rf), path=rf, size=os.path.getsize(rf), type="webui_upload") )
+    except Exception as e: print(f"Error scanning uploads: {e}")
 
-    # 2. Парсинг путей из текста (если пользователь указал путь явно)
+    # Парсинг путей из текста
     try:
         path_pattern = r'(?:/[\w\-. /]+|\bbackend/[\w\-. /]+)'
-        potential_paths = re.findall(path_pattern, user_query)
-        for p in potential_paths:
-            clean_path = p.strip()
-            if any(f.path == clean_path for f in found_files): continue
-            if "." in os.path.basename(clean_path) and os.path.exists(clean_path): 
-                 found_files.append(FileAttachment(
-                     name=os.path.basename(clean_path),
-                     path=clean_path, size=0, type="manual_path"
-                 ))
-    except Exception as e:
-        print(f"Error parsing paths: {e}")
+        matches = re.findall(path_pattern, user_query)
+        for m in matches:
+            cp = m.strip()
+            if cp and os.path.exists(cp) and not any(f.path == cp for f in found_files):
+                found_files.insert(0, FileAttachment(name=os.path.basename(cp), path=cp, size=0, type="manual"))
+    except: pass
 
     async def generate():
-        # Притворяемся OpenAI стримингом
-        start_chunk = {
-            "choices": [{
-                "delta": {"role": "assistant", "content": "Анализирую ваш запрос...\n\n"}
-            }]
-        }
-        yield "data: " + json.dumps(start_chunk) + "\n\n"
+        if target_model == "agent-navigator":
+            yield "data: " + json.dumps({"choices": [{"delta": {"role": "assistant", "content": "Анализирую ваш запрос...\n\n"}}]}) + "\n\n"
         
-        # Запускаем воркфлоу с найденными файлами
-        async for step in run_workflow_stream("openai-session", user_query, found_files):
-            if step["type"] == "thought":
-                content = "*[Thought: " + step["content"] + "]*\n"
-            elif step["type"] == "final_answer":
-                content = step["content"]
-            else:
-                content = "\n" + step["content"] + "\n"
-                
-            chunk = {
-                "choices": [{
-                    "delta": {"content": content},
-                    "finish_reason": None
-                }]
-            }
-            yield "data: " + json.dumps(chunk) + "\n\n"
+        async for step in run_workflow_stream("session", user_query, found_files, target_model):
+            txt = step.get("content", "")
+            if step["type"] == "thought" and target_model == "agent-navigator":
+                txt = f"*[Thought: {txt}]*\n"
             
+            if txt:
+                chunk = {"choices": [{"delta": {"content": txt}, "finish_reason": None}]}
+                yield "data: " + json.dumps(chunk) + "\n\n"
+        
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
-
-@app.get("/status")
-async def get_status():
-    resources = get_system_resources()
-    return {
-        "status": "online",
-        "active_workflows": ["compare", "equipment"],
-        "resources": resources
-    }
 
 if __name__ == "__main__":
     import uvicorn

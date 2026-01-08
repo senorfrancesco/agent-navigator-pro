@@ -13,7 +13,7 @@ dist-ssr
 *.local
 
 # Editor directories and files
-.vscode/*
+.vscode
 !.vscode/extensions.json
 .idea
 .DS_Store
@@ -22,3 +22,14 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+.pytest_cache
+
+for_cli/
+
+open_webui_uploads
+
+# Игнорируем все модели, но оставляем структуру и README
+gguf/*
+!gguf/README.md
+st/*
+!st/README.md
