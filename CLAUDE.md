@@ -31,8 +31,7 @@ activate_env.bat
 
 **Complete system startup (Linux/macOS):**
 ```bash
-cd backend
-./run_all.sh
+./scripts/run_all.sh
 ```
 
 This launches a tmux session named `agent-navigator` with 6 windows:
@@ -43,6 +42,16 @@ This launches a tmux session named `agent-navigator` with 6 windows:
 - `ums`: Unified Model Server (port 8090)
 - `monitor`: System monitoring (htop/top)
 
+**Stop all services:**
+```bash
+./scripts/stop_all.sh
+```
+
+**Restart all services:**
+```bash
+./scripts/restart_all.sh
+```
+
 **Windows startup:**
 ```cmd
 start_all_services.bat
@@ -51,11 +60,6 @@ start_all_services.bat
 **Attach to running tmux session:**
 ```bash
 tmux attach-session -t agent-navigator
-```
-
-**Stop all services:**
-```bash
-tmux kill-session -t agent-navigator
 ```
 
 ### Testing
@@ -281,6 +285,30 @@ netstat -ano | findstr :8000  # Windows
 - Verify uploads are in `backend/open_webui_uploads/`
 - Check file paths in attachments match actual filenames
 - Ensure Docker bind mount is correct in docker-compose.yaml
+
+## Recent Refactoring (v2.3.0)
+
+### Document Order Detection
+`agent_api.py::determine_document_order()` resolves which file is "old" vs "new" using 4-level priority:
+1. Explicit query markers: `[старый] file1`, `[новый] file2`
+2. Filename heuristics: `v1/v2`, `old/new`, dates, revision numbers
+3. Content date parsing: extracts dates from document text (first 1500 chars)
+4. Fallback: file mtime
+
+### Deduplication
+Open WebUI sends parallel duplicate requests. Mitigation:
+- Hash-based dedup key: `model:files_hash:query_hash` with 30s window
+- Report-level dedup in `generate_report_node`: checks existing reports for same file pair within 60s
+- Dedup key released only after workflow completes
+
+### Session Manager
+`sessions[session_id]` stores documents across requests:
+- Documents preloaded via Document Server on first attachment
+- On-demand context: included in LLM prompt only when query contains intent keywords (`"из документа"`, `"в файле"`, etc.)
+- Context limit: 48000 chars (~12000 tokens)
+
+### LLM Streaming
+`ums_client.async_infer_stream()` provides token-by-token SSE streaming for direct chat mode. Workflows still use batch `async_infer()` per node.
 
 ## Branch: refactor/middleware-agent
 

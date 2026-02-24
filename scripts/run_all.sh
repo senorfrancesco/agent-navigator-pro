@@ -8,9 +8,9 @@
 
 set -e
 
-BACKEND_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# PROJECT_ROOT - это родительская директория backend
-PROJECT_ROOT="$(dirname "$BACKEND_DIR")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+BACKEND_DIR="$PROJECT_ROOT/backend"
 ENV_FILE="$BACKEND_DIR/.env"
 
 # Цвета для вывода
@@ -197,5 +197,5 @@ echo -e "${GREEN}║${NC} (Это остановит и Docker контейне�
 echo -e "${GREEN}╚════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
-# Attach к сессии
-tmux attach-session -t "$SESSION_NAME"
+# Для подключения к сессии:
+# tmux attach-session -t agent-navigator

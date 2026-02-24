@@ -244,14 +244,15 @@ async def infer(request: InferRequest):
         payload = request.payload.copy()
         if request.stream: payload["stream"] = True
 
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            if request.stream:
-                async def gen():
-                    async with client.stream("POST", url, json=payload) as resp:
+        if request.stream:
+            async def gen():
+                async with httpx.AsyncClient(timeout=300.0) as stream_client:
+                    async with stream_client.stream("POST", url, json=payload) as resp:
                         async for line in resp.aiter_lines():
                             if line: yield f"{line}\n\n"
-                return StreamingResponse(gen(), media_type="text/event-stream")
-            else:
+            return StreamingResponse(gen(), media_type="text/event-stream")
+        else:
+            async with httpx.AsyncClient(timeout=300.0) as client:
                 resp = await client.post(url, json=payload)
                 return {"status": "success", "model": request.model_id, "result": resp.json()}
     except Exception as e:

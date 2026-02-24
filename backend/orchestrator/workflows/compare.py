@@ -46,6 +46,7 @@ class CompareState(TypedDict):
     analysis_results: List[Any]
     final_report: str
     errors: List[str]
+    session_id: str  # Привязка workflow к сессии (для дедупликации)
 
 # === Nodes ===
 
@@ -232,15 +233,16 @@ async def analyze_differences_node(state: CompareState):
 async def generate_report_node(state: CompareState):
     """Формирует финальный Markdown отчет и сохраняет его."""
     import time
-    
+    import glob as glob_mod
+
     report = "# Отчет о сравнении документов\n\n"
     report += f"**Дата:** {time.strftime('%Y-%m-%d %H:%M')}\n"
-    report += f"**Файлы:**\n- {os.path.basename(state['input_1'])}\n- {os.path.basename(state['input_2'])}\n\n"
+    report += f"**Файлы:**\n- Старая версия: {os.path.basename(state['input_1'])}\n- Новая версия: {os.path.basename(state['input_2'])}\n\n"
     report += f"**Найдено изменений:** {len(state['analysis_results'])}\n\n"
-    
+
     for r in state['analysis_results']:
         diff_type = r.get('type', 'MODIFIED')
-        
+
         if diff_type == 'MODIFIED':
             icon = "🔴 КРИТИЧНО" if r.get('is_critical') else "📝 ИЗМЕНЕНО"
             report += f"### {icon}\n"
@@ -249,36 +251,63 @@ async def generate_report_node(state: CompareState):
                 report += f"**Влияние:** {r.get('impact')}\n"
             report += f"> **Было:** {r.get('old_text', '')[:200]}...\n"
             report += f"> **Стало:** {r.get('new_text', '')[:200]}...\n\n"
-            
+
         elif diff_type == 'ADDED':
             report += f"### ✅ ДОБАВЛЕНО\n"
             report += f"> {r.get('content', '')[:200]}...\n\n"
-            
+
         elif diff_type == 'DELETED':
             report += f"### ❌ УДАЛЕНО\n"
             report += f"> {r.get('content', '')[:200]}...\n\n"
-            
-    # Сохранение в файл
+
+    # Сохранение в файл (с проверкой дубликатов — Задача 2)
     try:
-        # Определяем путь к папке загрузок (общая с Open WebUI)
         base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
         uploads_dir = os.path.join(base_dir, 'backend', 'open_webui_uploads')
-        
+
         if not os.path.exists(uploads_dir):
             os.makedirs(uploads_dir, exist_ok=True)
-            
+
+        # Проверяем, не создан ли уже отчёт для этой пары файлов за последние 60 сек
+        input_names = sorted([os.path.basename(state['input_1']), os.path.basename(state['input_2'])])
+        now = time.time()
+        current_count = len(state['analysis_results'])
+        existing_reports = glob_mod.glob(os.path.join(uploads_dir, "Report_Compare_*.md"))
+        for existing in existing_reports:
+            if now - os.path.getmtime(existing) < 60:
+                try:
+                    with open(existing, "r", encoding="utf-8") as ef:
+                        header = ef.read(500)
+                    # Если оба имени файлов есть в заголовке — это дубль
+                    if all(name in header for name in input_names):
+                        # Извлекаем количество изменений из существующего отчёта
+                        count_match = re.search(r'\*\*Найдено изменений:\*\*\s*(\d+)', header)
+                        existing_count = int(count_match.group(1)) if count_match else 0
+
+                        if current_count > existing_count:
+                            # Новый отчёт полнее — заменяем старый
+                            print(f"[Report] Replacing {os.path.basename(existing)} ({existing_count} -> {current_count} changes)")
+                            os.remove(existing)
+                            break
+                        else:
+                            # Старый отчёт не хуже — пропускаем
+                            print(f"[Report] Duplicate skipped ({current_count} <= {existing_count}): {existing}")
+                            report += f"\n---\n**Отчет уже сохранен:** `{os.path.basename(existing)}`"
+                            return {"final_report": report}
+                except Exception:
+                    pass
+
         filename = f"Report_Compare_{int(time.time())}.md"
         filepath = os.path.join(uploads_dir, filename)
-        
+
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(report)
-            
-        # Добавляем информацию о файле в конец отчета
+
         report += f"\n---\n**Отчет сохранен:** `{filename}`"
-        
+
     except Exception as e:
         report += f"\n---\n**Ошибка сохранения отчета:** {e}"
-        
+
     return {"final_report": report}
 
 # === Build Graph ===

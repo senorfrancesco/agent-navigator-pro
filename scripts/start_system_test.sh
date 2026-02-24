@@ -1,15 +1,18 @@
 #!/bin/bash
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+BACKEND_DIR="$PROJECT_ROOT/backend"
+
 # 1. Start Docker for Open WebUI
 echo "Starting Open WebUI via Docker..."
-docker compose up -d
+cd "$PROJECT_ROOT" && docker compose up -d
 
 # 2. Run backend services in tmux (using existing script logic but detached)
 echo "Starting Backend Services in tmux..."
 
 SESSION_NAME="agent-navigator"
-BACKEND_DIR="$(pwd)/backend"
 CONDA_ENV="diploma_llm" # Hardcoded for test safety, or derive from .env
 
 # Check/Kill existing session

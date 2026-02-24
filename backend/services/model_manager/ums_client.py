@@ -9,7 +9,7 @@ import os
 import time
 import requests
 import httpx
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, AsyncGenerator
 import json
 
 UMS_URL = os.getenv("UMS_URL", "http://localhost:8090")
@@ -93,7 +93,45 @@ class UMSClient:
                 if attempt < retries - 1:
                     await asyncio.sleep(2)
         raise RuntimeError(f"Failed to connect to UMS after {retries} attempts: {last_error}")
-    
+
+    async def async_infer_stream(self, model_id: str, payload: Dict[str, Any], device_mode: str = "hybrid") -> AsyncGenerator[str, None]:
+        """
+        Асинхронный стриминг инференса через UMS.
+        Возвращает токены по мере генерации (SSE от llama-server).
+        Используется для token-by-token стриминга в прямом чате.
+        """
+        url = f"{self.base_url}/infer"
+        request_body = {
+            "model_id": model_id,
+            "payload": payload,
+            "device_mode": device_mode,
+            "priority": "normal",
+            "stream": True
+        }
+        print(f"[UMS_CLIENT] Stream inference for model: {model_id}")
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            async with client.stream("POST", url, json=request_body) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    # UMS проксирует SSE от llama-server: "data: {...}"
+                    if line.startswith("data: "):
+                        data_str = line[6:]
+                        if data_str == "[DONE]":
+                            return
+                        try:
+                            chunk = json.loads(data_str)
+                            # llama-server completions format
+                            choices = chunk.get("choices", [])
+                            if choices:
+                                text = choices[0].get("text", "") or choices[0].get("delta", {}).get("content", "")
+                                if text:
+                                    yield text
+                        except json.JSONDecodeError:
+                            continue
+
     def switch_model(self, model_id: str, device_mode: str = "hybrid") -> Dict[str, Any]:
         """Переключает активную модель на UMS."""
         url = f"{self.base_url}/switch_model"
