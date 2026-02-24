@@ -33,6 +33,8 @@ except ImportError:
     sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
     from utils import parse_json_garbage
 
+BATCH_SIZE = 5  # Кол-во различий в одном LLM-вызове (batch analysis)
+
 # === State Definition ===
 
 class CompareState(TypedDict):
@@ -96,9 +98,12 @@ async def load_documents_node(state: CompareState):
                         if len(clean) > 40: chunks.append(clean)
                 return chunks
 
+            chunks_old = dc_smart_chunk(text1)
+            chunks_new = dc_smart_chunk(text2)
+            print(f"[Workflow] Chunks: old={len(chunks_old)}, new={len(chunks_new)}")
             return {
-                "chunks_old": dc_smart_chunk(text1),
-                "chunks_new": dc_smart_chunk(text2)
+                "chunks_old": chunks_old,
+                "chunks_new": chunks_new
             }
         except Exception as e:
             return {"errors": [f"Error loading docs: {str(e)}"]}
@@ -110,7 +115,7 @@ async def match_chunks_node(state: CompareState):
     if not state['chunks_old'] or not state['chunks_new']:
         return {"matches": []}
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=300.0) as client:
         try:
             # Вызываем новый батчевый эндпоинт
             resp = await client.post(f"{MCP_LEGAL_SERVER_URL}/match_batches", json={
@@ -120,85 +125,108 @@ async def match_chunks_node(state: CompareState):
             })
             resp.raise_for_status()
             data = resp.json()
-            
+
+            if data.get("status") == "error":
+                raise RuntimeError(data.get("error", "Unknown error from legal server"))
+
             # Фильтруем результаты (оставляем только измененные, удаленные или добавленные)
             all_matches = data.get("matches", [])
             diffs = [m for m in all_matches if m["type"] != "UNCHANGED"]
-            
+
             print(f"   - Найдено различий: {len(diffs)}")
             return {"matches": diffs}
         except Exception as e:
             print(f"Error in match_batches workflow: {e}")
-            return {"errors": [f"Matching failed: {str(e)}"]}
+            return {"matches": [], "errors": [f"Matching failed: {str(e)}"]}
 
 async def analyze_differences_node(state: CompareState):
-    """Анализирует найденные различия через LLM (UMS)."""
-    print(f"[Workflow] Analyzing {len(state['matches'])} differences")
-    
+    """Анализирует найденные различия через LLM (UMS) — batch по BATCH_SIZE штук за вызов."""
+    # Ранний выход если на предыдущем шаге была ошибка
+    if state.get('errors'):
+        print(f"[Workflow] Skipping analyze due to errors: {state['errors']}")
+        return {"analysis_results": []}
+
+    print(f"[Workflow] Analyzing {len(state['matches'])} differences (batch_size={BATCH_SIZE})")
+
     results = []
     critical_kw = ["обязан", "штраф", "срок", "рублей", "не вправе", "запрещено"]
-    
-    for i, m in enumerate(state['matches']):
-        m_type = m.get('type', 'MODIFIED')
-        old_txt = m.get('old_text', '')
-        new_txt = m.get('new_text', '')
-        
-        # Если это добавление или удаление - помечаем как структурное изменение
-        if m_type in ['ADDED', 'DELETED']:
-            content = new_txt if m_type == 'ADDED' else old_txt
-            results.append({
-                "type": m_type,
-                "diff": "Структурное изменение",
-                "content": content
-            })
-            continue
-            
-        # Фильтрация незначительных изменений
-        txt = (old_txt + new_txt).lower()
-        score = m.get('score', 0)
-        
-        # Анализируем только если низкий скор или есть ключевые слова
-        if score < 0.9 or any(k in txt for k in critical_kw):
-            prompt = dc_create_prompt(old_txt, new_txt)
-            
-            try:
-                # Используем параметры как в монолите
-                payload = {"prompt": prompt, "max_tokens": 300, "temperature": 0.1, "echo": False}
-                response = ums_client.infer("qwen-14b-llm", payload)
-                
-                # Извлекаем текст
-                content = response.get("content", "")
-                if not content and "choices" in response:
-                    content = response["choices"][0].get("text", "")
-                elif not content and "result" in response and "choices" in response["result"]:
-                     content = response["result"]["choices"][0].get("text", "")
 
-                # Используем мощный парсер
-                data = parse_json_garbage(content)
-                
-                if data and (data.get("is_critical") or len(data.get("diff"," ")) > 5):
+    # Разделяем на структурные (ADDED/DELETED) и требующие LLM анализа (MODIFIED)
+    structural = []
+    to_analyze = []
+    for m in state['matches']:
+        if m.get('type') in ['ADDED', 'DELETED']:
+            structural.append(m)
+        else:
+            txt = (m.get('old_text', '') + m.get('new_text', '')).lower()
+            score = m.get('similarity_score', m.get('score', 0))
+            if score < 0.9 or any(k in txt for k in critical_kw):
+                to_analyze.append(m)
+
+    # Структурные изменения без LLM
+    for m in structural:
+        content = m.get('new_text', '') if m.get('type') == 'ADDED' else m.get('old_text', '')
+        results.append({"type": m['type'], "diff": "Структурное изменение", "content": content})
+
+    print(f"[Workflow] Structural: {len(structural)}, needs LLM: {len(to_analyze)}")
+
+    # Batch LLM анализ: по BATCH_SIZE различий в одном промпте
+    total_batches = (len(to_analyze) + BATCH_SIZE - 1) // BATCH_SIZE if to_analyze else 0
+    for batch_idx, batch_start in enumerate(range(0, len(to_analyze), BATCH_SIZE)):
+        batch = to_analyze[batch_start:batch_start + BATCH_SIZE]
+        print(f"[Workflow] LLM batch {batch_idx+1}/{total_batches} ({len(batch)} diffs)")
+
+        items_text = ""
+        for idx, m in enumerate(batch):
+            items_text += f"\n[{idx+1}] СТАРЫЙ: {truncate_text(m.get('old_text',''), 800)}\n    НОВЫЙ: {truncate_text(m.get('new_text',''), 800)}\n"
+
+        prompt = f"""<|im_start|>system
+Ты эксперт-юрист. Проанализируй {len(batch)} изменений в документе.<|im_end|>
+<|im_start|>user
+Для каждого из {len(batch)} изменений определи юридическую суть.
+{items_text}
+Ответ — JSON массив из ровно {len(batch)} объектов:
+[{{"is_critical": true/false, "diff": "суть изменения", "impact": "последствия"}}]<|im_end|>
+<|im_start|>assistant
+"""
+        try:
+            payload = {"prompt": prompt, "max_tokens": 600, "temperature": 0.1, "echo": False}
+            response = await ums_client.async_infer("qwen-14b-llm", payload)
+
+            content = response.get("content", "")
+            if not content and "choices" in response:
+                content = response["choices"][0].get("text", "")
+            elif not content and "result" in response and "choices" in response.get("result", {}):
+                content = response["result"]["choices"][0].get("text", "")
+
+            parsed = parse_json_garbage(content)
+            if not isinstance(parsed, list):
+                parsed = [parsed] if isinstance(parsed, dict) else []
+
+            for idx, m in enumerate(batch):
+                item_data = parsed[idx] if idx < len(parsed) else {}
+                if item_data and (item_data.get("is_critical") or len(item_data.get("diff", " ")) > 5):
                     results.append({
                         "type": "MODIFIED",
-                        "is_critical": data.get("is_critical"),
-                        "diff": data.get("diff"),
-                        "impact": data.get("impact"),
-                        "old_text": old_txt, "new_text": new_txt
+                        "is_critical": item_data.get("is_critical"),
+                        "diff": item_data.get("diff"),
+                        "impact": item_data.get("impact"),
+                        "old_text": m.get('old_text', ''),
+                        "new_text": m.get('new_text', '')
                     })
-                else:
-                    # Если LLM не вернула полезного, но изменение есть - сохраняем как есть
-                    # Но только если это не пустой JSON
-                    pass 
 
-            except Exception as e:
-                print(f"Error analyzing chunk {i}: {e}")
+        except Exception as e:
+            print(f"[Workflow] Error in batch {batch_idx+1}: {e}")
+            for m in batch:
                 results.append({
                     "type": "MODIFIED",
-                    "is_critical": False, 
-                    "diff": "Ошибка анализа", 
+                    "is_critical": False,
+                    "diff": "Ошибка анализа",
                     "impact": "Требуется ручной анализ",
-                    "old_text": old_txt, "new_text": new_txt
+                    "old_text": m.get('old_text', ''),
+                    "new_text": m.get('new_text', '')
                 })
-            
+
     return {"analysis_results": results}
 
 async def generate_report_node(state: CompareState):
@@ -239,7 +267,7 @@ async def generate_report_node(state: CompareState):
         if not os.path.exists(uploads_dir):
             os.makedirs(uploads_dir, exist_ok=True)
             
-        filename = f"Report_Compare_{{int(time.time())}}.md"
+        filename = f"Report_Compare_{int(time.time())}.md"
         filepath = os.path.join(uploads_dir, filename)
         
         with open(filepath, "w", encoding="utf-8") as f:

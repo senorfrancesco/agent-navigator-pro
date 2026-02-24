@@ -64,12 +64,11 @@ async def extract_data_map_node(state: EquipmentState):
 Текст страницы:
 {page_text}"""
                 
-                res = ums_client.infer("qwen-14b-llm", {"prompt": prompt, "temperature": 0.1})
-                # Упрощенный парсинг (в реальности нужен regex для извлечения JSON блока)
+                res = await ums_client.async_infer("qwen-14b-llm", {"prompt": prompt, "temperature": 0.1})
                 try:
                     content = res.get("content", "[]")
                     # Ищем JSON блок
-                    json_match = re.search(r'[[.*]]', content, re.DOTALL)
+                    json_match = re.search(r'\[.*?\]', content, re.DOTALL)
                     if json_match:
                         items = json.loads(json_match.group())
                         all_requirements.extend(items)
@@ -95,7 +94,7 @@ async def extract_data_map_node(state: EquipmentState):
                 res = ums_client.infer("qwen-14b-llm", {"prompt": prompt, "temperature": 0.1})
                 try:
                     content = res.get("content", "[]")
-                    json_match = re.search(r'[[.*]]', content, re.DOTALL)
+                    json_match = re.search(r'\[.*?\]', content, re.DOTALL)
                     if json_match:
                         items = json.loads(json_match.group())
                         all_offers.extend(items)
@@ -125,11 +124,10 @@ async def match_and_evaluate_node(state: EquipmentState):
 Ответи JSON: {{"pass": true/false, "reason": "почему"}}"""
         
         try:
-            res_eval = ums_client.infer("qwen-14b-llm", {"prompt": prompt_eval, "temperature": 0.1})
-            # ИСПРАВЛЕНО: Безопасное получение контента с простым дефолтным JSON
-            content_str = res_eval.get("content", '{"pass": false}')
+            res = await ums_client.async_infer("qwen-14b-llm", {"prompt": prompt_eval, "temperature": 0.1})
+            content_str = res.get("content", '{"pass": false}')
             eval_data = json.loads(content_str)
-            
+
             matches.append({
                 "requirement": req,
                 "offer": state['offers'][0] if state['offers'] else None,

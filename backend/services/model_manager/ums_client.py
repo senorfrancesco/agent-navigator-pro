@@ -4,11 +4,15 @@ UMS Client - HTTP-клиент для взаимодействия с Unified Mo
 Все MCP-серверы используют этот клиент для выполнения инференса.
 """
 
+import asyncio
+import os
+import time
 import requests
+import httpx
 from typing import Dict, Any, Optional, List
 import json
 
-UMS_URL = "http://localhost:8090"
+UMS_URL = os.getenv("UMS_URL", "http://localhost:8090")
 
 class UMSClient:
     """HTTP-клиент для взаимодействия с UMS."""
@@ -37,20 +41,58 @@ class UMSClient:
             "priority": "normal"
         }
         
-        try:
-            print(f"[UMS_CLIENT] Sending inference request for model: {model_id}")
-            response = requests.post(url, json=request_body, timeout=300)
-            response.raise_for_status()
-            data = response.json()
-            
-            if data.get("status") == "success":
-                return data.get("result", {})
-            else:
-                raise RuntimeError(f"UMS returned error: {data}")
-        
-        except requests.exceptions.RequestException as e:
-            print(f"[UMS_CLIENT] Error: {e}")
-            raise RuntimeError(f"Failed to connect to UMS: {e}")
+        retries = 3
+        last_error = None
+        for attempt in range(retries):
+            try:
+                print(f"[UMS_CLIENT] Sending inference request for model: {model_id} (attempt {attempt+1})")
+                response = requests.post(url, json=request_body, timeout=300)
+                response.raise_for_status()
+                data = response.json()
+
+                if data.get("status") == "success":
+                    return data.get("result", {})
+                else:
+                    raise RuntimeError(f"UMS returned error: {data}")
+
+            except requests.exceptions.RequestException as e:
+                last_error = e
+                print(f"[UMS_CLIENT] Error (attempt {attempt+1}/{retries}): {e}")
+                if attempt < retries - 1:
+                    time.sleep(2)
+        raise RuntimeError(f"Failed to connect to UMS after {retries} attempts: {last_error}")
+
+    async def async_infer(self, model_id: str, payload: Dict[str, Any], device_mode: str = "hybrid") -> Dict[str, Any]:
+        """
+        Асинхронный инференс через UMS (использует httpx.AsyncClient).
+        Используется в async LangGraph нодах для избежания блокировки event loop.
+        """
+        url = f"{self.base_url}/infer"
+        request_body = {
+            "model_id": model_id,
+            "payload": payload,
+            "device_mode": device_mode,
+            "priority": "normal"
+        }
+        retries = 3
+        last_error = None
+        for attempt in range(retries):
+            try:
+                print(f"[UMS_CLIENT] Async inference for model: {model_id} (attempt {attempt+1})")
+                async with httpx.AsyncClient(timeout=300.0) as client:
+                    response = await client.post(url, json=request_body)
+                    response.raise_for_status()
+                    data = response.json()
+                    if data.get("status") == "success":
+                        return data.get("result", {})
+                    else:
+                        raise RuntimeError(f"UMS returned error: {data}")
+            except Exception as e:
+                last_error = e
+                print(f"[UMS_CLIENT] Async error (attempt {attempt+1}/{retries}): {e}")
+                if attempt < retries - 1:
+                    await asyncio.sleep(2)
+        raise RuntimeError(f"Failed to connect to UMS after {retries} attempts: {last_error}")
     
     def switch_model(self, model_id: str, device_mode: str = "hybrid") -> Dict[str, Any]:
         """Переключает активную модель на UMS."""

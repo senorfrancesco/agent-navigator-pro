@@ -47,6 +47,8 @@ app.add_middleware(
 )
 
 sessions: Dict[str, Dict[str, Any]] = {}
+# Дедупликация параллельных запросов от Open WebUI
+_active_workflows: Dict[str, float] = {}
 
 # === Pydantic Models ===
 
@@ -193,7 +195,11 @@ async def run_workflow_stream(session_id: str, query: str, attachments: List[Fil
             async for event in workflow.astream(initial_state):
                 for node_name, output in event.items():
                     if "final_report" in output and output["final_report"]:
-                        yield {"type": "final_answer", "content": output["final_report"]}
+                        # Стримим отчёт по абзацам, чтобы избежать "Chunk too big" в Open WebUI
+                        paragraphs = output["final_report"].split("\n\n")
+                        for para in paragraphs:
+                            if para.strip():
+                                yield {"type": "final_answer", "content": para + "\n\n"}
                     elif "errors" in output and output["errors"]:
                         yield {"type": "error", "content": "; ".join(output["errors"])}
                     else:
@@ -240,6 +246,21 @@ async def openai_completions(request: Request):
     data = await request.json()
     messages = data.get("messages", [])
     target_model = data.get("model", "agent-navigator")
+
+    # Дедупликация: Open WebUI иногда шлёт 2 одинаковых запроса за ~1 сек.
+    # Если уже идёт workflow для той же пары (модель + последнее сообщение), отклоняем дублёр.
+    dedup_key = f"{target_model}:{messages[-1].get('content', '') if messages else ''}"
+    now_ts = time.time()
+    if dedup_key in _active_workflows and now_ts - _active_workflows[dedup_key] < 5.0:
+        print(f"[DEDUP] Duplicate request detected, dropping: {dedup_key[:60]}")
+        async def _empty():
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(_empty(), media_type="text/event-stream")
+    _active_workflows[dedup_key] = now_ts
+    # Чистим устаревшие ключи (старше 10 мин)
+    for k in list(_active_workflows.keys()):
+        if now_ts - _active_workflows[k] > 600:
+            del _active_workflows[k]
     
     # Парсинг текста запроса
     user_query = ""

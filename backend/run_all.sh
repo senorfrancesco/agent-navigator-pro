@@ -131,8 +131,8 @@ WEBUI_PORT=3000
 # Запуск сервисов
 # -------------------------------------------
 
-# Окно 0: webui (Docker)
-tmux rename-window -t "$SESSION_NAME:0" "webui"
+# Окно 1: webui (Docker)
+tmux rename-window -t "$SESSION_NAME" "webui"
 echo -e "${GREEN}Запуск Open WebUI (Docker) на порту $WEBUI_PORT...${NC}"
 # Используем -d и --force-recreate для чистого запуска, затем стримим логи
 tmux send-keys -t "$SESSION_NAME:webui" "cd $PROJECT_ROOT && docker compose up -d --force-recreate && docker compose logs -f" Enter

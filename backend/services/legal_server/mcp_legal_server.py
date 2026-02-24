@@ -17,6 +17,8 @@ from typing import List, Dict, Any, Optional
 import json
 import sys
 import os
+import numpy as np
+from scipy.optimize import linear_sum_assignment
 
 # Добавляем путь к model_manager
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'model_manager'))
@@ -180,52 +182,58 @@ async def match_batches(request: MatchBatchesRequest):
                     all_embeddings.extend([[0.0]*768] * len(batch))
             return all_embeddings
 
-        embs_old = get_batch_embeddings(request.list_old)
-        embs_new = get_batch_embeddings(request.list_new)
-        
-        if not embs_old or not embs_new:
+        embs_old = np.array(get_batch_embeddings(request.list_old))
+        embs_new = np.array(get_batch_embeddings(request.list_new))
+
+        if embs_old.size == 0 or embs_new.size == 0:
             raise ValueError("Failed to get embeddings from UMS")
 
-        # 2. Вычисляем сходство и сопоставляем (Greedy approach для скорости)
+        # Строим полную матрицу косинусного сходства (как в монолите)
+        # norm → dot product = cosine similarity
+        norms_old = np.linalg.norm(embs_old, axis=1, keepdims=True)
+        norms_new = np.linalg.norm(embs_new, axis=1, keepdims=True)
+        embs_old_n = embs_old / np.maximum(norms_old, 1e-10)
+        embs_new_n = embs_new / np.maximum(norms_new, 1e-10)
+        scores = embs_old_n @ embs_new_n.T  # shape: (N_old, N_new)
+
+        # Венгерский алгоритм — глобально оптимальное сопоставление
+        row_ind, col_ind = linear_sum_assignment(1 - scores)
+
         matches = []
         matched_new_indices = set()
-        
-        # Статистика для отладки
         stats = {"UNCHANGED": 0, "MODIFIED": 0, "DELETED": 0, "ADDED": 0}
-        
-        for i, v_old in enumerate(embs_old):
-            best_score = -1.0
-            best_idx = -1
-            
-            for j, v_new in enumerate(embs_new):
-                if j in matched_new_indices: continue
-                
-                score = _cosine_similarity(v_old, v_new)
-                if score > best_score:
-                    best_score = score
-                    best_idx = j
-            
-            # Порог сходства
-            if best_idx != -1 and best_score >= request.threshold:
-                match_type = "MODIFIED" if best_score < 0.99 else "UNCHANGED"
+
+        for r, c in zip(row_ind, col_ind):
+            s = float(scores[r, c])
+            if s >= 0.99:
+                # Идентичные чанки — не репортим как изменение
                 matches.append({
-                    "type": match_type,
-                    "old_text": request.list_old[i],
-                    "new_text": request.list_new[best_idx],
-                    "similarity_score": best_score
+                    "type": "UNCHANGED",
+                    "old_text": request.list_old[r],
+                    "new_text": request.list_new[c],
+                    "similarity_score": s
                 })
-                matched_new_indices.add(best_idx)
-                stats[match_type] += 1
+                matched_new_indices.add(c)
+                stats["UNCHANGED"] += 1
+            elif s >= request.threshold:
+                matches.append({
+                    "type": "MODIFIED",
+                    "old_text": request.list_old[r],
+                    "new_text": request.list_new[c],
+                    "similarity_score": s
+                })
+                matched_new_indices.add(c)
+                stats["MODIFIED"] += 1
             else:
                 matches.append({
                     "type": "DELETED",
-                    "old_text": request.list_old[i],
+                    "old_text": request.list_old[r],
                     "new_text": None,
                     "similarity_score": 0.0
                 })
                 stats["DELETED"] += 1
-        
-        # Добавляем новые чанки, которые не нашли пару
+
+        # Чанки из нового документа без пары — добавленные
         for j, text in enumerate(request.list_new):
             if j not in matched_new_indices:
                 matches.append({
