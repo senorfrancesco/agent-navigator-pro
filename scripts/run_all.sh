@@ -109,6 +109,19 @@ if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
     tmux kill-session -t "$SESSION_NAME"
 fi
 
+# Явное завершение llama-server (остаётся в памяти после закрытия tmux)
+LLAMA_PIDS=$(pgrep -f "llama-server" 2>/dev/null)
+if [ -n "$LLAMA_PIDS" ]; then
+    echo -e "${YELLOW}Завершение llama-server перед запуском (PID: $LLAMA_PIDS)...${NC}"
+    echo "$LLAMA_PIDS" | xargs kill 2>/dev/null
+    sleep 1
+    LLAMA_PIDS=$(pgrep -f "llama-server" 2>/dev/null)
+    if [ -n "$LLAMA_PIDS" ]; then
+        echo "$LLAMA_PIDS" | xargs kill -9 2>/dev/null
+    fi
+    echo -e "${GREEN}  llama-server завершён${NC}"
+fi
+
 tmux new-session -d -s "$SESSION_NAME" -x 200 -y 50
 
 # Команда активации для tmux окон

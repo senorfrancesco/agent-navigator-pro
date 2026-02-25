@@ -45,7 +45,25 @@ else
 fi
 
 # -------------------------------------------
-# 3. Подчистка зависших процессов (если tmux не убил)
+# 3. Явное завершение llama-server (остаётся в памяти после закрытия tmux)
+# -------------------------------------------
+LLAMA_PIDS=$(pgrep -f "llama-server" 2>/dev/null)
+if [ -n "$LLAMA_PIDS" ]; then
+    echo -e "${YELLOW}Завершение llama-server (PID: $LLAMA_PIDS)...${NC}"
+    echo "$LLAMA_PIDS" | xargs kill 2>/dev/null
+    sleep 1
+    # SIGKILL если не завершился
+    LLAMA_PIDS=$(pgrep -f "llama-server" 2>/dev/null)
+    if [ -n "$LLAMA_PIDS" ]; then
+        echo "$LLAMA_PIDS" | xargs kill -9 2>/dev/null
+    fi
+    echo -e "${GREEN}  llama-server завершён${NC}"
+else
+    echo -e "${BLUE}  llama-server не запущен${NC}"
+fi
+
+# -------------------------------------------
+# 4. Подчистка зависших процессов (если tmux не убил)
 # -------------------------------------------
 PORTS=(8000 8001 8002 8090)
 PORT_NAMES=("Agent API" "Document Server" "Legal Server" "UMS")
