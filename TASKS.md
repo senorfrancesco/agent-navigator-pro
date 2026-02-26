@@ -1,36 +1,98 @@
 # TASKS - Agent Navigator Pro
 
-## v3.0 — Интеграция Open WebUI + RAG + Роутинг
+## v3.0 — Hardware-Adaptive Agentic System + Chainlit (2026-02-26)
 
-### В работе
+### Фаза 0 — Критические фиксы
 
-- [ ] **T3.1 — Фикс роутинга follow-up запросов**
-  Файлы, уже загруженные в сессию, не должны считаться новыми для роутинга.
-  Сейчас Open WebUI пересылает все attachments на каждый запрос → роутер повторно запускает workflow.
-  Решение: сравнивать attachments с `session["documents"]`, считать `file_count` только для новых файлов.
+- [x] **T3.0.1 — Багфикс MAX_CONTEXT_CHARS**
+  `agent_api.py:279`: 48000 → 16000. Текущее значение переполняет контекст Qwen-14B (8192 токенов).
 
-- [ ] **T3.2 — Передача истории диалога (messages[]) в промпт LLM**
-  Open WebUI отправляет полный массив `messages[]`, но agent_api берёт только последний `user` message.
-  Нужно формировать multi-turn промпт из всех messages → LLM понимает контекст ("приведи любую" после обсуждения статей).
+- [x] **T3.0.2 — Создать ветку feature/v3.0-agentic-system**
 
-- [ ] **T3.3 — Подключить LaBSE как движок эмбеддингов Open WebUI**
-  Добавить OpenAI-compatible `/v1/embeddings` эндпоинт в UMS/agent_api.
-  Настроить docker-compose: `RAG_EMBEDDING_ENGINE=openai`, `RAG_OPENAI_API_BASE_URL=http://host.docker.internal:8090`.
-  LaBSE лучше для русского текста, чем дефолтный MiniLM.
+### Фаза 1 — Фундамент
 
-- [ ] **T3.4 — Убрать дублирование RAG-логики из agent_api**
-  Удалить самодельный context stuffing (`_should_include_doc_context`, `_build_doc_context`, `DOC_CONTEXT_KEYWORDS`).
-  Open WebUI RAG сам подставляет релевантные чанки в промпт до отправки в agent_api.
-  В agent_api оставить только роутинг на workflows (compare/equipment).
+- [x] **T3.1 — Фикс follow-up роутинга (new_file_count)**
+  `agent_api.py:367`: `new_file_count` вместо `file_count` — считать только новые файлы.
+  Тест: загрузить файл → follow-up → workflow НЕ перезапускается.
 
-- [ ] **T3.5 — Верификация: тестирование полной интеграции Open WebUI + LaBSE RAG**
-  Проверить: загрузка файлов → RAG с LaBSE → цитирование → follow-up вопросы → workflows.
+- [x] **T3.2 — Multi-turn промпт из messages[]**
+  `agent_api.py`: `_build_multiturn_prompt()` — ChatML из messages[] с обрезкой до 10 сообщений.
+  Тест: "Меня зовут Иван" → "Как меня зовут?" → LLM отвечает "Иван".
+
+- [x] **T3.3 — /v1/embeddings в UMS**
+  Добавить OpenAI-compatible эндпоинт для LaBSE в `unified_model_server.py`.
+  Тест: `curl POST /v1/embeddings` → вектор размерности 768.
+
+### Фаза 2 — Hardware Profiler
+
+- [x] **T3.4 — HardwareProfiler (GPU/CPU/RAM detection)**
+  Новый модуль `backend/services/hardware/profiler.py`.
+  pynvml (primary), torch.cuda (fallback), psutil для CPU/RAM.
+  Тест: `test_hardware_profiler.py` — определяет GPU, CPU cores, AVX2, RAM.
+
+- [x] **T3.5 — TierSelector (Profile → TierConfig)**
+  `backend/services/hardware/tier_selector.py` — маппинг железа на tier 1-4.
+  VRAM budgeting: model_layers + kv_cache + overhead.
+  Тест: `test_tier_selector.py` — разные SystemProfile → правильный tier.
+
+- [x] **T3.6 — VRAM Calculator**
+  `backend/services/hardware/vram_calculator.py` — расчёт gpu_layers, ctx_size.
+  Тест: Qwen-14B Q4 + 8GB VRAM → partial; 16GB → -1 (all).
+
+- [x] **T3.7 — Интеграция в UMS lifespan**
+  `unified_model_server.py` → при старте: detect → select tier → load model.
+  Override через .env: `TIER_OVERRIDE`, `N_GPU_LAYERS_OVERRIDE`.
+
+### Фаза 3 — Adaptive RAG Pipeline
+
+- [ ] **T3.8 — LaBSE ONNX INT8 export**
+  Экспорт LaBSE в ONNX + INT8 квантизация для CPU.
+  Тест: `test_onnx_embeddings.py` — скорость ONNX vs PyTorch, точность <0.01 delta.
+
+- [x] **T3.9 — BM25 + Hybrid Search (RRF)**
+  `backend/orchestrator/rag/retriever.py` — BM25 для русского + dense LaBSE + RRF fusion.
+  Тест: `test_hybrid_search.py` — русский юр. текст, RRF > чистый dense.
+
+- [x] **T3.10 — EmbeddingIntentClassifier**
+  `backend/orchestrator/rag/classifier.py` — 5 интентов, centroid-based, без LLM.
+  Тест: `test_intent_classifier.py` — accuracy >85% на 50+ тестовых запросах.
+
+- [x] **T3.11 — AdaptiveRAGPipeline (tiered)**
+  `backend/orchestrator/rag/pipeline.py` — simple/corrective/agentic/multi-agent.
+  Тест: Tier 1 = 0 LLM-вызовов сверх генерации; Tier 2 = 1 classify.
+
+- [x] **T3.12 — Legal Document Chunker**
+  `backend/orchestrator/rag/chunker.py` — section-aware, overlap, sentence-boundary.
+  Тест: `test_chunker.py` — не разрезает внутри нумерованных пунктов.
+
+### Фаза 4 — Chainlit UI
+
+- [x] **T3.13 — Chainlit PoC: базовый чат + стриминг**
+  `backend/orchestrator/chainlit_app.py` — замена Open WebUI.
+  Тест: `chainlit run` → стриминг чата с UMS.
+
+- [ ] **T3.14 — Chainlit: workflows + cl.Step() (детализация)**
+  Compare/Equipment workflows обёрнуты в `cl.Step` для визуализации.
+  Тест: загрузить 2 файла + "сравни" → видны 4 шага с прогрессом.
+
+- [ ] **T3.15 — Chainlit: Docker + auth + history**
+  Dockerfile.chainlit, docker-compose замена Open WebUI.
+  Тест: Docker → http://localhost:3000 → auth → chat → history.
+
+### Фаза 5 — RAG Cleanup
+
+- [ ] **T3.16 — Удалить naive RAG из agent_api**
+  Убрать: `DOC_CONTEXT_KEYWORDS`, `_should_include_doc_context()`, `_build_doc_context()`.
+  Заменить на вызов AdaptiveRAGPipeline.
 
 ### Backlog
 
 - [ ] Vision-анализ изображений (Qwen-VL интеграция)
-- [ ] Мониторинг и алерты для микросервисов
+- [ ] LLM-based Intent Classification (замена keyword routing, Tier 3+)
+- [ ] Agentic RAG as LangGraph Tool (RetrieveNode внутри workflows)
+- [ ] VRAM Monitor + OOM recovery + dynamic fallback
 - [ ] Пул портов для динамических моделей в UMS
+- [ ] Мониторинг (Prometheus + Grafana)
 
 ## v2.3.1 — Багфиксы (2026-02-25)
 

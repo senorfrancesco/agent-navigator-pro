@@ -1,0 +1,309 @@
+"""
+AdaptiveRAGPipeline — tiered RAG pipeline, адаптирующийся к железу.
+
+Tier 1 (Simple): BM25+Dense → RRF → top-5 → Generate (0 доп. LLM-вызовов)
+Tier 2 (Corrective): IntentClassifier → Hybrid Search → Z-score grade → Generate
+Tier 3 (Agentic): LLM-router → search/grade/reformulate tools (ReAct loop)
+Tier 4 (Multi-Agent): Decompose → Parallel Agentic RAG → Synthesize
+"""
+
+import logging
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional
+
+from .retriever import HybridRetriever, RetrievalResult
+from .classifier import EmbeddingIntentClassifier
+from .chunker import LegalDocumentChunker, Chunk
+
+logger = logging.getLogger("RAG")
+
+
+@dataclass
+class RAGResult:
+    """Результат RAG pipeline."""
+    chunks: List[RetrievalResult]
+    intent: Optional[Dict[str, Any]] = None
+    needs_generation: bool = True
+    context_text: str = ""
+    metadata: Dict[str, Any] = None
+
+    def __post_init__(self):
+        if self.metadata is None:
+            self.metadata = {}
+
+
+class AdaptiveRAGPipeline:
+    """
+    Tiered RAG Pipeline — автоматически выбирает стратегию по tier.
+
+    Usage:
+        pipeline = AdaptiveRAGPipeline(embed_fn=my_embed, rag_mode="corrective")
+        pipeline.index_documents(["doc1 text", "doc2 text"])
+        result = pipeline.retrieve("Какие условия договора?")
+        # result.chunks — найденные чанки
+        # result.context_text — готовый контекст для LLM
+    """
+
+    def __init__(
+        self,
+        embed_fn: Optional[Callable] = None,
+        rag_mode: str = "simple",
+        top_k: int = 5,
+        use_bm25: bool = True,
+        z_score_threshold: float = -0.5,
+        max_context_chars: int = 16000,
+    ):
+        """
+        Args:
+            embed_fn: Функция embeddings (List[str]) -> np.ndarray
+            rag_mode: "simple" | "corrective" | "agentic" | "multi-agent"
+            top_k: Количество чанков для retrieval
+            use_bm25: Использовать BM25 в hybrid search
+            z_score_threshold: Порог Z-score для grading (ниже = poor)
+            max_context_chars: Максимум символов контекста для LLM
+        """
+        self.embed_fn = embed_fn
+        self.rag_mode = rag_mode
+        self.top_k = top_k
+        self.z_score_threshold = z_score_threshold
+        self.max_context_chars = max_context_chars
+
+        self.retriever = HybridRetriever(
+            embed_fn=embed_fn,
+            use_bm25=use_bm25,
+        )
+        self.classifier = EmbeddingIntentClassifier(embed_fn=embed_fn)
+        self.chunker = LegalDocumentChunker()
+
+        self._classifier_initialized = False
+        self._indexed = False
+
+    def index_documents(
+        self,
+        documents: List[str],
+        chunk: bool = True,
+        doc_names: Optional[List[str]] = None,
+    ) -> List[Chunk]:
+        """
+        Индексирует документы для поиска.
+
+        Args:
+            documents: Список текстов документов
+            chunk: Разбивать на чанки (True) или использовать как есть (False)
+            doc_names: Имена документов для метаданных
+
+        Returns:
+            Список чанков (если chunk=True)
+        """
+        all_chunks = []
+
+        if chunk:
+            for i, doc_text in enumerate(documents):
+                name = doc_names[i] if doc_names and i < len(doc_names) else f"doc_{i}"
+                chunks = self.chunker.chunk(doc_text, doc_name=name)
+                all_chunks.extend(chunks)
+            texts = [c.text for c in all_chunks]
+        else:
+            texts = documents
+            all_chunks = [
+                Chunk(text=t, index=i, start_char=0, end_char=len(t))
+                for i, t in enumerate(texts)
+            ]
+
+        self.retriever.index(texts)
+        self._indexed = True
+
+        # Инициализируем classifier если ещё не готов
+        if self.embed_fn and not self._classifier_initialized:
+            try:
+                self.classifier.initialize()
+                self._classifier_initialized = True
+            except Exception as e:
+                logger.warning(f"Classifier init failed: {e}")
+
+        self._chunks = all_chunks
+        return all_chunks
+
+    def retrieve(
+        self,
+        query: str,
+        top_k: Optional[int] = None,
+    ) -> RAGResult:
+        """
+        Выполняет retrieval по выбранной стратегии.
+
+        Args:
+            query: Запрос пользователя
+            top_k: Override количества результатов
+
+        Returns:
+            RAGResult с найденными чанками и метаданными
+        """
+        k = top_k or self.top_k
+
+        if self.rag_mode == "simple":
+            return self._retrieve_simple(query, k)
+        elif self.rag_mode == "corrective":
+            return self._retrieve_corrective(query, k)
+        elif self.rag_mode == "agentic":
+            return self._retrieve_agentic(query, k)
+        else:
+            # multi-agent fallback to agentic
+            return self._retrieve_agentic(query, k)
+
+    def _retrieve_simple(self, query: str, top_k: int) -> RAGResult:
+        """
+        Tier 1 — Simple RAG.
+        BM25+Dense → RRF → top-K → контекст.
+        0 дополнительных LLM-вызовов.
+        """
+        if not self._indexed:
+            return RAGResult(chunks=[], needs_generation=True, metadata={"mode": "simple", "error": "not_indexed"})
+
+        results = self.retriever.search(query, top_k=top_k)
+        context = self._build_context(results)
+
+        return RAGResult(
+            chunks=results,
+            needs_generation=True,
+            context_text=context,
+            metadata={"mode": "simple", "chunks_found": len(results)},
+        )
+
+    def _retrieve_corrective(self, query: str, top_k: int) -> RAGResult:
+        """
+        Tier 2 — Corrective RAG.
+        1. EmbeddingIntentClassifier (~5ms) → нужен ли RAG?
+        2. Если нет → direct generate
+        3. Если да → BM25+Dense → Z-score grading → [score > threshold?]
+           - ДА → generate с контекстом
+           - НЕТ → Rocchio expansion → re-retrieve → generate
+        """
+        # Classify intent
+        intent = None
+        if self._classifier_initialized:
+            intent = self.classifier.classify(query)
+            if not intent.get("needs_rag", True):
+                return RAGResult(
+                    chunks=[],
+                    intent=intent,
+                    needs_generation=True,
+                    context_text="",
+                    metadata={"mode": "corrective", "skipped_rag": True, "intent": intent["intent"]},
+                )
+
+        if not self._indexed:
+            return RAGResult(chunks=[], intent=intent, needs_generation=True, metadata={"mode": "corrective", "error": "not_indexed"})
+
+        # Hybrid search
+        results = self.retriever.search(query, top_k=top_k)
+
+        # Z-score grading
+        results = self.retriever.grade_results(results)
+
+        # Проверяем качество
+        good_results = [r for r in results if r.metadata.get("z_score", 0) > self.z_score_threshold]
+
+        if good_results:
+            context = self._build_context(good_results)
+            return RAGResult(
+                chunks=good_results,
+                intent=intent,
+                needs_generation=True,
+                context_text=context,
+                metadata={"mode": "corrective", "quality": "good", "chunks_found": len(good_results)},
+            )
+
+        # Rocchio expansion
+        expanded_results = self.retriever.rocchio_expand(query, results[:3], top_k=top_k)
+        context = self._build_context(expanded_results)
+
+        return RAGResult(
+            chunks=expanded_results,
+            intent=intent,
+            needs_generation=True,
+            context_text=context,
+            metadata={"mode": "corrective", "quality": "expanded", "chunks_found": len(expanded_results)},
+        )
+
+    def _retrieve_agentic(self, query: str, top_k: int) -> RAGResult:
+        """
+        Tier 3 — Agentic RAG.
+        LLM-router решает, нужен ли поиск.
+        Итеративный поиск с grading и reformulation (до 3 итераций).
+
+        Примечание: полный agentic loop с LLM reformulation
+        реализуется через LangGraph tools. Здесь — упрощённая версия
+        с embedding-based reformulation.
+        """
+        # Classify
+        intent = None
+        if self._classifier_initialized:
+            intent = self.classifier.classify(query)
+
+        if not self._indexed:
+            return RAGResult(chunks=[], intent=intent, needs_generation=True, metadata={"mode": "agentic", "error": "not_indexed"})
+
+        max_iterations = 3
+        all_results = []
+
+        for iteration in range(max_iterations):
+            results = self.retriever.search(query, top_k=top_k)
+            results = self.retriever.grade_results(results)
+
+            good = [r for r in results if r.metadata.get("grade") in ("excellent", "good")]
+
+            if good:
+                all_results = good
+                break
+
+            # Rocchio expansion для следующей итерации
+            if iteration < max_iterations - 1:
+                expanded = self.retriever.rocchio_expand(query, results[:3], top_k=top_k)
+                if expanded and expanded[0].score > (results[0].score if results else 0):
+                    all_results = expanded
+                    break
+                # Используем expanded results как fallback
+                all_results = expanded if expanded else results
+            else:
+                all_results = results
+
+        context = self._build_context(all_results)
+
+        return RAGResult(
+            chunks=all_results,
+            intent=intent,
+            needs_generation=True,
+            context_text=context,
+            metadata={
+                "mode": "agentic",
+                "iterations": iteration + 1,
+                "chunks_found": len(all_results),
+            },
+        )
+
+    def _build_context(self, results: List[RetrievalResult]) -> str:
+        """Собирает контекст из результатов поиска с учётом лимита."""
+        if not results:
+            return ""
+
+        parts = []
+        total = 0
+        for i, r in enumerate(results):
+            text = r.text.strip()
+            if total + len(text) > self.max_context_chars:
+                remaining = self.max_context_chars - total
+                if remaining > 100:
+                    text = text[:remaining] + "..."
+                else:
+                    break
+            parts.append(f"[Чанк {i+1}] {text}")
+            total += len(text)
+
+        return "\n\n".join(parts)
+
+    def classify_intent(self, query: str) -> Optional[Dict[str, Any]]:
+        """Классифицирует интент запроса (без retrieval)."""
+        if self._classifier_initialized:
+            return self.classifier.classify(query)
+        return None

@@ -224,12 +224,42 @@ class InferRequest(BaseModel):
     device_mode: Optional[DeviceMode] = DeviceMode.HYBRID
     stream: bool = False
 
+class EmbeddingRequest(BaseModel):
+    """OpenAI-compatible /v1/embeddings request."""
+    input: Any  # str | List[str]
+    model: str = "labse-embedding"
+    encoding_format: Optional[str] = "float"
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # T3.7: Hardware profiling при старте
+    try:
+        sys.path.insert(0, str(BACKEND_ROOT))
+        from services.hardware import HardwareProfiler, TierSelector
+        profiler = HardwareProfiler()
+        profile = profiler.detect()
+        selector = TierSelector()
+        tier_config = selector.select(profile)
+        state["system_profile"] = profile
+        state["tier_config"] = tier_config
+        logger.info(f"Hardware detected:\n{profile}")
+        logger.info(f"Selected: {tier_config}")
+
+        # Обновляем конфиг модели из tier_config
+        if "qwen-14b-llm" in STATIC_MODELS_CONFIG:
+            STATIC_MODELS_CONFIG["qwen-14b-llm"]["ctx_size"] = tier_config.llm_ctx_size
+            if tier_config.llm_gpu_layers != -1:
+                STATIC_MODELS_CONFIG["qwen-14b-llm"]["gpu_layers"] = tier_config.llm_gpu_layers
+            logger.info(f"Updated qwen-14b-llm: ctx={tier_config.llm_ctx_size}, gpu_layers={tier_config.llm_gpu_layers}")
+    except Exception as e:
+        logger.warning(f"Hardware profiling failed, using defaults: {e}")
+        state["system_profile"] = None
+        state["tier_config"] = None
+
     yield
     _stop_all_servers()
 
-app = FastAPI(title="Unified Model Server", lifespan=lifespan)
+app = FastAPI(title="Unified Model Server", version="3.0.0", lifespan=lifespan)
 
 @app.post("/infer")
 async def infer(request: InferRequest):
@@ -261,11 +291,56 @@ async def infer(request: InferRequest):
 
 @app.get("/status")
 async def get_status():
+    tier_info = None
+    if state.get("tier_config"):
+        tc = state["tier_config"]
+        tier_info = {"tier": tc.tier, "rag_mode": tc.rag_mode, "embedding_backend": tc.embedding_backend}
     return {
         "active_heavy_model": state["active_model"],
         "running": list(state["processes"].keys()),
-        "vram_free_gb": _get_available_vram()
+        "vram_free_gb": _get_available_vram(),
+        "tier": tier_info,
     }
+
+@app.post("/v1/embeddings")
+async def openai_embeddings(request: EmbeddingRequest):
+    """OpenAI-compatible embeddings endpoint. Proxies to LaBSE st_server."""
+    model_id = request.model
+    if model_id not in STATIC_MODELS_CONFIG:
+        model_id = "labse-embedding"
+
+    try:
+        _start_server(model_id, state["device_mode"])
+        config = get_model_config(model_id)
+        url = f"http://localhost:{config['port']}/v1/embeddings"
+
+        # Нормализуем input в список
+        texts = request.input if isinstance(request.input, list) else [request.input]
+
+        payload = {"input": texts, "model": model_id}
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(url, json=payload)
+            resp.raise_for_status()
+            result = resp.json()
+
+        # Обеспечиваем OpenAI-совместимый формат
+        if "data" not in result:
+            # st_server может вернуть другой формат — адаптируем
+            embeddings = result.get("embeddings", [])
+            result = {
+                "object": "list",
+                "data": [
+                    {"object": "embedding", "index": i, "embedding": emb}
+                    for i, emb in enumerate(embeddings)
+                ],
+                "model": model_id,
+                "usage": {"prompt_tokens": sum(len(t.split()) for t in texts), "total_tokens": sum(len(t.split()) for t in texts)},
+            }
+
+        return result
+    except Exception as e:
+        logger.error(f"Embeddings Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
 async def health(): return {"status": "ok"}

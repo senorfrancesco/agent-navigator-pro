@@ -276,7 +276,55 @@ DOC_CONTEXT_KEYWORDS = [
     "по документу", "согласно", "в тексте", "цитат", "упомянут",
     "из файла", "содержится", "указано в", "прочитай"
 ]
-MAX_CONTEXT_CHARS = 48000  # ~12000 токенов
+MAX_CONTEXT_CHARS = 16000  # ~4000 токенов — безопасно для Qwen-14B (8192 ctx)
+MAX_HISTORY_MESSAGES = 10  # Максимум сообщений в multi-turn промпте
+
+
+def _build_multiturn_prompt(messages: List[Dict[str, Any]], system_suffix: str = "") -> str:
+    """
+    Строит ChatML промпт из массива messages[] (OpenAI format).
+    Обрезает до MAX_HISTORY_MESSAGES последних сообщений.
+
+    Args:
+        messages: Список сообщений [{role, content}, ...]
+        system_suffix: Дополнительный текст для system-промпта (например, контекст документов)
+
+    Returns:
+        ChatML-промпт для Qwen
+    """
+    system_msg = "Ты помощник Agent Navigator. Помогай пользователю."
+    if system_suffix:
+        system_msg += f"\n\n{system_suffix}"
+
+    # Отделяем system от остальных сообщений
+    conversation = []
+    for msg in messages:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            # Multimodal: извлекаем текст
+            content = " ".join(p.get("text", "") for p in content if p.get("type") == "text")
+        if role == "system":
+            system_msg = content + (f"\n\n{system_suffix}" if system_suffix else "")
+        else:
+            conversation.append({"role": role, "content": content})
+
+    # Обрезаем до MAX_HISTORY_MESSAGES (сохраняем последние)
+    if len(conversation) > MAX_HISTORY_MESSAGES:
+        conversation = conversation[-MAX_HISTORY_MESSAGES:]
+
+    # Собираем ChatML
+    prompt = f"<|im_start|>system\n{system_msg}<|im_end|>\n"
+    for msg in conversation:
+        role = msg["role"]
+        content = msg["content"]
+        prompt += f"<|im_start|>{role}\n{content}<|im_end|>\n"
+
+    # Если последнее сообщение не от assistant, добавляем начало ответа
+    if not conversation or conversation[-1]["role"] != "assistant":
+        prompt += "<|im_start|>assistant\n"
+
+    return prompt
 
 def _get_or_create_session(session_id: Optional[str] = None) -> Tuple[str, Dict[str, Any]]:
     """Возвращает существующую или создаёт новую сессию."""
@@ -314,7 +362,7 @@ def _build_doc_context(session: Dict[str, Any], max_chars: int = MAX_CONTEXT_CHA
 
 # === Workflow Dispatcher ===
 
-async def run_workflow_stream(session_id: str, query: str, attachments: List[FileAttachment], target_model: str = "agent-navigator"):
+async def run_workflow_stream(session_id: str, query: str, attachments: List[FileAttachment], target_model: str = "agent-navigator", messages: Optional[List[Dict[str, Any]]] = None):
     """Запускает нужный LangGraph или прямой инференс в зависимости от контекста и модели."""
 
     # Получаем/создаём сессию
@@ -364,14 +412,16 @@ async def run_workflow_stream(session_id: str, query: str, attachments: List[Fil
     query_lower = query.lower()
     is_compare_intent = any(kw in query_lower for kw in ["сравни", "различия", "изменения"])
     is_equipment_intent = any(kw in query_lower for kw in ["смета", "оборудование", "тз", "закупка"])
+    # T3.1: Считаем только НОВЫЕ файлы (не загруженные ранее в сессию)
+    new_file_count = sum(1 for a in attachments if a.name not in session["documents"])
     file_count = len(attachments)
 
     workflow = None
     initial_state = {}
     task_name = "Чат"
 
-    # Сценарий A: 2+ файла и интент -> Графы (Compare или Equipment)
-    if file_count >= 2 and (is_compare_intent or is_equipment_intent):
+    # Сценарий A: 2+ НОВЫХ файла и интент -> Графы (Compare или Equipment)
+    if new_file_count >= 2 and (is_compare_intent or is_equipment_intent):
         active_attachments = attachments[:2]
 
         if is_compare_intent:
@@ -489,13 +539,21 @@ async def run_workflow_stream(session_id: str, query: str, attachments: List[Fil
         # Прямой чат с on-demand контекстом документов (Задача 4)
         from services.model_manager.ums_client import ums_client
 
-        system_msg = "Ты помощник Agent Navigator. Помогай пользователю."
-        doc_context = ""
+        # T3.2: Multi-turn промпт из messages[]
+        doc_context_suffix = ""
         if session["documents"] and _should_include_doc_context(query):
             doc_context = _build_doc_context(session)
-            system_msg += f"\n\nКонтекст документов:\n{doc_context}"
+            doc_context_suffix = f"Контекст документов:\n{doc_context}"
 
-        prompt = f"<|im_start|>system\n{system_msg}\n<|im_end|>\n<|im_start|>user\n{query}\n<|im_end|>\n<|im_start|>assistant\n"
+        if messages and len(messages) > 1:
+            # Multi-turn: строим ChatML из всей истории
+            prompt = _build_multiturn_prompt(messages, system_suffix=doc_context_suffix)
+        else:
+            # Single-turn fallback
+            system_msg = "Ты помощник Agent Navigator. Помогай пользователю."
+            if doc_context_suffix:
+                system_msg += f"\n\n{doc_context_suffix}"
+            prompt = f"<|im_start|>system\n{system_msg}<|im_end|>\n<|im_start|>user\n{query}<|im_end|>\n<|im_start|>assistant\n"
 
         # Задача 3: стриминг для прямого чата
         try:
@@ -602,7 +660,7 @@ async def openai_completions(request: Request):
             if target_model == "agent-navigator":
                 yield "data: " + json.dumps({"choices": [{"delta": {"role": "assistant", "content": "Анализирую ваш запрос...\n\n"}}]}) + "\n\n"
 
-            async for step in run_workflow_stream(session_id, user_query, found_files, target_model):
+            async for step in run_workflow_stream(session_id, user_query, found_files, target_model, messages=messages):
                 txt = step.get("content", "")
                 if step["type"] == "thought" and target_model == "agent-navigator":
                     txt = f"*[Thought: {txt}]*\n"
