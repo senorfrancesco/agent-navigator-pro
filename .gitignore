@@ -28,8 +28,15 @@ for_cli
 
 open_webui_uploads
 
-# Игнорируем все модели, но оставляем структуру и README
+# Model binaries (keep code and README)
 gguf/*
 !gguf/README.md
 st/*
 !st/README.md
+
+# ONNX model binaries (code tracked separately)
+*.onnx
+
+# Temp files
+*.data
+sym_shape_infer_temp.onnx

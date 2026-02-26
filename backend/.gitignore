@@ -2,11 +2,22 @@
 venv/
 __pycache__/
 *.pyc
+*.pyo
 
-# Models directory (ignore all model files)
-models/*
-!models/README.md
+# Model binaries (keep code and README)
+models/gguf/
+models/st/
+models/onnx/*.onnx
+models/onnx/tokenizer*
+models/onnx/vocab.txt
+models/onnx/special_tokens_map.json
 
+# Temp files from ONNX export
+*.data
+sym_shape_infer_temp.onnx
+
+# Open WebUI data
 open_webui_data/*
 
+# Environment
 .env
