@@ -117,7 +117,7 @@ class TierSelector:
             llm_ctx_size=4096,
             llm_gpu_layers=gpu_layers,
             llm_batch_size=256,
-            embedding_backend="onnx-int8",
+            embedding_backend="onnx",
             embedding_device="cpu",
             rag_mode="simple",
             retrieval_top_k=5,

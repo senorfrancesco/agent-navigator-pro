@@ -268,15 +268,8 @@ def determine_document_order(
     # Совсем fallback: порядок как пришли
     return a, b, "default"
 
-# === Сессионный менеджер документов (Задача 4) ===
+# === Сессионный менеджер документов ===
 
-# Ключевые слова, при которых документы из сессии включаются в контекст LLM
-DOC_CONTEXT_KEYWORDS = [
-    "из документа", "в файле", "на основе", "что написано", "найди в",
-    "по документу", "согласно", "в тексте", "цитат", "упомянут",
-    "из файла", "содержится", "указано в", "прочитай"
-]
-MAX_CONTEXT_CHARS = 16000  # ~4000 токенов — безопасно для Qwen-14B (8192 ctx)
 MAX_HISTORY_MESSAGES = 10  # Максимум сообщений в multi-turn промпте
 
 
@@ -338,28 +331,6 @@ def _get_or_create_session(session_id: Optional[str] = None) -> Tuple[str, Dict[
     }
     return sid, sessions[sid]
 
-def _should_include_doc_context(query: str) -> bool:
-    """Проверяет, содержит ли запрос ключевые слова для подключения контекста документов."""
-    query_lower = query.lower()
-    return any(kw in query_lower for kw in DOC_CONTEXT_KEYWORDS)
-
-def _build_doc_context(session: Dict[str, Any], max_chars: int = MAX_CONTEXT_CHARS) -> str:
-    """Строит контекст из документов сессии, обрезая до лимита."""
-    if not session["documents"]:
-        return ""
-    parts = []
-    total = 0
-    for fname, doc_info in session["documents"].items():
-        text = doc_info.get("text", "")
-        remaining = max_chars - total
-        if remaining <= 0:
-            break
-        if len(text) > remaining:
-            text = text[:remaining] + "..."
-        parts.append(f"--- Документ: {fname} ---\n{text}")
-        total += len(text)
-    return "\n\n".join(parts)
-
 # === Workflow Dispatcher ===
 
 async def run_workflow_stream(session_id: str, query: str, attachments: List[FileAttachment], target_model: str = "agent-navigator", messages: Optional[List[Dict[str, Any]]] = None):
@@ -392,6 +363,21 @@ async def run_workflow_stream(session_id: str, query: str, attachments: List[Fil
     if new_files_loaded:
         names_str = ", ".join(new_files_loaded)
         yield {"type": "thought", "content": f"Загружено в сессию: {names_str}. Спросите меня о содержимом."}
+
+        # Инициализируем/обновляем RAG pipeline для документов сессии
+        try:
+            from orchestrator.rag.pipeline import AdaptiveRAGPipeline
+            rag_pipeline = session.get("rag_pipeline")
+            if rag_pipeline is None:
+                rag_pipeline = AdaptiveRAGPipeline(rag_mode="simple")
+                session["rag_pipeline"] = rag_pipeline
+
+            # Индексируем только новые документы
+            new_texts = [session["documents"][n]["text"] for n in new_files_loaded if session["documents"][n].get("text")]
+            if new_texts:
+                rag_pipeline.index_documents(new_texts, doc_names=new_files_loaded)
+        except Exception as e:
+            print(f"[RAG] Failed to index documents: {e}")
 
     # 1. Прямой доступ к модели (Direct Model Access)
     if target_model != "agent-navigator":
@@ -536,14 +522,19 @@ async def run_workflow_stream(session_id: str, query: str, attachments: List[Fil
                         yield {"type": "thought", "content": f"Завершено: {node_name}"}
         except Exception as e: yield {"type": "error", "content": f"Ошибка графа: {e}"}
     else:
-        # Прямой чат с on-demand контекстом документов (Задача 4)
+        # Прямой чат с AdaptiveRAGPipeline
         from services.model_manager.ums_client import ums_client
 
-        # T3.2: Multi-turn промпт из messages[]
+        # RAG: retrieve контекст если есть проиндексированные документы
         doc_context_suffix = ""
-        if session["documents"] and _should_include_doc_context(query):
-            doc_context = _build_doc_context(session)
-            doc_context_suffix = f"Контекст документов:\n{doc_context}"
+        rag_pipeline = session.get("rag_pipeline")
+        if rag_pipeline and session["documents"]:
+            try:
+                rag_result = rag_pipeline.retrieve(query)
+                if rag_result.context_text:
+                    doc_context_suffix = f"Контекст документов:\n{rag_result.context_text}"
+            except Exception as e:
+                print(f"[RAG] Pipeline error: {e}")
 
         if messages and len(messages) > 1:
             # Multi-turn: строим ChatML из всей истории

@@ -52,7 +52,7 @@ class TestTierSelector:
         assert config.tier == Tier.TIER_1
         assert config.llm_gpu_layers == 0
         assert config.rag_mode == "simple"
-        assert config.embedding_backend == "onnx-int8"
+        assert config.embedding_backend == "onnx"
 
     def test_cpu_only_64gb(self):
         """CPU + 64GB RAM → Tier 1 (< 48GB available)."""
