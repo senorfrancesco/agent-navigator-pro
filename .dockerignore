@@ -1,0 +1,43 @@
+# Модели (не нужны внутри контейнера Chainlit)
+backend/models/gguf/
+backend/models/st/
+backend/models/onnx/*.onnx
+backend/models/onnx/*.data
+
+# Git
+.git/
+.gitignore
+
+# IDE / editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Docker volumes data
+backend/open_webui_uploads/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Claude / Gemini configs
+.claude/
+.gemini/
+
+# Docs / non-essential
+docs/
+*.md
+LICENSE

@@ -1,0 +1,21 @@
+# Chainlit UI — минимальные зависимости для Docker-контейнера.
+# Тяжёлые библиотеки (torch, llama-cpp, onnx, sentence-transformers)
+# работают на хосте; Chainlit обращается к ним через HTTP.
+
+# UI framework
+chainlit>=1.0.0
+
+# Chat history persistence (SQLite)
+aiosqlite>=0.19.0
+
+# LangGraph workflows
+langgraph>=0.0.30
+langchain>=0.1.0
+
+# HTTP clients (вызовы к хостовым сервисам)
+httpx>=0.26.0
+requests>=2.31.0
+
+# Utilities
+python-dotenv>=1.0.0
+pydantic>=2.0.0

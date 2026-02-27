@@ -1,9 +1,10 @@
 services:
+  # --- Open WebUI (legacy, можно отключить после перехода на Chainlit) ---
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
     container_name: open-webui
     ports:
-      - "3000:8080"
+      - "3001:8080"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -20,6 +21,39 @@ services:
       - RAG_EMBEDDING_ENGINE=
       - RAG_RERANKING_ENGINE=
     restart: always
+    profiles:
+      - legacy
+
+  # --- Chainlit UI (основной фронтенд v3.0) ---
+  chainlit:
+    build:
+      context: .
+      dockerfile: Dockerfile.chainlit
+    container_name: chainlit-ui
+    ports:
+      - "3000:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - ./backend/.env
+    volumes:
+      - ./backend/open_webui_uploads:/app/uploads
+      - chainlit-data:/app/orchestrator/.data
+    environment:
+      - CHAINLIT_AUTH_SECRET=${CHAINLIT_AUTH_SECRET:-agent-navigator-secret-key-change-me}
+      - CHAINLIT_ADMIN_USER=${CHAINLIT_ADMIN_USER:-admin}
+      - CHAINLIT_ADMIN_PASSWORD=${CHAINLIT_ADMIN_PASSWORD:-admin}
+      - CHAINLIT_DB_URL=${CHAINLIT_DB_URL:-sqlite+aiosqlite:///app/orchestrator/.data/chainlit.db}
+      - UMS_URL=http://host.docker.internal:8090
+      - DOC_SERVER_URL=http://host.docker.internal:8001
+      - LEGAL_SERVER_URL=http://host.docker.internal:8002
+      - MCP_DOCUMENT_SERVER_URL=http://host.docker.internal:8001
+      - MCP_LEGAL_SERVER_URL=http://host.docker.internal:8002
+      - UPLOADS_DIR=/app/uploads
+      - HOST_UPLOADS_DIR=${PWD}/backend/open_webui_uploads
+    restart: unless-stopped
+    depends_on: []
 
 volumes:
   open-webui: {}
+  chainlit-data: {}

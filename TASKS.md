@@ -45,9 +45,10 @@
 
 ### Фаза 3 — Adaptive RAG Pipeline
 
-- [ ] **T3.8 — LaBSE ONNX INT8 export**
-  Экспорт LaBSE в ONNX + INT8 квантизация для CPU.
-  Тест: `test_onnx_embeddings.py` — скорость ONNX vs PyTorch, точность <0.01 delta.
+- [x] **T3.8 — LaBSE ONNX FP32 export**
+  Экспорт LaBSE в ONNX FP32 (INT8 убран — ломает embedding space).
+  Бенчмарк: ONNX 1.2-1.4x быстрее SentenceTransformers на CPU.
+  Тест: `test_onnx_embeddings.py` — 14 тестов, точность delta <0.01.
 
 - [x] **T3.9 — BM25 + Hybrid Search (RRF)**
   `backend/orchestrator/rag/retriever.py` — BM25 для русского + dense LaBSE + RRF fusion.
@@ -71,19 +72,80 @@
   `backend/orchestrator/chainlit_app.py` — замена Open WebUI.
   Тест: `chainlit run` → стриминг чата с UMS.
 
-- [ ] **T3.14 — Chainlit: workflows + cl.Step() (детализация)**
+- [x] **T3.14 — Chainlit: workflows + cl.Step() (детализация)**
   Compare/Equipment workflows обёрнуты в `cl.Step` для визуализации.
   Тест: загрузить 2 файла + "сравни" → видны 4 шага с прогрессом.
 
-- [ ] **T3.15 — Chainlit: Docker + auth + history**
-  Dockerfile.chainlit, docker-compose замена Open WebUI.
-  Тест: Docker → http://localhost:3000 → auth → chat → history.
+- [x] **T3.15 — Chainlit: Docker + auth + history**
+  `Dockerfile.chainlit`, `requirements.chainlit.txt` (легковесный, без torch/llama-cpp).
+  `.dockerignore` — исключает 130 ГБ моделей из build context.
+  Auth: `@cl.password_auth_callback` (env-driven). Persistence: SQLAlchemy + SQLite.
+  `@cl.on_chat_resume` — восстановление истории. Open WebUI → port 3001 (legacy profile).
+  Тест: `docker compose up chainlit` → http://localhost:3000 → auth → chat → history.
 
 ### Фаза 5 — RAG Cleanup
 
-- [ ] **T3.16 — Удалить naive RAG из agent_api**
-  Убрать: `DOC_CONTEXT_KEYWORDS`, `_should_include_doc_context()`, `_build_doc_context()`.
-  Заменить на вызов AdaptiveRAGPipeline.
+- [x] **T3.16 — Удалить naive RAG из agent_api**
+  Убрано: `DOC_CONTEXT_KEYWORDS`, `_should_include_doc_context()`, `_build_doc_context()`.
+  Заменено на `AdaptiveRAGPipeline` — индексация при загрузке файлов, retrieve при запросе.
+
+### Фаза 6 — Production Deployment
+
+- [ ] **T3.17 — Dockerize backend services (UMS, Doc Server, Legal Server)**
+  Dockerfile'ы для каждого сервиса. UMS требует `nvidia-container-toolkit` для GPU.
+  Все сервисы в `docker-compose.yaml`. Сейчас работают на хосте — контейнеризировать.
+
+- [ ] **T3.18 — Model delivery strategy (130 GB GGUF)**
+  Стратегия доставки моделей на сервер: volume mount, S3/MinIO, скрипт скачивания.
+  GGUF ~130 ГБ, ST ~1.1 ГБ, ONNX ~1 ГБ. Документировать процесс деплоя.
+
+- [ ] **T3.19 — Production secrets & auth hardening**
+  Убрать admin/admin, генерация `CHAINLIT_AUTH_SECRET`.
+  Docker secrets или .env вне git. Поддержка нескольких пользователей (БД вместо env).
+
+- [ ] **T3.20 — HTTPS reverse proxy (nginx/traefik)**
+  Reverse proxy перед Chainlit в docker-compose. SSL (Let's Encrypt).
+  WebSocket проксирование для streaming. Rate limiting, CORS.
+
+- [ ] **T3.21 — Healthchecks, logging, monitoring**
+  Docker healthcheck для каждого контейнера (/health эндпоинты есть).
+  Централизованное логирование (Docker logs / Loki).
+  Мониторинг GPU (nvidia-smi), RAM, диск. Алерты при падении сервисов.
+
+### Bugfixes v3.0 (2026-02-27)
+
+- [x] **B3.1 — ModuleNotFoundError orchestrator в Chainlit Docker**
+  `Dockerfile.chainlit`: добавлен `ENV PYTHONPATH=/app`. Абсолютные импорты `from orchestrator.workflows.*` работают.
+
+- [x] **B3.2 — run_all.sh: пересборка при каждом запуске**
+  Убран `--build --force-recreate` из запуска Chainlit. Добавлены `wait_for_service()` и `wait_for_model()`.
+
+- [x] **B3.3 — Agent API: /health → 404**
+  Проверка health изменена на `/v1/models`. curl `-sf` заменён на `-s -o /dev/null -w "%{http_code}"`.
+
+- [x] **B3.4 — UMS: предзагрузка qwen-14b-llm при старте**
+  В `lifespan` добавлен вызов `_start_server("qwen-14b-llm")`. Ожидание готовности через `/status`.
+
+- [x] **B3.5 — Compare: 0 изменений (Docker↔Host path mismatch)**
+  Chainlit сохранял файлы в `/app/orchestrator/.files/<uuid>.pdf`. Добавлены `_save_to_uploads()` и `_to_host_path()`.
+  `new_files` обновляется из `session_docs` после загрузки (исправлен UUID-путь передаваемый в workflow).
+  Убран mock в doc-server (`File not found` вместо фейкового текста).
+
+- [x] **B3.6 — docker-compose: HOST_UPLOADS_DIR без хардкода**
+  Убрана переменная из `.env`. Используется `${PWD}/backend/open_webui_uploads` в `docker-compose.yaml`.
+
+- [x] **B3.7 — MCP_LEGAL_SERVER_URL неверная переменная**
+  В `docker-compose.yaml` передавалась `LEGAL_SERVER_URL`, а `compare.py` читал `MCP_LEGAL_SERVER_URL`.
+  Добавлена правильная переменная → Legal Server доступен из Docker.
+
+- [x] **B3.8 — UUID вместо имён файлов в отчёте**
+  Добавлены поля `name_1`/`name_2` в `CompareState`. Передаются из `chainlit_app.py`, используются в `generate_report_node`.
+
+- [x] **B3.9 — Счётчик изменений: 0 изменено/добавлено/удалено**
+  `chainlit_app.py:341-343`: поле `"status"` исправлено на `"type"` (используемое в `compare.py`).
+
+- [x] **B3.10 — Отчёт не сохранялся в контейнере**
+  `compare.py`: путь через `__file__` заменён на `os.getenv("UPLOADS_DIR")` (`/app/uploads` в Docker).
 
 ### Backlog
 
@@ -92,7 +154,6 @@
 - [ ] Agentic RAG as LangGraph Tool (RetrieveNode внутри workflows)
 - [ ] VRAM Monitor + OOM recovery + dynamic fallback
 - [ ] Пул портов для динамических моделей в UMS
-- [ ] Мониторинг (Prometheus + Grafana)
 
 ## v2.3.1 — Багфиксы (2026-02-25)
 

@@ -188,7 +188,7 @@ class EmbeddingIntentClassifier:
 
         return {
             "intent": best_intent,
-            "confidence": best_score,
+            "confidence": max(0.0, best_score),
             "margin": margin,
             "needs_rag": INTENT_NEEDS_RAG.get(best_intent, False),
             "scores": scores,

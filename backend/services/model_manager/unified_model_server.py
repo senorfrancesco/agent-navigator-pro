@@ -256,6 +256,14 @@ async def lifespan(app: FastAPI):
         state["system_profile"] = None
         state["tier_config"] = None
 
+    # Предзагрузка Qwen LLM — убирает задержку перед первым запросом
+    try:
+        logger.info("Preloading qwen-14b-llm...")
+        _start_server("qwen-14b-llm", state["device_mode"])
+        logger.info("qwen-14b-llm preloaded successfully")
+    except Exception as e:
+        logger.warning(f"Failed to preload qwen-14b-llm: {e}")
+
     yield
     _stop_all_servers()
 

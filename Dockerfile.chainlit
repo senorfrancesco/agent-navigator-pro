@@ -1,0 +1,32 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Копируем легковесный requirements (без torch, llama-cpp, onnx)
+COPY requirements.chainlit.txt /app/requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --timeout=120 --retries=3 -r requirements.txt
+
+# Копируем только нужный код (models/ исключены через .dockerignore)
+COPY backend/orchestrator/ /app/orchestrator/
+# Удаляем ручной config — Chainlit сгенерирует актуальный при первом запуске
+RUN rm -rf /app/orchestrator/.chainlit
+# ums_client.py + пустые __init__.py для Python-импортов
+RUN mkdir -p /app/services/model_manager
+COPY backend/services/model_manager/ums_client.py /app/services/model_manager/ums_client.py
+RUN touch /app/services/__init__.py /app/services/model_manager/__init__.py
+
+# Директория для SQLite persistence
+RUN mkdir -p /app/orchestrator/.data
+
+# Python должен видеть /app как корень для импортов (orchestrator.workflows.*)
+ENV PYTHONPATH=/app
+
+# Порт Chainlit
+EXPOSE 3000
+
+# Рабочая директория — orchestrator (где лежит chainlit_app.py)
+WORKDIR /app/orchestrator
+
+# Запуск Chainlit
+CMD ["chainlit", "run", "chainlit_app.py", "--host", "0.0.0.0", "--port", "3000"]

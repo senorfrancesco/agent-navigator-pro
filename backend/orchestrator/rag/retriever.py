@@ -236,7 +236,7 @@ class HybridRetriever:
                 index=idx,
                 source="dense",
             )
-            for idx in top_indices if scores[idx] > 0
+            for idx in top_indices
         ]
 
     def _search_hybrid(self, query: str, top_k: int) -> List[RetrievalResult]:

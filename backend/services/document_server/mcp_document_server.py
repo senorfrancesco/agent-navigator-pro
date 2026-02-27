@@ -176,20 +176,7 @@ async def load_document(request: LoadDocumentRequest):
         
         # Проверяем существование файла
         if not os.path.exists(path):
-            # Для тестирования возвращаем mock-данные
-            if "contract_old" in path:
-                text = "Document A: Contract text (old version). Clause 1: Price is $100. Clause 2: Delivery in 30 days."
-            elif "contract_new" in path:
-                text = "Document B: Contract text (new version). Clause 1: Price is $120. Clause 2: Delivery in 15 days."
-            else:
-                text = f"[Mock] Document {path} loaded successfully."
-            
-            return {
-                "status": "success",
-                "text": text,
-                "path": path,
-                "format": "mock"
-            }
+            return {"status": "error", "error": f"File not found: {path}"}
         
         # Определяем формат файла
         file_ext = Path(path).suffix.lower()
@@ -224,7 +211,7 @@ async def load_pages(request: LoadDocumentRequest):
     try:
         path = request.path
         if not os.path.exists(path):
-            return {"status": "success", "pages": ["Mock Page 1", "Mock Page 2"], "path": path}
+            return {"status": "error", "error": f"File not found: {path}"}
 
         file_ext = Path(path).suffix.lower()
         if file_ext == ".pdf":

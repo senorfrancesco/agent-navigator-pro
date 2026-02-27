@@ -40,6 +40,8 @@ BATCH_SIZE = 5  # Кол-во различий в одном LLM-вызове (b
 class CompareState(TypedDict):
     input_1: str  # Путь к старому файлу
     input_2: str  # Путь к новому файлу
+    name_1: str   # Оригинальное имя старого файла
+    name_2: str   # Оригинальное имя нового файла
     chunks_old: List[str]
     chunks_new: List[str]
     matches: List[Dict[str, Any]]
@@ -235,9 +237,12 @@ async def generate_report_node(state: CompareState):
     import time
     import glob as glob_mod
 
+    name_1 = state.get('name_1') or os.path.basename(state['input_1'])
+    name_2 = state.get('name_2') or os.path.basename(state['input_2'])
+
     report = "# Отчет о сравнении документов\n\n"
     report += f"**Дата:** {time.strftime('%Y-%m-%d %H:%M')}\n"
-    report += f"**Файлы:**\n- Старая версия: {os.path.basename(state['input_1'])}\n- Новая версия: {os.path.basename(state['input_2'])}\n\n"
+    report += f"**Файлы:**\n- Старая версия: {name_1}\n- Новая версия: {name_2}\n\n"
     report += f"**Найдено изменений:** {len(state['analysis_results'])}\n\n"
 
     for r in state['analysis_results']:
@@ -262,8 +267,10 @@ async def generate_report_node(state: CompareState):
 
     # Сохранение в файл (с проверкой дубликатов — Задача 2)
     try:
-        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-        uploads_dir = os.path.join(base_dir, 'backend', 'open_webui_uploads')
+        uploads_dir = os.getenv("UPLOADS_DIR", os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+            'backend', 'open_webui_uploads'
+        ))
 
         if not os.path.exists(uploads_dir):
             os.makedirs(uploads_dir, exist_ok=True)

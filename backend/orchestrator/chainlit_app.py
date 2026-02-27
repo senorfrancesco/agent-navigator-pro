@@ -7,11 +7,14 @@ Chainlit App — замена Open WebUI для Agent Navigator Pro.
 - Файлы не дублируются при follow-up
 - Python-native → тот же стек что FastAPI/LangGraph
 - Docker-ready: chainlit run app.py --host 0.0.0.0 --port 3000
+- Auth: password-based authentication (env-driven)
+- History: SQLAlchemy data layer (SQLite) for chat persistence
 """
 
 import os
 import sys
 import time
+import shutil
 from typing import Dict, List, Optional, Any
 
 # Добавляем пути
@@ -23,6 +26,40 @@ except ImportError:
     raise ImportError("chainlit not installed. Run: pip install chainlit")
 
 from services.model_manager.ums_client import ums_client
+
+
+# === Authentication ===
+
+ADMIN_USER = os.getenv("CHAINLIT_ADMIN_USER", "admin")
+ADMIN_PASSWORD = os.getenv("CHAINLIT_ADMIN_PASSWORD", "admin")
+
+
+@cl.password_auth_callback
+def auth_callback(username: str, password: str) -> Optional[cl.User]:
+    if (username, password) == (ADMIN_USER, ADMIN_PASSWORD):
+        return cl.User(
+            identifier=username,
+            metadata={"role": "admin", "provider": "credentials"},
+        )
+    return None
+
+
+# === Data Layer (SQLite persistence) ===
+
+_DB_URL = os.getenv(
+    "CHAINLIT_DB_URL",
+    "sqlite+aiosqlite:///.data/chainlit.db",
+)
+
+try:
+    from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
+
+    @cl.data_layer
+    def get_data_layer():
+        return SQLAlchemyDataLayer(conninfo=_DB_URL)
+
+except ImportError:
+    pass  # aiosqlite не установлен — работаем без persistence
 
 
 # === Session Storage ===
@@ -71,19 +108,52 @@ def _detect_intent(query: str, file_count: int = 0) -> str:
 
 # === File Loading ===
 
+# Пути для обмена файлами между Docker и хостом
+# Внутри контейнера: /app/uploads → на хосте: backend/open_webui_uploads/
+UPLOADS_DIR = os.getenv("UPLOADS_DIR", "/app/uploads")
+# Хостовый путь, который doc-server на хосте может прочитать
+HOST_UPLOADS_DIR = os.getenv("HOST_UPLOADS_DIR", "")
+
+
+def _to_host_path(container_path: str) -> str:
+    """Конвертирует контейнерный путь в хостовый для сервисов на хосте."""
+    if HOST_UPLOADS_DIR and container_path.startswith(UPLOADS_DIR):
+        return container_path.replace(UPLOADS_DIR, HOST_UPLOADS_DIR, 1)
+    return container_path
+
+
+def _save_to_uploads(src_path: str, filename: str) -> str:
+    """Копирует файл в shared uploads директорию, возвращает путь внутри контейнера."""
+    os.makedirs(UPLOADS_DIR, exist_ok=True)
+    dst_path = os.path.join(UPLOADS_DIR, filename)
+    if src_path != dst_path:
+        shutil.copy2(src_path, dst_path)
+    return dst_path
+
+
 async def _load_files(files: List[Dict]) -> List[Dict]:
-    """Загружает файлы через Document Server, возвращает список с текстом."""
+    """Копирует файлы в shared uploads, загружает через Document Server."""
     import httpx
     doc_server = os.getenv("MCP_DOCUMENT_SERVER_URL", "http://localhost:8001")
     loaded = []
 
     for f in files:
         try:
+            # Копируем файл в shared директорию
+            container_path = _save_to_uploads(f["path"], f["name"])
+            host_path = _to_host_path(container_path)
+
             async with httpx.AsyncClient(timeout=60.0) as client:
-                resp = await client.post(f"{doc_server}/load_document", json={"path": f["path"]})
+                resp = await client.post(f"{doc_server}/load_document", json={"path": host_path})
                 if resp.status_code == 200:
-                    text = resp.json().get("text", "")
-                    loaded.append({**f, "text": text})
+                    data = resp.json()
+                    if data.get("status") == "error":
+                        loaded.append({**f, "text": "", "path": container_path, "error": data.get("error")})
+                    else:
+                        text = data.get("text", "")
+                        loaded.append({**f, "text": text, "path": container_path})
+                else:
+                    loaded.append({**f, "text": "", "path": container_path, "error": f"HTTP {resp.status_code}"})
         except Exception as e:
             loaded.append({**f, "text": "", "error": str(e)})
 
@@ -132,8 +202,12 @@ async def _stream_response(prompt: str, msg: cl.Message, history: List):
 async def on_chat_start():
     cl.user_session.set("documents", {})
     cl.user_session.set("history", [])
+
+    user = cl.user_session.get("user")
+    greeting = f", **{user.identifier}**" if user else ""
+
     await cl.Message(
-        content="Добро пожаловать в **Agent Navigator Pro** v3.0!\n\n"
+        content=f"Добро пожаловать{greeting} в **Agent Navigator Pro** v3.0!\n\n"
                 "Я помогу вам анализировать юридические документы и сметы.\n\n"
                 "**Возможности:**\n"
                 "- Загрузите 2 файла и попросите сравнить\n"
@@ -141,6 +215,20 @@ async def on_chat_start():
                 "- Задайте вопрос по загруженному документу\n"
                 "- Или просто поговорите со мной"
     ).send()
+
+
+@cl.on_chat_resume
+async def on_chat_resume(thread):
+    """Восстановление сессии из сохранённой истории."""
+    cl.user_session.set("documents", {})
+    history = []
+    if thread and thread.get("steps"):
+        for step in thread["steps"]:
+            if step.get("type") == "user_message":
+                history.append({"role": "user", "content": step.get("output", "")})
+            elif step.get("type") == "assistant_message":
+                history.append({"role": "assistant", "content": step.get("output", "")})
+    cl.user_session.set("history", history)
 
 
 @cl.on_message
@@ -169,6 +257,9 @@ async def on_message(message: cl.Message):
                     elif f.get("error"):
                         await cl.Message(content=f"Ошибка загрузки {f['name']}: {f['error']}").send()
                 step.output = f"Загружено: {', '.join(names)}" if names else "Нет новых файлов"
+
+            # Обновляем new_files с корректными путями из session_docs (не UUID-пути Chainlit)
+            new_files = [{"name": n, "path": session_docs[n]["path"]} for n in names if n in session_docs]
 
     # Роутинг
     intent = _detect_intent(query, len(new_files))
@@ -214,8 +305,10 @@ async def _handle_compare(query: str, new_files: List, session_docs: Dict):
         try:
             workflow = create_compare_graph()
             initial_state = {
-                "input_1": files[0]["path"],
-                "input_2": files[1]["path"],
+                "input_1": _to_host_path(files[0]["path"]),
+                "input_2": _to_host_path(files[1]["path"]),
+                "name_1": files[0]["name"],
+                "name_2": files[1]["name"],
                 "chunks_old": [], "chunks_new": [], "matches": [],
                 "analysis_results": [], "final_report": "", "errors": [],
             }
@@ -245,9 +338,9 @@ async def _handle_compare(query: str, new_files: List, session_docs: Dict):
 
                         elif node_name == "match":
                             matches = output.get("matches", [])
-                            n_mod = sum(1 for m in matches if m.get("status") == "MODIFIED")
-                            n_add = sum(1 for m in matches if m.get("status") == "ADDED")
-                            n_del = sum(1 for m in matches if m.get("status") == "DELETED")
+                            n_mod = sum(1 for m in matches if m.get("type") == "MODIFIED")
+                            n_add = sum(1 for m in matches if m.get("type") == "ADDED")
+                            n_del = sum(1 for m in matches if m.get("type") == "DELETED")
                             step.output = (
                                 f"Найдено {len(matches)} изменений: "
                                 f"{n_mod} изменено, {n_add} добавлено, {n_del} удалено"
@@ -305,8 +398,8 @@ async def _handle_equipment(query: str, new_files: List, session_docs: Dict):
         try:
             workflow = create_equipment_graph()
             initial_state = {
-                "input_tz": files[0]["path"],
-                "input_smeta": files[1]["path"],
+                "input_tz": _to_host_path(files[0]["path"]),
+                "input_smeta": _to_host_path(files[1]["path"]),
                 "requirements": [], "offers": [], "matches": [],
                 "final_report": "", "errors": [],
             }
