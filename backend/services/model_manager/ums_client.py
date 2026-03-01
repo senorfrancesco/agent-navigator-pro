@@ -9,7 +9,8 @@ import os
 import time
 import requests
 import httpx
-from typing import Dict, Any, Optional, List, AsyncGenerator
+import numpy as np
+from typing import Dict, Any, Optional, List, AsyncGenerator, Callable
 import json
 
 UMS_URL = os.getenv("UMS_URL", "http://localhost:8090")
@@ -223,6 +224,32 @@ def get_embeddings_via_ums(text: str, normalize: bool = True) -> List[float]:
     except Exception as e:
         print(f"[UMS_CLIENT] Error getting embeddings: {e}")
         raise
+
+def create_ums_embed_fn(base_url: str = None) -> Optional[Callable]:
+    """
+    Фабрика embed_fn для AdaptiveRAGPipeline.
+
+    Возвращает функцию (List[str]) -> np.ndarray или None если UMS недоступен.
+    Синхронный requests.post — вызывается изнутри sync кода HybridRetriever.
+    """
+    url = (base_url or UMS_URL).rstrip("/") + "/v1/embeddings"
+
+    # Probe: проверяем доступность UMS и LaBSE
+    try:
+        resp = requests.post(url, json={"input": ["test"], "model": "labse-embedding"}, timeout=10)
+        resp.raise_for_status()
+    except Exception:
+        return None
+
+    def embed_fn(texts: List[str]) -> np.ndarray:
+        resp = requests.post(url, json={"input": texts, "model": "labse-embedding"}, timeout=60)
+        resp.raise_for_status()
+        data = resp.json().get("data", [])
+        data.sort(key=lambda x: x.get("index", 0))
+        return np.array([item["embedding"] for item in data], dtype=np.float32)
+
+    return embed_fn
+
 
 def process_vision_via_ums(image_path: str, prompt: str) -> str:
     """

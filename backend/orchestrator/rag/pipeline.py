@@ -183,7 +183,10 @@ class AdaptiveRAGPipeline:
         intent = None
         if self._classifier_initialized:
             intent = self.classifier.classify(query)
-            if not intent.get("needs_rag", True):
+            # Пропускаем RAG только если classifier уверен (margin > порога)
+            # При низком margin (почти случайный выбор) — делаем поиск на всякий случай
+            LOW_MARGIN_THRESHOLD = 0.05
+            if not intent.get("needs_rag", True) and intent.get("margin", 0) > LOW_MARGIN_THRESHOLD:
                 return RAGResult(
                     chunks=[],
                     intent=intent,

@@ -89,6 +89,64 @@
   Убрано: `DOC_CONTEXT_KEYWORDS`, `_should_include_doc_context()`, `_build_doc_context()`.
   Заменено на `AdaptiveRAGPipeline` — индексация при загрузке файлов, retrieve при запросе.
 
+### Фаза 5.1 — RAG Integration в Chainlit
+
+- [x] **T3.16.1 — create_ums_embed_fn() в ums_client.py**
+  Фабрика embed_fn для AdaptiveRAGPipeline: sync HTTP к UMS `/v1/embeddings` (LaBSE).
+  Probe при создании — если UMS down, возвращает `None` → BM25-only graceful degradation.
+
+- [x] **T3.16.2 — RAG pipeline init/re-index в Chainlit on_message**
+  Инициализация `AdaptiveRAGPipeline` при первой загрузке файлов.
+  Переиндексация при повторной загрузке. `_get_rag_mode()` из UMS tier config или env override.
+
+- [x] **T3.16.3 — Semantic Router intent detection**
+  Двухуровневый `_detect_intent()`: EmbeddingIntentClassifier (centroid-based, ~5ms) + keyword fallback.
+  `has_session_docs` параметр — если документы загружены, любой не-greeting → document_question.
+  `needs_rag` флаг — greeting/general_chat не подставляют контекст документов.
+
+- [x] **T3.16.4 — Исправить _handle_chat() (Баг 2)**
+  При наличии session_docs перенаправляет на `_handle_doc_question()`.
+  Убран guard `and session_docs` из routing — document_question работает без условия.
+
+- [x] **T3.16.5 — Улучшить _handle_doc_question()**
+  `asyncio.to_thread()` для sync embed_fn HTTP. try/except с fallback на naive context stuffing.
+  Проверка `rag._indexed`. Mode/intent в step output.
+
+- [x] **T3.16.6 — numpy в requirements.chainlit.txt**
+  Обязателен для `retriever.py` и `classifier.py` (`import numpy as np`).
+
+- [x] **T3.16.7 — RAG_MODE_OVERRIDE в .env.example**
+  `auto` (default) → UMS tier config. `simple`/`corrective`/`agentic` → жёсткий override.
+
+### Фаза 5.2 — RAG Quality Fixes (по результатам live-тестирования)
+
+- [x] **T3.16.8 — Chunker: детекция спецификаций**
+  `chunker.py`: добавлены `_is_specification()` и `_chunk_specification()`.
+  Документы с ≥3 нумерованными позициями + bullet-атрибутами разбиваются per-item.
+  Раньше «Компрессор К-250» и «Сварочный аппарат» лежали в одном чанке → RRF не находил.
+
+- [x] **T3.16.9 — Classifier: расширенные эталоны**
+  `classifier.py`: greeting += «Спасибо», «Понял», «Ясно», «Благодарю», «До свидания».
+  document_question += «О чём этот документ», «Какие документы загружены», «Какие файлы ты имеешь»,
+  + 8 фраз про цены/количества. general_chat: убраны «Спасибо/Понятно/Хорошо» (конфликт с greeting).
+
+- [x] **T3.16.10 — Corrective RAG: low-margin fallback**
+  `pipeline.py`: если classifier margin < 0.05 (почти случайный выбор) — делаем поиск
+  даже при `needs_rag=False`. Защита от ложного пропуска RAG.
+
+- [x] **T3.16.11 — Двойной gate для дорогих workflow**
+  `chainlit_app.py`: `compare_documents` и `equipment_analysis` требуют keyword + ≥2 файлов.
+  Без явного `сравни`/`различия` workflow не запускается — fallback на `document_question`.
+  Фикс: «Какие документы ты имеешь?» больше не запускает тяжёлое сравнение.
+
+- [x] **T3.16.12 — _handle_chat() доверяет Semantic Router**
+  `chainlit_app.py`: убран редирект session_docs → _handle_doc_question().
+  Если classifier решил `needs_rag=False` (greeting, general_chat) — отвечаем без контекста.
+
+- [x] **T3.16.13 — E2E тест RAG pipeline**
+  `test_rag_e2e.py`: standalone скрипт — 2 тестовых юр. документа, 7 вопросов, keyword evaluation.
+  7/7 = 100% accuracy. Retrieve ~80ms, LLM ~1-2с.
+
 ### Фаза 6 — Production Deployment
 
 - [ ] **T3.17 — Dockerize backend services (UMS, Doc Server, Legal Server)**

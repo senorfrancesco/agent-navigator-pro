@@ -42,6 +42,14 @@ SECTION_PATTERNS = [
     re.compile(r'^(?:ПРИЛОЖЕНИЕ|Приложение)\s+[№N\d]', re.MULTILINE),
 ]
 
+# Паттерн позиции спецификации: "N. Название\n   - Характеристика: значение"
+# Детектируем структуру: ^\d+\. <текст> \n (пробелы/таб) - <атрибут>
+SPEC_ITEM_PATTERN = re.compile(
+    r'^(\d+)\.\s+(.+?)(?=^\d+\.\s|\Z)',
+    re.MULTILINE | re.DOTALL,
+)
+SPEC_BULLET_PATTERN = re.compile(r'^\s+[-–—]\s+\S', re.MULTILINE)
+
 # Паттерн нумерованного пункта (не разрезаем внутри)
 NUMBERED_ITEM_PATTERN = re.compile(
     r'^\s*(?:\d+[\.\)]\s|[а-яa-z][\.\)]\s|[-–—•]\s)',
@@ -81,6 +89,10 @@ class LegalDocumentChunker:
         if not text or not text.strip():
             return []
 
+        # Детектируем спецификацию: пронумерованные позиции с bullet-атрибутами
+        if self._is_specification(text):
+            return self._chunk_specification(text, doc_name)
+
         if self.respect_sections:
             sections = self._split_by_sections(text)
         else:
@@ -108,6 +120,98 @@ class LegalDocumentChunker:
                 ))
                 global_idx += 1
                 global_offset = max(global_offset, start + len(chunk_text) - self.overlap)
+
+        return chunks
+
+    def _is_specification(self, text: str) -> bool:
+        """
+        Определяет, является ли документ спецификацией/списком позиций.
+
+        Критерий: >=3 нумерованных позиций верхнего уровня (^\d+\. Текст)
+        И хотя бы половина из них содержат bullet-атрибуты (- Характеристика:).
+        """
+        items = SPEC_ITEM_PATTERN.findall(text)
+        if len(items) < 3:
+            return False
+        bullets = len(SPEC_BULLET_PATTERN.findall(text))
+        return bullets >= len(items) // 2
+
+    def _chunk_specification(self, text: str, doc_name: str) -> List[Chunk]:
+        """
+        Разбивает спецификацию: каждая нумерованная позиция → отдельный чанк.
+        Заголовок/итоги документа идут в отдельный чанк.
+        """
+        chunks = []
+        idx = 0
+
+        # Находим все позиции и их границы
+        matches = list(SPEC_ITEM_PATTERN.finditer(text))
+
+        if not matches:
+            return self._chunk_section(text, "") and [Chunk(
+                text=text.strip(), index=0, start_char=0, end_char=len(text),
+                metadata={"doc_name": doc_name}
+            )]
+
+        # Текст до первой позиции (заголовок документа)
+        header = text[:matches[0].start()].strip()
+        if header:
+            chunks.append(Chunk(
+                text=header,
+                index=idx,
+                start_char=0,
+                end_char=matches[0].start(),
+                section="Заголовок",
+                metadata={"doc_name": doc_name, "chunk_type": "header"},
+            ))
+            idx += 1
+
+        # Каждая позиция — отдельный чанк
+        for i, match in enumerate(matches):
+            start = match.start()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+            item_text = text[start:end].strip()
+
+            if not item_text:
+                continue
+
+            # Если позиция слишком большая — разбиваем дополнительно
+            if len(item_text) > self.max_size:
+                sub_chunks = self._chunk_section(item_text, f"Позиция {match.group(1)}")
+                for sub in sub_chunks:
+                    chunks.append(Chunk(
+                        text=sub.strip(),
+                        index=idx,
+                        start_char=start,
+                        end_char=end,
+                        section=f"Позиция {match.group(1)}",
+                        metadata={"doc_name": doc_name, "chunk_type": "spec_item",
+                                  "item_num": match.group(1)},
+                    ))
+                    idx += 1
+            else:
+                chunks.append(Chunk(
+                    text=item_text,
+                    index=idx,
+                    start_char=start,
+                    end_char=end,
+                    section=f"Позиция {match.group(1)}",
+                    metadata={"doc_name": doc_name, "chunk_type": "spec_item",
+                              "item_num": match.group(1)},
+                ))
+                idx += 1
+
+        # Текст после последней позиции (итоги)
+        footer = text[matches[-1].end():].strip()
+        if footer and len(footer) > 50:
+            chunks.append(Chunk(
+                text=footer,
+                index=idx,
+                start_char=matches[-1].end(),
+                end_char=len(text),
+                section="Итоги",
+                metadata={"doc_name": doc_name, "chunk_type": "footer"},
+            ))
 
         return chunks
 

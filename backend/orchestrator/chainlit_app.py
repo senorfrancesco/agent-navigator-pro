@@ -11,10 +11,13 @@ Chainlit App — замена Open WebUI для Agent Navigator Pro.
 - History: SQLAlchemy data layer (SQLite) for chat persistence
 """
 
+import asyncio
+import logging
 import os
 import sys
 import time
 import shutil
+import httpx
 from typing import Dict, List, Optional, Any
 
 # Добавляем пути
@@ -26,6 +29,25 @@ except ImportError:
     raise ImportError("chainlit not installed. Run: pip install chainlit")
 
 from services.model_manager.ums_client import ums_client
+
+logger = logging.getLogger("chainlit_app")
+
+
+# === RAG Mode Helper ===
+
+async def _get_rag_mode() -> str:
+    """Определяет RAG mode: из env override или из UMS tier config."""
+    override = os.getenv("RAG_MODE_OVERRIDE", "auto")
+    if override != "auto":
+        return override
+    try:
+        ums_url = os.getenv("UMS_URL", "http://localhost:8090")
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{ums_url}/status")
+            data = resp.json()
+            return data.get("tier", {}).get("rag_mode", "simple")
+    except Exception:
+        return "simple"
 
 
 # === Authentication ===
@@ -89,9 +111,50 @@ DOC_KEYWORDS = ["из документа", "в файле", "что написа
 GREETING_KEYWORDS = ["привет", "здравствуй", "добрый"]
 
 
-def _detect_intent(query: str, file_count: int = 0) -> str:
+def _detect_intent(query: str, file_count: int = 0, has_session_docs: bool = False) -> str:
+    """
+    Двухуровневый intent detection:
+    1. Semantic Router (EmbeddingIntentClassifier) — если инициализирован
+    2. Keyword fallback — если classifier недоступен
+
+    Для дорогих workflow (compare, equipment) — двойной gate:
+    Semantic Router + keyword confirmation. Без явного keyword не запускаем.
+    """
     query_lower = query.lower()
 
+    # Уровень 1: Semantic Router
+    rag = cl.user_session.get("rag_pipeline")
+    if rag and rag._classifier_initialized:
+        result = rag.classify_intent(query)
+        if result:
+            intent = result["intent"]
+            needs_rag = result["needs_rag"]
+
+            # Двойной gate для дорогих workflow:
+            # Classifier может спутать "какие документы ты имеешь?" с compare_documents.
+            # Требуем keyword-подтверждение + >=2 файлов для запуска.
+            if intent == "compare_documents":
+                has_kw = any(kw in query_lower for kw in COMPARE_KEYWORDS)
+                has_files = file_count >= 2 or (has_session_docs and len(_get_session_docs()) >= 2)
+                if not (has_kw and has_files):
+                    intent = "document_question" if has_session_docs else "general_chat"
+
+            elif intent == "equipment_analysis":
+                has_kw = any(kw in query_lower for kw in EQUIPMENT_KEYWORDS)
+                has_files = file_count >= 2 or (has_session_docs and len(_get_session_docs()) >= 2)
+                if not (has_kw and has_files):
+                    intent = "document_question" if has_session_docs else "general_chat"
+
+            # greeting/general_chat при загруженных docs → не трогаем (needs_rag=False)
+            # document_question при загруженных docs → не трогаем (needs_rag=True)
+            # Если needs_rag=True и docs загружены, но intent не workflow → document_question
+            if has_session_docs and needs_rag and intent not in ("compare_documents", "equipment_analysis"):
+                intent = "document_question"
+
+            logger.info(f"Semantic Router: intent={intent}, confidence={result['confidence']:.2f}, margin={result.get('margin',0):.3f}")
+            return intent
+
+    # Уровень 2: Keyword fallback (UMS down или первое сообщение до загрузки файлов)
     if file_count >= 2:
         if any(kw in query_lower for kw in COMPARE_KEYWORDS):
             return "compare_documents"
@@ -100,6 +163,13 @@ def _detect_intent(query: str, file_count: int = 0) -> str:
 
     if any(kw in query_lower for kw in DOC_KEYWORDS):
         return "document_question"
+
+    # Если документы загружены — любой не-greeting вопрос → document_question
+    if has_session_docs:
+        if any(kw in query_lower for kw in GREETING_KEYWORDS):
+            return "greeting"
+        return "document_question"
+
     if any(kw in query_lower for kw in GREETING_KEYWORDS):
         return "greeting"
 
@@ -261,14 +331,44 @@ async def on_message(message: cl.Message):
             # Обновляем new_files с корректными путями из session_docs (не UUID-пути Chainlit)
             new_files = [{"name": n, "path": session_docs[n]["path"]} for n in names if n in session_docs]
 
+    # --- RAG: init or re-index ---
+    if new_files and session_docs:
+        rag = cl.user_session.get("rag_pipeline")
+        if rag is None:
+            # Первая загрузка: создаём pipeline
+            async with cl.Step(name="Инициализация RAG", type="tool") as step:
+                from orchestrator.rag.pipeline import AdaptiveRAGPipeline
+                from services.model_manager.ums_client import create_ums_embed_fn
+
+                embed_fn = create_ums_embed_fn()
+                rag_mode = await _get_rag_mode()
+
+                rag = AdaptiveRAGPipeline(embed_fn=embed_fn, rag_mode=rag_mode)
+                all_texts = [d["text"] for d in session_docs.values() if d.get("text")]
+                all_names = [n for n, d in session_docs.items() if d.get("text")]
+                if all_texts:
+                    rag.index_documents(all_texts, doc_names=all_names)
+                cl.user_session.set("rag_pipeline", rag)
+
+                search = "BM25+Dense (hybrid)" if embed_fn else "BM25-only"
+                step.output = f"RAG: mode={rag_mode}, search={search}, indexed {len(all_texts)} docs"
+        else:
+            # Повторная загрузка: переиндексация
+            async with cl.Step(name="Переиндексация", type="tool") as step:
+                all_texts = [d["text"] for d in session_docs.values() if d.get("text")]
+                all_names = [n for n, d in session_docs.items() if d.get("text")]
+                if all_texts:
+                    rag.index_documents(all_texts, doc_names=all_names)
+                step.output = f"Переиндексировано {len(all_texts)} документов"
+
     # Роутинг
-    intent = _detect_intent(query, len(new_files))
+    intent = _detect_intent(query, len(new_files), has_session_docs=bool(session_docs))
 
     if intent == "compare_documents":
         await _handle_compare(query, new_files, session_docs)
     elif intent == "equipment_analysis":
         await _handle_equipment(query, new_files, session_docs)
-    elif intent == "document_question" and session_docs:
+    elif intent == "document_question":
         await _handle_doc_question(query, session_docs, history)
     else:
         await _handle_chat(query, session_docs, history)
@@ -450,25 +550,32 @@ async def _handle_equipment(query: str, new_files: List, session_docs: Dict):
 # === Document Question (RAG) ===
 
 async def _handle_doc_question(query: str, session_docs: Dict, history: List):
-    """Вопрос по документам через AdaptiveRAGPipeline."""
+    """Вопрос по документам через AdaptiveRAGPipeline с fallback на naive stuffing."""
 
-    # Пытаемся использовать RAG pipeline если проиндексирован
     rag = cl.user_session.get("rag_pipeline")
     context_text = ""
 
-    if rag:
+    if rag and rag._indexed:
         async with cl.Step(name="Поиск по документам", type="retrieval") as step:
-            result = rag.retrieve(query)
-            context_text = result.context_text
-            n_chunks = len(result.chunks)
-            intent = result.intent or {}
-            step.output = (
-                f"Найдено {n_chunks} релевантных фрагментов "
-                f"(intent: {intent.get('intent', '?')}, "
-                f"confidence: {intent.get('confidence', 0):.2f})"
-            )
-    else:
-        # Fallback: naive context stuffing
+            try:
+                # embed_fn делает sync HTTP → выносим в thread
+                result = await asyncio.to_thread(rag.retrieve, query)
+                context_text = result.context_text
+                n_chunks = len(result.chunks)
+                meta = result.metadata or {}
+                intent = result.intent or {}
+                step.output = (
+                    f"Найдено {n_chunks} релевантных фрагментов "
+                    f"(mode: {meta.get('mode', '?')}, "
+                    f"intent: {intent.get('intent', '?')}, "
+                    f"confidence: {intent.get('confidence', 0):.2f})"
+                )
+            except Exception as e:
+                logger.warning(f"RAG retrieve failed, falling back to naive: {e}")
+                context_text = ""  # fallback ниже
+
+    # Fallback: naive context stuffing (RAG не инициализирован, не проиндексирован, или упал)
+    if not context_text and session_docs:
         async with cl.Step(name="Контекст документов", type="retrieval") as step:
             total = 0
             max_chars = 16000
@@ -483,6 +590,10 @@ async def _handle_doc_question(query: str, session_docs: Dict, history: List):
                 total += len(text)
             step.output = f"Контекст из {len(session_docs)} документов ({total} символов)"
 
+    if not context_text:
+        await cl.Message(content="Документы не содержат текста для анализа.").send()
+        return
+
     system_msg = (
         "Ты помощник Agent Navigator. Отвечай на вопросы по документам.\n\n"
         f"Контекст документов:\n{context_text}"
@@ -496,6 +607,8 @@ async def _handle_doc_question(query: str, session_docs: Dict, history: List):
 # === General Chat ===
 
 async def _handle_chat(query: str, session_docs: Dict, history: List):
+    # Semantic Router определил needs_rag=False → отвечаем без контекста документов.
+    # Даже если документы загружены — greeting/general_chat не нуждаются в RAG.
     prompt = _build_prompt(query, history)
     msg = cl.Message(content="")
     await _stream_response(prompt, msg, history)
