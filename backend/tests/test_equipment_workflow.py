@@ -516,9 +516,9 @@ class TestMatchItemsNode:
         matches = result["matches"]
         assert len(matches) == 2
 
-        # Проверяем что post вызван с threshold=0.55
+        # Проверяем что post вызван с threshold=0.45 (снижен для recall аналогов)
         call_args = mock_client.post.call_args
-        assert call_args[1]["json"]["threshold"] == 0.55
+        assert call_args[1]["json"]["threshold"] == 0.45
 
     @pytest.mark.asyncio
     async def test_legal_server_down(self, state_with_items):

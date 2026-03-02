@@ -120,7 +120,7 @@ def _detect_intent(query: str, file_count: int = 0, has_session_docs: bool = Fal
     2. Keyword fallback — если classifier недоступен
 
     Для дорогих workflow (compare, equipment) — двойной gate:
-    Semantic Router + keyword confirmation. Без явного keyword не запускаем.
+    Semantic Router + файловый контекст. Без файлов не запускаем.
     """
     query_lower = query.lower()
 
@@ -132,26 +132,13 @@ def _detect_intent(query: str, file_count: int = 0, has_session_docs: bool = Fal
             intent = result["intent"]
             needs_rag = result["needs_rag"]
 
-            # Двойной gate для дорогих workflow:
-            # Classifier может спутать "какие документы ты имеешь?" с compare_documents.
-            # Требуем keyword-подтверждение + >=2 файлов для запуска.
-            if intent == "compare_documents":
-                has_kw = any(kw in query_lower for kw in COMPARE_KEYWORDS)
-                has_files = file_count >= 2 or (has_session_docs and len(_get_session_docs()) >= 2)
-                if not (has_kw and has_files):
-                    intent = "document_question" if has_session_docs else "general_chat"
-
-            elif intent == "equipment_analysis":
-                has_kw = any(kw in query_lower for kw in EQUIPMENT_KEYWORDS)
-                has_files = file_count >= 2 or (has_session_docs and len(_get_session_docs()) >= 2)
-                if not (has_kw and has_files):
-                    intent = "document_question" if has_session_docs else "general_chat"
-
-            elif intent == "document_analysis":
-                has_kw = any(kw in query_lower for kw in ANALYSIS_KEYWORDS)
-                single_file = file_count == 1 or (has_session_docs and len(_get_session_docs()) == 1)
-                if not (has_kw and single_file):
-                    intent = "document_question" if has_session_docs else "general_chat"
+            # Для document_analysis без файлов — деградируем в general_chat.
+            # Для compare/equipment — НЕ деградируем: handler сам выдаст понятное сообщение
+            # ("Нужно минимум 2 документа..."), а не LLM-галлюцинацию.
+            if intent == "document_analysis":
+                has_file = file_count >= 1 or (has_session_docs and len(_get_session_docs()) >= 1)
+                if not has_file:
+                    intent = "general_chat"
 
             # greeting/general_chat при загруженных docs → не трогаем (needs_rag=False)
             # document_question при загруженных docs → не трогаем (needs_rag=True)
@@ -163,11 +150,12 @@ def _detect_intent(query: str, file_count: int = 0, has_session_docs: bool = Fal
             return intent
 
     # Уровень 2: Keyword fallback (UMS down или первое сообщение до загрузки файлов)
-    if file_count >= 2:
-        if any(kw in query_lower for kw in COMPARE_KEYWORDS):
-            return "compare_documents"
-        if any(kw in query_lower for kw in EQUIPMENT_KEYWORDS):
-            return "equipment_analysis"
+    # compare/equipment: роутим всегда при keyword-попадании — handler сам выдаст
+    # "Нужно минимум 2 документа" если файлов нет (вместо LLM-галлюцинации)
+    if any(kw in query_lower for kw in COMPARE_KEYWORDS):
+        return "compare_documents"
+    if any(kw in query_lower for kw in EQUIPMENT_KEYWORDS):
+        return "equipment_analysis"
 
     # 1 файл + analysis keyword → document_analysis
     single_file = file_count == 1 or (has_session_docs and len(_get_session_docs()) == 1)
@@ -500,10 +488,11 @@ _TZ_KEYWORDS = ["тз", "техническое задание", "требова
 _SMETA_KEYWORDS = ["смета", "прайс", "предложение", "кп", "коммерческое"]
 
 
-def _detect_equipment_mode(file1_name: str, file2_name: str, query: str) -> str:
+def _detect_equipment_mode(file1_name: str, file2_name: str, query: str,
+                           text_1: str = "", text_2: str = "") -> str:
     """Эвристика: tz_vs_smeta или smeta_vs_smeta."""
     from orchestrator.workflows.equipment import detect_equipment_mode
-    return detect_equipment_mode(file1_name, file2_name, query)
+    return detect_equipment_mode(file1_name, file2_name, query, text_1, text_2)
 
 
 async def _handle_equipment(query: str, new_files: List, session_docs: Dict):
@@ -517,7 +506,11 @@ async def _handle_equipment(query: str, new_files: List, session_docs: Dict):
             return
         files = [{"name": n, "path": session_docs[n]["path"]} for n in file_names]
 
-    mode = _detect_equipment_mode(files[0]["name"], files[1]["name"], query)
+    mode = _detect_equipment_mode(
+        files[0]["name"], files[1]["name"], query,
+        text_1=session_docs.get(files[0]["name"], {}).get("text", "")[:1000],
+        text_2=session_docs.get(files[1]["name"], {}).get("text", "")[:1000],
+    )
 
     async with cl.Step(name="Анализ оборудования", type="run") as run_step:
         run_step.input = f"{files[0]['name']} ↔ {files[1]['name']} ({mode})"
@@ -742,9 +735,22 @@ async def _handle_doc_question(query: str, session_docs: Dict, history: List):
 
 # === General Chat ===
 
+GENERAL_CHAT_SYSTEM = (
+    "Ты — Agent Navigator, специализированный ИИ-ассистент для анализа юридических документов и технических смет. "
+    "Твои основные возможности:\n"
+    "- Сравнение двух документов (договоров, технических заданий, редакций) с выявлением изменений\n"
+    "- Анализ соответствия сметы или КП техническому заданию (ТЗ vs смета/КП)\n"
+    "- Ответы на вопросы по содержимому загруженных документов\n"
+    "- Поиск конкретных условий, цифр и требований в документах\n\n"
+    "Ты НЕ умеешь: искать в интернете, давать прогнозы погоды, курсы валют, новости. "
+    "Если пользователь спрашивает о чём-то за пределами твоих возможностей — вежливо объясни, "
+    "что специализируешься на анализе документов, и предложи загрузить файлы для работы."
+)
+
+
 async def _handle_chat(query: str, session_docs: Dict, history: List):
     # Semantic Router определил needs_rag=False → отвечаем без контекста документов.
     # Даже если документы загружены — greeting/general_chat не нуждаются в RAG.
-    prompt = _build_prompt(query, history)
+    prompt = _build_prompt(query, history, GENERAL_CHAT_SYSTEM)
     msg = cl.Message(content="")
     await _stream_response(prompt, msg, history)

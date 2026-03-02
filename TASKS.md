@@ -213,6 +213,68 @@
 - [ ] VRAM Monitor + OOM recovery + dynamic fallback
 - [ ] Пул портов для динамических моделей в UMS
 
+---
+
+## Tech Debt — Найденные костыли (2026-03-02)
+
+> Выявлены в ходе аудита после реального тестирования equipment workflow.
+> Ответы подтверждены консультацией с NotebookLM (RAG, LLM Agents, Production-Ready AI ноутбуки).
+
+### 🔴 Critical (баги)
+
+- [ ] **TD-1 — `__aexit__` без `await` в `_handle_compare`**
+  `chainlit_app.py`: `prev_step.__aexit__(None, None, None)` — coroutine создаётся но никогда не выполняется.
+  Fix: заменить на `AsyncExitStack` или корректно управлять `async with cl.Step(...)`.
+
+### 🟠 High
+
+- [ ] **TD-2 — `INTENT_EXAMPLES` — hardcoded training data**
+  `rag/classifier.py`: примеры интентов прямо в коде. Любое изменение требует деплоя.
+  Fix: YAML-файл `data/intent_examples.yaml` + загрузка из vector DB (Chroma/FAISS) без перезапуска.
+  Доп.: 10-15 примеров недостаточно для семантически близких интентов (document_question vs document_analysis).
+
+- [ ] **TD-3 — `index_documents` блокирует event loop**
+  `chainlit_app.py::on_message`: sync вызов `rag.index_documents(...)` в async handler.
+  Fix: `await asyncio.to_thread(rag.index_documents, all_texts, doc_names=all_names)`.
+
+- [ ] **TD-4 — `on_chat_resume` не восстанавливает документы**
+  При возобновлении сессии восстанавливается только история сообщений, но не загруженные документы и RAG pipeline.
+  Fix: LangGraph Checkpointer + Store для персистентности, или сохранять метаданные документов в SQLite data layer.
+
+- [ ] **TD-5 — `sys.path.append` в рантайме**
+  В нескольких файлах (equipment.py, compare.py и др.) — `sys.path.insert/append` вместо нормального пакета.
+  Fix: `pyproject.toml` + `pip install -e .` в conda env и Dockerfile.
+
+### 🟡 Medium
+
+- [ ] **TD-6 — Дублирование логики отчётов в 3 файлах**
+  Логика дедупликации и сохранения отчётов скопирована в `compare.py`, `equipment.py`, `document_analysis.py`.
+  Fix: `backend/orchestrator/shared/report_utils.py` — общие `save_report()`, `dedup_check()`, `format_header()`.
+
+- [ ] **TD-7 — O(N·M) reverse mapping в `match_items_node`**
+  После получения matches от Legal Server обратный маппинг текст→item через двойной цикл.
+  Fix: построить `{text: item}` dict заранее → O(1) lookup.
+
+- [ ] **TD-8 — Fallback-цепочки скрывают ошибки**
+  RAG упал → тихий degradation на naive stuffing. Нет видимости сколько раз система деградировала.
+  Fix: WARNING-логирование + счётчики fallback-срабатываний, опционально Prometheus counters.
+
+- [ ] **TD-9 — Magic numbers без документации**
+  `threshold=0.45`, `k=60` (RRF), `max_chars=16000`, `MAX_HISTORY_MESSAGES=10`, `timeout=300.0` — без объяснения.
+  Fix: именованные константы с комментариями + env var override для порогов.
+
+### 🔵 Low
+
+- [ ] **TD-10 — Keyword routing как последний fallback (хрупко)**
+  Keyword lists (`COMPARE_KEYWORDS`, `EQUIPMENT_KEYWORDS` и др.) работают, но хрупки к новым формулировкам.
+  По best practice: keyword routing должен быть **первым слоем** (fast-pass), а не fallback-ом последнего уровня.
+
+- [ ] **TD-11 — Нет shared HTTP-клиента**
+  Каждый вызов создаёт `httpx.AsyncClient(timeout=...)` заново. Нет connection pooling.
+  Fix: shared client с `lifespan` управлением или dependency injection.
+
+---
+
 ## v2.3.1 — Багфиксы (2026-02-25)
 
 ### Выполнено

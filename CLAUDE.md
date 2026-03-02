@@ -42,8 +42,10 @@ tmux attach-session -t agent-navigator  # Подключение к сессии
 
 Docker-образ Chainlit **не пересобирается** при каждом запуске. Для пересборки после изменения кода:
 ```bash
-docker compose build chainlit
+docker compose build chainlit && docker compose up -d chainlit
 ```
+
+**Важно:** `chainlit_app.py` копируется в образ при сборке — bind mount только для `open_webui_uploads/`. Любое изменение кода требует `docker compose build chainlit`.
 
 ### Ручной запуск сервисов
 
@@ -186,6 +188,15 @@ async with httpx.AsyncClient(timeout=60.0) as client:
 **`ModuleNotFoundError` в Chainlit Docker:** убедиться что `ENV PYTHONPATH=/app` в `Dockerfile.chainlit`. Пересобрать: `docker compose build chainlit`.
 
 **tmux не стартует:** проверить conda (`conda env list`), пути в `run_all.sh::find_conda()`.
+
+**Playwright тестирование Chainlit:**
+- Авторизация: `admin` / `admin` (из `.env` `CHAINLIT_ADMIN_USER`/`CHAINLIT_ADMIN_PASSWORD`)
+- Стандартный `filechooser` event не срабатывает — загружать напрямую: `page.locator('input[type="file"]').first().setInputFiles(path)`
+- Для атомарного захвата: `Promise.all([page.waitForEvent('filechooser'), button.click()])` не работает с Chainlit — только прямой setInputFiles
+
+**Hooks (`.claude/hooks/`):**
+- Пути в `settings.json` должны быть **абсолютными** — hooks могут запускаться из `backend/`, а не корня проекта
+- Шаблон: `"command": "python3 /home/seral/HDD/proj/agent-navigator-pro/.claude/hooks/script.py"`
 
 ## Архитектурные принципы
 

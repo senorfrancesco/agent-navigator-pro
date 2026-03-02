@@ -44,7 +44,7 @@ class TestEmbeddingIntentClassifier:
     def test_initialization(self):
         """Классификатор инициализируется с центроидами."""
         assert self.classifier.initialized
-        assert len(self.classifier.centroids) == 5
+        assert len(self.classifier.centroids) == len(INTENT_EXAMPLES)
 
     def test_centroids_normalized(self):
         """Центроиды нормализованы (unit vectors)."""
@@ -68,9 +68,9 @@ class TestEmbeddingIntentClassifier:
             assert result["confidence"] > 0, f"'{q}': confidence should be > 0"
 
     def test_classify_all_intents_scored(self):
-        """Все 5 интентов имеют score в результате."""
+        """Все интенты имеют score в результате."""
         result = self.classifier.classify("тест")
-        assert len(result["scores"]) == 5
+        assert len(result["scores"]) == len(INTENT_EXAMPLES)
 
     def test_classify_needs_rag_greeting(self):
         """Greeting не требует RAG."""

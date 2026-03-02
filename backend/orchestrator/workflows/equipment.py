@@ -49,16 +49,62 @@ _TZ_KEYWORDS = ["тз", "техническое задание", "требова
 _SMETA_KEYWORDS = ["смета", "прайс", "предложение", "кп", "коммерческое"]
 
 
-def detect_equipment_mode(file1_name: str, file2_name: str, query: str) -> str:
-    """Эвристика: tz_vs_smeta или smeta_vs_smeta по именам файлов и запросу."""
+# Ключевые слова для content-based классификации документов
+_TZ_TEXT_KEYWORDS = [
+    "техническое задание", "предмет закупки", "требования к поставляемому",
+    "требуемый параметр", "технические характеристики", "тз на закупку",
+    "требуемое значение", "техзадание",
+]
+_KP_TEXT_KEYWORDS = [
+    "коммерческое предложение", "цена, руб", "стоимость", "прайс",
+    "предложение действительно", "итого:", "ндс", "стоимость с ндс",
+    "коммерческое", "quotation",
+]
+
+
+def detect_equipment_mode(
+    file1_name: str,
+    file2_name: str,
+    query: str,
+    text_1: str = "",
+    text_2: str = "",
+) -> str:
+    """Эвристика: tz_vs_smeta или smeta_vs_smeta.
+
+    Уровень 1: имена файлов
+    Уровень 2: content-based (первые 1000 символов текста)
+    Уровень 3: запрос
+    """
     f1 = file1_name.lower()
     f2 = file2_name.lower()
     q = query.lower()
 
+    # Уровень 1: имена файлов
     if any(kw in f1 for kw in _TZ_KEYWORDS) or any(kw in f2 for kw in _TZ_KEYWORDS):
         return "tz_vs_smeta"
     if any(kw in f1 for kw in _SMETA_KEYWORDS) and any(kw in f2 for kw in _SMETA_KEYWORDS):
         return "smeta_vs_smeta"
+
+    # Уровень 2: content-based классификация текста
+    def _classify_text(text: str) -> str:
+        t = text[:1000].lower()
+        tz_score = sum(1 for kw in _TZ_TEXT_KEYWORDS if kw in t)
+        kp_score = sum(1 for kw in _KP_TEXT_KEYWORDS if kw in t)
+        if tz_score > kp_score:
+            return "tz"
+        if kp_score > tz_score:
+            return "kp"
+        return "unknown"
+
+    if text_1 or text_2:
+        type1 = _classify_text(text_1)
+        type2 = _classify_text(text_2)
+        if type1 == "tz" or type2 == "tz":
+            return "tz_vs_smeta"
+        if type1 == "kp" and type2 == "kp":
+            return "smeta_vs_smeta"
+
+    # Уровень 3: запрос
     if "сравни смет" in q or "сравнение смет" in q:
         return "smeta_vs_smeta"
     return "tz_vs_smeta"
@@ -118,12 +164,177 @@ def _detect_header_columns(header_row: List[str]) -> Dict[str, int]:
     return mapping
 
 
+# Ключевые слова для ТЗ-колонок (merged-cell структура)
+_TZ_COL_KEYWORDS = {
+    "num":   ["№", "номер", "n", "п/п"],
+    "name":  ["наименование", "товар", "артикул", "оборудование"],
+    "qty":   ["количество", "кол-во", "кол.", "шт"],
+    "param": ["требуемый параметр", "параметр", "характеристика", "требуем",
+              "технические характе"],   # ← добавлено для этого PDF
+    "value": ["требуемое значение", "значение", "требование", "требуемое"],
+    "unit":  ["ед. изм", "единица", "ед.изм", "ед."],
+}
+
+
+def _is_tz_structure(header_row: List) -> bool:
+    """Детектирует ТЗ-структуру (merged-cells) по заголовку таблицы."""
+    if not header_row:
+        return False
+    # Нормализуем: убираем лишние пробелы внутри слов (OCR-артефакты merged-cells)
+    raw = " ".join(str(c) for c in header_row if c)
+    import re as _re
+    header_text = _re.sub(r'\s+', ' ', raw).lower()
+    # Явные признаки ТЗ с param/value структурой
+    if "требуемый" in header_text or "требуемое" in header_text:
+        return True
+    if "параметр" in header_text and "значение" in header_text:
+        return True
+    # Признак "технические характеристики" без ценовых колонок
+    if "технические характеристики" in header_text and "цен" not in header_text and "стоимост" not in header_text:
+        return True
+    return False
+
+
+def _detect_tz_columns(header_row: List) -> Dict[str, int]:
+    """Строит col_map для ТЗ-таблицы с колонками num/name/qty/param/value/unit."""
+    mapping = {}
+    for col_idx, cell in enumerate(header_row):
+        if cell is None:
+            continue
+        cell_lower = str(cell).lower().strip()
+        if not cell_lower:
+            continue
+        for field, keywords in _TZ_COL_KEYWORDS.items():
+            if field not in mapping and any(kw in cell_lower for kw in keywords):
+                mapping[field] = col_idx
+                break
+    return mapping
+
+
+def _extract_numeric_specs(spec_rows: List[Dict]) -> str:
+    """
+    Формирует компактный текст из строк-характеристик ТЗ.
+    Берёт строки с числовыми требованиями и специфическими значениями.
+    Пример: "ОЗУ: не менее 32 ГБ. БП: не менее 2 шт. CPU: не менее 2 шт."
+    """
+    numeric_pattern = re.compile(
+        r'(не\s+менее|не\s+более|от|до)\s*[\d.,]+', re.IGNORECASE
+    )
+    specific_value_pattern = re.compile(
+        r'\b(DDR\d|RDIMM|UDIMM|DIMM|SAS|SATA|NVMe|PCIe|RAID|TPM|ECC|LFF|SFF|'
+        r'Rack|Tower|Windows|Linux|UEFI|USB|HDMI|VGA|DP|RJ.?45)\b',
+        re.IGNORECASE
+    )
+
+    parts = []
+    for row in spec_rows:
+        param = str(row.get("param", "")).replace('\n', ' ').strip()
+        value = str(row.get("value", "")).replace('\n', ' ').strip()
+        unit  = str(row.get("unit",  "")).replace('\n', ' ').strip()
+
+        if not param:
+            continue
+
+        value_lower = value.lower()
+        if value_lower in ('', 'none', 'соответствие', '-'):
+            if specific_value_pattern.search(param):
+                parts.append(param)
+            continue
+
+        if numeric_pattern.search(value) or re.search(r'\d', value):
+            full = f"{param}: {value}"
+            if unit and unit != value:
+                full += f" {unit}"
+            parts.append(full)
+        elif specific_value_pattern.search(value):
+            parts.append(f"{param}: {value}")
+
+    return ". ".join(parts[:10])
+
+
+def _parse_tz_table_rows(
+    rows: List[List],
+    col_map: Dict[str, int],
+) -> List[Dict[str, Any]]:
+    """
+    Group-by парсер для ТЗ-таблиц с merged-cells.
+
+    Строка-позиция:      col[num] — целое число (1, 2, 3...)
+    Строка-характеристика: col[num] и col[name] — None/пусты
+    """
+    items = []
+    current_item: Dict[str, Any] | None = None
+    current_specs: List[Dict] = []
+
+    def _cell(row, key):
+        idx = col_map.get(key)
+        if idx is None or idx >= len(row):
+            return None
+        val = row[idx]
+        return str(val).replace('\n', ' ').strip() if val is not None else None
+
+    def _flush():
+        nonlocal current_item, current_specs
+        if current_item is not None:
+            current_item["specs"] = _extract_numeric_specs(current_specs)
+            items.append(current_item)
+        current_item = None
+        current_specs = []
+
+    for row in rows:
+        num_val  = _cell(row, "num")
+        name_val = _cell(row, "name")
+
+        # Строка-позиция: num_val — целое число
+        if num_val and re.match(r'^\d+$', num_val.strip()):
+            _flush()
+            qty_raw = _cell(row, "qty") or "1"
+            qty_match = re.search(r'\d+', qty_raw)
+            qty = int(qty_match.group()) if qty_match else 1
+
+            current_item = {
+                "name": name_val or f"Позиция {num_val}",
+                "specs": "",
+                "quantity": str(qty),
+                "price": "",
+                "unit": _cell(row, "unit") or "",
+                "source": "table",
+                "page": None,
+            }
+            current_specs = []
+
+            # Первая строка позиции может уже содержать характеристику
+            param = _cell(row, "param")
+            value = _cell(row, "value")
+            unit  = _cell(row, "unit")
+            if param:
+                current_specs.append({"param": param, "value": value or "", "unit": unit or ""})
+
+        # Строка-характеристика: num и name — пусты
+        elif (not num_val or num_val in ('None', '')) and \
+             (not name_val or name_val in ('None', '')):
+            if current_item is None:
+                continue
+            param = _cell(row, "param")
+            value = _cell(row, "value")
+            unit  = _cell(row, "unit")
+            if param:
+                current_specs.append({"param": param, "value": value or "", "unit": unit or ""})
+
+        # Строка с именем, но без номера — продолжение предыдущей позиции
+        elif not num_val and name_val and current_item is not None:
+            current_item["name"] += " " + name_val
+
+    _flush()
+    return items
+
+
 def _safe_cell(row: List, col_map: Dict[str, int], field: str) -> str:
     """None-safe извлечение значения ячейки."""
     if field not in col_map or len(row) <= col_map[field]:
         return ""
     val = row[col_map[field]]
-    return str(val).strip() if val is not None else ""
+    return str(val).replace('\n', ' ').strip() if val is not None else ""
 
 
 def _parse_table_rows(
@@ -144,11 +355,13 @@ def _parse_table_rows(
     # Ищем строку-заголовок (первую строку с >= 2 распознанных ключевых слова)
     header_idx = -1
     col_map = {}
+    header_row = []
     for i, row in enumerate(table_data[:5]):  # Проверяем первые 5 строк
         candidate = _detect_header_columns(row)
         if len(candidate) >= 2:
             header_idx = i
             col_map = candidate
+            header_row = row
             break
 
     # Если заголовок не найден — используем inherited_col_map (продолжение таблицы)
@@ -160,6 +373,13 @@ def _parse_table_rows(
             return [], inherited_col_map or {}
 
     start_row = header_idx + 1 if header_idx >= 0 else 0
+
+    # Проверяем: ТЗ-структура (merged-cell таблица с характеристиками)
+    if header_row and _is_tz_structure(header_row):
+        tz_col_map = _detect_tz_columns(header_row)
+        if "name" in tz_col_map and ("param" in tz_col_map or "value" in tz_col_map):
+            tz_items = _parse_tz_table_rows(table_data[start_row:], tz_col_map)
+            return tz_items, col_map
 
     items = []
     for row in table_data[start_row:]:
@@ -187,10 +407,10 @@ def _parse_table_rows(
 
 
 def _dedup_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Дедупликация позиций по name.lower()[:50], предпочитает source='table'."""
+    """Дедупликация позиций по name.lower()[:60], предпочитает source='table'."""
     seen = {}
     for item in items:
-        key = item["name"].lower().strip()[:50]
+        key = item["name"].replace('\n', ' ').lower().strip()[:60]
         if not key:
             continue
         if key in seen:
@@ -438,9 +658,27 @@ def _route_after_extract(state: EquipmentState) -> str:
 
 def _item_to_text(item: Dict[str, Any]) -> str:
     """Конвертирует item в текст для семантического матчинга."""
-    parts = [item.get("name", "")]
-    if item.get("specs"):
-        parts.append(item["specs"])
+    name = item.get("name", "").replace('\n', ' ').strip()
+
+    # Извлекаем артикул/модель из "(Аналог X)" и добавляем в текст для LaBSE
+    analog_match = re.search(r'\(аналог\s+(.+?)\)', name, re.IGNORECASE)
+    if analog_match:
+        analog_ref = analog_match.group(1).strip()
+        name = f"{name} {analog_ref}"
+
+    # Убираем лишние фразы из ТЗ-имён, мешающие матчингу
+    noise_patterns = [
+        r'\s*или\s+эквивалент\s*',
+        r'\bили\s+аналог\b',
+        r'\b4LFF\b', r'\b4SFF\b', r'\b8SFF\b', r'\b2LFF\b',
+    ]
+    for pattern in noise_patterns:
+        name = re.sub(pattern, ' ', name, flags=re.IGNORECASE).strip()
+
+    parts = [name]
+    specs = item.get("specs", "").replace('\n', ' ').strip()
+    if specs:
+        parts.append(specs)
     if item.get("quantity"):
         parts.append(f"кол-во: {item['quantity']}")
     return ". ".join(parts)
@@ -476,7 +714,7 @@ async def match_items_node(state: EquipmentState) -> dict:
             resp = await client.post(f"{MCP_LEGAL_SERVER_URL}/match_batches", json={
                 "list_old": list_old,
                 "list_new": list_new,
-                "threshold": 0.55,  # Ниже порог для оборудования (короткие названия)
+                "threshold": 0.45,  # Снижен с 0.55 для лучшего recall аналогов
             })
             resp.raise_for_status()
             data = resp.json()
