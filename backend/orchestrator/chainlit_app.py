@@ -108,6 +108,8 @@ COMPARE_KEYWORDS = ["сравни", "различия", "изменения", "�
 EQUIPMENT_KEYWORDS = ["смета", "оборудование", "тз", "закупка", "спецификация"]
 DOC_KEYWORDS = ["из документа", "в файле", "что написано", "найди в",
                 "по документу", "согласно", "в тексте"]
+ANALYSIS_KEYWORDS = ["проанализируй", "анализ документа", "содержание", "что в этом",
+                     "разбери", "обзор", "резюме", "структура документа"]
 GREETING_KEYWORDS = ["привет", "здравствуй", "добрый"]
 
 
@@ -145,10 +147,16 @@ def _detect_intent(query: str, file_count: int = 0, has_session_docs: bool = Fal
                 if not (has_kw and has_files):
                     intent = "document_question" if has_session_docs else "general_chat"
 
+            elif intent == "document_analysis":
+                has_kw = any(kw in query_lower for kw in ANALYSIS_KEYWORDS)
+                single_file = file_count == 1 or (has_session_docs and len(_get_session_docs()) == 1)
+                if not (has_kw and single_file):
+                    intent = "document_question" if has_session_docs else "general_chat"
+
             # greeting/general_chat при загруженных docs → не трогаем (needs_rag=False)
             # document_question при загруженных docs → не трогаем (needs_rag=True)
             # Если needs_rag=True и docs загружены, но intent не workflow → document_question
-            if has_session_docs and needs_rag and intent not in ("compare_documents", "equipment_analysis"):
+            if has_session_docs and needs_rag and intent not in ("compare_documents", "equipment_analysis", "document_analysis"):
                 intent = "document_question"
 
             logger.info(f"Semantic Router: intent={intent}, confidence={result['confidence']:.2f}, margin={result.get('margin',0):.3f}")
@@ -160,6 +168,11 @@ def _detect_intent(query: str, file_count: int = 0, has_session_docs: bool = Fal
             return "compare_documents"
         if any(kw in query_lower for kw in EQUIPMENT_KEYWORDS):
             return "equipment_analysis"
+
+    # 1 файл + analysis keyword → document_analysis
+    single_file = file_count == 1 or (has_session_docs and len(_get_session_docs()) == 1)
+    if single_file and any(kw in query_lower for kw in ANALYSIS_KEYWORDS):
+        return "document_analysis"
 
     if any(kw in query_lower for kw in DOC_KEYWORDS):
         return "document_question"
@@ -368,6 +381,8 @@ async def on_message(message: cl.Message):
         await _handle_compare(query, new_files, session_docs)
     elif intent == "equipment_analysis":
         await _handle_equipment(query, new_files, session_docs)
+    elif intent == "document_analysis":
+        await _handle_document_analysis(query, new_files, session_docs)
     elif intent == "document_question":
         await _handle_doc_question(query, session_docs, history)
     else:
@@ -474,10 +489,21 @@ async def _handle_compare(query: str, new_files: List, session_docs: Dict):
 # === Workflow: Анализ оборудования ===
 
 EQUIPMENT_NODE_LABELS = {
-    "extract": ("1. Извлечение данных", "tool"),
-    "evaluate": ("2. Оценка соответствия", "llm"),
-    "report": ("3. Генерация отчёта", "tool"),
+    "extract":  ("1. Извлечение позиций", "tool"),
+    "match":    ("2. Сопоставление позиций", "tool"),
+    "evaluate": ("3. Оценка соответствия", "llm"),
+    "report":   ("4. Генерация отчёта", "tool"),
 }
+
+# Ключевые слова для определения mode
+_TZ_KEYWORDS = ["тз", "техническое задание", "требовани", "specification", "техзадани"]
+_SMETA_KEYWORDS = ["смета", "прайс", "предложение", "кп", "коммерческое"]
+
+
+def _detect_equipment_mode(file1_name: str, file2_name: str, query: str) -> str:
+    """Эвристика: tz_vs_smeta или smeta_vs_smeta."""
+    from orchestrator.workflows.equipment import detect_equipment_mode
+    return detect_equipment_mode(file1_name, file2_name, query)
 
 
 async def _handle_equipment(query: str, new_files: List, session_docs: Dict):
@@ -491,17 +517,24 @@ async def _handle_equipment(query: str, new_files: List, session_docs: Dict):
             return
         files = [{"name": n, "path": session_docs[n]["path"]} for n in file_names]
 
+    mode = _detect_equipment_mode(files[0]["name"], files[1]["name"], query)
+
     async with cl.Step(name="Анализ оборудования", type="run") as run_step:
-        run_step.input = f"ТЗ: {files[0]['name']}, Смета: {files[1]['name']}"
+        run_step.input = f"{files[0]['name']} ↔ {files[1]['name']} ({mode})"
         t_start = time.perf_counter()
 
         try:
             workflow = create_equipment_graph()
             initial_state = {
-                "input_tz": _to_host_path(files[0]["path"]),
-                "input_smeta": _to_host_path(files[1]["path"]),
-                "requirements": [], "offers": [], "matches": [],
+                "input_1": _to_host_path(files[0]["path"]),
+                "input_2": _to_host_path(files[1]["path"]),
+                "name_1": files[0]["name"],
+                "name_2": files[1]["name"],
+                "mode": mode,
+                "items_1": [], "items_2": [],
+                "matches": [], "analysis_results": [],
                 "final_report": "", "errors": [],
+                "session_id": "",
             }
 
             final_state = {}
@@ -516,15 +549,25 @@ async def _handle_equipment(query: str, new_files: List, session_docs: Dict):
 
                     async with cl.Step(name=label, type=step_type) as step:
                         if node_name == "extract":
-                            n_req = len(output.get("requirements", []))
-                            n_off = len(output.get("offers", []))
-                            step.output = f"Требования: {n_req}, Предложения: {n_off}"
+                            n1 = len(output.get("items_1", []))
+                            n2 = len(output.get("items_2", []))
+                            step.output = f"Документ 1: {n1} позиций, Документ 2: {n2} позиций"
+
+                        elif node_name == "match":
+                            matches = output.get("matches", [])
+                            n_mod = sum(1 for m in matches if m.get("type") not in ("ADDED", "DELETED"))
+                            n_add = sum(1 for m in matches if m.get("type") == "ADDED")
+                            n_del = sum(1 for m in matches if m.get("type") == "DELETED")
+                            step.output = (
+                                f"Сопоставлено {len(matches)} пар: "
+                                f"{n_mod} совпадений, {n_add} добавлено, {n_del} удалено"
+                            )
 
                         elif node_name == "evaluate":
-                            matches = output.get("matches", [])
-                            n_pass = sum(1 for m in matches if m.get("result") == "PASS")
-                            n_fail = sum(1 for m in matches if m.get("result") == "FAIL")
-                            step.output = f"Оценено {len(matches)} позиций: {n_pass} ОК, {n_fail} несоответствий"
+                            results = output.get("analysis_results", [])
+                            n_pass = sum(1 for r in results if r.get("result") in ("PASS", "SAME"))
+                            n_fail = sum(1 for r in results if r.get("result") in ("FAIL", "GAP"))
+                            step.output = f"Оценено {len(results)} позиций: {n_pass} ОК, {n_fail} несоответствий"
 
                         elif node_name == "report":
                             step.output = "Отчёт сгенерирован"
@@ -545,6 +588,99 @@ async def _handle_equipment(query: str, new_files: List, session_docs: Dict):
         except Exception as e:
             run_step.output = f"Ошибка: {e}"
             await cl.Message(content=f"Ошибка workflow оборудования: {e}").send()
+
+
+# === Workflow: Анализ одного документа ===
+
+ANALYSIS_NODE_LABELS = {
+    "classify":  ("1. Классификация документа", "tool"),
+    "extract":   ("2. Извлечение позиций", "tool"),
+    "summarize": ("3. Анализ требований", "llm"),
+    "report":    ("4. Генерация отчёта", "tool"),
+}
+
+
+async def _handle_document_analysis(query: str, new_files: List, session_docs: Dict):
+    from orchestrator.workflows.document_analysis import create_analysis_graph
+
+    # Берём 1 файл из new_files или из session_docs
+    file = None
+    if new_files:
+        file = new_files[0]
+    elif session_docs:
+        last_name = list(session_docs.keys())[-1]
+        file = {"name": last_name, "path": session_docs[last_name]["path"]}
+
+    if not file:
+        await cl.Message(content="Нужно загрузить документ для анализа.").send()
+        return
+
+    async with cl.Step(name="Анализ документа", type="run") as run_step:
+        run_step.input = file["name"]
+        t_start = time.perf_counter()
+
+        try:
+            workflow = create_analysis_graph()
+            initial_state = {
+                "input_path": _to_host_path(file["path"]),
+                "doc_name": file["name"],
+                "doc_type": "",
+                "doc_metadata": {},
+                "items": [],
+                "full_text": "",
+                "summary": "",
+                "final_report": "",
+                "errors": [],
+            }
+
+            final_state = {}
+
+            async for event in workflow.astream(initial_state):
+                for node_name, output in event.items():
+                    final_state.update(output)
+
+                    label, step_type = ANALYSIS_NODE_LABELS.get(
+                        node_name, (node_name, "tool")
+                    )
+
+                    async with cl.Step(name=label, type=step_type) as step:
+                        if node_name == "classify":
+                            doc_type = output.get("doc_type", "?")
+                            meta = output.get("doc_metadata", {})
+                            step.output = (
+                                f"Тип: {doc_type}, "
+                                f"страниц: {meta.get('pages', '?')}, "
+                                f"символов: {meta.get('chars', '?')}, "
+                                f"таблиц: {meta.get('tables_count', '?')}"
+                            )
+
+                        elif node_name == "extract":
+                            n_items = len(output.get("items", []))
+                            step.output = f"Извлечено {n_items} позиций"
+
+                        elif node_name == "summarize":
+                            summary = output.get("summary", "")
+                            step.output = f"Сводка: {len(summary)} символов"
+
+                        elif node_name == "report":
+                            step.output = "Отчёт сгенерирован"
+
+            elapsed = time.perf_counter() - t_start
+            report = final_state.get("final_report", "")
+            errors = final_state.get("errors", [])
+
+            if report:
+                run_step.output = f"Анализ завершён за {elapsed:.1f}с"
+                await cl.Message(content=report).send()
+            elif errors:
+                run_step.output = "Завершено с ошибками"
+                await cl.Message(content=f"Ошибки:\n" + "\n".join(f"- {e}" for e in errors)).send()
+            else:
+                await cl.Message(content="Не удалось создать отчёт.").send()
+
+        except Exception as e:
+            run_step.output = f"Ошибка: {e}"
+            await cl.Message(content=f"Ошибка workflow анализа: {e}").send()
 
 
 # === Document Question (RAG) ===

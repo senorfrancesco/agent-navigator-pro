@@ -43,6 +43,13 @@ class ExtractTablesRequest(BaseModel):
     path: str
     pages: Optional[List[int]] = None
 
+class ExtractTablesDocxRequest(BaseModel):
+    path: str
+
+class ExtractExcelRequest(BaseModel):
+    path: str
+    sheets: Optional[List[str]] = None
+
 # ============================================================================
 # Document Loading Functions
 # ============================================================================
@@ -81,6 +88,26 @@ def load_txt(path: str) -> str:
             return f.read()
     except Exception as e:
         raise RuntimeError(f"Error reading TXT: {e}")
+
+def load_excel_as_text(path: str) -> str:
+    """Извлечение текста из Excel (xlsx) — ячейки через ' | '."""
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(path, read_only=True, data_only=True)
+        parts = []
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            parts.append(f"\n--- Sheet: {sheet_name} ---\n")
+            for row in ws.iter_rows(values_only=True):
+                cells = [str(c) if c is not None else "" for c in row]
+                if any(c.strip() for c in cells):
+                    parts.append(" | ".join(cells))
+        wb.close()
+        return "\n".join(parts)
+    except ImportError:
+        raise RuntimeError("openpyxl not installed. Install with: pip install openpyxl")
+    except Exception as e:
+        raise RuntimeError(f"Error reading Excel: {e}")
 
 # ============================================================================
 # Chunking Functions
@@ -190,6 +217,9 @@ async def load_document(request: LoadDocumentRequest):
         elif file_ext == ".txt":
             text = load_txt(path)
             format_type = "txt"
+        elif file_ext in (".xlsx", ".xls"):
+            text = load_excel_as_text(path)
+            format_type = "excel"
         else:
             return {"status": "error", "error": f"Unsupported format: {file_ext}"}
         
@@ -305,6 +335,73 @@ async def extract_tables(request: ExtractTablesRequest):
             "status": "error",
             "error": str(e)
         }
+
+@app.post("/extract_tables_docx")
+async def extract_tables_docx(request: ExtractTablesDocxRequest):
+    """Извлекает таблицы из DOCX через python-docx."""
+    try:
+        from docx import Document
+
+        if not os.path.exists(request.path):
+            return {"status": "error", "error": f"File not found: {request.path}"}
+
+        doc = Document(request.path)
+        tables = []
+        for idx, table in enumerate(doc.tables):
+            rows_data = []
+            for row in table.rows:
+                cells = [cell.text.strip() for cell in row.cells]
+                rows_data.append(cells)
+            if rows_data:
+                tables.append({"page": idx + 1, "data": rows_data})
+
+        return {
+            "status": "success",
+            "tables": tables,
+            "table_count": len(tables),
+        }
+    except ImportError:
+        return {"status": "error", "error": "python-docx not installed"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+@app.post("/extract_tables_excel")
+async def extract_tables_excel(request: ExtractExcelRequest):
+    """Извлекает таблицы из Excel (xlsx) через openpyxl."""
+    try:
+        from openpyxl import load_workbook
+
+        if not os.path.exists(request.path):
+            return {"status": "error", "error": f"File not found: {request.path}"}
+
+        wb = load_workbook(request.path, read_only=True, data_only=True)
+        tables = []
+        sheet_names = request.sheets or wb.sheetnames
+
+        for sheet_name in sheet_names:
+            if sheet_name not in wb.sheetnames:
+                continue
+            ws = wb[sheet_name]
+            rows = []
+            for row in ws.iter_rows(values_only=True):
+                cells = [str(c) if c is not None else "" for c in row]
+                if any(c.strip() for c in cells):
+                    rows.append(cells)
+            if rows:
+                tables.append({"page": sheet_name, "data": rows})
+
+        wb.close()
+        return {
+            "status": "success",
+            "tables": tables,
+            "table_count": len(tables),
+        }
+    except ImportError:
+        return {"status": "error", "error": "openpyxl not installed"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
 
 if __name__ == "__main__":
     import uvicorn
