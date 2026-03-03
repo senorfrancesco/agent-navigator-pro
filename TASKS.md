@@ -256,6 +256,14 @@
   Логика дедупликации и сохранения отчётов скопирована в `compare.py`, `equipment.py`, `document_analysis.py`.
   Fix: `backend/orchestrator/shared/report_utils.py` — общие `save_report()`, `dedup_check()`, `format_header()`.
 
+- [x] **TD-12 — Архитектурный переход от Regex к LLM Polisher для ТЗ**
+  Парсеры ТЗ страдали от хардкода и хрупких эвристик.
+  Fix: 
+  1. Вынос всех правил и ключевых слов в `data/parsers_config.yaml`.
+  2. Переход к сбору сырых данных (`raw_specs`) вместо фильтрации "на лету".
+  3. Внедрение `LLM Polisher` — агентской ноды, превращающей сырой мусор из таблиц в структурированный технический текст.
+  4. Реализация надежного Rule-based Fallback (на основе конфига) на случай сбоев LLM.
+
 - [ ] **TD-7 — O(N·M) reverse mapping в `match_items_node`**
   После получения matches от Legal Server обратный маппинг текст→item через двойной цикл.
   Fix: построить `{text: item}` dict заранее → O(1) lookup.

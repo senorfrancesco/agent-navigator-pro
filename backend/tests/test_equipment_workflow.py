@@ -439,12 +439,10 @@ class TestLoadAndExtractNode:
     @pytest.mark.asyncio
     async def test_handles_doc_server_error(self, base_state):
         """Document Server down → errors, items пусты."""
-        with patch("httpx.AsyncClient") as MockClient:
+        with patch("orchestrator.workflows.equipment.get_shared_client") as mock_get_client:
             mock_client = AsyncMock()
             mock_client.post = AsyncMock(side_effect=httpx.ConnectError("Connection refused"))
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            MockClient.return_value = mock_client
+            mock_get_client.return_value = mock_client
 
             with patch("orchestrator.workflows.equipment.ums_client") as mock_ums:
                 mock_ums.async_infer = AsyncMock(side_effect=Exception("UMS down"))
@@ -504,15 +502,12 @@ class TestMatchItemsNode:
         mock_resp.json.return_value = legal_response
         mock_resp.raise_for_status = MagicMock()
 
-        with patch("httpx.AsyncClient") as MockClient:
+        with patch("orchestrator.workflows.equipment.get_shared_client") as mock_get_client:
             mock_client = AsyncMock()
             mock_client.post = AsyncMock(return_value=mock_resp)
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            MockClient.return_value = mock_client
+            mock_get_client.return_value = mock_client
 
             result = await match_items_node(state_with_items)
-
         matches = result["matches"]
         assert len(matches) == 2
 
@@ -523,18 +518,15 @@ class TestMatchItemsNode:
     @pytest.mark.asyncio
     async def test_legal_server_down(self, state_with_items):
         """Legal Server down → errors."""
-        with patch("httpx.AsyncClient") as MockClient:
+        with patch("orchestrator.workflows.equipment.get_shared_client") as mock_get_client:
             mock_client = AsyncMock()
             mock_client.post = AsyncMock(side_effect=httpx.ConnectError("refused"))
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            MockClient.return_value = mock_client
+            mock_get_client.return_value = mock_client
 
             result = await match_items_node(state_with_items)
 
         assert result["matches"] == []
         assert len(result.get("errors", [])) > 0
-
 
 # ============================================================================
 # Tests: evaluate_compliance_node (mocked)
@@ -897,18 +889,15 @@ class TestChunkText:
         """Текст <= MAX_TEXT_FOR_LLM — возвращается как есть, без HTTP."""
         short = "Коммутатор Cisco 2960. Сервер Dell R740."
         assert len(short) <= MAX_TEXT_FOR_LLM
-
-        async with httpx.AsyncClient() as client:
-            with patch.object(client, "post", new_callable=AsyncMock) as mock_post:
-                chunks = await _chunk_text(client, short)
-                mock_post.assert_not_called()
-                assert chunks == [short]
+    
+        chunks = await _chunk_text(short)
+        assert chunks == [short]
 
     @pytest.mark.asyncio
     async def test_long_text_calls_smart_chunk(self):
         """Текст > MAX_TEXT_FOR_LLM — вызывает /smart_chunk и возвращает чанки."""
         long_text = "A" * (MAX_TEXT_FOR_LLM + 100)
-
+    
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.raise_for_status = MagicMock()
@@ -917,15 +906,18 @@ class TestChunkText:
             "chunks": ["chunk_1_text", "chunk_2_text"],
             "chunk_count": 2,
         }
-
-        async with httpx.AsyncClient() as client:
-            with patch.object(client, "post", new_callable=AsyncMock, return_value=mock_resp) as mock_post:
-                chunks = await _chunk_text(client, long_text)
-                mock_post.assert_called_once()
-                call_json = mock_post.call_args[1]["json"]
-                assert call_json["max_tokens"] == 2000
-                assert call_json["overlap"] == 150
-                assert chunks == ["chunk_1_text", "chunk_2_text"]
+    
+        with patch("orchestrator.workflows.equipment.get_shared_client") as mock_get_client:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_get_client.return_value = mock_client
+            
+            chunks = await _chunk_text(long_text)
+            mock_client.post.assert_called_once()
+            call_json = mock_client.post.call_args[1]["json"]
+            assert call_json["max_tokens"] == 2000
+            assert call_json["overlap"] == 150
+            assert chunks == ["chunk_1_text", "chunk_2_text"]
 
     @pytest.mark.asyncio
     async def test_smart_chunk_fails_fallback(self):
@@ -934,13 +926,16 @@ class TestChunkText:
         line = "B" * 100 + "\n"
         long_text = line * ((MAX_TEXT_FOR_LLM // 101) + 10)
         assert len(long_text) > MAX_TEXT_FOR_LLM
-
-        async with httpx.AsyncClient() as client:
-            with patch.object(client, "post", side_effect=httpx.ConnectError("down")):
-                chunks = await _chunk_text(client, long_text)
-                assert len(chunks) >= 2
-                for c in chunks:
-                    assert len(c) <= MAX_TEXT_FOR_LLM + 200  # допуск на последнюю строку
+    
+        with patch("orchestrator.workflows.equipment.get_shared_client") as mock_get_client:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(side_effect=httpx.ConnectError("down"))
+            mock_get_client.return_value = mock_client
+            
+            chunks = await _chunk_text(long_text)
+            assert len(chunks) >= 2
+            for c in chunks:
+                assert len(c) <= MAX_TEXT_FOR_LLM + 200  # допуск на последнюю строку
 
     @pytest.mark.asyncio
     async def test_oversized_smart_chunk_resplit(self):
@@ -948,7 +943,7 @@ class TestChunkText:
         line = "C" * 100 + "\n"
         long_text = line * ((MAX_TEXT_FOR_LLM // 101) + 10)
         assert len(long_text) > MAX_TEXT_FOR_LLM
-
+    
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.raise_for_status = MagicMock()
@@ -957,13 +952,16 @@ class TestChunkText:
             "chunks": [long_text],  # smart_chunk не смог разбить
             "chunk_count": 1,
         }
-
-        async with httpx.AsyncClient() as client:
-            with patch.object(client, "post", new_callable=AsyncMock, return_value=mock_resp):
-                chunks = await _chunk_text(client, long_text)
-                assert len(chunks) >= 2
-                for c in chunks:
-                    assert len(c) <= MAX_TEXT_FOR_LLM + 200
+    
+        with patch("orchestrator.workflows.equipment.get_shared_client") as mock_get_client:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_get_client.return_value = mock_client
+            
+            chunks = await _chunk_text(long_text)
+            assert len(chunks) >= 2
+            for c in chunks:
+                assert len(c) <= MAX_TEXT_FOR_LLM + 200
 
 
 # ============================================================================
@@ -1056,15 +1054,18 @@ class TestChunkedExtraction:
             call_count["n"] += 1
             return llm_responses[idx]
 
-        async with httpx.AsyncClient() as client:
-            with patch.object(client, "post", side_effect=route_post):
-                with patch("orchestrator.workflows.equipment.ums_client") as mock_ums:
-                    mock_ums.async_infer = mock_infer
-                    items = await _extract_items_llm(client, "/fake/doc.pdf", [])
-                    assert len(items) == 2
-                    names = {it["name"] for it in items}
-                    assert "Коммутатор" in names
-                    assert "Сервер Dell" in names
+        with patch("orchestrator.workflows.equipment.get_shared_client") as mock_get_client:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(side_effect=route_post)
+            mock_get_client.return_value = mock_client
+            
+            with patch("orchestrator.workflows.equipment.ums_client") as mock_ums:
+                mock_ums.async_infer = mock_infer
+                items = await _extract_items_llm("/fake/doc.pdf", [])
+                assert len(items) == 2
+                names = {it["name"] for it in items}
+                assert "Коммутатор" in names
+                assert "Сервер Dell" in names
 
     @pytest.mark.asyncio
     async def test_chunk_failure_partial_results(self):
@@ -1101,10 +1102,13 @@ class TestChunkedExtraction:
                 raise RuntimeError("LLM timeout")
             return {"content": '[{"name": "Item OK", "specs": "", "quantity": "1", "price": ""}]'}
 
-        async with httpx.AsyncClient() as client:
-            with patch.object(client, "post", side_effect=route_post):
-                with patch("orchestrator.workflows.equipment.ums_client") as mock_ums:
-                    mock_ums.async_infer = mock_infer
-                    items = await _extract_items_llm(client, "/fake/doc.pdf", [])
-                    assert len(items) == 1
-                    assert items[0]["name"] == "Item OK"
+        with patch("orchestrator.workflows.equipment.get_shared_client") as mock_get_client:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(side_effect=route_post)
+            mock_get_client.return_value = mock_client
+            
+            with patch("orchestrator.workflows.equipment.ums_client") as mock_ums:
+                mock_ums.async_infer = mock_infer
+                items = await _extract_items_llm("/fake/doc.pdf", [])
+                assert len(items) == 1
+                assert items[0]["name"] == "Item OK"

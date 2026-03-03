@@ -161,14 +161,12 @@ class TestClassifyAndLoadNode:
                 return mock_response_tables
             return mock_response_load
 
-        with patch("httpx.AsyncClient") as MockClient:
+        with patch("orchestrator.workflows.document_analysis.get_shared_client") as mock_get_client:
             client_instance = AsyncMock()
             client_instance.post = AsyncMock(side_effect=mock_post)
-            MockClient.return_value.__aenter__ = AsyncMock(return_value=client_instance)
-            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_get_client.return_value = client_instance
 
             result = await classify_and_load_node(base_state)
-
         assert result["doc_type"] == "tz"
         assert result["full_text"] == tz_text
         assert result["doc_metadata"]["pages"] == 5
@@ -201,14 +199,12 @@ class TestClassifyAndLoadNode:
                 return mock_response_tables
             return mock_response_load
 
-        with patch("httpx.AsyncClient") as MockClient:
+        with patch("orchestrator.workflows.document_analysis.get_shared_client") as mock_get_client:
             client_instance = AsyncMock()
             client_instance.post = AsyncMock(side_effect=mock_post)
-            MockClient.return_value.__aenter__ = AsyncMock(return_value=client_instance)
-            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_get_client.return_value = client_instance
 
             result = await classify_and_load_node(base_state)
-
         assert result["doc_type"] == "smeta"
         meta = result["doc_metadata"]
         assert "pages" in meta

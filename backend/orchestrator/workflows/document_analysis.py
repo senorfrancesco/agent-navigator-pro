@@ -29,6 +29,7 @@ from orchestrator.workflows.equipment import (
     _dedup_items,
     _chunk_text,
     truncate_text,
+    _polish_items_specs_llm,
 )
 
 # URLs серверов
@@ -183,6 +184,10 @@ async def extract_positions_node(state: DocumentAnalysisState) -> dict:
         errors.append(f"LLM extraction failed: {e}")
 
     items = _dedup_items(items_table + items_text)
+    
+    # TD-LLM-Polisher: Очищаем сырые характеристики через LLM
+    await _polish_items_specs_llm(items)
+    
     print(f"  [DocAnalysis] Total after dedup: {len(items)}")
 
     return {"items": items, "errors": errors}

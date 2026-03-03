@@ -72,32 +72,32 @@ async def load_documents_node(state: CompareState):
         resp2 = await client.post(f"{MCP_DOCUMENT_SERVER_URL}/load_document", json={"path": state['input_2']})
         resp2.raise_for_status()
         text2 = resp2.json().get("text", "")
-            
-            # Разбиваем на чанки
-            def dc_smart_chunk(text: str) -> List[str]:
-                chunks = []
-                section_pattern = r'\n(?=\d+\.(?:\d+\.)*\s+[А-ЯA])'
-                sections = re.split(section_pattern, text)
-                for section in sections:
-                    if len(section) > 2000:
-                        parts = re.split(r'\n\s*\n', section)
-                        for p in parts:
-                            clean = ' '.join(p.split())
-                            if len(clean) > 40: chunks.append(clean)
-                    else:
-                        clean = ' '.join(section.split())
+        
+        # Разбиваем на чанки
+        def dc_smart_chunk(text: str) -> List[str]:
+            chunks = []
+            section_pattern = r'\n(?=\d+\.(?:\d+\.)*\s+[А-ЯA])'
+            sections = re.split(section_pattern, text)
+            for section in sections:
+                if len(section) > 2000:
+                    parts = re.split(r'\n\s*\n', section)
+                    for p in parts:
+                        clean = ' '.join(p.split())
                         if len(clean) > 40: chunks.append(clean)
-                return chunks
+                else:
+                    clean = ' '.join(section.split())
+                    if len(clean) > 40: chunks.append(clean)
+            return chunks
 
-            chunks_old = dc_smart_chunk(text1)
-            chunks_new = dc_smart_chunk(text2)
-            print(f"[Workflow] Chunks: old={len(chunks_old)}, new={len(chunks_new)}")
-            return {
-                "chunks_old": chunks_old,
-                "chunks_new": chunks_new
-            }
-        except Exception as e:
-            return {"errors": [f"Error loading docs: {str(e)}"]}
+        chunks_old = dc_smart_chunk(text1)
+        chunks_new = dc_smart_chunk(text2)
+        print(f"[Workflow] Chunks: old={len(chunks_old)}, new={len(chunks_new)}")
+        return {
+            "chunks_old": chunks_old,
+            "chunks_new": chunks_new
+        }
+    except Exception as e:
+        return {"errors": [f"Error loading docs: {str(e)}"]}
 
 async def match_chunks_node(state: CompareState):
     """Сопоставляет чанки через Legal Server (батчевое семантическое сходство)."""
@@ -114,21 +114,21 @@ async def match_chunks_node(state: CompareState):
             "list_new": state['chunks_new'],
             "threshold": 0.72
         })
-            resp.raise_for_status()
-            data = resp.json()
+        resp.raise_for_status()
+        data = resp.json()
 
-            if data.get("status") == "error":
-                raise RuntimeError(data.get("error", "Unknown error from legal server"))
+        if data.get("status") == "error":
+            raise RuntimeError(data.get("error", "Unknown error from legal server"))
 
-            # Фильтруем результаты (оставляем только измененные, удаленные или добавленные)
-            all_matches = data.get("matches", [])
-            diffs = [m for m in all_matches if m["type"] != "UNCHANGED"]
+        # Фильтруем результаты (оставляем только измененные, удаленные или добавленные)
+        all_matches = data.get("matches", [])
+        diffs = [m for m in all_matches if m["type"] != "UNCHANGED"]
 
-            print(f"   - Найдено различий: {len(diffs)}")
-            return {"matches": diffs}
-        except Exception as e:
-            print(f"Error in match_batches workflow: {e}")
-            return {"matches": [], "errors": [f"Matching failed: {str(e)}"]}
+        print(f"   - Найдено различий: {len(diffs)}")
+        return {"matches": diffs}
+    except Exception as e:
+        print(f"Error in match_batches workflow: {e}")
+        return {"errors": [f"Error in batch matching: {str(e)}"]}
 
 async def analyze_differences_node(state: CompareState):
     """Анализирует найденные различия через LLM (UMS) — batch по BATCH_SIZE штук за вызов."""

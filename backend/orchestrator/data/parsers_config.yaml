@@ -1,0 +1,20 @@
+# Configuration for Document Parsers and Rule-based Heuristics
+
+# Keywords for detecting table columns
+header_keywords:
+  name: ["наименование", "название", "товар", "оборудование", "позиция", "продукция", "модель"]
+  specs: ["характеристик", "описание", "параметр", "спецификац", "тех.требован", "требовани"]
+  quantity: ["кол-во", "количество", "кол.", "шт", "объем", "объём"]
+  price: ["цена", "стоимость", "сумма", "руб", "₽", "price"]
+  unit: ["ед.изм", "единица", "ед.", "измерен"]
+  num: ["№", "номер", "п/п", "n/p"]
+  param: ["параметр", "требовани", "характеристика", "показатель"]
+  value: ["значение", "соответствие", "требуем", "результат"]
+
+# Hardware terms for the polisher fallback (if LLM is slow/offline)
+hardware_patterns:
+  terms: ["DDR", "RDIMM", "SSD", "HDD", "Intel", "Xeon", "AMD", "NVIDIA", "PCIe", "NVMe", "RAID", "TPM"]
+  prefixes: ["не менее", "не более", "от", "до", ">=", "<="]
+
+# Stop words for cleaning
+garbage_values: ["", "none", "nan", "-", "соответствие", "да", "есть", "соответствует"]

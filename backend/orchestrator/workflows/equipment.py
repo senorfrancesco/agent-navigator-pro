@@ -127,23 +127,26 @@ class EquipmentState(TypedDict):
     session_id: str
 
 
-# === Helpers ===
+# === Config & Constants ===
 
-# Ключевые слова заголовков таблиц оборудования
-_HEADER_KEYWORDS = {
-    "name": ["наименование", "название", "товар", "оборудование", "позиция", "продукция", "модель"],
-    "specs": ["характеристик", "описание", "параметр", "спецификац", "тех.требован", "требовани"],
-    "quantity": ["кол-во", "количество", "кол.", "шт", "объем", "объём"],
-    "price": ["цена", "стоимость", "сумма", "руб", "₽", "price"],
-    "unit": ["ед.изм", "единица", "ед.", "измерен"],
-    "num": ["№", "номер", "п/п"],
-    "param": ["параметр", "требовани"],
-    "value": ["значение", "соответствие", "требуем"],
-}
+def _load_parsers_config() -> Dict:
+    path = os.path.join(os.path.dirname(__file__), "..", "data", "parsers_config.yaml")
+    if os.path.exists(path):
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                import yaml
+                return yaml.safe_load(f) or {}
+        except Exception:
+            pass
+    return {}
+
+_CONFIG = _load_parsers_config()
+_HEADER_KEYWORDS = _CONFIG.get("header_keywords", {})
+_GARBAGE_VALUES = _CONFIG.get("garbage_values", [])
 
 
 def _detect_header_columns(header_row: List[str]) -> Dict[str, int]:
-    """Детектирует маппинг колонок по ключевым словам в заголовке."""
+    """Детектирует маппинг колонок по ключевым словам из конфига."""
     mapping = {}
     for col_idx, cell in enumerate(header_row):
         if cell is None:
@@ -174,14 +177,9 @@ def _is_tz_structure(header_row: List) -> bool:
     """Детектирует ТЗ-структуру (merged-cells) по заголовку таблицы."""
     if not header_row:
         return False
-    # Нормализуем: убираем ВСЕ пробелы для борьбы с OCR артефактами типа "Т ехнические"
-    raw_text = "".join(str(c) for c in header_row if c).lower()
-    
-    # Ключевые признаки ТЗ (без пробелов)
-    has_specs = any(kw in raw_text for kw in ["техническиехаракте", "спецификац", "требован", "параметр"])
-    has_value = any(kw in raw_text for kw in ["значение", "соответствие", "требуем"])
-    
-    return has_specs and (has_value or "параметр" in raw_text)
+    raw = "".join(str(c) for c in header_row if c).lower()
+    # Любое упоминание характеристик или параметров (максимально лояльно)
+    return any(kw in raw for kw in ["характер", "параметр", "специфик", "требован"])
 
 
 def _detect_tz_columns(header_rows: List[List]) -> Dict[str, int]:
@@ -218,48 +216,80 @@ def _detect_tz_columns(header_rows: List[List]) -> Dict[str, int]:
     return mapping
 
 
-def _extract_numeric_specs(spec_rows: List[Dict]) -> str:
+async def _polish_items_specs_llm(items: List[Dict[str, Any]]):
     """
-    Формирует компактный текст из строк-характеристик ТЗ.
-    Берёт строки с числовыми требованиями и специфическими значениями.
+    Уровень 3: LLM Polisher. 
+    Превращает сырые списки характеристик в чистый технический текст.
     """
-    numeric_pattern = re.compile(
-        r'(не\s+менее|не\s+более|от|до|>=|<=|>|<)\s*[\d.,]+', re.IGNORECASE
-    )
-    specific_value_pattern = re.compile(
-        r'\b(DDR\d|RDIMM|UDIMM|DIMM|SAS|SATA|NVMe|PCIe|RAID|TPM|ECC|LFF|SFF|'
-        r'Rack|Tower|Windows|Linux|UEFI|USB|HDMI|VGA|DP|RJ.?45|SSD|HDD|'
-        r'Intel|Xeon|AMD|Epyc|NVIDIA|Core)\b',
-        re.IGNORECASE
-    )
+    to_polish = [it for it in items if it.get("raw_specs")]
+    if not to_polish:
+        return
 
-    parts = []
-    for row in spec_rows:
-        param = str(row.get("param", "")).replace('\n', ' ').strip()
-        value = str(row.get("value", "")).replace('\n', ' ').strip()
-        unit  = str(row.get("unit",  "")).replace('\n', ' ').strip()
-
-        if not param or len(param) < 3:
-            continue
-
-        value_lower = value.lower()
+    print(f"  [LLM Polisher] Polishing specs for {len(to_polish)} items...")
+    
+    # Обрабатываем батчами по 3 позиции (было 5) для точности
+    BATCH_POLISH = 3
+    for i in range(0, len(to_polish), BATCH_POLISH):
+        batch = to_polish[i : i + BATCH_POLISH]
         
-        # Если значение - заглушка ("соответствие"), но параметр важен - берем его
-        if value_lower in ('', 'none', 'соответствие', '-', 'да', 'есть'):
-            if specific_value_pattern.search(param) or len(param) > 15:
-                parts.append(param)
-            continue
+        # Формируем компактное представление для LLM
+        prompt_data = []
+        for it in batch:
+            raw = it["raw_specs"]
+            specs_str = " | ".join([f"{s['p']}: {s['v']} {s['u']}".strip() for s in raw])
+            prompt_data.append({"id": batch.index(it), "name": it["name"], "raw": specs_str})
 
-        # Формируем строку параметра со значением
-        if numeric_pattern.search(value) or re.search(r'\d', value) or specific_value_pattern.search(value):
-            full = f"{param}: {value}"
-            if unit and unit.lower() not in value.lower() and len(unit) < 10:
-                full += f" {unit}"
-            parts.append(full)
-        elif len(value) > 0 and len(value) < 50:
-            parts.append(f"{param}: {value}")
+        prompt = f"""<|im_start|>system
+Ты технический эксперт. Твоя задача — очистить "сырые" характеристики оборудования.
+Убери слова 'соответствие', 'да', 'есть', 'nan', 'none' и пустые значения. 
+Оставь только технические параметры.
+Верни строго JSON в формате: {{"results": ["строка 1", "строка 2", ...]}}
+Итоговая строка должна быть краткой, через запятую.
+<|im_end|>
+<|im_start|>user
+Данные для очистки:
+{json.dumps(prompt_data, ensure_ascii=False)}
+<|im_end|>
+<|im_start|>assistant
+"""
+        try:
+            resp = await ums_client.async_infer("qwen-14b-llm", {
+                "prompt": prompt, "temperature": 0.1, "max_tokens": 2000
+            })
+            
+            # Извлекаем текст (совместимость с OpenAI/llama-server)
+            content = ""
+            if "choices" in resp:
+                choice = resp["choices"][0]
+                content = choice.get("text", "") or choice.get("message", {}).get("content", "")
+            elif "content" in resp:
+                content = resp["content"]
+            else:
+                content = str(resp)
 
-    return ". ".join(parts[:15])
+            print(f"  [DEBUG-POLISH] LLM Response (200 chars): {content[:200]}...")
+            parsed = parse_json_garbage(content)
+            
+            if isinstance(parsed, dict) and "results" in parsed:
+                results = parsed["results"]
+                for j, item in enumerate(batch):
+                    if j < len(results):
+                        item["specs"] = results[j]
+                        print(f"  [DEBUG-POLISH] Item {j} specs updated: {item['specs'][:50]}...")
+            else:
+                print(f"  [DEBUG-POLISH] Failed to parse JSON or results missing. Type: {type(parsed)}")
+        except Exception as e:
+            print(f"  [LLM Polisher] Error batch {i}: {e}")
+            # Fallback: просто склеиваем самое важное по ключевым словам из конфига
+            for item in batch:
+                if not item.get("specs"):
+                    terms = _CONFIG.get("hardware_patterns", {}).get("terms", [])
+                    parts = []
+                    for s in item["raw_specs"]:
+                        p_v = f"{s['p']}: {s['v']}"
+                        if any(t.lower() in p_v.lower() for t in terms):
+                            parts.append(p_v)
+                    item["specs"] = ". ".join(parts[:10])
 
 
 def _parse_tz_table_rows(
@@ -267,26 +297,25 @@ def _parse_tz_table_rows(
     col_map: Dict[str, int],
 ) -> List[Dict[str, Any]]:
     """
-    Group-by парсер для ТЗ-таблиц с merged-cells.
+    Group-by парсер для ТЗ-таблиц. Собирает ВСЕ сырые характеристики.
     """
     items = []
     current_item: Dict[str, Any] | None = None
-    current_specs: List[Dict] = []
+    current_raw_specs: List[Dict] = []
 
     def _cell(row, key):
         idx = col_map.get(key)
-        if idx is None or idx >= len(row):
-            return None
+        if idx is None or idx >= len(row): return None
         val = row[idx]
-        return str(val).replace('\n', ' ').strip() if val is not None else None
+        return str(val).strip() if val is not None else None
 
     def _flush():
-        nonlocal current_item, current_specs
+        nonlocal current_item, current_raw_specs
         if current_item is not None:
-            current_item["specs"] = _extract_numeric_specs(current_specs)
+            current_item["raw_specs"] = current_raw_specs
             items.append(current_item)
         current_item = None
-        current_specs = []
+        current_raw_specs = []
 
     def _is_empty(val):
         if val is None: return True
@@ -298,8 +327,9 @@ def _parse_tz_table_rows(
         name_val = _cell(row, "name")
         param_val = _cell(row, "param")
         value_val = _cell(row, "value")
+        unit_val = _cell(row, "unit")
 
-        # Строка-позиция: num_val — целое число (1, 2, 3...)
+        # Строка-позиция: num_val — целое число
         if num_val and re.match(r'^\d+$', num_val.strip()):
             _flush()
             qty_raw = _cell(row, "qty") or "1"
@@ -308,44 +338,26 @@ def _parse_tz_table_rows(
 
             current_item = {
                 "name": name_val or f"Позиция {num_val}",
-                "specs": "",
+                "specs": "", 
                 "quantity": str(qty),
                 "price": "",
-                "unit": _cell(row, "unit") or "",
+                "unit": unit_val or "",
                 "source": "table",
                 "page": None,
             }
-            current_specs = []
-
-            # Первая строка позиции может уже содержать характеристику
             if not _is_empty(param_val):
-                current_specs.append({
-                    "param": param_val, 
-                    "value": value_val or "", 
-                    "unit": _cell(row, "unit") or ""
-                })
+                current_raw_specs.append({"p": param_val, "v": value_val or "", "u": unit_val or ""})
 
         # Строка-характеристика: num и name — пусты
         elif _is_empty(num_val) and _is_empty(name_val):
-            if current_item is None:
-                continue
-            if not _is_empty(param_val):
-                current_specs.append({
-                    "param": param_val, 
-                    "value": value_val or "", 
-                    "unit": _cell(row, "unit") or ""
-                })
+            if current_item is not None and not _is_empty(param_val):
+                current_raw_specs.append({"p": param_val, "v": value_val or "", "u": unit_val or ""})
 
-        # Строка с именем, но без номера — продолжение предыдущей позиции (многострочное название)
+        # Продолжение названия
         elif _is_empty(num_val) and not _is_empty(name_val) and current_item is not None:
             current_item["name"] += " " + name_val
-            # В такой строке тоже может быть характеристика
             if not _is_empty(param_val):
-                current_specs.append({
-                    "param": param_val, 
-                    "value": value_val or "", 
-                    "unit": _cell(row, "unit") or ""
-                })
+                current_raw_specs.append({"p": param_val, "v": value_val or "", "u": unit_val or ""})
 
     _flush()
     return items
@@ -399,52 +411,67 @@ def _parse_table_rows(
     # Проверяем: ТЗ-структура (merged-cell таблица с характеристиками)
     if header_row and _is_tz_structure(header_row):
         tz_col_map = _detect_tz_columns(table_data[header_idx : header_idx + 3])
-        if "name" in tz_col_map and ("param" in tz_col_map or "value" in tz_col_map):
-            # Если заголовок многострочный (как в этом PDF), начинаем данные со второй строки после начала заголовка
+        # Присутствие хотя бы одной колонки для параметров
+        if "name" in tz_col_map and any(k in tz_col_map for k in ["param", "value", "specs"]):
             actual_data_start = header_idx + 1
-            # Проверяем, не является ли следующая строка тоже частью заголовка (пустой номер)
             next_row = table_data[header_idx + 1] if header_idx + 1 < len(table_data) else []
-            if next_row and not next_row[0] and ("параметр" in str(next_row).lower() or "значение" in str(next_row).lower()):
+            if next_row and not next_row[0] and any(kw in str(next_row).lower() for kw in ["параметр", "значение", "требован"]):
                 actual_data_start = header_idx + 2
             
             tz_items = _parse_tz_table_rows(table_data[actual_data_start:], tz_col_map)
             return tz_items, col_map
 
+    # Fallback: Обычный парсер (тоже учим его собирать сырые характеристики)
     items = []
+    current_item = None
     for row in table_data[start_row:]:
-        if len(row) <= col_map.get("name", 0):
-            continue
+        if len(row) <= col_map.get("name", 0): continue
         name = _safe_cell(row, col_map, "name")
-        if not name or len(name) < 3:
-            continue
-        # Пропускаем строки-итоги
-        if any(kw in name.lower() for kw in ["итого", "всего", "total", "сумма"]):
-            continue
-
-        item = {
-            "name": name,
-            "specs": _safe_cell(row, col_map, "specs"),
-            "quantity": _safe_cell(row, col_map, "quantity"),
-            "price": _safe_cell(row, col_map, "price"),
-            "unit": _safe_cell(row, col_map, "unit"),
-            "source": "table",
-            "page": page_info,
-        }
-        items.append(item)
+        
+        if name and len(name) >= 3 and not any(kw in name.lower() for kw in ["итого", "всего", "total", "сумма"]):
+            current_item = {
+                "name": name,
+                "specs": _safe_cell(row, col_map, "specs"),
+                "quantity": _safe_cell(row, col_map, "quantity"),
+                "price": _safe_cell(row, col_map, "price"),
+                "unit": _safe_cell(row, col_map, "unit"),
+                "source": "table",
+                "page": page_info,
+                "raw_specs": []
+            }
+            # Если в этой же строке есть данные в колонках характеристик
+            p = _safe_cell(row, col_map, "param") or _safe_cell(row, col_map, "specs")
+            v = _safe_cell(row, col_map, "value")
+            if p: current_item["raw_specs"].append({"p": p, "v": v, "u": ""})
+            items.append(current_item)
+        elif not name and current_item:
+            # Строка без названия - вероятно, продолжение характеристик (merged cells)
+            p = _safe_cell(row, col_map, "param") or _safe_cell(row, col_map, "specs")
+            v = _safe_cell(row, col_map, "value")
+            if p: current_item["raw_specs"].append({"p": p, "v": v, "u": ""})
 
     return items, col_map
 
 
 def _dedup_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Дедупликация позиций по name.lower()[:60], предпочитает source='table'."""
+    """Дедупликация позиций. Сохраняет raw_specs при объединении."""
     seen = {}
     for item in items:
         key = item["name"].replace('\n', ' ').lower().strip()[:60]
-        if not key:
-            continue
+        if not key: continue
+        
         if key in seen:
+            existing = seen[key]
+            # Если у нового айтема больше raw_specs - берем его (или объединяем)
+            new_raw = item.get("raw_specs", [])
+            old_raw = existing.get("raw_specs", [])
+            if len(new_raw) > len(old_raw):
+                existing["raw_specs"] = new_raw
+            
             # Предпочитаем table-источник
-            if seen[key]["source"] != "table" and item["source"] == "table":
+            if existing["source"] != "table" and item["source"] == "table":
+                # Переносим важные поля
+                item["raw_specs"] = existing.get("raw_specs", []) or item.get("raw_specs", [])
                 seen[key] = item
         else:
             seen[key] = item
@@ -718,6 +745,10 @@ async def load_and_extract_node(state: EquipmentState) -> dict:
         errors.append(f"LLM extraction doc2 failed: {e}")
 
     items_2 = _dedup_items(items_2_table + items_2_text)
+
+    # TD-LLM-Polisher: Очищаем сырые характеристики через LLM
+    await _polish_items_specs_llm(items_1)
+    await _polish_items_specs_llm(items_2)
 
     print(f"  [Equipment] Total: doc1={len(items_1)}, doc2={len(items_2)}")
     return {"items_1": items_1, "items_2": items_2, "errors": errors}
