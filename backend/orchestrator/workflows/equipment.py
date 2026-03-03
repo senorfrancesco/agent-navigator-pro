@@ -136,6 +136,9 @@ _HEADER_KEYWORDS = {
     "quantity": ["кол-во", "количество", "кол.", "шт", "объем", "объём"],
     "price": ["цена", "стоимость", "сумма", "руб", "₽", "price"],
     "unit": ["ед.изм", "единица", "ед.", "измерен"],
+    "num": ["№", "номер", "п/п"],
+    "param": ["параметр", "требовани"],
+    "value": ["значение", "соответствие", "требуем"],
 }
 
 
@@ -171,34 +174,47 @@ def _is_tz_structure(header_row: List) -> bool:
     """Детектирует ТЗ-структуру (merged-cells) по заголовку таблицы."""
     if not header_row:
         return False
-    # Нормализуем: убираем лишние пробелы внутри слов (OCR-артефакты merged-cells)
-    raw = " ".join(str(c) for c in header_row if c)
-    import re as _re
-    header_text = _re.sub(r'\s+', ' ', raw).lower()
-    # Явные признаки ТЗ с param/value структурой
-    if "требуемый" in header_text or "требуемое" in header_text:
-        return True
-    if "параметр" in header_text and "значение" in header_text:
-        return True
-    # Признак "технические характеристики" без ценовых колонок
-    if "технические характеристики" in header_text and "цен" not in header_text and "стоимост" not in header_text:
-        return True
-    return False
+    # Нормализуем: убираем ВСЕ пробелы для борьбы с OCR артефактами типа "Т ехнические"
+    raw_text = "".join(str(c) for c in header_row if c).lower()
+    
+    # Ключевые признаки ТЗ (без пробелов)
+    has_specs = any(kw in raw_text for kw in ["техническиехаракте", "спецификац", "требован", "параметр"])
+    has_value = any(kw in raw_text for kw in ["значение", "соответствие", "требуем"])
+    
+    return has_specs and (has_value or "параметр" in raw_text)
 
 
-def _detect_tz_columns(header_row: List) -> Dict[str, int]:
-    """Строит col_map для ТЗ-таблицы с колонками num/name/qty/param/value/unit."""
+def _detect_tz_columns(header_rows: List[List]) -> Dict[str, int]:
+    """Строит col_map для ТЗ-таблицы, анализируя несколько строк заголовка."""
     mapping = {}
-    for col_idx, cell in enumerate(header_row):
-        if cell is None:
-            continue
-        cell_lower = str(cell).lower().strip()
-        if not cell_lower:
-            continue
+    
+    # Объединяем первые 2-3 строки в один "супер-заголовок" для поиска колонок
+    combined_cells = []
+    num_cols = len(header_rows[0]) if header_rows else 0
+    for col_idx in range(num_cols):
+        cells = []
+        for row in header_rows[:3]:
+            if col_idx < len(row) and row[col_idx]:
+                cells.append(str(row[col_idx]).lower().replace('\n', ' '))
+        combined_cells.append(" ".join(cells))
+
+    # Ищем колонки в объединенном тексте
+    for col_idx, cell_text in enumerate(combined_cells):
         for field, keywords in _TZ_COL_KEYWORDS.items():
-            if field not in mapping and any(kw in cell_lower for kw in keywords):
+            if field not in mapping and any(kw in cell_text for kw in keywords):
                 mapping[field] = col_idx
                 break
+    
+    # Фолбэк для этого конкретного PDF: если нашли "технические характер" в колокне N, 
+    # а следующая N+1 пустая или "значение"
+    if "param" not in mapping:
+        for idx, text in enumerate(combined_cells):
+            if "характе" in text:
+                mapping["param"] = idx
+                if idx + 1 < len(combined_cells) and "value" not in mapping:
+                    mapping["value"] = idx + 1
+                break
+
     return mapping
 
 
@@ -206,14 +222,14 @@ def _extract_numeric_specs(spec_rows: List[Dict]) -> str:
     """
     Формирует компактный текст из строк-характеристик ТЗ.
     Берёт строки с числовыми требованиями и специфическими значениями.
-    Пример: "ОЗУ: не менее 32 ГБ. БП: не менее 2 шт. CPU: не менее 2 шт."
     """
     numeric_pattern = re.compile(
-        r'(не\s+менее|не\s+более|от|до)\s*[\d.,]+', re.IGNORECASE
+        r'(не\s+менее|не\s+более|от|до|>=|<=|>|<)\s*[\d.,]+', re.IGNORECASE
     )
     specific_value_pattern = re.compile(
         r'\b(DDR\d|RDIMM|UDIMM|DIMM|SAS|SATA|NVMe|PCIe|RAID|TPM|ECC|LFF|SFF|'
-        r'Rack|Tower|Windows|Linux|UEFI|USB|HDMI|VGA|DP|RJ.?45)\b',
+        r'Rack|Tower|Windows|Linux|UEFI|USB|HDMI|VGA|DP|RJ.?45|SSD|HDD|'
+        r'Intel|Xeon|AMD|Epyc|NVIDIA|Core)\b',
         re.IGNORECASE
     )
 
@@ -223,24 +239,27 @@ def _extract_numeric_specs(spec_rows: List[Dict]) -> str:
         value = str(row.get("value", "")).replace('\n', ' ').strip()
         unit  = str(row.get("unit",  "")).replace('\n', ' ').strip()
 
-        if not param:
+        if not param or len(param) < 3:
             continue
 
         value_lower = value.lower()
-        if value_lower in ('', 'none', 'соответствие', '-'):
-            if specific_value_pattern.search(param):
+        
+        # Если значение - заглушка ("соответствие"), но параметр важен - берем его
+        if value_lower in ('', 'none', 'соответствие', '-', 'да', 'есть'):
+            if specific_value_pattern.search(param) or len(param) > 15:
                 parts.append(param)
             continue
 
-        if numeric_pattern.search(value) or re.search(r'\d', value):
+        # Формируем строку параметра со значением
+        if numeric_pattern.search(value) or re.search(r'\d', value) or specific_value_pattern.search(value):
             full = f"{param}: {value}"
-            if unit and unit != value:
+            if unit and unit.lower() not in value.lower() and len(unit) < 10:
                 full += f" {unit}"
             parts.append(full)
-        elif specific_value_pattern.search(value):
+        elif len(value) > 0 and len(value) < 50:
             parts.append(f"{param}: {value}")
 
-    return ". ".join(parts[:10])
+    return ". ".join(parts[:15])
 
 
 def _parse_tz_table_rows(
@@ -249,9 +268,6 @@ def _parse_tz_table_rows(
 ) -> List[Dict[str, Any]]:
     """
     Group-by парсер для ТЗ-таблиц с merged-cells.
-
-    Строка-позиция:      col[num] — целое число (1, 2, 3...)
-    Строка-характеристика: col[num] и col[name] — None/пусты
     """
     items = []
     current_item: Dict[str, Any] | None = None
@@ -272,11 +288,18 @@ def _parse_tz_table_rows(
         current_item = None
         current_specs = []
 
+    def _is_empty(val):
+        if val is None: return True
+        s = str(val).strip().lower()
+        return s in ('', 'none', 'nan', '-', '.', '..')
+
     for row in rows:
         num_val  = _cell(row, "num")
         name_val = _cell(row, "name")
+        param_val = _cell(row, "param")
+        value_val = _cell(row, "value")
 
-        # Строка-позиция: num_val — целое число
+        # Строка-позиция: num_val — целое число (1, 2, 3...)
         if num_val and re.match(r'^\d+$', num_val.strip()):
             _flush()
             qty_raw = _cell(row, "qty") or "1"
@@ -295,26 +318,34 @@ def _parse_tz_table_rows(
             current_specs = []
 
             # Первая строка позиции может уже содержать характеристику
-            param = _cell(row, "param")
-            value = _cell(row, "value")
-            unit  = _cell(row, "unit")
-            if param:
-                current_specs.append({"param": param, "value": value or "", "unit": unit or ""})
+            if not _is_empty(param_val):
+                current_specs.append({
+                    "param": param_val, 
+                    "value": value_val or "", 
+                    "unit": _cell(row, "unit") or ""
+                })
 
         # Строка-характеристика: num и name — пусты
-        elif (not num_val or num_val in ('None', '')) and \
-             (not name_val or name_val in ('None', '')):
+        elif _is_empty(num_val) and _is_empty(name_val):
             if current_item is None:
                 continue
-            param = _cell(row, "param")
-            value = _cell(row, "value")
-            unit  = _cell(row, "unit")
-            if param:
-                current_specs.append({"param": param, "value": value or "", "unit": unit or ""})
+            if not _is_empty(param_val):
+                current_specs.append({
+                    "param": param_val, 
+                    "value": value_val or "", 
+                    "unit": _cell(row, "unit") or ""
+                })
 
-        # Строка с именем, но без номера — продолжение предыдущей позиции
-        elif not num_val and name_val and current_item is not None:
+        # Строка с именем, но без номера — продолжение предыдущей позиции (многострочное название)
+        elif _is_empty(num_val) and not _is_empty(name_val) and current_item is not None:
             current_item["name"] += " " + name_val
+            # В такой строке тоже может быть характеристика
+            if not _is_empty(param_val):
+                current_specs.append({
+                    "param": param_val, 
+                    "value": value_val or "", 
+                    "unit": _cell(row, "unit") or ""
+                })
 
     _flush()
     return items
@@ -367,9 +398,16 @@ def _parse_table_rows(
 
     # Проверяем: ТЗ-структура (merged-cell таблица с характеристиками)
     if header_row and _is_tz_structure(header_row):
-        tz_col_map = _detect_tz_columns(header_row)
+        tz_col_map = _detect_tz_columns(table_data[header_idx : header_idx + 3])
         if "name" in tz_col_map and ("param" in tz_col_map or "value" in tz_col_map):
-            tz_items = _parse_tz_table_rows(table_data[start_row:], tz_col_map)
+            # Если заголовок многострочный (как в этом PDF), начинаем данные со второй строки после начала заголовка
+            actual_data_start = header_idx + 1
+            # Проверяем, не является ли следующая строка тоже частью заголовка (пустой номер)
+            next_row = table_data[header_idx + 1] if header_idx + 1 < len(table_data) else []
+            if next_row and not next_row[0] and ("параметр" in str(next_row).lower() or "значение" in str(next_row).lower()):
+                actual_data_start = header_idx + 2
+            
+            tz_items = _parse_tz_table_rows(table_data[actual_data_start:], tz_col_map)
             return tz_items, col_map
 
     items = []
@@ -544,10 +582,57 @@ async def _extract_tables_from_doc(path: str) -> List[Dict[str, Any]]:
         if data.get("status") == "error":
             raise RuntimeError(data.get("error", "Unknown error from document server"))
 
-        for table_info in data.get("tables", []):
+        # TD-Pagination Fix: Склеиваем таблицы-продолжения перед парсингом
+        raw_tables = data.get("tables", [])
+        if not raw_tables:
+            return []
+
+        merged_blocks = [] # List of (data, start_page, col_map)
+        current_block = []
+        current_start_page = None
+        current_col_map = None
+
+        for table_info in raw_tables:
             table_data = table_info.get("data", [])
             page = table_info.get("page")
-            parsed, last_col_map = _parse_table_rows(table_data, page_info=page, inherited_col_map=last_col_map)
+            if not table_data: continue
+
+            # Проверяем наличие заголовка в этом фрагменте
+            header_mapping = {}
+            for row in table_data[:3]: # Проверяем только начало фрагмента
+                m = _detect_header_columns(row)
+                if len(m) >= 2:
+                    header_mapping = m
+                    break
+            
+            # Логика склейки:
+            # Если нашли новый заголовок ИЛИ это первая таблица ИЛИ кол-во колонок изменилось
+            if header_mapping or not current_block or len(table_data[0]) != len(current_block[0]):
+                # Сохраняем предыдущий блок если он был
+                if current_block:
+                    merged_blocks.append((current_block, current_start_page, current_col_map))
+                
+                # Начинаем новый блок
+                current_block = list(table_data)
+                current_start_page = page
+                current_col_map = header_mapping if header_mapping else current_col_map
+            else:
+                # Это продолжение предыдущей таблицы (нет заголовка и те же колонки)
+                current_block.extend(table_data)
+
+        # Не забываем последний блок
+        if current_block:
+            merged_blocks.append((current_block, current_start_page, current_col_map))
+
+        # Теперь парсим склеенные блоки
+        last_col_map = None
+        for block_data, page, block_map in merged_blocks:
+            # Передаем накопленный блок в парсер
+            parsed, last_col_map = _parse_table_rows(
+                block_data, 
+                page_info=page, 
+                inherited_col_map=block_map or last_col_map
+            )
             items.extend(parsed)
 
     except Exception as e:
@@ -570,7 +655,7 @@ async def _extract_items_llm(path: str, already_found: List[str]) -> List[Dict[s
         print(f"[Extract] LLM extraction failed for {path}: {e}")
         raise
 
-    chunks = await _chunk_text(client, text)
+    chunks = await _chunk_text(text)
     print(f"[LLM Extract] {len(chunks)} chunk(s) for {os.path.basename(path)} ({len(text)} chars)")
 
     all_items = []
@@ -705,48 +790,48 @@ async def match_items_node(state: EquipmentState) -> dict:
     client = await get_shared_client()
     try:
         resp = await client.post(f"{MCP_LEGAL_SERVER_URL}/batch_match", json={
-                "list_old": list_old,
-                "list_new": list_new,
-                "threshold": 0.45,  # Снижен с 0.55 для лучшего recall аналогов
+            "list_old": list_old,
+            "list_new": list_new,
+            "threshold": 0.45,  # Снижен с 0.55 для лучшего recall аналогов
+        })
+        resp.raise_for_status()
+        data = resp.json()
+
+        if data.get("status") == "error":
+            raise RuntimeError(data.get("error", "Unknown error from legal server"))
+
+        raw_matches = data.get("matches", [])
+
+        # Обогащаем оригинальными items через обратный маппинг
+        enriched = []
+        for m in raw_matches:
+            old_text = m.get("old_text", "")
+            new_text = m.get("new_text", "")
+
+            # Обратный маппинг по тексту
+            item_1 = None
+            item_2 = None
+            for i, txt in enumerate(list_old):
+                if txt == old_text:
+                    item_1 = items_1[i]
+                    break
+            for i, txt in enumerate(list_new):
+                if txt == new_text:
+                    item_2 = items_2[i]
+                    break
+
+            enriched.append({
+                **m,
+                "item_1": item_1,
+                "item_2": item_2,
             })
-            resp.raise_for_status()
-            data = resp.json()
 
-            if data.get("status") == "error":
-                raise RuntimeError(data.get("error", "Unknown error from legal server"))
+        print(f"  [Equipment] Matched: {len(enriched)} pairs")
+        return {"matches": enriched}
 
-            raw_matches = data.get("matches", [])
-
-            # Обогащаем оригинальными items через обратный маппинг
-            enriched = []
-            for m in raw_matches:
-                old_text = m.get("old_text", "")
-                new_text = m.get("new_text", "")
-
-                # Обратный маппинг по тексту
-                item_1 = None
-                item_2 = None
-                for i, txt in enumerate(list_old):
-                    if txt == old_text:
-                        item_1 = items_1[i]
-                        break
-                for i, txt in enumerate(list_new):
-                    if txt == new_text:
-                        item_2 = items_2[i]
-                        break
-
-                enriched.append({
-                    **m,
-                    "item_1": item_1,
-                    "item_2": item_2,
-                })
-
-            print(f"  [Equipment] Matched: {len(enriched)} pairs")
-            return {"matches": enriched}
-
-        except Exception as e:
-            print(f"[Equipment] Matching failed: {e}")
-            return {"matches": [], "errors": [f"Matching failed: {e}"]}
+    except Exception as e:
+        print(f"[Equipment] Matching failed: {e}")
+        return {"matches": [], "errors": [f"Matching failed: {e}"]}
 
 
 # === Node 3: Evaluate ===
