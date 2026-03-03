@@ -98,43 +98,43 @@ async def classify_and_load_node(state: DocumentAnalysisState) -> dict:
     # Загрузка текста
     try:
         resp = await client.post(
-                f"{MCP_DOCUMENT_SERVER_URL}/load_document",
-                json={"path": path},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            if data.get("status") == "error":
-                errors.append(f"Document load error: {data.get('error')}")
-            else:
-                full_text = data.get("text", "")
-        except Exception as e:
-            errors.append(f"Failed to load document: {e}")
+            f"{MCP_DOCUMENT_SERVER_URL}/load_document",
+            json={"path": path},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("status") == "error":
+            errors.append(f"Document load error: {data.get('error')}")
+        else:
+            full_text = data.get("text", "")
+    except Exception as e:
+        errors.append(f"Failed to load document: {e}")
 
-        # Количество страниц (PDF)
-        if ext == ".pdf":
-            try:
-                resp = await client.post(
-                    f"{MCP_DOCUMENT_SERVER_URL}/load_pages",
-                    json={"path": path},
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                pages = data.get("total_pages", 0)
-            except Exception as e:
-                errors.append(f"Failed to load pages: {e}")
-
-        # Количество таблиц
+    # Количество страниц (PDF)
+    if ext == ".pdf":
         try:
             resp = await client.post(
-                f"{MCP_DOCUMENT_SERVER_URL}/extract_tables",
+                f"{MCP_DOCUMENT_SERVER_URL}/load_pages",
                 json={"path": path},
             )
             resp.raise_for_status()
             data = resp.json()
-            if data.get("status") != "error":
-                tables_count = len(data.get("tables", []))
-        except Exception:
-            pass  # Таблицы опциональны
+            pages = data.get("total_pages", 0)
+        except Exception as e:
+            errors.append(f"Failed to load pages: {e}")
+
+    # Количество таблиц
+    try:
+        resp = await client.post(
+            f"{MCP_DOCUMENT_SERVER_URL}/extract_tables",
+            json={"path": path},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("status") != "error":
+            tables_count = len(data.get("tables", []))
+    except Exception:
+        pass  # Таблицы опциональны
 
     # Классификация
     doc_type = classify_doc_type(full_text)
@@ -147,7 +147,6 @@ async def classify_and_load_node(state: DocumentAnalysisState) -> dict:
     }
 
     print(f"  [DocAnalysis] Type: {doc_type}, pages: {pages}, chars: {len(full_text)}, tables: {tables_count}")
-
     return {
         "doc_name": doc_name,
         "doc_type": doc_type,
@@ -166,23 +165,22 @@ async def extract_positions_node(state: DocumentAnalysisState) -> dict:
 
     print(f"[DocAnalysis] Extracting positions from: {os.path.basename(path)}")
 
-    async with httpx.AsyncClient(timeout=180.0) as client:
-        # Pass 1: Структурные таблицы
-        items_table = []
-        try:
-            items_table = await _extract_tables_from_doc(client, path)
-            print(f"  [DocAnalysis] Tables: {len(items_table)} items")
-        except Exception as e:
-            errors.append(f"Table extraction failed: {e}")
+    # Pass 1: Структурные таблицы
+    items_table = []
+    try:
+        items_table = await _extract_tables_from_doc(path)
+        print(f"  [DocAnalysis] Tables: {len(items_table)} items")
+    except Exception as e:
+        errors.append(f"Table extraction failed: {e}")
 
-        # Pass 2: LLM текстовые позиции
-        items_text = []
-        try:
-            already_names = [it["name"] for it in items_table]
-            items_text = await _extract_items_llm(client, path, already_names)
-            print(f"  [DocAnalysis] LLM text: {len(items_text)} items")
-        except Exception as e:
-            errors.append(f"LLM extraction failed: {e}")
+    # Pass 2: LLM текстовые позиции
+    items_text = []
+    try:
+        already_names = [it["name"] for it in items_table]
+        items_text = await _extract_items_llm(path, already_names)
+        print(f"  [DocAnalysis] LLM text: {len(items_text)} items")
+    except Exception as e:
+        errors.append(f"LLM extraction failed: {e}")
 
     items = _dedup_items(items_table + items_text)
     print(f"  [DocAnalysis] Total after dedup: {len(items)}")
@@ -250,8 +248,7 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
     print(f"[DocAnalysis] Summarizing (type={doc_type})")
 
     # Map-reduce: разбиваем на чанки, суммаризируем каждый, объединяем
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        chunks = await _chunk_text(client, full_text)
+    chunks = await _chunk_text(full_text)
 
     print(f"  [DocAnalysis] {len(chunks)} chunk(s) for summarization")
 
