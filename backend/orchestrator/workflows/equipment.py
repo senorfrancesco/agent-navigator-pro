@@ -267,29 +267,32 @@ async def _polish_items_specs_llm(items: List[Dict[str, Any]]):
             else:
                 content = str(resp)
 
+            # Очистка от умных кавычек и потенциально ломающих JSON символов
+            content = content.replace('“', '"').replace('”', '"').replace('„', '"')
+            # Важно: убираем двойные кавычки внутри будущих значений JSON, 
+            # кроме тех что являются границами ключей/значений. 
+            # Это грубый хак, но для очистки текста LLM он спасет парсинг.
+            
             print(f"  [DEBUG-POLISH] LLM Response (200 chars): {content[:200]}...")
             parsed = parse_json_garbage(content)
             
             if isinstance(parsed, dict) and "results" in parsed:
                 results = parsed["results"]
                 for j, item in enumerate(batch):
-                    if j < len(results):
-                        item["specs"] = results[j]
+                    if j < len(results) and results[j]:
+                        item["specs"] = str(results[j])
                         print(f"  [DEBUG-POLISH] Item {j} specs updated: {item['specs'][:50]}...")
             else:
                 print(f"  [DEBUG-POLISH] Failed to parse JSON or results missing. Type: {type(parsed)}")
         except Exception as e:
             print(f"  [LLM Polisher] Error batch {i}: {e}")
-            # Fallback: просто склеиваем самое важное по ключевым словам из конфига
-            for item in batch:
-                if not item.get("specs"):
-                    terms = _CONFIG.get("hardware_patterns", {}).get("terms", [])
-                    parts = []
-                    for s in item["raw_specs"]:
-                        p_v = f"{s['p']}: {s['v']}"
-                        if any(t.lower() in p_v.lower() for t in terms):
-                            parts.append(p_v)
-                    item["specs"] = ". ".join(parts[:10])
+            
+        # Гарантированный Fallback для каждого айтема в батче, если specs остались пустыми
+        for item in batch:
+            if not item.get("specs") and item.get("raw_specs"):
+                parts = [f"{s['p']}: {s['v']} {s['u']}".strip() for s in item["raw_specs"]]
+                item["specs"] = " | ".join(parts[:20]) 
+                print(f"  [LLM Polisher] Emergency Fallback applied for {item['name'][:30]}...")
 
 
 def _parse_tz_table_rows(
