@@ -9,6 +9,7 @@ Workflow: Single-Document Analysis
 Map-reduce суммаризация с адаптивным промптом по типу документа.
 """
 
+import asyncio
 import glob as glob_mod
 import json
 import os
@@ -36,7 +37,7 @@ from orchestrator.workflows.equipment import (
 MCP_DOCUMENT_SERVER_URL = os.getenv("MCP_DOCUMENT_SERVER_URL", "http://localhost:8001")
 UMS_URL = os.getenv("UMS_URL", "http://localhost:8090")
 
-MAX_TEXT_FOR_LLM = 6000
+MAX_TEXT_FOR_LLM = 8000  # Снижено для стабильности KV-кэша GPU
 
 
 # === State Definition ===
@@ -262,7 +263,13 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
 
     chunk_summaries = []
     for idx, chunk in enumerate(chunks):
-        prompt = f"""<|im_start|>system
+        # Визуализация прогресса в Chainlit (если запущено через него)
+        try:
+            import chainlit as cl
+            step_name = f"Суммаризация чанка {idx+1}/{len(chunks)}"
+            async with cl.Step(name=step_name, type="tool") as step:
+                print(f"    [DocAnalysis] Processing chunk {idx+1}/{len(chunks)}...")
+                prompt = f"""<|im_start|>system
 Ты аналитик документов. Извлекай структурированную информацию из текстов.<|im_end|>
 <|im_start|>user
 {type_prompt}
@@ -272,19 +279,48 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
 {truncate_text(chunk, MAX_TEXT_FOR_LLM)}<|im_end|>
 <|im_start|>assistant
 """
-        try:
-            response = await ums_client.async_infer("qwen-14b-llm", {
-                "prompt": prompt, "temperature": 0.1, "max_tokens": 1500
-            })
-            content = response.get("content", "")
-            if not content and "choices" in response:
-                content = response["choices"][0].get("text", "")
-            if content.strip():
-                chunk_summaries.append(content.strip())
-                print(f"  [Chunk {idx + 1}/{len(chunks)}] Summary OK ({len(content)} chars)")
-        except Exception as e:
-            errors.append(f"Summarize chunk {idx + 1} failed: {e}")
-            print(f"  [Chunk {idx + 1}/{len(chunks)}] Failed: {e}")
+                response = await ums_client.async_infer("qwen-14b-llm", {
+                    "prompt": prompt, "temperature": 0.1, "max_tokens": 1500
+                })
+                
+                content = ""
+                if "choices" in response:
+                    choice = response["choices"][0]
+                    content = choice.get("text", "") or choice.get("message", {}).get("content", "")
+                elif "content" in response:
+                    content = response["content"]
+                else:
+                    content = str(response)
+                    
+                if content.strip():
+                    chunk_summaries.append(content.strip())
+                    step.output = f"Успешно: {len(content)} симв."
+                
+                await asyncio.sleep(1.0)
+        except (ImportError, RuntimeError):
+            # Fallback если запуск не через Chainlit (например, в тестах)
+            print(f"    [DocAnalysis] Processing chunk {idx+1}/{len(chunks)}...")
+            prompt = f"""<|im_start|>system
+Ты аналитик документов. Извлекай структурированную информацию из текстов.<|im_end|>
+<|im_start|>user
+{type_prompt}
+Отвечай кратко, по пунктам. Если информация отсутствует — пропусти пункт.
+
+Текст (фрагмент {idx + 1} из {len(chunks)}):
+{truncate_text(chunk, MAX_TEXT_FOR_LLM)}<|im_end|>
+<|im_start|>assistant
+"""
+            try:
+                response = await ums_client.async_infer("qwen-14b-llm", {
+                    "prompt": prompt, "temperature": 0.1, "max_tokens": 1500
+                })
+                content = response.get("content", "")
+                if content.strip():
+                    chunk_summaries.append(content.strip())
+                await asyncio.sleep(1.0)
+            except Exception as e:
+                print(f"    [DocAnalysis] Chunk {idx+1} failed: {e}")
+                errors.append(f"Summarize chunk {idx+1} failed: {e}")
 
     if not chunk_summaries:
         return {"summary": "Не удалось выполнить суммаризацию.", "errors": errors}
