@@ -11,27 +11,15 @@ from typing import TypedDict, List, Dict, Any, Annotated, Optional
 import operator
 from langgraph.graph import StateGraph, END
 
+# Абсолютные импорты пакета (TD-5 Fix)
+from services.model_manager.ums_client import ums_client
+from orchestrator.utils import parse_json_garbage
+from orchestrator.shared.http_client import get_shared_client
+
 # Настройки URL серверов (через переменные окружения)
 MCP_DOCUMENT_SERVER_URL = os.getenv("MCP_DOCUMENT_SERVER_URL", "http://localhost:8001")
 MCP_LEGAL_SERVER_URL = os.getenv("MCP_LEGAL_SERVER_URL", "http://localhost:8002")
 UMS_URL = os.getenv("UMS_URL", "http://localhost:8090")
-
-# Импортируем клиент UMS (предполагая правильный путь в sys.path)
-try:
-    from services.model_manager.ums_client import ums_client
-except ImportError:
-    # Fallback если структура папок в runtime отличается
-    import sys
-    sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
-    from services.model_manager.ums_client import ums_client
-
-# Импортируем утилиты
-try:
-    from orchestrator.utils import parse_json_garbage
-except ImportError:
-    import sys
-    sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-    from utils import parse_json_garbage
 
 BATCH_SIZE = 5  # Кол-во различий в одном LLM-вызове (batch analysis)
 
@@ -73,17 +61,17 @@ async def load_documents_node(state: CompareState):
     """Загружает и разбивает документы на чанки через Document Server."""
     print(f"[Workflow] Loading documents: {state['input_1']} and {state['input_2']}")
     
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        try:
-            # Загружаем первый документ
-            resp1 = await client.post(f"{MCP_DOCUMENT_SERVER_URL}/load_document", json={"path": state['input_1']})
-            resp1.raise_for_status()
-            text1 = resp1.json().get("text", "")
-            
-            # Загружаем второй документ
-            resp2 = await client.post(f"{MCP_DOCUMENT_SERVER_URL}/load_document", json={"path": state['input_2']})
-            resp2.raise_for_status()
-            text2 = resp2.json().get("text", "")
+    client = await get_shared_client()
+    try:
+        # Загружаем первый документ
+        resp1 = await client.post(f"{MCP_DOCUMENT_SERVER_URL}/load_document", json={"path": state['input_1']})
+        resp1.raise_for_status()
+        text1 = resp1.json().get("text", "")
+        
+        # Загружаем второй документ
+        resp2 = await client.post(f"{MCP_DOCUMENT_SERVER_URL}/load_document", json={"path": state['input_2']})
+        resp2.raise_for_status()
+        text2 = resp2.json().get("text", "")
             
             # Разбиваем на чанки
             def dc_smart_chunk(text: str) -> List[str]:
@@ -118,14 +106,14 @@ async def match_chunks_node(state: CompareState):
     if not state['chunks_old'] or not state['chunks_new']:
         return {"matches": []}
 
-    async with httpx.AsyncClient(timeout=300.0) as client:
-        try:
-            # Вызываем новый батчевый эндпоинт
-            resp = await client.post(f"{MCP_LEGAL_SERVER_URL}/match_batches", json={
-                "list_old": state['chunks_old'],
-                "list_new": state['chunks_new'],
-                "threshold": 0.72
-            })
+    client = await get_shared_client()
+    try:
+        # Вызываем новый батчевый эндпоинт
+        resp = await client.post(f"{MCP_LEGAL_SERVER_URL}/match_batches", json={
+            "list_old": state['chunks_old'],
+            "list_new": state['chunks_new'],
+            "threshold": 0.72
+        })
             resp.raise_for_status()
             data = resp.json()
 

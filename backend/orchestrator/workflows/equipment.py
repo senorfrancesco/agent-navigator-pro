@@ -15,24 +15,15 @@ import os
 import re
 import time
 import httpx
-from typing import TypedDict, List, Dict, Any, Annotated
+import asyncio
+from typing import TypedDict, List, Dict, Any, Annotated, Optional
 import operator
 from langgraph.graph import StateGraph, END
 
-# Утилиты
-try:
-    from orchestrator.utils import parse_json_garbage
-except ImportError:
-    import sys
-    sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-    from utils import parse_json_garbage
-
-try:
-    from services.model_manager.ums_client import ums_client
-except ImportError:
-    import sys
-    sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
-    from services.model_manager.ums_client import ums_client
+# Абсолютные импорты пакета (TD-5 Fix)
+from services.model_manager.ums_client import ums_client
+from orchestrator.utils import parse_json_garbage
+from orchestrator.shared.http_client import get_shared_client
 
 # URLs серверов
 MCP_DOCUMENT_SERVER_URL = os.getenv("MCP_DOCUMENT_SERVER_URL", "http://localhost:8001")
@@ -443,11 +434,12 @@ def _split_by_lines(text: str, max_chars: int) -> List[str]:
     return chunks
 
 
-async def _chunk_text(client: httpx.AsyncClient, text: str) -> List[str]:
+async def _chunk_text(text: str) -> List[str]:
     """Разбивает текст на чанки через /smart_chunk. Short texts — без HTTP."""
     if len(text) <= MAX_TEXT_FOR_LLM:
         return [text]
 
+    client = await get_shared_client()
     try:
         resp = await client.post(
             f"{MCP_DOCUMENT_SERVER_URL}/smart_chunk",
@@ -530,12 +522,13 @@ async def _extract_from_single_chunk(
 
 # === Node 1: Extract ===
 
-async def _extract_tables_from_doc(client: httpx.AsyncClient, path: str) -> List[Dict[str, Any]]:
+async def _extract_tables_from_doc(path: str) -> List[Dict[str, Any]]:
     """Извлекает таблицы из документа через Document Server (Pass 1)."""
     ext = os.path.splitext(path)[1].lower()
     items = []
     last_col_map = None
 
+    client = await get_shared_client()
     try:
         if ext == ".pdf":
             resp = await client.post(f"{MCP_DOCUMENT_SERVER_URL}/extract_tables", json={"path": path})
@@ -564,8 +557,9 @@ async def _extract_tables_from_doc(client: httpx.AsyncClient, path: str) -> List
     return items
 
 
-async def _extract_items_llm(client: httpx.AsyncClient, path: str, already_found: List[str]) -> List[Dict[str, Any]]:
-    """Извлекает позиции из текста через LLM (Pass 2). Map-Reduce: чанки → LLM → merge."""
+async def _extract_items_llm(path: str, already_found: List[str]) -> List[Dict[str, Any]]:
+    """Извлекает позиции из текста документа через LLM (Pass 2, Map-Reduce)."""
+    client = await get_shared_client()
     try:
         resp = await client.post(f"{MCP_DOCUMENT_SERVER_URL}/load_document", json={"path": path})
         resp.raise_for_status()
@@ -604,42 +598,41 @@ async def load_and_extract_node(state: EquipmentState) -> dict:
     print(f"[Equipment] Extracting items from: {state['input_1']} and {state['input_2']}")
     errors = []
 
-    async with httpx.AsyncClient(timeout=180.0) as client:
-        # === Документ 1 ===
-        items_1_table = []
-        items_1_text = []
-        try:
-            items_1_table = await _extract_tables_from_doc(client, state["input_1"])
-            print(f"  [Doc1] Tables: {len(items_1_table)} items")
-        except Exception as e:
-            errors.append(f"Table extraction doc1 failed: {e}")
+    # === Документ 1 ===
+    items_1_table = []
+    items_1_text = []
+    try:
+        items_1_table = await _extract_tables_from_doc(state["input_1"])
+        print(f"  [Doc1] Tables: {len(items_1_table)} items")
+    except Exception as e:
+        errors.append(f"Table extraction doc1 failed: {e}")
 
-        try:
-            already_names = [it["name"] for it in items_1_table]
-            items_1_text = await _extract_items_llm(client, state["input_1"], already_names)
-            print(f"  [Doc1] LLM text: {len(items_1_text)} items")
-        except Exception as e:
-            errors.append(f"LLM extraction doc1 failed: {e}")
+    try:
+        already_names = [it["name"] for it in items_1_table]
+        items_1_text = await _extract_items_llm(state["input_1"], already_names)
+        print(f"  [Doc1] LLM text: {len(items_1_text)} items")
+    except Exception as e:
+        errors.append(f"LLM extraction doc1 failed: {e}")
 
-        items_1 = _dedup_items(items_1_table + items_1_text)
+    items_1 = _dedup_items(items_1_table + items_1_text)
 
-        # === Документ 2 ===
-        items_2_table = []
-        items_2_text = []
-        try:
-            items_2_table = await _extract_tables_from_doc(client, state["input_2"])
-            print(f"  [Doc2] Tables: {len(items_2_table)} items")
-        except Exception as e:
-            errors.append(f"Table extraction doc2 failed: {e}")
+    # === Документ 2 ===
+    items_2_table = []
+    items_2_text = []
+    try:
+        items_2_table = await _extract_tables_from_doc(state["input_2"])
+        print(f"  [Doc2] Tables: {len(items_2_table)} items")
+    except Exception as e:
+        errors.append(f"Table extraction doc2 failed: {e}")
 
-        try:
-            already_names = [it["name"] for it in items_2_table]
-            items_2_text = await _extract_items_llm(client, state["input_2"], already_names)
-            print(f"  [Doc2] LLM text: {len(items_2_text)} items")
-        except Exception as e:
-            errors.append(f"LLM extraction doc2 failed: {e}")
+    try:
+        already_names = [it["name"] for it in items_2_table]
+        items_2_text = await _extract_items_llm(state["input_2"], already_names)
+        print(f"  [Doc2] LLM text: {len(items_2_text)} items")
+    except Exception as e:
+        errors.append(f"LLM extraction doc2 failed: {e}")
 
-        items_2 = _dedup_items(items_2_table + items_2_text)
+    items_2 = _dedup_items(items_2_table + items_2_text)
 
     print(f"  [Equipment] Total: doc1={len(items_1)}, doc2={len(items_2)}")
     return {"items_1": items_1, "items_2": items_2, "errors": errors}
@@ -709,9 +702,9 @@ async def match_items_node(state: EquipmentState) -> dict:
     list_old = [_item_to_text(it) for it in items_1]
     list_new = [_item_to_text(it) for it in items_2]
 
-    async with httpx.AsyncClient(timeout=300.0) as client:
-        try:
-            resp = await client.post(f"{MCP_LEGAL_SERVER_URL}/match_batches", json={
+    client = await get_shared_client()
+    try:
+        resp = await client.post(f"{MCP_LEGAL_SERVER_URL}/batch_match", json={
                 "list_old": list_old,
                 "list_new": list_new,
                 "threshold": 0.45,  # Снижен с 0.55 для лучшего recall аналогов

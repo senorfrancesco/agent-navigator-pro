@@ -20,7 +20,7 @@ import shutil
 import httpx
 from typing import Dict, List, Optional, Any
 
-# Добавляем пути
+# Добавляем пути (оставляем для обратной совместимости, но используем абсолютные)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 try:
@@ -29,6 +29,7 @@ except ImportError:
     raise ImportError("chainlit not installed. Run: pip install chainlit")
 
 from services.model_manager.ums_client import ums_client
+from orchestrator.shared.http_client import get_shared_client
 
 logger = logging.getLogger("chainlit_app")
 
@@ -42,10 +43,10 @@ async def _get_rag_mode() -> str:
         return override
     try:
         ums_url = os.getenv("UMS_URL", "http://localhost:8090")
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{ums_url}/status")
-            data = resp.json()
-            return data.get("tier", {}).get("rag_mode", "simple")
+        client = await get_shared_client()
+        resp = await client.get(f"{ums_url}/status", timeout=5.0)
+        data = resp.json()
+        return data.get("tier", {}).get("rag_mode", "simple")
     except Exception:
         return "simple"
 
@@ -181,9 +182,9 @@ def _save_to_uploads(src_path: str, filename: str) -> str:
 
 async def _load_files(files: List[Dict]) -> List[Dict]:
     """Копирует файлы в shared uploads, загружает через Document Server."""
-    import httpx
     doc_server = os.getenv("MCP_DOCUMENT_SERVER_URL", "http://localhost:8001")
     loaded = []
+    client = await get_shared_client()
 
     for f in files:
         try:
@@ -191,17 +192,16 @@ async def _load_files(files: List[Dict]) -> List[Dict]:
             container_path = _save_to_uploads(f["path"], f["name"])
             host_path = _to_host_path(container_path)
 
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                resp = await client.post(f"{doc_server}/load_document", json={"path": host_path})
-                if resp.status_code == 200:
-                    data = resp.json()
-                    if data.get("status") == "error":
-                        loaded.append({**f, "text": "", "path": container_path, "error": data.get("error")})
-                    else:
-                        text = data.get("text", "")
-                        loaded.append({**f, "text": text, "path": container_path})
+            resp = await client.post(f"{doc_server}/load_document", json={"path": host_path}, timeout=60.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("status") == "error":
+                    loaded.append({**f, "text": "", "path": container_path, "error": data.get("error")})
                 else:
-                    loaded.append({**f, "text": "", "path": container_path, "error": f"HTTP {resp.status_code}"})
+                    text = data.get("text", "")
+                    loaded.append({**f, "text": text, "path": container_path})
+            else:
+                loaded.append({**f, "text": "", "path": container_path, "error": f"HTTP {resp.status_code}"})
         except Exception as e:
             loaded.append({**f, "text": "", "error": str(e)})
 
@@ -267,16 +267,72 @@ async def on_chat_start():
 
 @cl.on_chat_resume
 async def on_chat_resume(thread):
-    """Восстановление сессии из сохранённой истории."""
+    """
+    Восстановление сессии из сохранённой истории (TD-4 Fix).
+    Пытается восстановить список документов и RAG-индекс.
+    """
     cl.user_session.set("documents", {})
     history = []
+    found_files = []
+
     if thread and thread.get("steps"):
         for step in thread["steps"]:
+            # Восстанавливаем историю сообщений
             if step.get("type") == "user_message":
                 history.append({"role": "user", "content": step.get("output", "")})
             elif step.get("type") == "assistant_message":
                 history.append({"role": "assistant", "content": step.get("output", "")})
+            
+            # Ищем информацию о загруженных файлах в шагах
+            if step.get("name") == "Загрузка документов" and step.get("output"):
+                # Парсим строку "Загружено: file1.pdf, file2.docx"
+                output = step.get("output", "")
+                if "Загружено:" in output:
+                    files_str = output.split("Загружено:")[1].strip()
+                    fnames = [f.strip() for f in files_str.split(",") if f.strip()]
+                    found_files.extend(fnames)
+
     cl.user_session.set("history", history)
+
+    # Пытаемся восстановить документы и RAG
+    if found_files:
+        unique_files = list(set(found_files))
+        session_docs = {}
+        files_to_load = []
+        
+        for fname in unique_files:
+            # Путь в контейнере
+            c_path = os.path.join(UPLOADS_DIR, fname)
+            if os.path.exists(c_path):
+                files_to_load.append({"name": fname, "path": c_path})
+        
+        if files_to_load:
+            async with cl.Step(name="Восстановление документов", type="tool") as step:
+                loaded = await _load_files(files_to_load)
+                names = []
+                for f in loaded:
+                    if f.get("text"):
+                        session_docs[f["name"]] = {"text": f["text"], "path": f["path"]}
+                        names.append(f["name"])
+                cl.user_session.set("documents", session_docs)
+                
+                # Инициализируем RAG
+                if session_docs:
+                    from orchestrator.rag.pipeline import AdaptiveRAGPipeline
+                    from services.model_manager.ums_client import create_ums_embed_fn
+                    
+                    embed_fn = create_ums_embed_fn()
+                    rag_mode = await _get_rag_mode()
+                    rag = AdaptiveRAGPipeline(embed_fn=embed_fn, rag_mode=rag_mode)
+                    
+                    all_texts = [d["text"] for d in session_docs.values()]
+                    all_names = [n for n in session_docs.keys()]
+                    await asyncio.to_thread(rag.index_documents, all_texts, doc_names=all_names)
+                    cl.user_session.set("rag_pipeline", rag)
+                    
+                    step.output = f"Восстановлено {len(names)} документов, RAG готов."
+                else:
+                    step.output = "Не удалось восстановить текст документов."
 
 
 @cl.on_message

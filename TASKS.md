@@ -242,13 +242,13 @@
   `chainlit_app.py::on_message`: sync вызов `rag.index_documents(...)` в async handler.
   Fix: `await asyncio.to_thread(rag.index_documents, all_texts, doc_names=all_names)`.
 
-- [ ] **TD-4 — `on_chat_resume` не восстанавливает документы**
+- [x] **TD-4 — `on_chat_resume` не восстанавливает документы**
   При возобновлении сессии восстанавливается только история сообщений, но не загруженные документы и RAG pipeline.
-  Fix: LangGraph Checkpointer + Store для персистентности, или сохранять метаданные документов в SQLite data layer.
+  Fix: Автоматический поиск файлов в UPLOADS_DIR по истории шагов и их переиндексация.
 
-- [ ] **TD-5 — `sys.path.append` в рантайме**
+- [x] **TD-5 — `sys.path.append` в рантайме**
   В нескольких файлах (equipment.py, compare.py и др.) — `sys.path.insert/append` вместо нормального пакета.
-  Fix: `pyproject.toml` + `pip install -e .` в conda env и Dockerfile.
+  Fix: `pyproject.toml` + абсолютные импорты во всех модулях.
 
 ### 🟡 Medium
 
@@ -274,9 +274,9 @@
   Keyword lists (`COMPARE_KEYWORDS`, `EQUIPMENT_KEYWORDS` и др.) работают, но хрупки к новым формулировкам.
   По best practice: keyword routing должен быть **первым слоем** (fast-pass), а не fallback-ом последнего уровня.
 
-- [ ] **TD-11 — Нет shared HTTP-клиента**
+- [x] **TD-11 — Нет shared HTTP-клиента**
   Каждый вызов создаёт `httpx.AsyncClient(timeout=...)` заново. Нет connection pooling.
-  Fix: shared client с `lifespan` управлением или dependency injection.
+  Fix: `shared/http_client.py` с асинхронным синглтоном и пулом соединений.
 
 ---
 

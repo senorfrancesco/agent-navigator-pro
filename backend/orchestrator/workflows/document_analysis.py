@@ -15,42 +15,21 @@ import os
 import re
 import time
 import httpx
-from typing import TypedDict, List, Dict, Any, Annotated
+from typing import TypedDict, List, Dict, Any, Annotated, Optional
 import operator
 from langgraph.graph import StateGraph, END
 
-# Утилиты
-try:
-    from orchestrator.utils import parse_json_garbage
-except ImportError:
-    import sys
-    sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-    from utils import parse_json_garbage
-
-try:
-    from services.model_manager.ums_client import ums_client
-except ImportError:
-    import sys
-    sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
-    from services.model_manager.ums_client import ums_client
-
-# Переиспользуемые хелперы из equipment workflow
-try:
-    from orchestrator.workflows.equipment import (
-        _extract_tables_from_doc,
-        _extract_items_llm,
-        _dedup_items,
-        _chunk_text,
-        truncate_text,
-    )
-except ImportError:
-    from equipment import (
-        _extract_tables_from_doc,
-        _extract_items_llm,
-        _dedup_items,
-        _chunk_text,
-        truncate_text,
-    )
+# Абсолютные импорты пакета (TD-5 Fix)
+from services.model_manager.ums_client import ums_client
+from orchestrator.utils import parse_json_garbage
+from orchestrator.shared.http_client import get_shared_client
+from orchestrator.workflows.equipment import (
+    _extract_tables_from_doc,
+    _extract_items_llm,
+    _dedup_items,
+    _chunk_text,
+    truncate_text,
+)
 
 # URLs серверов
 MCP_DOCUMENT_SERVER_URL = os.getenv("MCP_DOCUMENT_SERVER_URL", "http://localhost:8001")
@@ -115,10 +94,10 @@ async def classify_and_load_node(state: DocumentAnalysisState) -> dict:
     pages = 0
     tables_count = 0
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        # Загрузка текста
-        try:
-            resp = await client.post(
+    client = await get_shared_client()
+    # Загрузка текста
+    try:
+        resp = await client.post(
                 f"{MCP_DOCUMENT_SERVER_URL}/load_document",
                 json={"path": path},
             )
