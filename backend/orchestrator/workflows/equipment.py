@@ -954,51 +954,20 @@ async def generate_equipment_report_node(state: EquipmentState) -> dict:
 
         report += "\n"
 
-    # Сохранение в файл
+    # Сохранение в файл через общую утилиту
     try:
-        uploads_dir = os.getenv("UPLOADS_DIR", os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
-            'backend', 'open_webui_uploads'
-        ))
-        os.makedirs(uploads_dir, exist_ok=True)
-
-        # Дедупликация (паттерн из compare.py)
-        input_names = sorted([os.path.basename(state["input_1"]), os.path.basename(state["input_2"])])
-        now = time.time()
-        current_count = len(results)
-        existing_reports = glob_mod.glob(os.path.join(uploads_dir, "Report_Equipment_*.md"))
-
-        for existing in existing_reports:
-            if now - os.path.getmtime(existing) < 60:
-                try:
-                    with open(existing, "r", encoding="utf-8") as ef:
-                        header = ef.read(500)
-                    if all(name in header for name in [name_1, name_2]):
-                        count_match = re.search(r'\*\*Извлечено позиций:\*\*.*?(\d+)', header)
-                        existing_count = int(count_match.group(1)) if count_match else 0
-                        if current_count > existing_count:
-                            print(f"[Report] Replacing {os.path.basename(existing)}")
-                            os.remove(existing)
-                            break
-                        else:
-                            print(f"[Report] Duplicate skipped: {existing}")
-                            report += f"\n---\n**Отчет уже сохранен:** `{os.path.basename(existing)}`"
-                            return {"final_report": report}
-                except Exception:
-                    pass
-
-        filename = f"Report_Equipment_{int(time.time())}.md"
-        filepath = os.path.join(uploads_dir, filename)
-
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(report)
-
-        report += f"\n---\n**Отчет сохранен:** `{filename}`"
-
+        from orchestrator.shared.report_utils import save_report_with_dedup
+        final_report_text = save_report_with_dedup(
+            report_text=report,
+            prefix="Report_Equipment",
+            input_names=[name_1, name_2],
+            current_metric=len(results),
+            metric_marker="Извлечено позиций:** из документа 1:"
+        )
+        return {"final_report": final_report_text}
     except Exception as e:
         report += f"\n---\n**Ошибка сохранения отчета:** {e}"
-
-    return {"final_report": report}
+        return {"final_report": report}
 
 
 # === Build Graph ===

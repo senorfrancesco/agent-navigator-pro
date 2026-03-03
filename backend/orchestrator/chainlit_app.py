@@ -104,27 +104,15 @@ def _get_session_history() -> List[Dict[str, str]]:
 
 # === Intent Detection ===
 
-COMPARE_KEYWORDS = ["сравни", "различия", "изменения", "отличия", "сопоставь"]
-EQUIPMENT_KEYWORDS = ["смета", "оборудование", "тз", "закупка", "спецификация"]
-DOC_KEYWORDS = ["из документа", "в файле", "что написано", "найди в",
-                "по документу", "согласно", "в тексте"]
-ANALYSIS_KEYWORDS = ["проанализируй", "анализ документа", "содержание", "что в этом",
-                     "разбери", "обзор", "резюме", "структура документа"]
-GREETING_KEYWORDS = ["привет", "здравствуй", "добрый"]
-
-
 def _detect_intent(query: str, file_count: int = 0, has_session_docs: bool = False) -> str:
     """
-    Двухуровневый intent detection:
-    1. Semantic Router (EmbeddingIntentClassifier) — если инициализирован
-    2. Keyword fallback — если classifier недоступен
-
-    Для дорогих workflow (compare, equipment) — двойной gate:
-    Semantic Router + файловый контекст. Без файлов не запускаем.
+    Семантическая классификация интентов (Semantic Router).
+    TD-10: Жесткие списки ключевых слов удалены. Вся маршрутизация идет
+    через EmbeddingIntentClassifier (поиск ближайших соседей в векторном пространстве).
     """
     query_lower = query.lower()
 
-    # Уровень 1: Semantic Router
+    # Уровень 1: Semantic Router (Основной и приоритетный)
     rag = cl.user_session.get("rag_pipeline")
     if rag and rag._classifier_initialized:
         result = rag.classify_intent(query)
@@ -132,46 +120,35 @@ def _detect_intent(query: str, file_count: int = 0, has_session_docs: bool = Fal
             intent = result["intent"]
             needs_rag = result["needs_rag"]
 
-            # Для document_analysis без файлов — деградируем в general_chat.
-            # Для compare/equipment — НЕ деградируем: handler сам выдаст понятное сообщение
-            # ("Нужно минимум 2 документа..."), а не LLM-галлюцинацию.
+            # Защита: если интент требует файлов, но их нет
             if intent == "document_analysis":
                 has_file = file_count >= 1 or (has_session_docs and len(_get_session_docs()) >= 1)
                 if not has_file:
                     intent = "general_chat"
 
-            # greeting/general_chat при загруженных docs → не трогаем (needs_rag=False)
-            # document_question при загруженных docs → не трогаем (needs_rag=True)
-            # Если needs_rag=True и docs загружены, но intent не workflow → document_question
             if has_session_docs and needs_rag and intent not in ("compare_documents", "equipment_analysis", "document_analysis"):
                 intent = "document_question"
 
             logger.info(f"Semantic Router: intent={intent}, confidence={result['confidence']:.2f}, margin={result.get('margin',0):.3f}")
             return intent
 
-    # Уровень 2: Keyword fallback (UMS down или первое сообщение до загрузки файлов)
-    # compare/equipment: роутим всегда при keyword-попадании — handler сам выдаст
-    # "Нужно минимум 2 документа" если файлов нет (вместо LLM-галлюцинации)
-    if any(kw in query_lower for kw in COMPARE_KEYWORDS):
+    # Уровень 2: Minimal Fallback (только если UMS/Classifier недоступен)
+    logger.warning("Semantic Router offline. Using minimal fallback routing.")
+    if "сравни" in query_lower or "различия" in query_lower:
         return "compare_documents"
-    if any(kw in query_lower for kw in EQUIPMENT_KEYWORDS):
+    if "смет" in query_lower or "тз" in query_lower:
         return "equipment_analysis"
-
-    # 1 файл + analysis keyword → document_analysis
+    
     single_file = file_count == 1 or (has_session_docs and len(_get_session_docs()) == 1)
-    if single_file and any(kw in query_lower for kw in ANALYSIS_KEYWORDS):
+    if single_file and ("анализ" in query_lower or "документ" in query_lower):
         return "document_analysis"
 
-    if any(kw in query_lower for kw in DOC_KEYWORDS):
-        return "document_question"
-
-    # Если документы загружены — любой не-greeting вопрос → document_question
     if has_session_docs:
-        if any(kw in query_lower for kw in GREETING_KEYWORDS):
+        if "привет" in query_lower or "здравствуй" in query_lower:
             return "greeting"
         return "document_question"
 
-    if any(kw in query_lower for kw in GREETING_KEYWORDS):
+    if "привет" in query_lower or "здравствуй" in query_lower:
         return "greeting"
 
     return "general_chat"
@@ -348,7 +325,8 @@ async def on_message(message: cl.Message):
                 all_texts = [d["text"] for d in session_docs.values() if d.get("text")]
                 all_names = [n for n, d in session_docs.items() if d.get("text")]
                 if all_texts:
-                    rag.index_documents(all_texts, doc_names=all_names)
+                    # TD-3: Выносим тяжелую индексацию в поток, чтобы не блокировать event loop
+                    await asyncio.to_thread(rag.index_documents, all_texts, doc_names=all_names)
                 cl.user_session.set("rag_pipeline", rag)
 
                 search = "BM25+Dense (hybrid)" if embed_fn else "BM25-only"
@@ -359,7 +337,8 @@ async def on_message(message: cl.Message):
                 all_texts = [d["text"] for d in session_docs.values() if d.get("text")]
                 all_names = [n for n, d in session_docs.items() if d.get("text")]
                 if all_texts:
-                    rag.index_documents(all_texts, doc_names=all_names)
+                    # TD-3: Переиндексация тоже в потоке
+                    await asyncio.to_thread(rag.index_documents, all_texts, doc_names=all_names)
                 step.output = f"Переиндексировано {len(all_texts)} документов"
 
     # Роутинг
@@ -426,7 +405,7 @@ async def _handle_compare(query: str, new_files: List, session_docs: Dict):
                     # Закрываем предыдущий шаг
                     if active_steps:
                         for prev_name, prev_step in list(active_steps.items()):
-                            prev_step.__aexit__(None, None, None)
+                            await prev_step.__aexit__(None, None, None)
 
                     # Обновляем вывод в зависимости от ноды
                     label, step_type = COMPARE_NODE_LABELS.get(

@@ -4,7 +4,7 @@
 
 import numpy as np
 import pytest
-from orchestrator.rag.classifier import EmbeddingIntentClassifier, INTENT_EXAMPLES
+from orchestrator.rag.classifier import EmbeddingIntentClassifier
 
 
 def _mock_embed_fn(texts):
@@ -44,7 +44,7 @@ class TestEmbeddingIntentClassifier:
     def test_initialization(self):
         """Классификатор инициализируется с центроидами."""
         assert self.classifier.initialized
-        assert len(self.classifier.centroids) == len(INTENT_EXAMPLES)
+        assert len(self.classifier.centroids) == 6
 
     def test_centroids_normalized(self):
         """Центроиды нормализованы (unit vectors)."""
@@ -70,7 +70,7 @@ class TestEmbeddingIntentClassifier:
     def test_classify_all_intents_scored(self):
         """Все интенты имеют score в результате."""
         result = self.classifier.classify("тест")
-        assert len(result["scores"]) == len(INTENT_EXAMPLES)
+        assert len(result["scores"]) == 6
 
     def test_classify_needs_rag_greeting(self):
         """Greeting не требует RAG."""

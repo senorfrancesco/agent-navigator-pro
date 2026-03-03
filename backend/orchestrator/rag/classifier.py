@@ -13,10 +13,14 @@ EmbeddingIntentClassifier — классификация интентов без
 по близости к центроидам кластеров.
 """
 
+import os
+import yaml
+import logging
 import numpy as np
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
 
+logger = logging.getLogger("classifier")
 
 @dataclass
 class ClassificationResult:
@@ -27,106 +31,14 @@ class ClassificationResult:
     scores: Dict[str, float]
 
 
-# Эталонные фразы для каждого интента
-INTENT_EXAMPLES = {
-    "greeting": [
-        "Привет",
-        "Здравствуйте",
-        "Добрый день",
-        "Как дела",
-        "Здорово",
-        "Приветствую",
-        "Доброе утро",
-        "Добрый вечер",
-        "Хай",
-        "Алло",
-        "Спасибо",
-        "Понял спасибо",
-        "Ясно",
-        "Понятно",
-        "Хорошо спасибо",
-        "Благодарю",
-        "Ок понял",
-        "До свидания",
-    ],
-    "compare_documents": [
-        "Сравни эти два документа",
-        "Какие различия между файлами",
-        "Покажи изменения между версиями",
-        "Что изменилось в новой версии",
-        "Сравнение документов",
-        "Найди отличия между файлами",
-        "Чем отличаются эти документы",
-        "Сопоставь два текста",
-        "Что нового в этой редакции",
-        "Покажи разницу",
-    ],
-    "equipment_analysis": [
-        "Проанализируй смету",
-        "Проверь оборудование по ТЗ",
-        "Сравни смету с техническим заданием",
-        "Анализ закупки оборудования",
-        "Проверь соответствие сметы",
-        "Оцени стоимость оборудования",
-        "Найди расхождения в смете",
-        "Проверь позиции сметы",
-        "Анализ технического задания",
-        "Соответствие ТЗ и сметы",
-    ],
-    "document_analysis": [
-        "Проанализируй этот документ",
-        "Сделай анализ документа",
-        "Разбери этот файл",
-        "Что в этом документе",
-        "Обзор документа",
-        "Резюме документа",
-        "Структура документа",
-        "О чём этот документ",
-        "Что содержится в этом файле",
-        "Сделай обзор загруженного файла",
-        "Какова структура этого документа",
-        "Опиши содержание документа",
-        "Что можешь сказать об этом файле",
-        "Сделай краткое резюме",
-        "Проведи анализ загруженного файла",
-    ],
-    "document_question": [
-        "Что написано в документе про штрафы",
-        "Найди в файле информацию о сроках",
-        "Какие условия договора",
-        "Что говорится о гарантиях",
-        "Найди пункт о расторжении",
-        "Какая ответственность сторон",
-        "Что указано в приложении",
-        "Процитируй пункт о оплате",
-        "Есть ли в документе информация о",
-        "Перескажи содержание раздела",
-        "Сколько штук нужно поставить",
-        "По какой цене указано оборудование",
-        "Какое количество позиций в спецификации",
-        "Какова стоимость единицы товара",
-        "Какие технические характеристики указаны",
-        "Что написано в спецификации",
-        "Какой объём поставки",
-        "Сколько это стоит по договору",
-        "О чём эти документы",
-        "Какие документы загружены",
-        "Какие файлы ты имеешь",
-        "Что содержится в файлах",
-        "Расскажи о содержании документа",
-    ],
-    "general_chat": [
-        "Что ты умеешь",
-        "Помоги мне",
-        "Расскажи о себе",
-        "Какие функции доступны",
-        "Как работает система",
-        "Напиши код",
-        "Переведи текст",
-        "Расскажи анекдот",
-        "Какая сейчас погода",
-        "Который час",
-    ],
+# Резервные эталонные фразы (если YAML не найден)
+DEFAULT_INTENT_EXAMPLES = {
+    "greeting": ["Привет", "Здравствуйте", "Добрый день"],
+    "compare_documents": ["Сравни документы", "Какие различия"],
+    "equipment_analysis": ["Проанализируй смету", "Проверь оборудование"],
+    "document_analysis": ["Что в этом документе", "Сделай обзор"],
+    "document_question": ["Найди информацию о", "Что написано про"],
+    "general_chat": ["Что ты умеешь", "Помоги мне"],
 }
 
 # Какие интенты требуют RAG
@@ -143,32 +55,44 @@ INTENT_NEEDS_RAG = {
 class EmbeddingIntentClassifier:
     """
     Классификация интентов на основе embedding similarity.
-
-    Работает БЕЗ LLM — только embeddings.
-    ~5ms на классификацию, accuracy ~85-93% на типичных запросах.
+    
+    TD-2 Fix: Примеры загружаются из внешнего YAML-файла.
+    В будущем может быть заменено на поиск в полноценной Vector DB (Chroma/FAISS).
     """
 
     def __init__(self, embed_fn: Optional[Callable] = None):
-        """
-        Args:
-            embed_fn: Функция для получения embeddings.
-                      Сигнатура: embed_fn(texts: List[str]) -> np.ndarray (N, dim)
-        """
         self.embed_fn = embed_fn
         self.centroids: Dict[str, np.ndarray] = {}
         self.initialized = False
+        self.examples_path = os.path.join(
+            os.path.dirname(__file__), "..", "data", "intent_examples.yaml"
+        )
+
+    def _load_examples(self) -> Dict[str, List[str]]:
+        """Загружает примеры из YAML-файла."""
+        if os.path.exists(self.examples_path):
+            try:
+                with open(self.examples_path, 'r', encoding='utf-8') as f:
+                    examples = yaml.safe_load(f)
+                    if isinstance(examples, dict) and len(examples) > 0:
+                        logger.info(f"Loaded intent examples from {self.examples_path}")
+                        return examples
+            except Exception as e:
+                logger.error(f"Error loading intent examples from {self.examples_path}: {e}")
+        
+        logger.warning("Using default intent examples (hardcoded fallback)")
+        return DEFAULT_INTENT_EXAMPLES
 
     def initialize(self, custom_examples: Optional[Dict[str, List[str]]] = None):
         """
         Инициализирует центроиды для каждого интента.
-
-        Args:
-            custom_examples: Дополнительные примеры для интентов
         """
         if self.embed_fn is None:
             raise ValueError("embed_fn must be set before initialization")
 
-        examples = {k: list(v) for k, v in INTENT_EXAMPLES.items()}
+        # Загружаем из файла
+        examples = self._load_examples()
+        
         if custom_examples:
             for intent, texts in custom_examples.items():
                 if intent in examples:
@@ -178,10 +102,14 @@ class EmbeddingIntentClassifier:
 
         # Вычисляем центроиды
         for intent, texts in examples.items():
+            if not texts:
+                continue
             embeddings = self.embed_fn(texts)
             if isinstance(embeddings, list):
                 embeddings = np.array(embeddings)
+            
             # Центроид = среднее нормализованных эмбеддингов
+            # Это простая альтернатива Vector DB (прототипирование по методу центроидов)
             centroid = np.mean(embeddings, axis=0)
             norm = np.linalg.norm(centroid)
             if norm > 0:

@@ -265,57 +265,20 @@ async def generate_report_node(state: CompareState):
             report += f"### ❌ УДАЛЕНО\n"
             report += f"> {r.get('content', '')[:200]}...\n\n"
 
-    # Сохранение в файл (с проверкой дубликатов — Задача 2)
+    # Сохранение в файл (с проверкой дубликатов через общую утилиту)
     try:
-        uploads_dir = os.getenv("UPLOADS_DIR", os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
-            'backend', 'open_webui_uploads'
-        ))
-
-        if not os.path.exists(uploads_dir):
-            os.makedirs(uploads_dir, exist_ok=True)
-
-        # Проверяем, не создан ли уже отчёт для этой пары файлов за последние 60 сек
-        input_names = sorted([os.path.basename(state['input_1']), os.path.basename(state['input_2'])])
-        now = time.time()
-        current_count = len(state['analysis_results'])
-        existing_reports = glob_mod.glob(os.path.join(uploads_dir, "Report_Compare_*.md"))
-        for existing in existing_reports:
-            if now - os.path.getmtime(existing) < 60:
-                try:
-                    with open(existing, "r", encoding="utf-8") as ef:
-                        header = ef.read(500)
-                    # Если оба имени файлов есть в заголовке — это дубль
-                    if all(name in header for name in input_names):
-                        # Извлекаем количество изменений из существующего отчёта
-                        count_match = re.search(r'\*\*Найдено изменений:\*\*\s*(\d+)', header)
-                        existing_count = int(count_match.group(1)) if count_match else 0
-
-                        if current_count > existing_count:
-                            # Новый отчёт полнее — заменяем старый
-                            print(f"[Report] Replacing {os.path.basename(existing)} ({existing_count} -> {current_count} changes)")
-                            os.remove(existing)
-                            break
-                        else:
-                            # Старый отчёт не хуже — пропускаем
-                            print(f"[Report] Duplicate skipped ({current_count} <= {existing_count}): {existing}")
-                            report += f"\n---\n**Отчет уже сохранен:** `{os.path.basename(existing)}`"
-                            return {"final_report": report}
-                except Exception:
-                    pass
-
-        filename = f"Report_Compare_{int(time.time())}.md"
-        filepath = os.path.join(uploads_dir, filename)
-
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(report)
-
-        report += f"\n---\n**Отчет сохранен:** `{filename}`"
-
+        from orchestrator.shared.report_utils import save_report_with_dedup
+        final_report_text = save_report_with_dedup(
+            report_text=report,
+            prefix="Report_Compare",
+            input_names=[name_1, name_2],
+            current_metric=len(state['analysis_results']),
+            metric_marker="Найдено изменений:**"
+        )
+        return {"final_report": final_report_text}
     except Exception as e:
         report += f"\n---\n**Ошибка сохранения отчета:** {e}"
-
-    return {"final_report": report}
+        return {"final_report": report}
 
 # === Build Graph ===
 

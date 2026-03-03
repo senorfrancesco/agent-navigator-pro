@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "playwright": {
+      "args": [
+        "@playwright/mcp@latest"
+      ],
+      "command": "npx"
+    },
+    "notebooklm": {
+      "args": [
+        "notebooklm-mcp@latest"
+      ],
+      "command": "npx",
+      "env": {}
+    }
+  }
+}

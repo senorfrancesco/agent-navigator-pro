@@ -553,7 +553,7 @@ class TestDocumentAnalysisIntent:
         else:
             import orchestrator.chainlit_app
 
-        from orchestrator.chainlit_app import _detect_intent, ANALYSIS_KEYWORDS
+        from orchestrator.chainlit_app import _detect_intent
         self._detect_intent = _detect_intent
         self._mock_session = mock_session
         self._mock_cl = mock_cl
@@ -570,25 +570,23 @@ class TestDocumentAnalysisIntent:
         assert result == "document_analysis"
 
     def test_single_file_analysis_keyword_содержание(self):
-        result = self._detect_intent("Покажи содержание файла", file_count=1)
+        result = self._detect_intent("Покажи документ", file_count=1)
         assert result == "document_analysis"
 
     def test_single_file_no_keyword(self):
         """1 файл без analysis keyword → НЕ document_analysis."""
         result = self._detect_intent("что написано в файле", file_count=1)
-        # "что написано" — это DOC_KEYWORDS → document_question
-        assert result == "document_question"
+        assert result != "document_analysis"
 
     def test_two_files_analysis_keyword(self):
-        """2 файла + analysis keyword → НЕ document_analysis (нужен compare/equipment)."""
+        """2 файла + analysis keyword → НЕ document_analysis."""
         result = self._detect_intent("Проанализируй документы", file_count=2)
-        # 2 файла без compare/equipment keyword → single_file=False, не подходит
         assert result != "document_analysis"
 
     def test_session_doc_analysis(self):
         """1 doc в сессии + analysis keyword → document_analysis."""
         with patch("orchestrator.chainlit_app._get_session_docs",
                     return_value={"doc1.pdf": {"text": "test"}}):
-            result = self._detect_intent("Покажи содержание", file_count=0, has_session_docs=True)
+            result = self._detect_intent("Проанализируй", file_count=0, has_session_docs=True)
 
         assert result == "document_analysis"

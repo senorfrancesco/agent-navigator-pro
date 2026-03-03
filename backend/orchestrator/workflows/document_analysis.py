@@ -412,42 +412,20 @@ async def generate_analysis_report_node(state: DocumentAnalysisState) -> dict:
     report += f"- **Позиций извлечено:** {len(items)}\n"
     report += f"- **Символов в документе:** {chars}\n"
 
-    # Сохранение в файл
+    # Сохранение в файл через общую утилиту
     try:
-        uploads_dir = os.getenv("UPLOADS_DIR", os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
-            'backend', 'open_webui_uploads'
-        ))
-        os.makedirs(uploads_dir, exist_ok=True)
-
-        # Дедупликация
-        now = time.time()
-        existing_reports = glob_mod.glob(os.path.join(uploads_dir, "Report_Analysis_*.md"))
-
-        for existing in existing_reports:
-            if now - os.path.getmtime(existing) < 60:
-                try:
-                    with open(existing, "r", encoding="utf-8") as ef:
-                        header = ef.read(500)
-                    if doc_name in header:
-                        print(f"[Report] Duplicate skipped: {existing}")
-                        report += f"\n---\n**Отчет уже сохранен:** `{os.path.basename(existing)}`"
-                        return {"final_report": report}
-                except Exception:
-                    pass
-
-        filename = f"Report_Analysis_{int(time.time())}.md"
-        filepath = os.path.join(uploads_dir, filename)
-
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(report)
-
-        report += f"\n---\n**Отчет сохранен:** `{filename}`"
-
+        from orchestrator.shared.report_utils import save_report_with_dedup
+        final_report_text = save_report_with_dedup(
+            report_text=report,
+            prefix="Report_Analysis",
+            input_names=[doc_name],
+            current_metric=len(items),
+            metric_marker="Позиций извлечено:**"
+        )
+        return {"final_report": final_report_text}
     except Exception as e:
         report += f"\n---\n**Ошибка сохранения отчета:** {e}"
-
-    return {"final_report": report}
+        return {"final_report": report}
 
 
 # === Build Graph ===

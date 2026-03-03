@@ -212,6 +212,11 @@
 - [ ] Agentic RAG as LangGraph Tool (RetrieveNode внутри workflows)
 - [ ] VRAM Monitor + OOM recovery + dynamic fallback
 - [ ] Пул портов для динамических моделей в UMS
+- [ ] **Conda environment export** — зафиксировать воспроизводимое окружение `diploma_llm`:
+  Export: `conda env export -n diploma_llm --no-builds > environment.yml`
+  Для переноса: `conda env create -f environment.yml`
+  Дополнительно: `pip list --format=freeze > backend/requirements.lock` для точных версий pip-пакетов.
+  Цель — один файл `environment.yml` в корне репо для воссоздания полного окружения хоста (llama-cpp-python, onnxruntime, torch и т.д.)
 
 ---
 
@@ -222,18 +227,18 @@
 
 ### 🔴 Critical (баги)
 
-- [ ] **TD-1 — `__aexit__` без `await` в `_handle_compare`**
+- [x] **TD-1 — `__aexit__` без `await` в `_handle_compare`**
   `chainlit_app.py`: `prev_step.__aexit__(None, None, None)` — coroutine создаётся но никогда не выполняется.
   Fix: заменить на `AsyncExitStack` или корректно управлять `async with cl.Step(...)`.
 
 ### 🟠 High
 
-- [ ] **TD-2 — `INTENT_EXAMPLES` — hardcoded training data**
+- [x] **TD-2 — `INTENT_EXAMPLES` — hardcoded training data**
   `rag/classifier.py`: примеры интентов прямо в коде. Любое изменение требует деплоя.
   Fix: YAML-файл `data/intent_examples.yaml` + загрузка из vector DB (Chroma/FAISS) без перезапуска.
   Доп.: 10-15 примеров недостаточно для семантически близких интентов (document_question vs document_analysis).
 
-- [ ] **TD-3 — `index_documents` блокирует event loop**
+- [x] **TD-3 — `index_documents` блокирует event loop**
   `chainlit_app.py::on_message`: sync вызов `rag.index_documents(...)` в async handler.
   Fix: `await asyncio.to_thread(rag.index_documents, all_texts, doc_names=all_names)`.
 
@@ -247,7 +252,7 @@
 
 ### 🟡 Medium
 
-- [ ] **TD-6 — Дублирование логики отчётов в 3 файлах**
+- [x] **TD-6 — Дублирование логики отчётов в 3 файлах**
   Логика дедупликации и сохранения отчётов скопирована в `compare.py`, `equipment.py`, `document_analysis.py`.
   Fix: `backend/orchestrator/shared/report_utils.py` — общие `save_report()`, `dedup_check()`, `format_header()`.
 
@@ -265,7 +270,7 @@
 
 ### 🔵 Low
 
-- [ ] **TD-10 — Keyword routing как последний fallback (хрупко)**
+- [x] **TD-10 — Keyword routing как последний fallback (хрупко)**
   Keyword lists (`COMPARE_KEYWORDS`, `EQUIPMENT_KEYWORDS` и др.) работают, но хрупки к новым формулировкам.
   По best practice: keyword routing должен быть **первым слоем** (fast-pass), а не fallback-ом последнего уровня.
 

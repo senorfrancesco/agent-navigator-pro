@@ -1,0 +1,24 @@
+[project]
+# Таймаут сессии при потере соединения (секунды)
+session_timeout = 3600
+
+# Таймаут пользовательской сессии (15 дней)
+user_session_timeout = 1296000
+
+# Кэш третьих сторон
+cache = false
+
+# Разрешённые origins
+allow_origins = ["*"]
+
+[features]
+# Отключаем загрузку аудио
+spontaneous_file_upload.audio.enabled = false
+
+[UI]
+name = "Agent Navigator Pro"
+default_theme = "dark"
+cot = "full"
+
+[UI.theme]
+default = "dark"
