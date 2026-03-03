@@ -178,8 +178,13 @@ def _is_tz_structure(header_row: List) -> bool:
     if not header_row:
         return False
     raw = "".join(str(c) for c in header_row if c).lower()
-    # Любое упоминание характеристик или параметров (максимально лояльно)
-    return any(kw in raw for kw in ["характер", "параметр", "специфик", "требован"])
+    
+    # Чтобы считать таблицу ТЗ-структурой, она должна иметь колонки типа "Параметр" и "Значение" (или "Требование" и "Соответствие").
+    # Просто слова "Характеристики" недостаточно (это может быть обычная смета).
+    has_param_col = any(kw in raw for kw in ["параметр", "требован"])
+    has_value_col = any(kw in raw for kw in ["значение", "соответствие", "результат"])
+    
+    return has_param_col and has_value_col
 
 
 def _detect_tz_columns(header_rows: List[List]) -> Dict[str, int]:
@@ -298,6 +303,7 @@ async def _polish_items_specs_llm(items: List[Dict[str, Any]]):
 def _parse_tz_table_rows(
     rows: List[List],
     col_map: Dict[str, int],
+    page_info: Any = None,
 ) -> List[Dict[str, Any]]:
     """
     Group-by парсер для ТЗ-таблиц. Собирает ВСЕ сырые характеристики.
@@ -346,7 +352,7 @@ def _parse_tz_table_rows(
                 "price": "",
                 "unit": unit_val or "",
                 "source": "table",
-                "page": None,
+                "page": page_info,
             }
             if not _is_empty(param_val):
                 current_raw_specs.append({"p": param_val, "v": value_val or "", "u": unit_val or ""})
@@ -421,7 +427,7 @@ def _parse_table_rows(
             if next_row and not next_row[0] and any(kw in str(next_row).lower() for kw in ["параметр", "значение", "требован"]):
                 actual_data_start = header_idx + 2
             
-            tz_items = _parse_tz_table_rows(table_data[actual_data_start:], tz_col_map)
+            tz_items = _parse_tz_table_rows(table_data[actual_data_start:], tz_col_map, page_info=page_info)
             return tz_items, col_map
 
     # Fallback: Обычный парсер (тоже учим его собирать сырые характеристики)
@@ -722,12 +728,17 @@ async def load_and_extract_node(state: EquipmentState) -> dict:
     except Exception as e:
         errors.append(f"Table extraction doc1 failed: {e}")
 
-    try:
-        already_names = [it["name"] for it in items_1_table]
-        items_1_text = await _extract_items_llm(state["input_1"], already_names)
-        print(f"  [Doc1] LLM text: {len(items_1_text)} items")
-    except Exception as e:
-        errors.append(f"LLM extraction doc1 failed: {e}")
+    # Архитектурное Решение 1: Условная маршрутизация (Short-Circuit)
+    # Если парсер таблиц нашел четкое ТЗ (>= 2 позиций), мы пропускаем LLM-поиск по тексту.
+    if len(items_1_table) >= 2:
+        print(f"  [Doc1] Skipping LLM text extraction: {len(items_1_table)} items already found in structured tables.")
+    else:
+        try:
+            already_names = [it["name"] for it in items_1_table]
+            items_1_text = await _extract_items_llm(state["input_1"], already_names)
+            print(f"  [Doc1] LLM text: {len(items_1_text)} items")
+        except Exception as e:
+            errors.append(f"LLM extraction doc1 failed: {e}")
 
     items_1 = _dedup_items(items_1_table + items_1_text)
 
@@ -740,12 +751,15 @@ async def load_and_extract_node(state: EquipmentState) -> dict:
     except Exception as e:
         errors.append(f"Table extraction doc2 failed: {e}")
 
-    try:
-        already_names = [it["name"] for it in items_2_table]
-        items_2_text = await _extract_items_llm(state["input_2"], already_names)
-        print(f"  [Doc2] LLM text: {len(items_2_text)} items")
-    except Exception as e:
-        errors.append(f"LLM extraction doc2 failed: {e}")
+    if len(items_2_table) >= 2:
+        print(f"  [Doc2] Skipping LLM text extraction: {len(items_2_table)} items already found in structured tables.")
+    else:
+        try:
+            already_names = [it["name"] for it in items_2_table]
+            items_2_text = await _extract_items_llm(state["input_2"], already_names)
+            print(f"  [Doc2] LLM text: {len(items_2_text)} items")
+        except Exception as e:
+            errors.append(f"LLM extraction doc2 failed: {e}")
 
     items_2 = _dedup_items(items_2_table + items_2_text)
 

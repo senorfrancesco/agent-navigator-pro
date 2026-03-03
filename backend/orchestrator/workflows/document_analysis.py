@@ -174,14 +174,17 @@ async def extract_positions_node(state: DocumentAnalysisState) -> dict:
     except Exception as e:
         errors.append(f"Table extraction failed: {e}")
 
-    # Pass 2: LLM текстовые позиции
+    # Pass 2: LLM текстовые позиции (Условный запуск)
     items_text = []
-    try:
-        already_names = [it["name"] for it in items_table]
-        items_text = await _extract_items_llm(path, already_names)
-        print(f"  [DocAnalysis] LLM text: {len(items_text)} items")
-    except Exception as e:
-        errors.append(f"LLM extraction failed: {e}")
+    if len(items_table) >= 2:
+        print(f"  [DocAnalysis] Skipping LLM text extraction: {len(items_table)} items already found in structured tables.")
+    else:
+        try:
+            already_names = [it["name"] for it in items_table]
+            items_text = await _extract_items_llm(path, already_names)
+            print(f"  [DocAnalysis] LLM text: {len(items_text)} items")
+        except Exception as e:
+            errors.append(f"LLM extraction failed: {e}")
 
     items = _dedup_items(items_table + items_text)
     
