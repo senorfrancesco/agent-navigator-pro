@@ -91,7 +91,11 @@ state = {
     "active_model": None, # Последняя запрошенная "тяжелая" модель
     "processes": {},      # model_id -> process
     "device_mode": DeviceMode.HYBRID,
-    "dynamic_ports": 8100 # Начальный порт для динамических моделей
+    "dynamic_ports": 8100, # Начальный порт для динамических моделей
+    "effective_context_tokens": None,
+    "context_backend_limit": None,
+    "context_parallelism": 1,
+    "context_guardrail_cap": None,
 }
 _model_start_locks: Dict[str, threading.Lock] = {}
 _model_start_locks_guard = threading.Lock()
@@ -133,6 +137,57 @@ def _get_model_start_lock(model_id: str) -> threading.Lock:
             lock = threading.Lock()
             _model_start_locks[model_id] = lock
         return lock
+
+
+def _resolve_context_guardrail_cap() -> int:
+    override = os.getenv("UMS_CONTEXT_GUARDRAIL_CAP")
+    if override:
+        try:
+            parsed = int(override)
+            if parsed > 0:
+                return parsed
+        except ValueError:
+            logger.warning(f"Invalid UMS_CONTEXT_GUARDRAIL_CAP={override}, ignoring")
+
+    tc = state.get("tier_config")
+    rag_mode = getattr(tc, "rag_mode", "simple") if tc else "simple"
+    rag_caps = {
+        "simple": 16000,
+        "corrective": 16000,
+        "agentic": 32000,
+        "multi-agent": 32000,
+    }
+    return rag_caps.get(rag_mode, 16000)
+
+
+def _resolve_llm_parallelism() -> int:
+    env_np = os.getenv("UMS_LLM_PARALLELISM")
+    if env_np:
+        try:
+            parsed = int(env_np)
+            if parsed > 0:
+                return parsed
+        except ValueError:
+            logger.warning(f"Invalid UMS_LLM_PARALLELISM={env_np}, ignoring")
+
+    tc = state.get("tier_config")
+    if tc and getattr(tc, "max_concurrent_llm", 0) > 0:
+        return int(tc.max_concurrent_llm)
+    return 1
+
+
+def _update_effective_context_state(config: Dict[str, Any], parallelism: int) -> None:
+    backend_ctx = int(config.get("ctx_size", 0) or 0)
+    guardrail_cap = _resolve_context_guardrail_cap()
+    slots = max(1, int(parallelism or 1))
+
+    effective_ctx = min(backend_ctx, guardrail_cap)
+    effective_ctx = max(512, effective_ctx // slots)
+
+    state["context_backend_limit"] = backend_ctx
+    state["context_parallelism"] = slots
+    state["context_guardrail_cap"] = guardrail_cap
+    state["effective_context_tokens"] = effective_ctx
 
 
 def _find_listener_pids(port: int) -> List[int]:
@@ -313,13 +368,16 @@ def _start_server(model_id: str, device_mode: DeviceMode):
                     raise
             raise RuntimeError(f"Failed to start {model_id}: {last_error}")
         else:
+            llm_parallelism = _resolve_llm_parallelism()
             cmd = ["llama-server", "-m", model_path, "--port", str(config["port"]),
                    "--host", "0.0.0.0", "-c", str(config["ctx_size"]),
-                   "-ngl", str(config["gpu_layers"] if device_mode != DeviceMode.CPU else 0)]
+                   "-ngl", str(config["gpu_layers"] if device_mode != DeviceMode.CPU else 0),
+                   "-np", str(llm_parallelism)]
             if n_gpu > 1 and device_mode != DeviceMode.CPU:
                 cmd.extend(["--tensor-split", ",".join(["1"] * n_gpu)])
             if config["type"] == "gguf-vl" and "mmproj" in config:
                 cmd.extend(["--mmproj", resolve_model_path(config["mmproj"])])
+            _update_effective_context_state(config, llm_parallelism)
 
         logger.info(f"Executing: {' '.join(cmd)}")
         try:
@@ -466,11 +524,20 @@ async def get_status():
     tier_info = None
     if state.get("tier_config"):
         tc = state["tier_config"]
-        tier_info = {"tier": tc.tier, "rag_mode": tc.rag_mode, "embedding_backend": tc.embedding_backend}
+        tier_info = {
+            "tier": tc.tier,
+            "rag_mode": tc.rag_mode,
+            "embedding_backend": tc.embedding_backend,
+            "effective_context_tokens": state.get("effective_context_tokens"),
+            "context_backend_limit": state.get("context_backend_limit"),
+            "context_parallelism": state.get("context_parallelism"),
+            "context_guardrail_cap": state.get("context_guardrail_cap"),
+        }
     return {
         "active_heavy_model": state["active_model"],
         "running": list(state["processes"].keys()),
         "vram_free_gb": _get_available_vram(),
+        "effective_context_tokens": state.get("effective_context_tokens"),
         "tier": tier_info,
     }
 

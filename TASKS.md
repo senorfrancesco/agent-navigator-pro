@@ -205,6 +205,13 @@
 - [x] **B3.10 — Отчёт не сохранялся в контейнере**
   `compare.py`: путь через `__file__` заменён на `os.getenv("UPLOADS_DIR")` (`/app/uploads` в Docker).
 
+- [x] **B3.12 — UMS effective context budgeting + Chainlit integration**
+  `unified_model_server.py`: расчёт `effective_context_tokens` на запрос c учётом `ctx_size`,
+  серверного параллелизма (`-np`) и guardrail cap (profile/env), публикация в `/status`.
+  `chainlit_app.py`: RAG budgeting теперь использует `effective_context_tokens` из UMS
+  (через `max_context_chars`), а не только `rag_mode`.
+  Follow-up: уточнить эвристику `tokens→chars` (сейчас x4) под реальные русскоязычные документы.
+
 ### Backlog
 
 - [ ] **B3.11 — Убрать JSON salvage из DEBUG-POLISH**
