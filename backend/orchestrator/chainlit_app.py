@@ -272,9 +272,22 @@ async def _init_classifier():
         from orchestrator.rag.classifier import EmbeddingIntentClassifier
         from services.model_manager.ums_client import create_ums_embed_fn
 
-        embed_fn = await asyncio.to_thread(create_ums_embed_fn)
+        retries = int(os.getenv("CHAINLIT_CLASSIFIER_PREINIT_RETRIES", "6"))
+        delay_s = float(os.getenv("CHAINLIT_CLASSIFIER_PREINIT_DELAY_S", "2.0"))
+        embed_fn = None
+
+        for attempt in range(1, retries + 1):
+            embed_fn = await asyncio.to_thread(create_ums_embed_fn)
+            if embed_fn:
+                break
+            if attempt < retries:
+                logger.info(
+                    f"Classifier pre-init: UMS unavailable, retrying ({attempt}/{retries})"
+                )
+                await asyncio.sleep(delay_s)
+
         if not embed_fn:
-            logger.warning("Classifier pre-init: UMS unavailable, skipping")
+            logger.info("Classifier pre-init skipped: UMS unavailable after retries")
             return
         classifier = EmbeddingIntentClassifier(embed_fn=embed_fn)
         await asyncio.to_thread(classifier.initialize)

@@ -108,6 +108,7 @@ class TestAsyncInferStream:
     class _FakeResponse:
         def __init__(self, lines):
             self._lines = lines
+            self.exited = False
 
         def raise_for_status(self):
             return None
@@ -124,6 +125,7 @@ class TestAsyncInferStream:
             return self._response
 
         async def __aexit__(self, exc_type, exc, tb):
+            self._response.exited = True
             return False
 
     class _FakeClient:
@@ -166,3 +168,20 @@ class TestAsyncInferStream:
             await ums.async_infer_stream_to_callback("qwen-14b-llm", {"prompt": "x"}, on_token)
 
         assert tokens == ["Hello", " world"]
+
+    @pytest.mark.asyncio
+    async def test_async_infer_stream_closes_upstream_when_consumer_stops_early(self):
+        response = self._FakeResponse([
+            'data: {"choices":[{"text":"Hello"}]}',
+            "data: [DONE]",
+        ])
+        client = self._FakeClient(response)
+        ums = UMSClient(base_url="http://test")
+
+        with patch("services.model_manager.ums_client._get_async_client", new=AsyncMock(return_value=client)):
+            stream = ums.async_infer_stream("qwen-14b-llm", {"prompt": "x"})
+            first = await anext(stream)
+            assert first == "Hello"
+            await stream.aclose()
+
+        assert response.exited is True

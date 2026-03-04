@@ -11,14 +11,34 @@ cache = false
 # Разрешённые origins
 allow_origins = ["*"]
 
-[features]
-# Отключаем загрузку аудио
-spontaneous_file_upload.audio.enabled = false
+[features.spontaneous_file_upload]
+enabled = true
+accept = [
+  "application/pdf",
+  "text/plain",
+  "image/*",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.ms-excel",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+]
+max_files = 20
+max_size_mb = 500
+
+[features.audio]
+enabled = false
+sample_rate = 24000
 
 [UI]
 name = "Agent Navigator Pro"
 default_theme = "dark"
 cot = "full"
+language = "ru-RU"
+logo_file_url = "/public/logo_dark.svg"
+default_avatar_file_url = "/public/avatar.svg"
 
 [UI.theme]
 default = "dark"
+
+[meta]
+generated_by = "2.9.6"

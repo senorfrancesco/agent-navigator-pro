@@ -9,6 +9,7 @@ import inspect
 import os
 import time
 import random
+from contextlib import suppress
 import requests
 import httpx
 import numpy as np
@@ -44,6 +45,28 @@ def _should_retry_async_infer(exc: Exception) -> bool:
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code in {429, 500, 502, 503, 504}
     return False
+
+
+def _extract_sse_text(line: str) -> str:
+    """Парсит одну SSE-строку от llama-server/UMS и достает текстовый токен."""
+    line = line.strip()
+    if not line or not line.startswith("data: "):
+        return ""
+
+    data_str = line[6:]
+    if data_str == "[DONE]":
+        return ""
+
+    try:
+        chunk = json.loads(data_str)
+    except json.JSONDecodeError:
+        return ""
+
+    choices = chunk.get("choices", [])
+    if not choices:
+        return ""
+
+    return choices[0].get("text", "") or choices[0].get("delta", {}).get("content", "")
 
 
 class UMSClient:
@@ -148,32 +171,43 @@ class UMSClient:
             "stream": True
         }
         print(f"[UMS_CLIENT] Stream inference for model: {model_id}")
-        client = await _get_async_client()
-        try:
-            async with client.stream("POST", url, json=request_body) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    # UMS проксирует SSE от llama-server: "data: {...}"
-                    if line.startswith("data: "):
-                        data_str = line[6:]
-                        if data_str == "[DONE]":
+        queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+
+        async def producer() -> None:
+            client = await _get_async_client()
+            try:
+                async with client.stream("POST", url, json=request_body) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        stripped = line.strip()
+                        if stripped == "data: [DONE]":
                             return
-                        try:
-                            chunk = json.loads(data_str)
-                            # llama-server completions format
-                            choices = chunk.get("choices", [])
-                            if choices:
-                                text = choices[0].get("text", "") or choices[0].get("delta", {}).get("content", "")
-                                if text:
-                                    yield text
-                        except json.JSONDecodeError:
-                            continue
-        except asyncio.CancelledError:
-            # Cancellation is normal control flow for streaming clients.
-            raise
+
+                        text = _extract_sse_text(line)
+                        if text:
+                            await queue.put(("token", text))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await queue.put(("error", exc))
+            finally:
+                await queue.put(("done", None))
+
+        producer_task = asyncio.create_task(producer(), name=f"ums-stream:{model_id}")
+        try:
+            while True:
+                kind, value = await queue.get()
+                if kind == "token":
+                    yield value
+                    continue
+                if kind == "error":
+                    raise value
+                return
+        finally:
+            if not producer_task.done():
+                producer_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await producer_task
 
     async def async_infer_stream_to_callback(
         self,
@@ -187,46 +221,10 @@ class UMSClient:
         на стороне вызывающего кода. Это снижает риск GeneratorExit/cancel-scope конфликтов
         в UI-интеграциях, которые рано завершают consumer task.
         """
-        url = f"{self.base_url}/infer"
-        request_body = {
-            "model_id": model_id,
-            "payload": payload,
-            "device_mode": device_mode,
-            "priority": "normal",
-            "stream": True
-        }
-        print(f"[UMS_CLIENT] Stream inference for model: {model_id}")
-        client = await _get_async_client()
-        try:
-            async with client.stream("POST", url, json=request_body) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    if not line.startswith("data: "):
-                        continue
-                    data_str = line[6:]
-                    if data_str == "[DONE]":
-                        return
-                    try:
-                        chunk = json.loads(data_str)
-                    except json.JSONDecodeError:
-                        continue
-
-                    choices = chunk.get("choices", [])
-                    if not choices:
-                        continue
-
-                    text = choices[0].get("text", "") or choices[0].get("delta", {}).get("content", "")
-                    if not text:
-                        continue
-
-                    result = on_token(text)
-                    if inspect.isawaitable(result):
-                        await result
-        except asyncio.CancelledError:
-            raise
+        async for text in self.async_infer_stream(model_id, payload, device_mode=device_mode):
+            result = on_token(text)
+            if inspect.isawaitable(result):
+                await result
 
     def switch_model(self, model_id: str, device_mode: str = "hybrid") -> Dict[str, Any]:
         """Переключает активную модель на UMS."""

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Agent Navigator Pro">
+  <rect width="256" height="256" rx="48" fill="#111827"/>
+  <path d="M48 188L118 68h20l70 120h-31l-14-25H93l-14 25H48zm61-51h38l-19-34-19 34z" fill="#f3f4f6"/>
+  <circle cx="192" cy="72" r="20" fill="#22c55e"/>
+</svg>

@@ -13,6 +13,8 @@ import asyncio
 import logging
 import psutil
 import warnings
+import threading
+from contextlib import suppress
 from enum import Enum
 from typing import Dict, List, Optional, Any, AsyncGenerator
 from pathlib import Path
@@ -91,6 +93,8 @@ state = {
     "device_mode": DeviceMode.HYBRID,
     "dynamic_ports": 8100 # Начальный порт для динамических моделей
 }
+_model_start_locks: Dict[str, threading.Lock] = {}
+_model_start_locks_guard = threading.Lock()
 
 # === Resource Helpers ===
 
@@ -120,6 +124,60 @@ def resolve_model_path(path_str: str) -> str:
     if not path.is_absolute():
         path = BACKEND_ROOT / path_str
     return str(path.resolve())
+
+
+def _get_model_start_lock(model_id: str) -> threading.Lock:
+    with _model_start_locks_guard:
+        lock = _model_start_locks.get(model_id)
+        if lock is None:
+            lock = threading.Lock()
+            _model_start_locks[model_id] = lock
+        return lock
+
+
+def _find_listener_pids(port: int) -> List[int]:
+    pids = set()
+    try:
+        for conn in psutil.net_connections(kind="inet"):
+            if conn.status != psutil.CONN_LISTEN:
+                continue
+            if not conn.laddr:
+                continue
+            if conn.laddr.port != port:
+                continue
+            if conn.pid:
+                pids.add(conn.pid)
+    except Exception as e:
+        logger.warning(f"Failed to inspect listeners on port {port}: {e}")
+    return sorted(pids)
+
+
+def _kill_process_tree(pid: int) -> None:
+    try:
+        proc = psutil.Process(pid)
+    except psutil.Error:
+        return
+
+    children = proc.children(recursive=True)
+    for child in children:
+        with suppress(psutil.Error):
+            child.terminate()
+    with suppress(psutil.Error):
+        proc.terminate()
+
+    gone, alive = psutil.wait_procs(children + [proc], timeout=3)
+    for survivor in alive:
+        with suppress(psutil.Error):
+            survivor.kill()
+
+
+def _reap_stale_listener_on_port(port: int, tracked_proc: Optional[subprocess.Popen] = None) -> None:
+    tracked_pid = tracked_proc.pid if tracked_proc is not None else None
+    for pid in _find_listener_pids(port):
+        if tracked_pid and pid == tracked_pid:
+            continue
+        logger.warning(f"Reaping stale listener on port {port}: pid={pid}")
+        _kill_process_tree(pid)
 
 # === Dynamic Model Discovery ===
 
@@ -161,60 +219,118 @@ def _stop_all_servers():
     for model_id in list(state["processes"].keys()):
         _stop_model(model_id)
 
-def _start_server(model_id: str, device_mode: DeviceMode):
-    config = get_model_config(model_id)
-    if not config:
-        raise HTTPException(status_code=404, detail=f"Model {model_id} not found in filesystem.")
-
-    model_path = resolve_model_path(config["path"])
-    is_heavy = config["type"] in ["gguf", "gguf-vl"]
-    
-    if is_heavy:
-        active_heavy = None
-        for pid in state["processes"]:
-            p_config = get_model_config(pid)
-            if p_config and p_config["type"] in ["gguf", "gguf-vl"]:
-                active_heavy = pid
-                break
-        if active_heavy and active_heavy != model_id:
-            logger.info(f"Stopping {active_heavy} to free memory for {model_id}")
-            _stop_model(active_heavy)
-
-    if model_id in state["processes"]:
-        return # Уже работает
-
-    n_gpu = len(_get_gpu_info())
-    
-    if config["type"] == "st":
-        device_arg = "cuda" if (device_mode != DeviceMode.CPU and n_gpu > 0) else "cpu"
-        cmd = [sys.executable, str(Path(__file__).parent / "st_server.py"),
-               "--model", model_path, "--port", str(config["port"]), "--device", device_arg]
-    else:
-        cmd = ["llama-server", "-m", model_path, "--port", str(config["port"]),
-               "--host", "0.0.0.0", "-c", str(config["ctx_size"]),
-               "-ngl", str(config["gpu_layers"] if device_mode != DeviceMode.CPU else 0)]
-        if n_gpu > 1 and device_mode != DeviceMode.CPU:
-            cmd.extend(["--tensor-split", ",".join(["1"] * n_gpu)])
-        if config["type"] == "gguf-vl" and "mmproj" in config:
-            cmd.extend(["--mmproj", resolve_model_path(config["mmproj"])])
-
-    logger.info(f"Executing: {' '.join(cmd)}")
+def _terminate_process(proc: subprocess.Popen) -> None:
+    """Останавливает дочерний процесс и его process group."""
     try:
-        process = subprocess.Popen(cmd, preexec_fn=os.setsid)
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        proc.wait(timeout=5)
+    except Exception:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except Exception:
+            pass
+
+
+def _launch_server_process(cmd: List[str], port: int, health_timeout_s: float = 120.0) -> subprocess.Popen:
+    """Запускает сервер и ждет его readiness по /health."""
+    process = subprocess.Popen(cmd, preexec_fn=os.setsid)
+    try:
         start_time = time.time()
-        while time.time() - start_time < 120:
+        while time.time() - start_time < health_timeout_s:
+            if process.poll() is not None:
+                raise RuntimeError(f"Server exited with code {process.returncode}")
             try:
                 with httpx.Client(timeout=1.0) as client:
-                    if client.get(f"http://localhost:{config['port']}/health").status_code == 200:
-                        state["processes"][model_id] = process
-                        if is_heavy: state["active_model"] = model_id
-                        return
-            except: pass
+                    if client.get(f"http://localhost:{port}/health").status_code == 200:
+                        return process
+            except Exception:
+                pass
             time.sleep(1)
         raise TimeoutError("Server start timeout")
-    except Exception as e:
-        logger.error(f"Start failed: {e}")
+    except Exception:
+        _terminate_process(process)
         raise
+
+
+def _start_server(model_id: str, device_mode: DeviceMode):
+    with _get_model_start_lock(model_id):
+        config = get_model_config(model_id)
+        if not config:
+            raise HTTPException(status_code=404, detail=f"Model {model_id} not found in filesystem.")
+
+        model_path = resolve_model_path(config["path"])
+        is_heavy = config["type"] in ["gguf", "gguf-vl"]
+        
+        if is_heavy:
+            active_heavy = None
+            for pid in state["processes"]:
+                p_config = get_model_config(pid)
+                if p_config and p_config["type"] in ["gguf", "gguf-vl"]:
+                    active_heavy = pid
+                    break
+            if active_heavy and active_heavy != model_id:
+                logger.info(f"Stopping {active_heavy} to free memory for {model_id}")
+                _stop_model(active_heavy)
+
+        existing_proc = state["processes"].get(model_id)
+        if existing_proc is not None:
+            if existing_proc.poll() is None:
+                return  # Уже работает
+            state["processes"].pop(model_id, None)
+
+        _reap_stale_listener_on_port(config["port"], tracked_proc=existing_proc)
+
+        n_gpu = len(_get_gpu_info())
+        
+        if config["type"] == "st":
+            preferred_device = "cuda" if (device_mode != DeviceMode.CPU and n_gpu > 0) else "cpu"
+            device_candidates = [preferred_device]
+            if preferred_device == "cuda":
+                device_candidates.append("cpu")
+
+            last_error = None
+            for idx, device_arg in enumerate(device_candidates):
+                cmd = [
+                    sys.executable,
+                    str(Path(__file__).parent / "st_server.py"),
+                    "--model", model_path,
+                    "--port", str(config["port"]),
+                    "--device", device_arg,
+                ]
+                logger.info(f"Executing: {' '.join(cmd)}")
+                try:
+                    process = _launch_server_process(cmd, config["port"])
+                    state["processes"][model_id] = process
+                    return
+                except Exception as e:
+                    last_error = e
+                    if idx < len(device_candidates) - 1:
+                        logger.warning(
+                            f"ST server startup failed on {device_arg}, retrying on {device_candidates[idx + 1]}: {e}"
+                        )
+                        continue
+                    logger.error(f"Start failed: {e}")
+                    raise
+            raise RuntimeError(f"Failed to start {model_id}: {last_error}")
+        else:
+            cmd = ["llama-server", "-m", model_path, "--port", str(config["port"]),
+                   "--host", "0.0.0.0", "-c", str(config["ctx_size"]),
+                   "-ngl", str(config["gpu_layers"] if device_mode != DeviceMode.CPU else 0)]
+            if n_gpu > 1 and device_mode != DeviceMode.CPU:
+                cmd.extend(["--tensor-split", ",".join(["1"] * n_gpu)])
+            if config["type"] == "gguf-vl" and "mmproj" in config:
+                cmd.extend(["--mmproj", resolve_model_path(config["mmproj"])])
+
+        logger.info(f"Executing: {' '.join(cmd)}")
+        try:
+            process = _launch_server_process(cmd, config["port"])
+            state["processes"][model_id] = process
+            if is_heavy:
+                state["active_model"] = model_id
+            return
+        except Exception as e:
+            logger.error(f"Start failed: {e}")
+            raise
 
 # === API ===
 
@@ -273,6 +389,50 @@ app = FastAPI(title="Unified Model Server", version="3.0.0", lifespan=lifespan)
 _llm_semaphore = asyncio.Semaphore(1)
 _embed_semaphore = asyncio.Semaphore(4)
 
+
+async def _proxy_sse_stream(url: str, payload: Dict[str, Any], sem: asyncio.Semaphore) -> AsyncGenerator[bytes, None]:
+    """
+    Проксирует upstream SSE через очередь и отдельную producer-task.
+
+    Это разрывает хрупкую связку:
+    StreamingResponse consumer task -> httpx stream context
+    и гарантирует, что upstream stream закрывается в том же task, где был открыт.
+    """
+    queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+
+    async def producer() -> None:
+        try:
+            async with sem:
+                async with httpx.AsyncClient(timeout=300.0) as stream_client:
+                    async with stream_client.stream("POST", url, json=payload) as resp:
+                        resp.raise_for_status()
+                        async for line in resp.aiter_lines():
+                            if line:
+                                await queue.put(("chunk", f"{line}\n\n".encode()))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(f"Upstream SSE proxy error for {url}: {exc}")
+            await queue.put(("error", exc))
+        finally:
+            await queue.put(("done", None))
+
+    producer_task = asyncio.create_task(producer(), name=f"ums-proxy:{os.path.basename(url)}")
+    try:
+        while True:
+            kind, value = await queue.get()
+            if kind == "chunk":
+                yield value
+                continue
+            if kind == "error":
+                return
+            return
+    finally:
+        if not producer_task.done():
+            producer_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await producer_task
+
 @app.post("/infer")
 async def infer(request: InferRequest):
     try:
@@ -288,13 +448,10 @@ async def infer(request: InferRequest):
         if request.stream: payload["stream"] = True
 
         if request.stream:
-            async def gen():
-                async with sem:
-                    async with httpx.AsyncClient(timeout=300.0) as stream_client:
-                        async with stream_client.stream("POST", url, json=payload) as resp:
-                            async for line in resp.aiter_lines():
-                                if line: yield f"{line}\n\n"
-            return StreamingResponse(gen(), media_type="text/event-stream")
+            return StreamingResponse(
+                _proxy_sse_stream(url, payload, sem),
+                media_type="text/event-stream",
+            )
         else:
             async with sem:
                 async with httpx.AsyncClient(timeout=300.0) as client:

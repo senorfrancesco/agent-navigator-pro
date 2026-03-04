@@ -9,8 +9,6 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 # Копируем только нужный код (models/ исключены через .dockerignore)
 COPY backend/orchestrator/ /app/orchestrator/
-# Удаляем ручной config — Chainlit сгенерирует актуальный при первом запуске
-RUN rm -rf /app/orchestrator/.chainlit
 # ums_client.py + пустые __init__.py для Python-импортов
 RUN mkdir -p /app/services/model_manager
 COPY backend/services/model_manager/ums_client.py /app/services/model_manager/ums_client.py

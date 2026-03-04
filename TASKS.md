@@ -295,6 +295,14 @@
     патчи в `chainlit_app.py`;
   - при возврате streaming нужен отдельный regression suite именно на cleanup/cancellation,
     а не только ручная проверка `привет`.
+  Обновление по состоянию:
+  - выполнен глубокий рефакторинг `UMS`/`ums_client` streaming proxy: upstream SSE теперь
+    читается через queue + отдельную producer-task, чтобы stream context открывался и
+    закрывался в одном task;
+  - добавлены regression tests на раннее закрытие consumer;
+  - полный backend suite после рефакторинга остаётся зелёным;
+  - direct chat при этом сознательно оставлен в non-stream режиме как production default,
+    пока не будет отдельного решения о возврате token-by-token UX поверх новой proxy-схемы.
 
 - [ ] **B3.15 — Очистка и консолидация устаревших markdown-документов**
   В корне репо накопились временные и частично устаревшие `.md` файлы, которые уже расходятся
@@ -336,6 +344,46 @@
   - понять, даёт ли текущая цепочка `Chainlit -> UMS -> llama-server` реальную выгоду от кэша;
   - если кэш не даёт эффекта, определить причину:
     разные prompt-prefixes, отсутствие cache reuse, неудачный batching или сброс процесса.
+
+- [ ] **B3.18 — VRAM-aware fallback для `labse-embedding` / `st_server`**
+  В live runtime после исправления direct chat streaming всплыл отдельный ресурсный дефект:
+  `LaBSE` пытается стартовать на `cuda`, когда вся VRAM занята `qwen-14b-llm`, и падает
+  с `CUDA out of memory`.
+  Что нужно обеспечить:
+  - `UMS` должен сначала пробовать `st_server` на GPU, но при неуспешном старте
+    автоматически деградировать на CPU;
+  - readiness/startup path должен быстро распознавать ранний exit дочернего процесса,
+    а не ждать глухой timeout;
+  - запуск одной и той же embedding-модели должен быть сериализован: live-логи показали,
+    что без per-model startup lock параллельные `/v1/embeddings` могут одновременно пытаться
+    поднять `labse-embedding`, и второй старт уходит в лишний `CUDA OOM`, даже если первый
+    процесс уже успешно обслуживает запросы;
+  - нужны regression tests на сценарии:
+    - GPU-start fail -> CPU fallback;
+    - явный `device_mode=cpu` не должен сначала пробовать `cuda`;
+    - concurrent startup одного `model_id` не должен запускать второй процесс.
+
+- [x] **B3.19 — Cleanup Chainlit UI/runtime warnings**
+  Остаточные warning-и после стабилизации backend уже не блокируют сценарии, но шумят в логах
+  и маскируют реальные проблемы.
+  Что нужно закрепить:
+  - `ru-RU` должен обслуживаться локальными ресурсами приложения, а не fallback-ом в `en-US`;
+  - `chainlit.md` и `chainlit_ru-RU.md` должны лежать в app root и попадать в контейнер;
+  - `.chainlit/config.toml` не должен использовать дефолтный `accept = ["*/*"]`, который
+    вызывает browser warning про invalid MIME type;
+  - `.chainlit/config.toml` должен быть совместим с установленным `chainlit`:
+    для `2.9.6` обязателен `[meta].generated_by`, а аудио-настройки должны жить в
+    `[features.audio]`, иначе `chainlit-ui` уходит в restart loop с `config file is outdated`;
+  - `Dockerfile.chainlit` должен сохранять repo-side `.chainlit`, `translations` и `public`,
+    а не удалять их на build;
+  - classifier pre-init при раннем старте `chainlit` должен использовать retry/info-path,
+    а не warning на каждую гонку старта с `UMS`.
+  Статус после live-проверки:
+  - `chainlit-ui` стартует без restart loop;
+  - browser console: `0 warnings / 0 errors`;
+  - `GET /project/translations?language=ru-RU` -> `200`;
+  - `GET /public/logo_dark.svg` и `GET /public/avatar.svg` -> `200`;
+  - warning `Skipped "*/*" because it is not a valid MIME type` больше не воспроизводится.
 
 - [ ] Vision-анализ изображений (Qwen-VL интеграция)
 - [ ] LLM-based Intent Classification (замена keyword routing, Tier 3+)
