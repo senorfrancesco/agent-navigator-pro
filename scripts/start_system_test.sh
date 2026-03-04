@@ -1,66 +1,59 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-BACKEND_DIR="$PROJECT_ROOT/backend"
+LAUNCHER_SCRIPT="$SCRIPT_DIR/run_all.sh"
 
-# 1. Start Docker for Open WebUI
-echo "Starting Open WebUI via Docker..."
-cd "$PROJECT_ROOT" && docker compose up -d
+# Цвета для вывода
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
 
-# 2. Run backend services in tmux (using existing script logic but detached)
-echo "Starting Backend Services in tmux..."
-
-SESSION_NAME="agent-navigator"
-CONDA_ENV="diploma_llm" # Hardcoded for test safety, or derive from .env
-
-# Check/Kill existing session
-if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
-    echo "Killing existing tmux session..."
-    tmux kill-session -t "$SESSION_NAME"
+if [ ! -x "$LAUNCHER_SCRIPT" ]; then
+    echo -e "${RED}Ошибка: launcher-скрипт не найден или не исполняемый: $LAUNCHER_SCRIPT${NC}"
+    exit 1
 fi
 
-# Явное завершение llama-server (остаётся в памяти после закрытия tmux)
-LLAMA_PIDS=$(pgrep -f "llama-server" 2>/dev/null)
-if [ -n "$LLAMA_PIDS" ]; then
-    echo "Stopping llama-server before test (PID: $LLAMA_PIDS)..."
-    echo "$LLAMA_PIDS" | xargs kill 2>/dev/null
-    sleep 1
-    LLAMA_PIDS=$(pgrep -f "llama-server" 2>/dev/null)
-    if [ -n "$LLAMA_PIDS" ]; then
-        echo "$LLAMA_PIDS" | xargs kill -9 2>/dev/null
-    fi
-    echo "llama-server stopped."
-fi
+echo -e "${GREEN}Запуск launcher/preflight в тестовом режиме (--mode default --check-only)...${NC}"
+"$LAUNCHER_SCRIPT" --mode default --check-only
 
-# Create session	mux new-session -d -s "$SESSION_NAME" -x 200 -y 50
+# -------------------------------------------
+# Health-check блок (fail-fast)
+# -------------------------------------------
 
-# Commands
-ACTIVATE_CMD="eval \"$(conda shell.bash hook)\" && conda activate $CONDA_ENV"
+echo ""
+echo -e "${YELLOW}=== System Health Check ===${NC}"
 
-# Window 1: Agent API	mux new-window -t "$SESSION_NAME" -n "agent-api"	mux send-keys -t "$SESSION_NAME:agent-api" "cd $BACKEND_DIR/orchestrator && $ACTIVATE_CMD && python agent_api.py" Enter
-
-# Window 2: Document Server	mux new-window -t "$SESSION_NAME" -n "doc-server"	mux send-keys -t "$SESSION_NAME:doc-server" "cd $BACKEND_DIR/services/document_server && $ACTIVATE_CMD && uvicorn mcp_document_server:app --host 0.0.0.0 --port 8001" Enter
-
-# Window 3: Legal Server	mux new-window -t "$SESSION_NAME" -n "legal-server"	mux send-keys -t "$SESSION_NAME:legal-server" "cd $BACKEND_DIR/services/legal_server && $ACTIVATE_CMD && uvicorn mcp_legal_server:app --host 0.0.0.0 --port 8002" Enter
-
-# Window 4: UMS	mux new-window -t "$SESSION_NAME" -n "ums"	mux send-keys -t "$SESSION_NAME:ums" "cd $BACKEND_DIR/services/model_manager && $ACTIVATE_CMD && python unified_model_server.py" Enter
-
-echo "Tmux session '$SESSION_NAME' started in background."
-echo "Waiting 10 seconds for services to initialize..."
-sleep 10
-
-# 3. Validation
-echo "=== System Status ==="
 echo "Docker Containers:"
-docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" | grep open-webui
+docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" | rg -i "chainlit|open-webui" || {
+    echo -e "${RED}Ошибка: UI контейнер (Chainlit/Open WebUI) не найден среди запущенных.${NC}"
+    exit 1
+}
 
-echo -e "\nBackend Services Check:"
-curl -s -o /dev/null -w "Agent API: %{http_code}\n" http://localhost:8000/status || echo "Agent API: FAILED"
-curl -s -o /dev/null -w "Doc Server: %{http_code}\n" http://localhost:8001/health || echo "Doc Server: FAILED"
-curl -s -o /dev/null -w "Legal Server: %{http_code}\n" http://localhost:8002/health || echo "Legal Server: FAILED"
-curl -s -o /dev/null -w "UMS: %{http_code}\n" http://localhost:8090/health || echo "UMS: FAILED"
+check_http() {
+    local name="$1"
+    local url="$2"
 
-echo "=== Test Complete ==="
-echo "To attach to backend logs: tmux attach -t $SESSION_NAME"
+    local http_code
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" "$url" || true)
+
+    if [ "$http_code" -ge 200 ] 2>/dev/null && [ "$http_code" -lt 400 ] 2>/dev/null; then
+        echo -e "${GREEN}${name}: HTTP ${http_code}${NC}"
+    else
+        echo -e "${RED}${name}: HTTP ${http_code} (FAIL)${NC}"
+        exit 1
+    fi
+}
+
+echo ""
+echo "Backend Services Check:"
+check_http "Agent API" "http://localhost:8000/health"
+check_http "Doc Server" "http://localhost:8001/health"
+check_http "Legal Server" "http://localhost:8002/health"
+check_http "UMS" "http://localhost:8090/health"
+
+echo ""
+echo -e "${GREEN}=== Test Complete: all checks passed ===${NC}"
+echo "Для просмотра логов: tmux attach -t agent-navigator"

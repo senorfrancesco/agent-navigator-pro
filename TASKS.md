@@ -787,3 +787,5 @@
 - [x] **[2026-03-03 15:42]** Task #4: (без названия) — ✅ completed
 - [x] **[2026-03-03 15:42]** Task #2: (без названия) — ✅ completed
 - [x] **[2026-03-03 15:42]** Task #1: (без названия) — ✅ completed
+
+- [x] **[2026-03-04 00:00]** start_system_test.sh: thin-wrapper на run_all.sh (--mode default --check-only) + fail-fast health-check — ✅ completed
