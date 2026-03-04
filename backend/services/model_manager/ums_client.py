@@ -8,6 +8,7 @@ import asyncio
 import inspect
 import os
 import time
+import random
 import requests
 import httpx
 import numpy as np
@@ -32,6 +33,17 @@ async def _get_async_client() -> httpx.AsyncClient:
                     limits=httpx.Limits(max_keepalive_connections=10, max_connections=50),
                 )
     return _async_client
+
+
+def _should_retry_async_infer(exc: Exception) -> bool:
+    """Retry only on transient transport/backend failures."""
+    if isinstance(exc, httpx.TimeoutException):
+        return True
+    if isinstance(exc, httpx.RequestError):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in {429, 500, 502, 503, 504}
+    return False
 
 
 class UMSClient:
@@ -85,7 +97,7 @@ class UMSClient:
     async def async_infer(self, model_id: str, payload: Dict[str, Any], device_mode: str = "hybrid") -> Dict[str, Any]:
         """
         Асинхронный инференс через UMS (использует shared client).
-        Exponential backoff: 4 попытки, задержка min(2^attempt, 10) секунд.
+        Retry only on transient failures. Shared client is preserved for pooling.
         """
         url = f"{self.base_url}/infer"
         request_body = {
@@ -94,13 +106,16 @@ class UMSClient:
             "device_mode": device_mode,
             "priority": "normal"
         }
-        retries = 4
+        retries = int(os.getenv("UMS_INFER_RETRIES", "4"))
+        base_delay_s = float(os.getenv("UMS_RETRY_BASE_DELAY_S", "1.0"))
+        max_delay_s = float(os.getenv("UMS_RETRY_MAX_DELAY_S", "10.0"))
+        timeout_s = float(os.getenv("UMS_INFER_TIMEOUT_S", "300.0"))
         last_error = None
         for attempt in range(retries):
             try:
                 print(f"[UMS_CLIENT] Async inference for model: {model_id} (attempt {attempt+1})")
                 client = await _get_async_client()
-                response = await client.post(url, json=request_body)
+                response = await client.post(url, json=request_body, timeout=timeout_s)
                 response.raise_for_status()
                 data = response.json()
                 if data.get("status") == "success":
@@ -110,9 +125,12 @@ class UMSClient:
             except Exception as e:
                 last_error = e
                 print(f"[UMS_CLIENT] Async error (attempt {attempt+1}/{retries}): {e}")
-                if attempt < retries - 1:
-                    delay = min(2 ** attempt, 10)
-                    await asyncio.sleep(delay)
+                if attempt < retries - 1 and _should_retry_async_infer(e):
+                    delay = min(max_delay_s, base_delay_s * (2 ** attempt))
+                    jitter = random.uniform(0.0, min(0.5, delay * 0.2))
+                    await asyncio.sleep(delay + jitter)
+                    continue
+                break
         raise RuntimeError(f"Failed to connect to UMS after {retries} attempts: {last_error}")
 
     async def async_infer_stream(self, model_id: str, payload: Dict[str, Any], device_mode: str = "hybrid") -> AsyncGenerator[str, None]:

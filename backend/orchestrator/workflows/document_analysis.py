@@ -68,6 +68,27 @@ _DOC_TYPE_KEYWORDS = {
 }
 
 
+def _extract_llm_content(response: Dict[str, Any]) -> str:
+    """Normalize common UMS/LLM response shapes to plain text."""
+    if not isinstance(response, dict):
+        return str(response).strip()
+
+    choices = response.get("choices")
+    if isinstance(choices, list) and choices:
+        choice = choices[0] or {}
+        return (
+            choice.get("text", "")
+            or choice.get("message", {}).get("content", "")
+            or choice.get("delta", {}).get("content", "")
+        ).strip()
+
+    content = response.get("content")
+    if isinstance(content, str):
+        return content.strip()
+
+    return str(response).strip()
+
+
 def classify_doc_type(text: str) -> str:
     """Keyword scoring для определения типа документа (без LLM)."""
     text_lower = text[:5000].lower()
@@ -314,7 +335,7 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
                 response = await ums_client.async_infer("qwen-14b-llm", {
                     "prompt": prompt, "temperature": 0.1, "max_tokens": 1500
                 })
-                content = response.get("content", "")
+                content = _extract_llm_content(response)
                 if content.strip():
                     chunk_summaries.append(content.strip())
                 await asyncio.sleep(1.0)

@@ -349,6 +349,23 @@ class TestSummarizeNode:
         assert any("failed" in e.lower() or "timeout" in e.lower() for e in result["errors"])
 
     @pytest.mark.asyncio
+    async def test_summarize_accepts_choices_response_shape(self, base_state, tz_text):
+        base_state["full_text"] = tz_text
+        base_state["doc_type"] = "tz"
+
+        with patch("orchestrator.workflows.document_analysis._chunk_text", new_callable=AsyncMock) as mock_chunk, \
+             patch("orchestrator.workflows.document_analysis.ums_client") as mock_ums:
+            mock_chunk.return_value = [tz_text]
+            mock_ums.async_infer = AsyncMock(return_value={
+                "choices": [{"text": "- Срок поставки: 20 рабочих дней\n- Гарантия: 36 месяцев"}]
+            })
+
+            result = await summarize_node(base_state)
+
+        assert "20 рабочих дней" in result["summary"]
+        assert "36 месяцев" in result["summary"]
+
+    @pytest.mark.asyncio
     async def test_summarize_empty_text(self, base_state):
         base_state["full_text"] = ""
         base_state["doc_type"] = "tz"
