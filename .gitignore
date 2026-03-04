@@ -40,3 +40,11 @@ st/*
 # Temp files
 *.data
 sym_shape_infer_temp.onnx
+
+# Local agent / browser artifacts
+.playwright-mcp/
+.agents/
+
+# Local test documents and ad-hoc samples
+documents/
+test_document.pdf
