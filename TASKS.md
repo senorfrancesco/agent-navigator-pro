@@ -218,6 +218,80 @@
   Дополнительно: `pip list --format=freeze > backend/requirements.lock` для точных версий pip-пакетов.
   Цель — один файл `environment.yml` в корне репо для воссоздания полного окружения хоста (llama-cpp-python, onnxruntime, torch и т.д.)
 
+### Фаза 7 — UI/Ops + Production Inference (vLLM)
+
+- [ ] **T4.1 — Product decision: разделение User UI и Ops UI**
+  Зафиксировать архитектурное решение (ADR):
+  - Chainlit остаётся основным пользовательским интерфейсом для agent/workflow сценариев.
+  - Open WebUI остаётся как legacy/fallback профиль.
+  - Вводится отдельный Ops UI для управления моделями и мониторинга.
+
+- [ ] **T4.2 — Chainlit UX hardening: threads/new chat/history discoverability**
+  Улучшить UX истории чатов:
+  - Явная кнопка/действие «Новый чат».
+  - Видимый список тредов и восстановление контекста документов при resume.
+  - Отдельный smoke-test для сценария: загрузка файлов → logout/login → resume.
+
+- [ ] **T4.3 — LLM Profile Selector в Chainlit (без raw model-id в UI)**
+  Добавить выбор профиля инференса (например: `default-chat`, `long-context`, `legal-compare`).
+  Профиль маппится на backend-конфиг (модель, ctx, temperature, device_mode).
+  Убрать жёсткую привязку к `qwen-14b-llm` в пользовательском потоке.
+
+- [ ] **T4.4 — UMS Model Control API (операции для Ops UI)**
+  Добавить эндпоинты:
+  - `GET /models` (обнаруженные модели + статус + тип + порт)
+  - `POST /models/rescan` (перескан директории моделей)
+  - `POST /models/activate` (активация модели/профиля)
+  - `POST /models/deactivate` (остановка модели)
+  - `GET /models/health` (агрегированный health по процессам)
+
+- [ ] **T4.5 — Dynamic model registration из папки (safe mode)**
+  Реализовать безопасное подключение моделей из ФС:
+  - Валидация расширений (`.gguf`, `.gguf-vl`) и доступности `mmproj` для VL.
+  - Защита от дублирующихся model_id и конфликтов путей.
+  - Метаданные модели (размер, mtime, hash) для аудита.
+
+- [ ] **T4.6 — Port pool и scheduler в UMS**
+  Закрыть TODO по динамическим портам:
+  - Пул портов вместо одного `dynamic_ports`.
+  - Освобождение порта при остановке процесса.
+  - Политика при исчерпании пула (очередь/ошибка с подсказкой).
+
+- [ ] **T4.7 — Concurrency policy для production**
+  Ввести ограничения и политику параллелизма:
+  - Queue + backpressure для LLM задач.
+  - Разделение interactive/batch приоритета.
+  - Таймауты и cancelation для long-running workflow.
+
+- [ ] **T4.8 — Observability stack (Prometheus + Grafana + tracing)**
+  Экспортировать и визуализировать:
+  - latency p50/p95/p99, throughput (req/s, tok/s), queue depth
+  - GPU/VRAM/CPU/RAM, model start/stop events
+  - Ошибки по сервисам (doc/legal/ums/orchestrator)
+  Рассмотреть Langfuse/OpenTelemetry для трейсинга LLM-цепочек.
+
+- [ ] **T4.9 — vLLM adapter в UMS (feature-flag rollout)**
+  Добавить backend-адаптер инференса:
+  - `INFERENCE_BACKEND=llama_cpp|vllm`
+  - Проксирование OpenAI-compatible запросов в vLLM API
+  - Поддержка stream/non-stream, `v1/models`, `v1/embeddings` (где применимо)
+
+- [ ] **T4.10 — Production docker-compose profile для vLLM**
+  Добавить профиль `prod-vllm`:
+  - отдельный сервис vLLM (GPU)
+  - chainlit + ops-ui + monitoring stack
+  - healthchecks, restart policy, resource limits, secrets
+
+- [ ] **T4.11 — E2E benchmark before/after migration**
+  Сравнить llama-server vs vLLM на целевых сценариях:
+  - TTFT, токены/сек, пропускная способность
+  - стабильность при N параллельных пользователях
+  - качество ответов на regression-наборе юр. кейсов
+
+- [ ] **T4.12 — Security hardening для Ops UI и Model Control API**
+  Ввести RBAC (admin/operator/viewer), аудит действий и ограничение опасных операций.
+  Защитить endpoints управления моделями (authN/authZ + rate limiting).
+
 ---
 
 ## Tech Debt — Найденные костыли (2026-03-02)
