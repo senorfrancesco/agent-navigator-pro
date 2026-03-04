@@ -496,6 +496,20 @@
 - Если решение временное или похоже на костыль, это нужно явно помечать в `TASKS.md`
   как follow-up / backlog-задачу с желаемым целевым вариантом.
 
+#### 2026-03-04 — Consolidation branch model
+
+- Каноническая основная ветка репозитория переведена на `v3.0`.
+- `main` удалена с remote и локально, чтобы не было второй competing default branch.
+- Удалены устаревшие ветки:
+  - `feature/v3.0-agentic-system`
+  - `refactor/middleware-agent`
+  - `codex/analyze-repo-for-testing-feasibility`
+  - `codex/explain-codebase-structure-for-beginners`
+- `origin/HEAD` теперь указывает на `origin/v3.0`.
+- Следствие для дальнейшей работы:
+  - все новые изменения базировать на `v3.0`;
+  - не использовать старое имя `tech-debt/v3.0-cleanup` как рабочую ветку.
+
 #### 2026-03-04 — Ручная E2E-валидация через Chainlit/Playwright
 
 - `S1 RAG question` — `documents/Requirements.pdf` — `PASS`

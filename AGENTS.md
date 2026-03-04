@@ -31,6 +31,7 @@ Do not commit local bootstrap artifacts such as `test_logs/`, temporary uploaded
 
 ## Agent-Specific Instructions
 Respond to repository collaborators in Russian unless a task explicitly requires another language.
+- Каноническая основная ветка репозитория — `v3.0`. Не использовать `main` как базовую ветку для новых работ и не восстанавливать старую branch-модель без явного решения.
 - Считать `Chainlit` основным UI, а `Open WebUI` — legacy-путём. Не откатывать документацию и инструкции обратно к `Open WebUI-first`.
 - Все важные решения, спорные места, временные обходы, архитектурные компромиссы и найденный техдолг
   фиксировать в `TASKS.md` по ходу работы.
