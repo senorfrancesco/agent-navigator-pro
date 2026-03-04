@@ -31,9 +31,9 @@ async def embeddings(request: EmbeddingRequest):
         if isinstance(sentences, str):
             sentences = [sentences]
             
-        # Генерация эмбеддингов
+        # Генерация эмбеддингов с внутренним батчингом
         # normalize_embeddings=True для косинусного сходства
-        embeddings = model.encode(sentences, normalize_embeddings=True)
+        embeddings = model.encode(sentences, batch_size=8, normalize_embeddings=True, convert_to_tensor=False)
         
         # Формируем ответ в стиле OpenAI
         data = []

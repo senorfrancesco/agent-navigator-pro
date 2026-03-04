@@ -254,7 +254,7 @@ async def load_pages(request: LoadDocumentRequest):
         return {
             "status": "success",
             "pages": pages,
-            "page_count": len(pages),
+            "total_pages": len(pages),
             "path": path
         }
     except Exception as e:

@@ -567,6 +567,13 @@ def _extract_content(response):
                 return choice.get("text", "") or choice.get("message", {}).get("content", "")
     return str(response).strip()
 
+# === Health ===
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
 # === OpenAI Compatible API ===
 
 @app.get("/v1/models")

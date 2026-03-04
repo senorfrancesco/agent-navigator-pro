@@ -269,30 +269,37 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Unified Model Server", version="3.0.0", lifespan=lifespan)
 
+# Concurrency control: llama-server — однопоточный inference, ONNX LaBSE — допускает параллелизм
+_llm_semaphore = asyncio.Semaphore(1)
+_embed_semaphore = asyncio.Semaphore(4)
+
 @app.post("/infer")
 async def infer(request: InferRequest):
     try:
-        _start_server(request.model_id, request.device_mode or state["device_mode"])
+        await asyncio.to_thread(_start_server, request.model_id, request.device_mode or state["device_mode"])
         config = get_model_config(request.model_id)
-        
+        sem = _embed_semaphore if config["type"] == "st" else _llm_semaphore
+
         is_chat = "messages" in request.payload
         url_suffix = "v1/embeddings" if config["type"] == "st" else f"v1/{'chat/' if is_chat else ''}completions"
         url = f"http://localhost:{config['port']}/{url_suffix}"
-        
+
         payload = request.payload.copy()
         if request.stream: payload["stream"] = True
 
         if request.stream:
             async def gen():
-                async with httpx.AsyncClient(timeout=300.0) as stream_client:
-                    async with stream_client.stream("POST", url, json=payload) as resp:
-                        async for line in resp.aiter_lines():
-                            if line: yield f"{line}\n\n"
+                async with sem:
+                    async with httpx.AsyncClient(timeout=300.0) as stream_client:
+                        async with stream_client.stream("POST", url, json=payload) as resp:
+                            async for line in resp.aiter_lines():
+                                if line: yield f"{line}\n\n"
             return StreamingResponse(gen(), media_type="text/event-stream")
         else:
-            async with httpx.AsyncClient(timeout=300.0) as client:
-                resp = await client.post(url, json=payload)
-                return {"status": "success", "model": request.model_id, "result": resp.json()}
+            async with sem:
+                async with httpx.AsyncClient(timeout=300.0) as client:
+                    resp = await client.post(url, json=payload)
+                    return {"status": "success", "model": request.model_id, "result": resp.json()}
     except Exception as e:
         logger.error(f"Inference Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -318,7 +325,7 @@ async def openai_embeddings(request: EmbeddingRequest):
         model_id = "labse-embedding"
 
     try:
-        _start_server(model_id, state["device_mode"])
+        await asyncio.to_thread(_start_server, model_id, state["device_mode"])
         config = get_model_config(model_id)
         url = f"http://localhost:{config['port']}/v1/embeddings"
 
@@ -326,10 +333,11 @@ async def openai_embeddings(request: EmbeddingRequest):
         texts = request.input if isinstance(request.input, list) else [request.input]
 
         payload = {"input": texts, "model": model_id}
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(url, json=payload)
-            resp.raise_for_status()
-            result = resp.json()
+        async with _embed_semaphore:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(url, json=payload)
+                resp.raise_for_status()
+                result = resp.json()
 
         # Обеспечиваем OpenAI-совместимый формат
         if "data" not in result:
