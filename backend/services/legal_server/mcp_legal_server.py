@@ -137,8 +137,7 @@ async def compare_chunks(request: CompareChunksRequest):
             error=str(e)
         )
 
-@app.post("/match_batches", response_model=MatchBatchesResponse)
-async def match_batches(request: MatchBatchesRequest):
+async def _match_batches_impl(request: MatchBatchesRequest) -> MatchBatchesResponse:
     """
     Эффективно сопоставляет два списка чанков.
     
@@ -250,6 +249,17 @@ async def match_batches(request: MatchBatchesRequest):
     except Exception as e:
         print(f"[LEGAL_SERVER] Error in match_batches: {e}")
         return MatchBatchesResponse(status="error", error=str(e), matches=[])
+
+
+@app.post("/match_batches", response_model=MatchBatchesResponse)
+async def match_batches(request: MatchBatchesRequest):
+    return await _match_batches_impl(request)
+
+
+@app.post("/batch_match", response_model=MatchBatchesResponse)
+async def batch_match(request: MatchBatchesRequest):
+    """Backward-compatible alias for older workflow clients."""
+    return await _match_batches_impl(request)
 
 @app.post("/analyze_impact", response_model=AnalyzeImpactResponse)
 async def analyze_impact(request: AnalyzeImpactRequest):

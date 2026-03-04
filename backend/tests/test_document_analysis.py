@@ -129,6 +129,9 @@ class TestClassifyDocType:
         # tz: 4 совпадения, legal: 1 ("договор")
         assert classify_doc_type(text) == "tz"
 
+    def test_legal_label_is_not_contract(self):
+        assert _DOC_TYPE_LABELS["legal"] == "Юридический / нормативный документ"
+
 
 # ============================================================================
 # Tests: classify_and_load_node
@@ -395,6 +398,26 @@ class TestGenerateAnalysisReportNode:
         assert "2 шт." in report or "| 2 |" in report
 
     @pytest.mark.asyncio
+    async def test_report_does_not_cut_specs_to_80_chars(self, base_state):
+        base_state["doc_type"] = "tz"
+        base_state["doc_metadata"] = {"pages": 5, "chars": 5000, "tables_count": 1, "format": "PDF"}
+        long_specs = (
+            "Тип устройства: Сервер, Тип корпуса: Rack 19, TPM 2.0, Количество отсеков: 24, "
+            "Количество блоков питания: 2, Мощность блока питания: 1400 Вт"
+        )
+        base_state["items"] = [
+            {"name": "Сервер HP", "specs": long_specs, "quantity": "2", "price": "100000", "source": "table"},
+        ]
+        base_state["summary"] = ""
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(os.environ, {"UPLOADS_DIR": tmpdir}):
+                result = await generate_analysis_report_node(base_state)
+
+        report = result["final_report"]
+        assert "Мощность блока питания: 1400 Вт" in report
+
+    @pytest.mark.asyncio
     async def test_report_contains_summary(self, base_state):
         base_state["doc_type"] = "tz"
         base_state["doc_metadata"] = {"pages": 5, "chars": 5000, "tables_count": 0, "format": "PDF"}
@@ -439,6 +462,21 @@ class TestGenerateAnalysisReportNode:
             # Проверяем что файл реально создан
             files = os.listdir(tmpdir)
             assert any(f.startswith("Report_Analysis_") for f in files)
+
+    @pytest.mark.asyncio
+    async def test_report_uses_legal_label(self, base_state):
+        base_state["doc_type"] = "legal"
+        base_state["doc_metadata"] = {"pages": 10, "chars": 10000, "tables_count": 0, "format": "PDF"}
+        base_state["items"] = []
+        base_state["summary"] = "Нормативный акт"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(os.environ, {"UPLOADS_DIR": tmpdir}):
+                result = await generate_analysis_report_node(base_state)
+
+        report = result["final_report"]
+        assert "Тип:** Юридический / нормативный документ" in report
+        assert "Тип:** Договор/Контракт" not in report
 
     @pytest.mark.asyncio
     async def test_report_dedup(self, base_state):

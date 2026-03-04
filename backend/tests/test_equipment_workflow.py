@@ -30,6 +30,11 @@ from orchestrator.workflows.equipment import (
     _detect_header_columns,
     _parse_table_rows,
     _dedup_items,
+    _normalize_spec_for_polish,
+    _build_polish_source_specs,
+    _build_polish_batches,
+    _parse_polish_xml_results,
+    _polish_items_specs_llm,
     _item_to_text,
     _route_after_extract,
     truncate_text,
@@ -255,6 +260,227 @@ class TestParseTableRows:
         assert len(items2) == 2
         assert items2[0]["name"] == "Ноутбук Dell"
         assert items2[1]["name"] == "Монитор LG"
+
+    def test_tz_multiline_header_and_page_break_item(self):
+        """ТЗ-таблица с двухстрочным заголовком и разрывом позиции между страницами."""
+        data = [
+            ["№\nп/п", "Наименование товара", "Количество", "Технические характеристики", None, "Ед. изм."],
+            [None, None, None, "Требуемый параметр", "Требуемое значение", ""],
+            ["2", "Система хранения данных", "1", "Гарантия", "не менее 12", "Мес"],
+            ["3", "", "1", "Тип устройства - Сервер", "соответствие", ""],
+            ["", "Сервер DELL PowerEdge R760\nили эквивалент", "", "Тип корпуса – Rack 19”", "соответствие", ""],
+            [None, None, None, "Монтажная высота", "Не более 2", "Юнит"],
+        ]
+
+        items, _ = _parse_table_rows(data, page_info=6)
+
+        assert len(items) == 2
+        r760 = items[1]
+        assert r760["name"] == "Сервер DELL PowerEdge R760 или эквивалент"
+        assert r760["quantity"] == "1"
+        assert r760["page"] == 6
+        assert r760["raw_specs"][:3] == [
+            {"p": "Тип устройства - Сервер", "v": "соответствие", "u": ""},
+            {"p": "Тип корпуса – Rack 19”", "v": "соответствие", "u": ""},
+            {"p": "Монтажная высота", "v": "Не более 2", "u": "Юнит"},
+        ]
+
+
+# ============================================================================
+# Tests: _polish_items_specs_llm
+# ============================================================================
+
+class TestPolishItemsSpecsLlm:
+
+    def test_normalize_spec_for_polish_removes_only_explicit_garbage_values(self):
+        spec = {"p": "Наличие модуля TPM 2.0", "v": "соответствие", "u": ""}
+        assert _normalize_spec_for_polish(spec) == "Наличие модуля TPM 2.0"
+
+    def test_normalize_spec_for_polish_keeps_numeric_value_and_unit(self):
+        spec = {"p": "Мощность блока питания", "v": "Не менее 1400", "u": "Вт"}
+        assert _normalize_spec_for_polish(spec) == "Мощность блока питания: Не менее 1400 Вт"
+
+    def test_normalize_spec_for_polish_converts_inline_param_value(self):
+        spec = {"p": "Тип устройства - Сервер", "v": "соответствие", "u": ""}
+        assert _normalize_spec_for_polish(spec) == "Тип устройства: Сервер"
+
+    def test_build_polish_source_specs_deduplicates_and_skips_empty(self):
+        raw_specs = [
+            {"p": "Тип устройства", "v": "Сервер", "u": ""},
+            {"p": "Тип устройства", "v": "Сервер", "u": ""},
+            {"p": "", "v": "что-то", "u": ""},
+            {"p": "Наличие TPM", "v": "соответствие", "u": ""},
+        ]
+        assert _build_polish_source_specs(raw_specs) == [
+            "Тип устройства: Сервер",
+            "Наличие TPM",
+        ]
+
+    def test_build_polish_batches_splits_by_payload_budget(self):
+        items = [
+            {
+                "name": "Тяжёлая позиция",
+                "raw_specs": [{"p": f"Параметр {i}", "v": "X" * 120, "u": ""} for i in range(20)],
+            },
+            {
+                "name": "Короткая 1",
+                "raw_specs": [{"p": "Тип устройства", "v": "Ноутбук", "u": ""}],
+            },
+            {
+                "name": "Короткая 2",
+                "raw_specs": [{"p": "Тип устройства", "v": "Монитор", "u": ""}],
+            },
+        ]
+
+        batches = _build_polish_batches(items)
+
+        assert len(batches) == 2
+        assert [entry["item"]["name"] for entry in batches[0]] == ["Тяжёлая позиция"]
+        assert [entry["item"]["name"] for entry in batches[1]] == ["Короткая 1", "Короткая 2"]
+
+    def test_build_polish_batches_preserves_original_order(self):
+        items = [
+            {"name": "A", "raw_specs": [{"p": "P1", "v": "V1", "u": ""}]},
+            {"name": "B", "raw_specs": [{"p": "P2", "v": "V2", "u": ""}]},
+            {"name": "C", "raw_specs": [{"p": "P3", "v": "V3", "u": ""}]},
+            {"name": "D", "raw_specs": [{"p": "P4", "v": "V4", "u": ""}]},
+        ]
+        batches = _build_polish_batches(items)
+        ordered = [entry["item"]["name"] for batch in batches for entry in batch]
+        assert ordered == ["A", "B", "C", "D"]
+
+    def test_parse_polish_xml_results_maps_by_id(self):
+        content = (
+            "<results>"
+            "<item id='1'>Второй</item>"
+            "<item id='0'>Первый</item>"
+            "</results>"
+        )
+        assert _parse_polish_xml_results(content, expected_ids=[0, 1]) == {0: "Первый", 1: "Второй"}
+
+    def test_parse_polish_xml_results_rejects_missing_expected_id(self):
+        content = "<results><item id='0'>Первый</item></results>"
+        assert _parse_polish_xml_results(content, expected_ids=[0, 1]) is None
+
+    def test_parse_polish_xml_results_accepts_code_fence_wrapped_xml(self):
+        content = "```xml\n<results><item id='0'>Первый:</item></results>\n```"
+        assert _parse_polish_xml_results(content, expected_ids=[0]) == {0: "Первый"}
+
+    @pytest.mark.asyncio
+    async def test_polish_items_specs_llm_uses_id_mapping_not_position_only(self):
+        items = [
+            {
+                "name": "Сервер 1",
+                "specs": "",
+                "raw_specs": [{"p": "Тип устройства", "v": "Сервер", "u": ""}],
+            },
+            {
+                "name": "Сервер 2",
+                "specs": "",
+                "raw_specs": [{"p": "Тип корпуса", "v": "Rack 19", "u": ""}],
+            },
+        ]
+
+        response = {
+            "content": (
+                "<results>"
+                "<item id='1'>Тип корпуса - Rack 19\"</item>"
+                "<item id='0'>Тип устройства - Сервер</item>"
+                "</results>"
+            )
+        }
+
+        with patch("orchestrator.workflows.equipment.ums_client") as mock_ums:
+            mock_ums.async_infer = AsyncMock(return_value=response)
+
+            await _polish_items_specs_llm(items)
+
+        assert items[0]["specs"] == "Тип устройства - Сервер"
+        assert items[1]["specs"] == "Тип корпуса - Rack 19"
+
+    @pytest.mark.asyncio
+    async def test_polish_items_specs_llm_falls_back_when_batch_xml_invalid(self):
+        items = [
+            {
+                "name": "Сервер 1",
+                "specs": "",
+                "raw_specs": [{"p": "Тип устройства", "v": "Сервер", "u": ""}],
+            },
+            {
+                "name": "Сервер 2",
+                "specs": "",
+                "raw_specs": [{"p": "Тип корпуса", "v": "Rack 19", "u": ""}],
+            },
+        ]
+
+        malformed_response = {
+            "content": "<results><item id='0'>Тип устройства - Сервер</item><item>Тип корпуса - Rack 19</item></results>"
+        }
+
+        with patch("orchestrator.workflows.equipment.ums_client") as mock_ums:
+            mock_ums.async_infer = AsyncMock(return_value=malformed_response)
+
+            await _polish_items_specs_llm(items)
+
+        assert items[0]["specs"] == "Тип устройства: Сервер"
+        assert items[1]["specs"] == "Тип корпуса: Rack 19"
+
+    @pytest.mark.asyncio
+    async def test_polish_items_specs_llm_sends_large_item_in_single_batch(self):
+        large_item = {
+            "name": "Тяжёлая позиция",
+            "specs": "",
+            "raw_specs": [{"p": f"Параметр {i}", "v": "X" * 120, "u": ""} for i in range(20)],
+        }
+        small_item = {
+            "name": "Короткая позиция",
+            "specs": "",
+            "raw_specs": [{"p": "Тип устройства", "v": "Монитор", "u": ""}],
+        }
+        items = [large_item, small_item]
+
+        responses = [
+            {"content": "<results><item id='0'>Тяжелая спецификация</item></results>"},
+            {"content": "<results><item id='0'>Короткая спецификация</item></results>"},
+        ]
+
+        with patch("orchestrator.workflows.equipment.ums_client") as mock_ums:
+            mock_ums.async_infer = AsyncMock(side_effect=responses)
+
+            await _polish_items_specs_llm(items)
+
+        assert mock_ums.async_infer.await_count == 2
+        first_prompt = mock_ums.async_infer.await_args_list[0].args[1]["prompt"]
+        second_prompt = mock_ums.async_infer.await_args_list[1].args[1]["prompt"]
+        assert "Тяжёлая позиция" in first_prompt
+        assert "Короткая позиция" not in first_prompt
+        assert "Короткая позиция" in second_prompt
+
+    @pytest.mark.asyncio
+    async def test_polish_items_specs_llm_keeps_small_items_batched(self):
+        items = [
+            {"name": "A", "specs": "", "raw_specs": [{"p": "Тип", "v": "A", "u": ""}]},
+            {"name": "B", "specs": "", "raw_specs": [{"p": "Тип", "v": "B", "u": ""}]},
+            {"name": "C", "specs": "", "raw_specs": [{"p": "Тип", "v": "C", "u": ""}]},
+        ]
+
+        response = {
+            "content": (
+                "<results>"
+                "<item id='0'>Spec A</item>"
+                "<item id='1'>Spec B</item>"
+                "<item id='2'>Spec C</item>"
+                "</results>"
+            )
+        }
+
+        with patch("orchestrator.workflows.equipment.ums_client") as mock_ums:
+            mock_ums.async_infer = AsyncMock(return_value=response)
+
+            await _polish_items_specs_llm(items)
+
+        assert mock_ums.async_infer.await_count == 1
+        assert [item["specs"] for item in items] == ["Spec A", "Spec B", "Spec C"]
 
 
 # ============================================================================
@@ -511,8 +737,9 @@ class TestMatchItemsNode:
         matches = result["matches"]
         assert len(matches) == 2
 
-        # Проверяем что post вызван с threshold=0.45 (снижен для recall аналогов)
         call_args = mock_client.post.call_args
+        assert call_args[0][0].endswith("/match_batches")
+        # Проверяем что post вызван с threshold=0.45 (снижен для recall аналогов)
         assert call_args[1]["json"]["threshold"] == 0.45
 
     @pytest.mark.asyncio
@@ -527,6 +754,25 @@ class TestMatchItemsNode:
 
         assert result["matches"] == []
         assert len(result.get("errors", [])) > 0
+
+    @pytest.mark.asyncio
+    async def test_http_404_returns_errors(self, state_with_items):
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "404 Not Found",
+            request=httpx.Request("POST", "http://test/match_batches"),
+            response=httpx.Response(404),
+        )
+
+        with patch("orchestrator.workflows.equipment.get_shared_client") as mock_get_client:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_get_client.return_value = mock_client
+
+            result = await match_items_node(state_with_items)
+
+        assert result["matches"] == []
+        assert any("404" in err for err in result.get("errors", []))
 
 # ============================================================================
 # Tests: evaluate_compliance_node (mocked)

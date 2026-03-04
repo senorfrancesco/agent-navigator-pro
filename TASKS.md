@@ -207,6 +207,95 @@
 
 ### Backlog
 
+- [ ] **B3.11 — Убрать JSON salvage из DEBUG-POLISH**
+  Статус:
+  - локальная часть для `DEBUG-POLISH` выполнена: JSON-контракт и salvage parsing удалены;
+  - шаг переведён на XML-контракт `<results><item id="...">...</item></results>`;
+  - XML-only вариант без `id` и без адаптивного batching оказался недостаточен:
+    live-прогон показал cardinality mismatch на длинных однотипных batched items;
+  - текущий generic-фикс:
+    - budget-based batching для polisher prompt-а;
+    - XML `id`-mapping вместо позиционного сопоставления;
+    - только safe cleanup явного мусора без доменных предположений о важности параметров;
+  - дополнительное наблюдение из live-прогона:
+    - часть деградации качества в UI шла не из самого polisher-а, а из вторичной обрезки
+      `specs` в `document_analysis` report table (`[:80]`);
+    - отчётный слой тоже нужно учитывать при оценке качества extraction/polish pipeline.
+  - дополнительный root cause по `R760`:
+    - проблема оказалась не в `DEBUG-POLISH`, а раньше, в table extraction;
+    - `_parse_table_rows()` не распознавал merged ТЗ-таблицу, если `Требуемый параметр /
+      Требуемое значение` находились во второй строке заголовка;
+    - из-за этого включался fallback-парсер и терялись `quantity`, `value` и стартовая
+      характеристика `Тип устройства - Сервер` на разрыве страниц 6-7;
+    - отдельный follow-up: продолжать отслеживать page-break кейсы, где номер позиции идет
+      на одной странице, а реальное `name` начинается на следующей.
+  - парсер остаётся fail-fast: если отсутствует хотя бы один ожидаемый `id`, весь батч уходит
+    в fallback, чтобы не допускать сдвига характеристик между позициями.
+  Что осталось в работе:
+  - platform-level structured output для workflow, где LLM должен возвращать массивы объектов;
+  - оценить, нужен ли schema-constrained output на уровне UMS / llama-server как общая capability.
+  Актуализация по коду:
+  - structured output уже фактически нужен в нескольких workflow, а не только в `DEBUG-POLISH`;
+  - кандидаты на общий platform-level structured output:
+    - `backend/orchestrator/workflows/compare.py` — batch diff-analysis возвращает массив объектов;
+    - `backend/orchestrator/workflows/equipment.py::_extract_from_single_chunk()` — извлечение списка позиций;
+    - `backend/orchestrator/workflows/equipment.py::evaluate_compliance_node()` — batch-оценка соответствия;
+  - `DEBUG-POLISH` не стоит тащить в общий object-based контракт только ради унификации:
+    там контракт проще (`list[str]`), поэтому локальный XML-вариант остаётся предпочтительным;
+  - следствие: platform-level задачу нужно вести отдельно от уже закрытого XML-рефактора polisher-а.
+
+- [x] **B3.12 — `document_analysis` неверно маркирует legal PDF как `Договор/Контракт`**
+  Live E2E на `documents/H12100110_1621890000.pdf`:
+  workflow и summary корректно определяют документ как правовой акт (`Type: legal` в логах),
+  но итоговый Markdown-отчёт показывает `Тип: Договор/Контракт`.
+  Исправлено: `_DOC_TYPE_LABELS["legal"]` теперь рендерится как
+  `Юридический / нормативный документ`.
+  Повторный live E2E после пересборки `chainlit` подтвердил корректный label в UI и в
+  `Report_Analysis_1772624000.md`.
+
+- [x] **B3.13 — `equipment_analysis` падает на matching этапе из-за `404 /batch_match`**
+  Live E2E на `documents/f5jsglrkyfe8p3ogd02g405d9q3r9lfn.pdf` +
+  `documents/Quotation_12.pdf`:
+  извлечение и `DEBUG-POLISH` проходят, включая тяжёлый `R760` batch,
+  но затем `POST http://host.docker.internal:8002/batch_match` возвращает `404 Not Found`.
+  Из-за этого сравнение `tz_vs_smeta` заканчивается report-ом только с предупреждением,
+  без матчинга и оценки соответствия.
+  Исправлено:
+  - `equipment.py` использует canonical endpoint `/match_batches`;
+  - `mcp_legal_server.py` добавляет backward-compatible alias `/batch_match`.
+  Повторный live E2E подтвердил:
+  - `POST http://host.docker.internal:8002/match_batches "HTTP/1.1 200 OK"`
+  - `Matched: 8 pairs`
+  - полноценный `Report_Equipment_1772624340.md` вместо warning-only отчёта.
+
+- [ ] **B3.14 — Runtime warnings при стриминге / завершении Chainlit-задач**
+  В live E2E RAG-сценария зафиксированы:
+  - `RuntimeError: async generator ignored GeneratorExit`
+  - `RuntimeError: Attempted to exit cancel scope in a different task than it was entered in`
+  Пользовательский сценарий завершился успешно, но это признак некорректного cleanup/cancellation
+  в streaming path и требует отдельной диагностики.
+  Временный production workaround:
+  - direct chat / document-question ответы в `chainlit_app.py` переведены на обычный `infer`
+    без SSE-streaming;
+  - streaming path оставлен для дальнейшего разбора на уровне `UMS -> httpx/httpcore`
+    proxy-цепочки, где и воспроизводится основной баг cleanup.
+  Инженерный вывод по логам:
+  - ошибка воспроизводится даже на простом `привет`, то есть не связана с router, RAG или
+    document/equipment workflow logic;
+  - стек указывает на `httpcore` / `anyio` cleanup (`HTTP11ConnectionByteStream.__aiter__`,
+    `aclose`, `CancelScope`), а не на бизнес-логику приложения;
+  - это подтверждает, что ближайший pragmatic fix — убирать direct-chat SSE streaming,
+    а не лечить prompt/router/workflow слои;
+  - полноценный корневой фикс, если streaming понадобится вернуть, нужно делать в
+    `Chainlit -> UMS -> llama-server` proxy-цепочке, а не в доменных workflow.
+  Решение по дальнейшим работам:
+  - direct-chat non-stream режим оставить как текущий production default;
+  - возврат streaming делать только отдельной задачей и отдельным циклом тестирования;
+  - deep fix должен быть на уровне `UMS` streaming proxy / SSE bridging, а не как точечные
+    патчи в `chainlit_app.py`;
+  - при возврате streaming нужен отдельный regression suite именно на cleanup/cancellation,
+    а не только ручная проверка `привет`.
+
 - [ ] Vision-анализ изображений (Qwen-VL интеграция)
 - [ ] LLM-based Intent Classification (замена keyword routing, Tier 3+)
 - [ ] Agentic RAG as LangGraph Tool (RetrieveNode внутри workflows)
@@ -217,6 +306,64 @@
   Для переноса: `conda env create -f environment.yml`
   Дополнительно: `pip list --format=freeze > backend/requirements.lock` для точных версий pip-пакетов.
   Цель — один файл `environment.yml` в корне репо для воссоздания полного окружения хоста (llama-cpp-python, onnxruntime, torch и т.д.)
+
+### Working Notes
+
+- Важные технические решения, спорные компромиссы, временные обходы и выявленный техдолг
+  должны добавляться в `TASKS.md` сразу по ходу работы, а не оставаться только в диалоге.
+- Если решение временное или похоже на костыль, это нужно явно помечать в `TASKS.md`
+  как follow-up / backlog-задачу с желаемым целевым вариантом.
+
+#### 2026-03-04 — Ручная E2E-валидация через Chainlit/Playwright
+
+- `S1 RAG question` — `documents/Requirements.pdf` — `PASS`
+  Запрос про гарантию и срок поставки вернул якоря `не менее 36 месяцев` и `20 рабочих дней`.
+  Router: `document_question`.
+- `S2 compare_documents` — `documents/H12100110_1621890000.pdf` +
+  `documents/H12300274_1688590800.pdf` — `PASS`
+  Получен `Report_Compare_1772620314.md`, найдено `43` различия, compare workflow прошёл до конца.
+- `S3 document_analysis (legal)` — `documents/H12100110_1621890000.pdf` — `PASS with issue`
+  `Report_Analysis_1772620451.md` сохранён, summary корректный, но report metadata ошибочно
+  показывает `Тип: Договор/Контракт` вместо legal/нормативного акта.
+- `S4 document_analysis (tz)` — `documents/Requirements.pdf` — `PASS`
+  `Report_Analysis_1772620540.md` сохранён, извлечено `3` позиции, в отчёте есть `36 месяцев`
+  и `20 рабочих дней`.
+- `S5 equipment_analysis (tz_vs_smeta)` — `documents/f5jsglrkyfe8p3ogd02g405d9q3r9lfn.pdf` +
+  `documents/Quotation_12.pdf` — `PARTIAL`
+  `DEBUG-POLISH` и extraction отработали корректно, включая одиночный тяжёлый batch для `R760`
+  с `Тип устройства: Сервер`, но matching сломался на `404 /batch_match`, поэтому итоговый
+  `Report_Equipment_1772620860.md` содержит только предупреждение без оценки соответствия.
+
+#### 2026-03-04 — Повторная E2E-валидация после фиксов `legal label`, `match_batches` и non-stream chat
+
+- `Smoke direct chat` — `PASS`
+  Сообщение `привет` отвечает штатно. В логах больше нет
+  `RuntimeError: async generator ignored GeneratorExit` и
+  `Attempted to exit cancel scope in a different task...` для direct-chat path.
+  Текущий pragmatic default: direct chat и `document_question` идут через обычный `infer`,
+  без SSE-streaming.
+- `S1 RAG question` — `documents/Requirements.pdf` — `PASS`
+  Запрос про гарантию и срок поставки вернул `не менее 36 месяцев` и `20 рабочих дней`.
+  Router: `document_question`.
+- `S2 compare_documents` — `documents/H12100110_1621890000.pdf` +
+  `documents/H12300274_1688590800.pdf` — `PASS`
+  Получен `Report_Compare_1772624683.md`, compare workflow прошёл до конца,
+  в UI отображён отчёт о сравнении документов, найдено `38` различий в финальном report.
+- `S3 document_analysis (legal)` — `documents/H12100110_1621890000.pdf` — `PASS`
+  Получен `Report_Analysis_1772624000.md`.
+  В UI и report metadata документ отображается как
+  `Тип: Юридический / нормативный документ`.
+- `S4 document_analysis (tz)` — `documents/Requirements.pdf` — `PASS`
+  Получен `Report_Analysis_1772624756.md`, извлечено `3` позиции,
+  в отчёте есть `20 рабочих дней` и `36 месяцев`.
+- `S5 equipment_analysis (tz_vs_smeta)` — `documents/f5jsglrkyfe8p3ogd02g405d9q3r9lfn.pdf` +
+  `documents/Quotation_12.pdf` — `PASS`
+  Matching и evaluation прошли до конца:
+  - `POST /match_batches` вернул `200 OK`;
+  - `Matched: 8 pairs`;
+  - получен полноценный `Report_Equipment_1772624340.md`;
+  - `R760` в итоговом результате остаётся корректно сопоставленным и не теряет
+    `Тип устройства: Сервер`.
 
 ---
 
@@ -264,6 +411,16 @@
   3. Внедрение `LLM Polisher` — агентской ноды, превращающей сырой мусор из таблиц в структурированный технический текст.
   4. Реализация надежного Rule-based Fallback (на основе конфига) на случай сбоев LLM.
 
+- [x] **TD-13 — Условная маршрутизация для предотвращения Over-extraction**
+  Проблема "фантомных позиций": LLM извлекала компоненты (порты, диски) как отдельные товары.
+  Fix: Логика Short-Circuit в узлах экстракции. Если табличный парсер (Pass 1) нашел >= 2 позиций, текстовая экстракция (Pass 2) пропускается. Это экономит время, токены и исключает мусор в отчетах.
+
+- [x] **TD-14 — Стабилизация парсеров и API**
+  Fix:
+  1. Исправлена детекция ТЗ-структуры (теперь строго требуются колонки Параметр/Значение, чтобы не ломать обычные сметы).
+  2. Исправлен маппинг страниц в Document Server (`page_count` -> `total_pages`).
+  3. Внедрена неблокирующая инициализация RAG в Chainlit (try/except вокруг эмбеддингов).
+
 - [ ] **TD-7 — O(N·M) reverse mapping в `match_items_node`**
   После получения matches от Legal Server обратный маппинг текст→item через двойной цикл.
   Fix: построить `{text: item}` dict заранее → O(1) lookup.
@@ -309,3 +466,19 @@
 - [x] Создание скриптов: `run_all.sh`, `stop_all.sh`, `restart_all.sh`, `setup_ubuntu.sh`, `start_system_test.sh`
 - [x] Фикс dedup key lifecycle — `try/finally` в async generator
 - [x] Report quality dedup — замена отчёта если новый содержит больше изменений
+
+## Session Log
+
+- [x] **[2026-03-03 16:12]** Task #4: (без названия) — ✅ completed
+- [x] **[2026-03-03 16:11]** Task #6: (без названия) — ✅ completed
+- [x] **[2026-03-03 16:09]** Task #3: (без названия) — ✅ completed
+- [x] **[2026-03-03 15:58]** Task #5: (без названия) — ✅ completed
+- [x] **[2026-03-03 15:56]** Task #2: (без названия) — ✅ completed
+- [x] **[2026-03-03 15:55]** Task #1: (без названия) — ✅ completed
+- [x] **[2026-03-03 15:48]** Task #3: (без названия) — ✅ completed
+- [x] **[2026-03-03 15:48]** Task #11: (без названия) — ✅ completed
+- [x] **[2026-03-03 15:42]** Task #6: (без названия) — ✅ completed
+- [x] **[2026-03-03 15:42]** Task #5: (без названия) — ✅ completed
+- [x] **[2026-03-03 15:42]** Task #4: (без названия) — ✅ completed
+- [x] **[2026-03-03 15:42]** Task #2: (без названия) — ✅ completed
+- [x] **[2026-03-03 15:42]** Task #1: (без названия) — ✅ completed

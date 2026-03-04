@@ -114,24 +114,34 @@ def _detect_intent(query: str, file_count: int = 0, has_session_docs: bool = Fal
     query_lower = query.lower()
 
     # Уровень 1: Semantic Router (Основной и приоритетный)
+    # Источник A: classifier из RAG pipeline (после загрузки файлов)
+    # Источник B: standalone classifier (pre-initialized в on_chat_start)
+    classifier_result = None
     rag = cl.user_session.get("rag_pipeline")
     if rag and rag._classifier_initialized:
-        result = rag.classify_intent(query)
-        if result:
-            intent = result["intent"]
-            needs_rag = result["needs_rag"]
+        classifier_result = rag.classify_intent(query)
+    elif cl.user_session.get("intent_classifier"):
+        standalone = cl.user_session.get("intent_classifier")
+        try:
+            classifier_result = standalone.classify(query)
+        except Exception as e:
+            logger.warning(f"Standalone classifier error: {e}")
 
-            # Защита: если интент требует файлов, но их нет
-            if intent == "document_analysis":
-                has_file = file_count >= 1 or (has_session_docs and len(_get_session_docs()) >= 1)
-                if not has_file:
-                    intent = "general_chat"
+    if classifier_result:
+        intent = classifier_result["intent"]
+        needs_rag = classifier_result["needs_rag"]
 
-            if has_session_docs and needs_rag and intent not in ("compare_documents", "equipment_analysis", "document_analysis"):
-                intent = "document_question"
+        # Защита: если интент требует файлов, но их нет
+        if intent == "document_analysis":
+            has_file = file_count >= 1 or (has_session_docs and len(_get_session_docs()) >= 1)
+            if not has_file:
+                intent = "general_chat"
 
-            logger.info(f"Semantic Router: intent={intent}, confidence={result['confidence']:.2f}, margin={result.get('margin',0):.3f}")
-            return intent
+        if has_session_docs and needs_rag and intent not in ("compare_documents", "equipment_analysis", "document_analysis"):
+            intent = "document_question"
+
+        logger.info(f"Semantic Router: intent={intent}, confidence={classifier_result['confidence']:.2f}, margin={classifier_result.get('margin',0):.3f}")
+        return intent
 
     # Уровень 2: Minimal Fallback (только если UMS/Classifier недоступен)
     logger.warning("Semantic Router offline. Using minimal fallback routing.")
@@ -226,15 +236,25 @@ def _build_prompt(query: str, history: List, system_msg: str = "") -> str:
 # === Stream Response ===
 
 async def _stream_response(prompt: str, msg: cl.Message, history: List):
-    """Стриминг ответа LLM с fallback на sync."""
+    """Генерация ответа для direct chat без SSE streaming.
+
+    Временный production workaround: direct-chat streaming через
+    Chainlit -> UMS -> llama-server даёт GeneratorExit/cancel-scope
+    ошибки в httpcore/anyio. Для UI-чата используем обычный infer.
+    """
     try:
-        async for token in ums_client.async_infer_stream(
-            "qwen-14b-llm", {"prompt": prompt, "temperature": 0.7}
-        ):
-            await msg.stream_token(token)
+        response = await asyncio.to_thread(
+            ums_client.infer,
+            "qwen-14b-llm",
+            {"prompt": prompt, "temperature": 0.7},
+        )
+        msg.content = response.get("choices", [{}])[0].get("text", str(response))
     except Exception:
         try:
-            response = ums_client.infer("qwen-14b-llm", {"prompt": prompt, "temperature": 0.7})
+            logger.warning("Direct chat infer failed, retrying sync inference", exc_info=True)
+            response = ums_client.infer(
+                "qwen-14b-llm", {"prompt": prompt, "temperature": 0.7}
+            )
             content = response.get("choices", [{}])[0].get("text", str(response))
             msg.content = content
         except Exception as e:
@@ -246,10 +266,31 @@ async def _stream_response(prompt: str, msg: cl.Message, history: List):
 
 # === Chainlit Handlers ===
 
+async def _init_classifier():
+    """Фоновая инициализация EmbeddingIntentClassifier до загрузки файлов."""
+    try:
+        from orchestrator.rag.classifier import EmbeddingIntentClassifier
+        from services.model_manager.ums_client import create_ums_embed_fn
+
+        embed_fn = await asyncio.to_thread(create_ums_embed_fn)
+        if not embed_fn:
+            logger.warning("Classifier pre-init: UMS unavailable, skipping")
+            return
+        classifier = EmbeddingIntentClassifier(embed_fn=embed_fn)
+        await asyncio.to_thread(classifier.initialize)
+        cl.user_session.set("intent_classifier", classifier)
+        logger.info("Classifier pre-initialized successfully")
+    except Exception as e:
+        logger.warning(f"Classifier pre-init failed: {e}")
+
+
 @cl.on_chat_start
 async def on_chat_start():
     cl.user_session.set("documents", {})
     cl.user_session.set("history", [])
+
+    # Фоновая инициализация classifier для раннего semantic routing
+    asyncio.create_task(_init_classifier())
 
     user = cl.user_session.get("user")
     greeting = f", **{user.identifier}**" if user else ""
@@ -376,17 +417,21 @@ async def on_message(message: cl.Message):
 
                 embed_fn = create_ums_embed_fn()
                 rag_mode = await _get_rag_mode()
+                search_type = "BM25+Dense (hybrid)" if embed_fn else "BM25-only"
 
                 rag = AdaptiveRAGPipeline(embed_fn=embed_fn, rag_mode=rag_mode)
                 all_texts = [d["text"] for d in session_docs.values() if d.get("text")]
                 all_names = [n for n, d in session_docs.items() if d.get("text")]
                 if all_texts:
                     # TD-3: Выносим тяжелую индексацию в поток, чтобы не блокировать event loop
-                    await asyncio.to_thread(rag.index_documents, all_texts, doc_names=all_names)
+                    try:
+                        await asyncio.to_thread(rag.index_documents, all_texts, doc_names=all_names)
+                        step.output = f"RAG: mode={rag_mode}, search={search_type}, indexed {len(all_texts)} docs"
+                    except Exception as e:
+                        logger.error(f"RAG Indexing failed: {e}")
+                        step.output = f"⚠️ RAG Indexing failed: {e}. Falling back to non-RAG mode."
+                
                 cl.user_session.set("rag_pipeline", rag)
-
-                search = "BM25+Dense (hybrid)" if embed_fn else "BM25-only"
-                step.output = f"RAG: mode={rag_mode}, search={search}, indexed {len(all_texts)} docs"
         else:
             # Повторная загрузка: переиндексация
             async with cl.Step(name="Переиндексация", type="tool") as step:
@@ -394,8 +439,12 @@ async def on_message(message: cl.Message):
                 all_names = [n for n, d in session_docs.items() if d.get("text")]
                 if all_texts:
                     # TD-3: Переиндексация тоже в потоке
-                    await asyncio.to_thread(rag.index_documents, all_texts, doc_names=all_names)
-                step.output = f"Переиндексировано {len(all_texts)} документов"
+                    try:
+                        await asyncio.to_thread(rag.index_documents, all_texts, doc_names=all_names)
+                        step.output = f"Переиндексировано {len(all_texts)} документов"
+                    except Exception as e:
+                        logger.error(f"RAG Re-indexing failed: {e}")
+                        step.output = f"⚠️ Re-indexing failed: {e}"
 
     # Роутинг
     intent = _detect_intent(query, len(new_files), has_session_docs=bool(session_docs))

@@ -10,6 +10,7 @@ Workflow: Equipment Analysis (ТЗ vs Смета / Смета vs Смета)
 Batch LLM evaluation по BATCH_SIZE=5.
 """
 
+import html
 import json
 import os
 import re
@@ -30,10 +31,13 @@ MCP_DOCUMENT_SERVER_URL = os.getenv("MCP_DOCUMENT_SERVER_URL", "http://localhost
 MCP_LEGAL_SERVER_URL = os.getenv("MCP_LEGAL_SERVER_URL", "http://localhost:8002")
 UMS_URL = os.getenv("UMS_URL", "http://localhost:8090")
 
-BATCH_SIZE = 5  # Позиций в одном LLM-вызове
-MAX_TEXT_FOR_LLM = 6000  # Лимит символов текста для LLM-экстракции (~2000 токенов)
-CHUNK_MAX_TOKENS = 2000    # токенов на чанк (~6000 символов) — безопасно для 16K ctx
-CHUNK_OVERLAP = 150        # overlap токенов между чанками
+BATCH_SIZE = 5              # Позиций в одном LLM eval-вызове
+BATCH_POLISH = 3            # Позиций в одном LLM polisher-вызове
+POLISH_MAX_BATCH_CHARS = 3000  # Бюджет XML payload для одного polisher-батча
+MATCH_SIMILARITY_THRESHOLD = 0.45  # Min LaBSE cosine для equipment matching
+MAX_TEXT_FOR_LLM = 6000     # Лимит символов текста для LLM-экстракции (~2000 токенов)
+CHUNK_MAX_TOKENS = 2000     # токенов на чанк (~6000 символов) — безопасно для 16K ctx
+CHUNK_OVERLAP = 150         # overlap токенов между чанками
 
 # Ключевые слова для mode detection
 _TZ_KEYWORDS = ["тз", "техническое задание", "требовани", "specification", "техзадани"]
@@ -173,11 +177,14 @@ _TZ_COL_KEYWORDS = {
 }
 
 
-def _is_tz_structure(header_row: List) -> bool:
-    """Детектирует ТЗ-структуру (merged-cells) по заголовку таблицы."""
-    if not header_row:
+def _is_tz_structure(header_rows: List[List]) -> bool:
+    """Детектирует ТЗ-структуру (merged-cells) по 2-3 строкам заголовка таблицы."""
+    if not header_rows:
         return False
-    raw = "".join(str(c) for c in header_row if c).lower()
+    raw_parts = []
+    for row in header_rows[:3]:
+        raw_parts.extend(str(c) for c in row if c)
+    raw = "".join(raw_parts).lower()
     
     # Чтобы считать таблицу ТЗ-структурой, она должна иметь колонки типа "Параметр" и "Значение" (или "Требование" и "Соответствие").
     # Просто слова "Характеристики" недостаточно (это может быть обычная смета).
@@ -221,9 +228,125 @@ def _detect_tz_columns(header_rows: List[List]) -> Dict[str, int]:
     return mapping
 
 
+_GARBAGE_SPEC_VALUES = {'nan', 'none', '-', '.', '..', 'да', 'есть', 'соответствие', 'соответствует'}
+
+
+def _format_specs_fallback(raw_specs: List[Dict]) -> str:
+    """Форматирует сырые specs без LLM, фильтруя мусорные значения."""
+    parts = []
+    for s in raw_specs:
+        param = str(s.get('p', '')).strip()
+        value = str(s.get('v', '')).strip()
+        unit = str(s.get('u', '')).strip()
+        if not param or param.lower() in _GARBAGE_SPEC_VALUES:
+            continue
+        if not value or value.lower() in _GARBAGE_SPEC_VALUES:
+            continue
+        spec = f"{param}: {value}"
+        if unit and unit.lower() not in _GARBAGE_SPEC_VALUES:
+            spec += f" {unit}"
+        parts.append(spec)
+    return ", ".join(parts[:15]) if parts else ""
+
+
+def _normalize_spec_for_polish(spec: Dict[str, Any]) -> Optional[str]:
+    """Нормализует одну spec-запись для LLM-polisher, убирая только явный мусор."""
+    param = re.sub(r"\s+", " ", str(spec.get("p", "") or "")).strip()
+    value = re.sub(r"\s+", " ", str(spec.get("v", "") or "")).strip()
+    unit = re.sub(r"\s+", " ", str(spec.get("u", "") or "")).strip()
+
+    if not param or param.lower() in _GARBAGE_SPEC_VALUES:
+        return None
+
+    if not value or value.lower() in _GARBAGE_SPEC_VALUES:
+        inline_match = re.match(r"^(.*?\S)\s+[–-]\s+(\S.*)$", param)
+        if inline_match:
+            param = f"{inline_match.group(1)}: {inline_match.group(2)}"
+        return _clean_polished_spec(param)
+
+    normalized = f"{param}: {value}"
+    if unit and unit.lower() not in _GARBAGE_SPEC_VALUES:
+        normalized += f" {unit}"
+    return _clean_polished_spec(normalized)
+
+
+def _build_polish_source_specs(raw_specs: List[Dict[str, Any]]) -> List[str]:
+    """Готовит deduplicated список строк характеристик для XML-входа polisher-а."""
+    prepared: List[str] = []
+    seen: set[str] = set()
+
+    for spec in raw_specs:
+        normalized = _normalize_spec_for_polish(spec)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        prepared.append(normalized)
+
+    return prepared
+
+
+def _render_polish_source_item_xml(item_id: int, item_name: str, specs: List[str]) -> str:
+    """Рендерит один source_item для XML prompt-а."""
+    specs_xml = "\n".join(f"      <spec>{html.escape(spec)}</spec>" for spec in specs)
+    return (
+        f'  <source_item id="{item_id}">\n'
+        f"    <name>{html.escape(item_name)}</name>\n"
+        f"    <raw_specs>\n{specs_xml}\n    </raw_specs>\n"
+        f"  </source_item>"
+    )
+
+
+def _estimate_polish_source_item_size(item: Dict[str, Any], specs: List[str]) -> int:
+    """Оценивает размер XML-блока item для budget-based batching."""
+    return len(_render_polish_source_item_xml(0, item.get("name", ""), specs))
+
+
+def _build_polish_batches(items: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+    """Строит батчи для polisher-а по max items и budget размера XML payload."""
+    prepared_items: List[Dict[str, Any]] = []
+    for item in items:
+        source_specs = _build_polish_source_specs(item.get("raw_specs", []))
+        prepared_items.append({
+            "item": item,
+            "source_specs": source_specs,
+            "estimated_size": _estimate_polish_source_item_size(item, source_specs),
+        })
+
+    batches: List[List[Dict[str, Any]]] = []
+    current_batch: List[Dict[str, Any]] = []
+    current_chars = len("<input>\n\n</input>")
+
+    for prepared in prepared_items:
+        item_chars = prepared["estimated_size"]
+        exceeds_item_limit = len(current_batch) >= BATCH_POLISH
+        exceeds_char_budget = current_batch and (current_chars + item_chars > POLISH_MAX_BATCH_CHARS)
+
+        if exceeds_item_limit or exceeds_char_budget:
+            batches.append(current_batch)
+            current_batch = []
+            current_chars = len("<input>\n\n</input>")
+
+        current_batch.append(prepared)
+        current_chars += item_chars
+
+    if current_batch:
+        batches.append(current_batch)
+
+    return batches
+
+
+def _render_polish_input_xml(batch: List[Dict[str, Any]]) -> str:
+    """Рендерит весь XML input для текущего батча c локальными batch ids."""
+    rendered_items = [
+        _render_polish_source_item_xml(idx, entry["item"].get("name", ""), entry["source_specs"])
+        for idx, entry in enumerate(batch)
+    ]
+    return "<input>\n" + "\n".join(rendered_items) + "\n</input>"
+
+
 async def _polish_items_specs_llm(items: List[Dict[str, Any]]):
     """
-    Уровень 3: LLM Polisher. 
+    Уровень 3: LLM Polisher.
     Превращает сырые списки характеристик в чистый технический текст.
     """
     to_polish = [it for it in items if it.get("raw_specs")]
@@ -231,33 +354,37 @@ async def _polish_items_specs_llm(items: List[Dict[str, Any]]):
         return
 
     print(f"  [LLM Polisher] Polishing specs for {len(to_polish)} items...")
-    
-    # Обрабатываем батчами по 3 позиции (было 5) для точности
-    BATCH_POLISH = 3
-    for i in range(0, len(to_polish), BATCH_POLISH):
-        batch = to_polish[i : i + BATCH_POLISH]
-        
-        # Формируем компактное представление для LLM
-        prompt_data = []
-        for it in batch:
-            raw = it["raw_specs"]
-            specs_str = " | ".join([f"{s['p']}: {s['v']} {s['u']}".strip() for s in raw])
-            prompt_data.append({"id": batch.index(it), "name": it["name"], "raw": specs_str})
+    batches = _build_polish_batches(to_polish)
+
+    for batch_idx, batch in enumerate(batches):
+        prompt_input_xml = _render_polish_input_xml(batch)
+        expected_ids = list(range(len(batch)))
+        batch_chars = len(prompt_input_xml)
 
         prompt = f"""<|im_start|>system
 Ты технический эксперт. Твоя задача — очистить "сырые" характеристики оборудования.
-Убери слова 'соответствие', 'да', 'есть', 'nan', 'none' и пустые значения. 
-Оставь только технические параметры.
-Верни строго JSON в формате: {{"results": ["строка 1", "строка 2", ...]}}
+Убери только явный мусор: пустые значения, nan, none, "-", ".", "..", "да", "есть", "соответствие", "соответствует".
+Не удаляй технически значимые параметры.
+Верни строго XML в формате:
+<results>
+  <item id="0">строка 1</item>
+  <item id="1">строка 2</item>
+</results>
+Для каждого source_item верни ровно один item с тем же id.
 Итоговая строка должна быть краткой, через запятую.
+Не добавляй markdown, code fences, комментарии или пояснения до и после XML.
 <|im_end|>
 <|im_start|>user
 Данные для очистки:
-{json.dumps(prompt_data, ensure_ascii=False)}
+{prompt_input_xml}
 <|im_end|>
 <|im_start|>assistant
 """
         try:
+            print(
+                f"  [DEBUG-POLISH] Batch {batch_idx + 1}/{len(batches)}: "
+                f"items={len(batch)}, payload_chars={batch_chars}, ids={expected_ids}"
+            )
             resp = await ums_client.async_infer("qwen-14b-llm", {
                 "prompt": prompt, "temperature": 0.1, "max_tokens": 2000
             })
@@ -272,32 +399,86 @@ async def _polish_items_specs_llm(items: List[Dict[str, Any]]):
             else:
                 content = str(resp)
 
-            # Очистка от умных кавычек и потенциально ломающих JSON символов
             content = content.replace('“', '"').replace('”', '"').replace('„', '"')
-            # Важно: убираем двойные кавычки внутри будущих значений JSON, 
-            # кроме тех что являются границами ключей/значений. 
-            # Это грубый хак, но для очистки текста LLM он спасет парсинг.
-            
             print(f"  [DEBUG-POLISH] LLM Response (200 chars): {content[:200]}...")
-            parsed = parse_json_garbage(content)
-            
-            if isinstance(parsed, dict) and "results" in parsed:
-                results = parsed["results"]
-                for j, item in enumerate(batch):
-                    if j < len(results) and results[j]:
-                        item["specs"] = str(results[j])
-                        print(f"  [DEBUG-POLISH] Item {j} specs updated: {item['specs'][:50]}...")
+            results = _parse_polish_xml_results(content, expected_ids=expected_ids)
+
+            if results:
+                for entry_idx, entry in enumerate(batch):
+                    item = entry["item"]
+                    result = results.get(entry_idx)
+                    if result:
+                        item["specs"] = result
+                        print(f"  [DEBUG-POLISH] Item {entry_idx} specs updated: {item['specs'][:50]}...")
             else:
-                print(f"  [DEBUG-POLISH] Failed to parse JSON or results missing. Type: {type(parsed)}")
+                print("  [DEBUG-POLISH] Failed to parse XML polish response.")
         except Exception as e:
-            print(f"  [LLM Polisher] Error batch {i}: {e}")
+            print(f"  [LLM Polisher] Error batch {batch_idx}: {e}")
             
         # Гарантированный Fallback для каждого айтема в батче, если specs остались пустыми
-        for item in batch:
+        for entry in batch:
+            item = entry["item"]
             if not item.get("specs") and item.get("raw_specs"):
-                parts = [f"{s['p']}: {s['v']} {s['u']}".strip() for s in item["raw_specs"]]
-                item["specs"] = " | ".join(parts[:20]) 
-                print(f"  [LLM Polisher] Emergency Fallback applied for {item['name'][:30]}...")
+                item["specs"] = _format_specs_fallback(item["raw_specs"])
+                print(f"  [LLM Polisher] Fallback applied for {item['name'][:30]}...")
+
+
+def _clean_polished_spec(text: Any) -> str:
+    """Нормализует строку характеристик после LLM-парсинга."""
+    cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
+    cleaned = re.sub(r"\s*,\s*", ", ", cleaned)
+    cleaned = re.sub(r'"\s*:\s*$', "", cleaned)
+    cleaned = re.sub(r"\s*:\s*", ": ", cleaned)
+    cleaned = cleaned.strip(' "\',;:')
+    return cleaned
+
+
+def _strip_xml_code_fences(content: str) -> str:
+    """Убирает markdown code fences вокруг XML, если модель всё же их вернула."""
+    stripped = str(content or "").strip()
+    stripped = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", stripped)
+    stripped = re.sub(r"\s*```$", "", stripped)
+    return stripped.strip()
+
+
+def _parse_polish_xml_results(content: str, expected_ids: List[int]) -> Optional[Dict[int, str]]:
+    """Извлекает результаты polisher-а из XML по обязательному id-mapping."""
+    normalized = _strip_xml_code_fences(content)
+    match = re.search(r"<results\b[^>]*>(.*?)</results>", normalized, flags=re.DOTALL | re.IGNORECASE)
+    if not match:
+        return None
+
+    body = match.group(1)
+    results: Dict[int, str] = {}
+
+    for item_match in re.finditer(r"<item\b([^>]*)>(.*?)</item>", body, flags=re.DOTALL | re.IGNORECASE):
+        attrs = item_match.group(1)
+        item_body = item_match.group(2)
+        id_match = re.search(r"""\bid\s*=\s*['"]?(\d+)['"]?""", attrs, flags=re.IGNORECASE)
+        if not id_match:
+            return None
+
+        item_id = int(id_match.group(1))
+        if item_id in results:
+            return None
+
+        text = re.sub(r"<[^>]+>", " ", item_body)
+        text = html.unescape(text)
+        text = _clean_polished_spec(text)
+        if text:
+            results[item_id] = text
+        else:
+            return None
+
+    expected_id_set = set(expected_ids)
+    result_id_set = set(results.keys())
+    if result_id_set != expected_id_set:
+        missing_ids = sorted(expected_id_set - result_id_set)
+        extra_ids = sorted(result_id_set - expected_id_set)
+        print(f"  [DEBUG-POLISH] Invalid XML ids: missing={missing_ids}, extra={extra_ids}")
+        return None
+
+    return results
 
 
 def _parse_tz_table_rows(
@@ -316,7 +497,7 @@ def _parse_tz_table_rows(
         idx = col_map.get(key)
         if idx is None or idx >= len(row): return None
         val = row[idx]
-        return str(val).strip() if val is not None else None
+        return str(val).replace('\n', ' ').strip() if val is not None else None
 
     def _flush():
         nonlocal current_item, current_raw_specs
@@ -364,7 +545,10 @@ def _parse_tz_table_rows(
 
         # Продолжение названия
         elif _is_empty(num_val) and not _is_empty(name_val) and current_item is not None:
-            current_item["name"] += " " + name_val
+            if re.match(r"^Позиция\s+\d+$", current_item["name"].strip(), re.IGNORECASE):
+                current_item["name"] = name_val
+            else:
+                current_item["name"] += " " + name_val
             if not _is_empty(param_val):
                 current_raw_specs.append({"p": param_val, "v": value_val or "", "u": unit_val or ""})
 
@@ -418,8 +602,9 @@ def _parse_table_rows(
     start_row = header_idx + 1 if header_idx >= 0 else 0
 
     # Проверяем: ТЗ-структура (merged-cell таблица с характеристиками)
-    if header_row and _is_tz_structure(header_row):
-        tz_col_map = _detect_tz_columns(table_data[header_idx : header_idx + 3])
+    tz_header_rows = table_data[header_idx : header_idx + 3] if header_idx >= 0 else []
+    if tz_header_rows and _is_tz_structure(tz_header_rows):
+        tz_col_map = _detect_tz_columns(tz_header_rows)
         # Присутствие хотя бы одной колонки для параметров
         if "name" in tz_col_map and any(k in tz_col_map for k in ["param", "value", "specs"]):
             actual_data_start = header_idx + 1
@@ -837,10 +1022,10 @@ async def match_items_node(state: EquipmentState) -> dict:
 
     client = await get_shared_client()
     try:
-        resp = await client.post(f"{MCP_LEGAL_SERVER_URL}/batch_match", json={
+        resp = await client.post(f"{MCP_LEGAL_SERVER_URL}/match_batches", json={
             "list_old": list_old,
             "list_new": list_new,
-            "threshold": 0.45,  # Снижен с 0.55 для лучшего recall аналогов
+            "threshold": MATCH_SIMILARITY_THRESHOLD,
         })
         resp.raise_for_status()
         data = resp.json()
@@ -850,28 +1035,19 @@ async def match_items_node(state: EquipmentState) -> dict:
 
         raw_matches = data.get("matches", [])
 
-        # Обогащаем оригинальными items через обратный маппинг
+        # O(1) reverse mapping по тексту (TD-7 Fix)
+        items_1_by_text = {txt: items_1[i] for i, txt in enumerate(list_old)}
+        items_2_by_text = {txt: items_2[i] for i, txt in enumerate(list_new)}
+
         enriched = []
         for m in raw_matches:
             old_text = m.get("old_text", "")
             new_text = m.get("new_text", "")
 
-            # Обратный маппинг по тексту
-            item_1 = None
-            item_2 = None
-            for i, txt in enumerate(list_old):
-                if txt == old_text:
-                    item_1 = items_1[i]
-                    break
-            for i, txt in enumerate(list_new):
-                if txt == new_text:
-                    item_2 = items_2[i]
-                    break
-
             enriched.append({
                 **m,
-                "item_1": item_1,
-                "item_2": item_2,
+                "item_1": items_1_by_text.get(old_text),
+                "item_2": items_2_by_text.get(new_text),
             })
 
         print(f"  [Equipment] Matched: {len(enriched)} pairs")

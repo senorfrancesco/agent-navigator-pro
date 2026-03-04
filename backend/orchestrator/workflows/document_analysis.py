@@ -359,7 +359,7 @@ _DOC_TYPE_LABELS = {
     "tz": "Техническое задание",
     "smeta": "Сметная документация",
     "kp": "Коммерческое предложение",
-    "legal": "Договор/Контракт",
+    "legal": "Юридический / нормативный документ",
     "other": "Документ",
 }
 
@@ -406,7 +406,8 @@ async def generate_analysis_report_node(state: DocumentAnalysisState) -> dict:
         report += "| :---: | :--- | :--- | :---: | :---: | :---: |\n"
         for idx, item in enumerate(items, 1):
             name = item.get("name", "-")[:60]
-            specs = item.get("specs", "-")[:80]
+            specs = truncate_text(item.get("specs", "-"), 180)
+            specs = specs.replace("|", "\\|")
             qty = item.get("quantity", "-")
             price = item.get("price", "-")
             source = item.get("source", "-")

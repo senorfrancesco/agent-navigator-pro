@@ -5,15 +5,34 @@ UMS Client - HTTP-клиент для взаимодействия с Unified Mo
 """
 
 import asyncio
+import inspect
 import os
 import time
 import requests
 import httpx
 import numpy as np
-from typing import Dict, Any, Optional, List, AsyncGenerator, Callable
+from typing import Dict, Any, Optional, List, AsyncGenerator, Callable, Awaitable
 import json
 
 UMS_URL = os.getenv("UMS_URL", "http://localhost:8090")
+
+# Shared async client для повторного использования соединений
+_async_client: Optional[httpx.AsyncClient] = None
+_client_lock = asyncio.Lock()
+
+
+async def _get_async_client() -> httpx.AsyncClient:
+    """Shared httpx.AsyncClient singleton для UMS."""
+    global _async_client
+    if _async_client is None:
+        async with _client_lock:
+            if _async_client is None:
+                _async_client = httpx.AsyncClient(
+                    timeout=httpx.Timeout(300.0, connect=10.0),
+                    limits=httpx.Limits(max_keepalive_connections=10, max_connections=50),
+                )
+    return _async_client
+
 
 class UMSClient:
     """HTTP-клиент для взаимодействия с UMS."""
@@ -65,8 +84,8 @@ class UMSClient:
 
     async def async_infer(self, model_id: str, payload: Dict[str, Any], device_mode: str = "hybrid") -> Dict[str, Any]:
         """
-        Асинхронный инференс через UMS (использует httpx.AsyncClient).
-        Используется в async LangGraph нодах для избежания блокировки event loop.
+        Асинхронный инференс через UMS (использует shared client).
+        Exponential backoff: 4 попытки, задержка min(2^attempt, 10) секунд.
         """
         url = f"{self.base_url}/infer"
         request_body = {
@@ -75,24 +94,25 @@ class UMSClient:
             "device_mode": device_mode,
             "priority": "normal"
         }
-        retries = 3
+        retries = 4
         last_error = None
         for attempt in range(retries):
             try:
                 print(f"[UMS_CLIENT] Async inference for model: {model_id} (attempt {attempt+1})")
-                async with httpx.AsyncClient(timeout=300.0) as client:
-                    response = await client.post(url, json=request_body)
-                    response.raise_for_status()
-                    data = response.json()
-                    if data.get("status") == "success":
-                        return data.get("result", {})
-                    else:
-                        raise RuntimeError(f"UMS returned error: {data}")
+                client = await _get_async_client()
+                response = await client.post(url, json=request_body)
+                response.raise_for_status()
+                data = response.json()
+                if data.get("status") == "success":
+                    return data.get("result", {})
+                else:
+                    raise RuntimeError(f"UMS returned error: {data}")
             except Exception as e:
                 last_error = e
                 print(f"[UMS_CLIENT] Async error (attempt {attempt+1}/{retries}): {e}")
                 if attempt < retries - 1:
-                    await asyncio.sleep(2)
+                    delay = min(2 ** attempt, 10)
+                    await asyncio.sleep(delay)
         raise RuntimeError(f"Failed to connect to UMS after {retries} attempts: {last_error}")
 
     async def async_infer_stream(self, model_id: str, payload: Dict[str, Any], device_mode: str = "hybrid") -> AsyncGenerator[str, None]:
@@ -110,7 +130,8 @@ class UMSClient:
             "stream": True
         }
         print(f"[UMS_CLIENT] Stream inference for model: {model_id}")
-        async with httpx.AsyncClient(timeout=300.0) as client:
+        client = await _get_async_client()
+        try:
             async with client.stream("POST", url, json=request_body) as response:
                 response.raise_for_status()
                 async for line in response.aiter_lines():
@@ -132,6 +153,62 @@ class UMSClient:
                                     yield text
                         except json.JSONDecodeError:
                             continue
+        except asyncio.CancelledError:
+            # Cancellation is normal control flow for streaming clients.
+            raise
+
+    async def async_infer_stream_to_callback(
+        self,
+        model_id: str,
+        payload: Dict[str, Any],
+        on_token: Callable[[str], Awaitable[None] | None],
+        device_mode: str = "hybrid",
+    ) -> None:
+        """
+        Асинхронный стриминг инференса через callback без промежуточного async-generator
+        на стороне вызывающего кода. Это снижает риск GeneratorExit/cancel-scope конфликтов
+        в UI-интеграциях, которые рано завершают consumer task.
+        """
+        url = f"{self.base_url}/infer"
+        request_body = {
+            "model_id": model_id,
+            "payload": payload,
+            "device_mode": device_mode,
+            "priority": "normal",
+            "stream": True
+        }
+        print(f"[UMS_CLIENT] Stream inference for model: {model_id}")
+        client = await _get_async_client()
+        try:
+            async with client.stream("POST", url, json=request_body) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if not line.startswith("data: "):
+                        continue
+                    data_str = line[6:]
+                    if data_str == "[DONE]":
+                        return
+                    try:
+                        chunk = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+
+                    choices = chunk.get("choices", [])
+                    if not choices:
+                        continue
+
+                    text = choices[0].get("text", "") or choices[0].get("delta", {}).get("content", "")
+                    if not text:
+                        continue
+
+                    result = on_token(text)
+                    if inspect.isawaitable(result):
+                        await result
+        except asyncio.CancelledError:
+            raise
 
     def switch_model(self, model_id: str, device_mode: str = "hybrid") -> Dict[str, Any]:
         """Переключает активную модель на UMS."""
@@ -231,6 +308,7 @@ def create_ums_embed_fn(base_url: str = None) -> Optional[Callable]:
 
     Возвращает функцию (List[str]) -> np.ndarray или None если UMS недоступен.
     Синхронный requests.post — вызывается изнутри sync кода HybridRetriever.
+    Retry с exponential backoff при ошибках.
     """
     url = (base_url or UMS_URL).rstrip("/") + "/v1/embeddings"
 
@@ -242,11 +320,37 @@ def create_ums_embed_fn(base_url: str = None) -> Optional[Callable]:
         return None
 
     def embed_fn(texts: List[str]) -> np.ndarray:
-        resp = requests.post(url, json={"input": texts, "model": "labse-embedding"}, timeout=60)
-        resp.raise_for_status()
-        data = resp.json().get("data", [])
-        data.sort(key=lambda x: x.get("index", 0))
-        return np.array([item["embedding"] for item in data], dtype=np.float32)
+        """Синхронная обертка с батчингом (TD-Batching)."""
+        if not texts: return np.array([], dtype=np.float32)
+        
+        all_embeddings = []
+        BATCH_SIZE = 10
+        last_error = None
+        
+        try:
+            with httpx.Client(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
+                for i in range(0, len(texts), BATCH_SIZE):
+                    batch = texts[i : i + BATCH_SIZE]
+                    
+                    # Ретраи для каждого батча
+                    for attempt in range(3):
+                        try:
+                            resp = client.post(url, json={"input": batch, "model": "labse-embedding"})
+                            resp.raise_for_status()
+                            data = resp.json().get("data", [])
+                            data.sort(key=lambda x: x.get("index", i))
+                            batch_embs = [item["embedding"] for item in data]
+                            all_embeddings.extend(batch_embs)
+                            break # Успех
+                        except Exception as e:
+                            last_error = e
+                            if attempt < 2: time.sleep(1)
+                            else: raise
+                            
+            return np.array(all_embeddings, dtype=np.float32)
+        except Exception as e:
+            print(f"[UMS_CLIENT] Critical embedding error: {e}")
+            raise RuntimeError(f"embed_fn failed: {e}")
 
     return embed_fn
 
