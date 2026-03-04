@@ -976,6 +976,33 @@ class TestGenerateEquipmentReportNode:
         reports = glob.glob(os.path.join(tmpdir, "Report_Equipment_*.md"))
         assert len(reports) == 1  # Только один файл
 
+    @pytest.mark.asyncio
+    async def test_report_contains_full_details_without_truncation(self, base_state):
+        long_reason = (
+            "Предложение не соответствует всем требованиям ТЗ: "
+            "не хватает резервирования БП, не указан тип RAID, не указан интерфейс PCIe для NVMe."
+        )
+        base_state["items_1"] = [{"name": "Сервер | Lenovo", "specs": "CPU: 2x Xeon\nRAM: 256GB"}]
+        base_state["items_2"] = [{"name": "Сервер DELL", "specs": "CPU: 2x Xeon\nRAM: 128GB"}]
+        base_state["analysis_results"] = [
+            {
+                "item_1": base_state["items_1"][0],
+                "item_2": base_state["items_2"][0],
+                "result": "PARTIAL",
+                "reason": long_reason,
+                "type": "MODIFIED",
+            }
+        ]
+
+        with patch.dict(os.environ, {"UPLOADS_DIR": tempfile.mkdtemp()}):
+            result = await generate_equipment_report_node(base_state)
+
+        report = result["final_report"]
+        assert "## Полные детали по позициям" in report
+        assert long_reason in report
+        assert "Сервер \\| Lenovo" in report
+        assert "CPU: 2x Xeon\nRAM: 256GB" in report
+
 
 # ============================================================================
 # Tests: create_equipment_graph

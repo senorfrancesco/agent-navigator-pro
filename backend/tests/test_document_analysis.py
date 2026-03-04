@@ -584,6 +584,8 @@ class TestDocumentAnalysisIntent:
         mock_session.get.return_value = None  # Нет rag_pipeline
         mock_cl.user_session = mock_session
         mock_cl.Message = MagicMock()
+        mock_cl.AskActionMessage = MagicMock()
+        mock_cl.Action = MagicMock()
         mock_cl.Step = MagicMock()
         mock_cl.User = MagicMock()
         mock_cl.on_chat_start = lambda f: f
@@ -604,8 +606,28 @@ class TestDocumentAnalysisIntent:
         else:
             import orchestrator.chainlit_app
 
-        from orchestrator.chainlit_app import _detect_intent
+        from orchestrator.chainlit_app import (
+            _detect_intent,
+            _get_intent_decision,
+            _resolve_pending_route_choice,
+            _needs_doc_question_regen,
+            _extract_citation_ids,
+            _citations_are_valid,
+            _has_sufficient_evidence,
+            _build_doc_question_deterministic_fallback,
+            _compute_confidence_v1,
+            _build_sources_from_rag_result,
+        )
         self._detect_intent = _detect_intent
+        self._get_intent_decision = _get_intent_decision
+        self._resolve_pending_route_choice = _resolve_pending_route_choice
+        self._needs_doc_question_regen = _needs_doc_question_regen
+        self._extract_citation_ids = _extract_citation_ids
+        self._citations_are_valid = _citations_are_valid
+        self._has_sufficient_evidence = _has_sufficient_evidence
+        self._build_doc_question_deterministic_fallback = _build_doc_question_deterministic_fallback
+        self._compute_confidence_v1 = _compute_confidence_v1
+        self._build_sources_from_rag_result = _build_sources_from_rag_result
         self._mock_session = mock_session
         self._mock_cl = mock_cl
 
@@ -641,3 +663,220 @@ class TestDocumentAnalysisIntent:
             result = self._detect_intent("Проанализируй", file_count=0, has_session_docs=True)
 
         assert result == "document_analysis"
+
+    def test_two_docs_tz_kp_query_prefers_equipment_analysis(self):
+        session_docs = {
+            "Quotation_12.pdf": {"text": "Коммерческое предложение на поставку оборудования"},
+            "f5.pdf": {"text": "Техническое задание на поставку серверного оборудования"},
+        }
+        classifier_result = {
+            "intent": "document_question",
+            "confidence": 0.39,
+            "margin": 0.115,
+            "needs_rag": True,
+        }
+
+        with patch("orchestrator.chainlit_app._detect_equipment_mode", return_value="tz_vs_smeta"):
+            result = self._get_intent_decision(
+                "Есть тз и коммерческое предложение. Что нам подходит из коммерческого предложения?",
+                file_count=2,
+                has_session_docs=True,
+                session_docs=session_docs,
+                classifier_result=classifier_result,
+            )
+
+        assert result["intent"] == "equipment_analysis"
+        assert result["requires_choice"] is True
+        assert result["recommended_route"] == "equipment_analysis"
+
+    def test_two_docs_low_margin_compare_becomes_choice(self):
+        session_docs = {
+            "old.pdf": {"text": "Старая редакция договора"},
+            "new.pdf": {"text": "Новая редакция договора"},
+        }
+        classifier_result = {
+            "intent": "general_chat",
+            "confidence": 0.44,
+            "margin": 0.005,
+            "needs_rag": False,
+        }
+
+        result = self._get_intent_decision(
+            "Сравни эти два документа",
+            file_count=2,
+            has_session_docs=True,
+            session_docs=session_docs,
+            classifier_result=classifier_result,
+        )
+
+        assert result["intent"] == "compare_documents"
+        assert result["requires_choice"] is True
+        assert result["recommended_route"] == "compare_documents"
+
+    def test_document_question_stays_document_question_without_equipment_signal(self):
+        session_docs = {
+            "doc1.pdf": {"text": "Гарантийные обязательства"},
+            "doc2.pdf": {"text": "Сроки поставки"},
+        }
+        classifier_result = {
+            "intent": "document_question",
+            "confidence": 0.71,
+            "margin": 0.20,
+            "needs_rag": True,
+        }
+
+        result = self._get_intent_decision(
+            "Что написано в документах про гарантию?",
+            file_count=2,
+            has_session_docs=True,
+            session_docs=session_docs,
+            classifier_result=classifier_result,
+        )
+
+        assert result["intent"] == "document_question"
+        assert result["requires_choice"] is False
+
+    def test_resolve_pending_route_choice(self):
+        pending = {
+            "expires_at": time.time() + 60,
+            "choices": {"1": "equipment_analysis", "2": "compare_documents", "3": "document_question"},
+        }
+        assert self._resolve_pending_route_choice("1", pending) == "equipment_analysis"
+        assert self._resolve_pending_route_choice("отмена", pending) == "cancel"
+        assert self._resolve_pending_route_choice("9", pending) is None
+
+    def test_resolve_pending_route_choice_expired(self):
+        pending = {
+            "expires_at": time.time() - 1,
+            "choices": {"1": "equipment_analysis"},
+        }
+        assert self._resolve_pending_route_choice("1", pending) is None
+
+    def test_doc_question_regen_detection_when_docs_loaded(self):
+        text = "Пожалуйста, предоставьте тексты ТЗ и коммерческого предложения для анализа."
+        assert self._needs_doc_question_regen(text, has_session_docs=True) is True
+
+    def test_doc_question_regen_not_required_without_docs(self):
+        text = "Пожалуйста, предоставьте тексты ТЗ и коммерческого предложения для анализа."
+        assert self._needs_doc_question_regen(text, has_session_docs=False) is False
+
+    def test_doc_question_regen_detects_clarification_pattern(self):
+        text = (
+            "Не могу предоставить точный ответ. "
+            "Пожалуйста, уточните требования ТЗ и содержание коммерческого предложения."
+        )
+        assert self._needs_doc_question_regen(text, has_session_docs=True) is True
+
+    def test_extract_citation_ids(self):
+        cited = self._extract_citation_ids("Ответ [1] и [3], но не [x]")
+        assert cited == [1, 3]
+
+    def test_citations_are_valid(self):
+        assert self._citations_are_valid("Ответ [1][2]", source_count=2) is True
+        assert self._citations_are_valid("Ответ [3]", source_count=2) is False
+        assert self._citations_are_valid("Ответ без ссылок", source_count=2) is False
+
+    def test_has_sufficient_evidence_simple_mode(self):
+        sources = [
+            {
+                "source_id": 1,
+                "document_id": "a.pdf",
+                "chunk_id": 0,
+                "char_span": {"start_char": 0, "end_char": 100},
+                "page": None,
+                "quote": "test",
+                "raw_score": 0.2,
+                "normalized_score": 1.0,
+                "grade": None,
+                "z_score": None,
+            }
+        ]
+        assert self._has_sufficient_evidence(sources, mode="simple", query="Что написано?", citations_valid=True) is True
+
+    def test_has_sufficient_evidence_corrective_uses_zscore(self):
+        sources = [
+            {
+                "source_id": 1,
+                "document_id": "a.pdf",
+                "chunk_id": 0,
+                "char_span": {"start_char": 0, "end_char": 100},
+                "page": None,
+                "quote": "test",
+                "raw_score": 0.01,
+                "normalized_score": 1.0,
+                "grade": "poor",
+                "z_score": -1.2,
+            }
+        ]
+        assert self._has_sufficient_evidence(sources, mode="corrective", query="Что написано?", citations_valid=True) is False
+
+    def test_deterministic_fallback_payload(self):
+        sources = [
+            {
+                "source_id": 1,
+                "document_id": "a.pdf",
+                "chunk_id": 0,
+                "char_span": {"start_char": 0, "end_char": 100},
+                "page": None,
+                "quote": "Короткая цитата",
+                "raw_score": 0.5,
+                "normalized_score": 1.0,
+                "grade": "good",
+                "z_score": 0.3,
+            }
+        ]
+        payload = self._build_doc_question_deterministic_fallback("запрос", sources, "insufficient_evidence")
+        assert payload["answer_mode"] == "insufficient_evidence"
+        assert payload["fallback_type"] == "insufficient_evidence"
+        assert payload["confidence_method"] == "heuristic_v1"
+        assert payload["confidence_version"] == "1"
+
+    def test_confidence_v1_low_for_insufficient(self):
+        sources = [
+            {
+                "source_id": 1,
+                "document_id": "a.pdf",
+                "chunk_id": 0,
+                "char_span": {"start_char": 0, "end_char": 100},
+                "page": None,
+                "quote": "Короткая цитата",
+                "raw_score": 0.7,
+                "normalized_score": 1.0,
+                "grade": "excellent",
+                "z_score": 1.2,
+            }
+        ]
+        confidence, label = self._compute_confidence_v1(sources, [1], "insufficient_evidence")
+        assert confidence <= 0.35
+        assert label == "low"
+
+    def test_build_sources_from_rag_result(self):
+        class DummyRetrieval:
+            def __init__(self, text, score, index, metadata=None):
+                self.text = text
+                self.score = score
+                self.index = index
+                self.metadata = metadata or {}
+
+        class DummyChunk:
+            def __init__(self, start_char, end_char, metadata):
+                self.start_char = start_char
+                self.end_char = end_char
+                self.metadata = metadata
+
+        class DummyResult:
+            def __init__(self, chunks):
+                self.chunks = chunks
+
+        class DummyRag:
+            def __init__(self, chunks):
+                self._chunks = chunks
+
+        rag_result = DummyResult(
+            [DummyRetrieval("Фрагмент А", 0.1, 0, {"grade": "good", "z_score": 0.2})]
+        )
+        rag = DummyRag([DummyChunk(10, 50, {"doc_name": "docA.pdf"})])
+        sources = self._build_sources_from_rag_result(rag_result, rag)
+        assert len(sources) == 1
+        assert sources[0]["document_id"] == "docA.pdf"
+        assert sources[0]["char_span"]["start_char"] == 10

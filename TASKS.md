@@ -404,6 +404,92 @@
   - `GET /public/logo_dark.svg` и `GET /public/avatar.svg` -> `200`;
   - warning `Skipped "*/*" because it is not a valid MIME type` больше не воспроизводится.
 
+- [x] **B3.20 — UX fallback для неоднозначного routing в Chainlit**
+  Live-кейс показал, что при двух загруженных документах (`ТЗ + КП`) и двусмысленном вопросе
+  semantic router может увести сценарий в `document_question`, `general_chat` или даже
+  `document_analysis` по одному файлу. Ближайшее правильное решение — не угадывать дорогой
+  workflow, а спрашивать пользователя.
+  Что нужно закрепить:
+  - ambiguity gate по `confidence`/`margin` для routing дорогих workflow;
+  - deterministic pre-routing для `detect_equipment_mode(...) == tz_vs_smeta`;
+  - нативный `Chainlit` fallback через `AskActionMessage` с интерактивным выбором в чате;
+  - текстовый запасной путь `1/2/3/отмена`, если action timeout или пользователь не кликает.
+
+- [x] **B3.24 — Report_Equipment: убрать обрезание колонок (hybrid output)**
+  Выполнено:
+  - в `generate_equipment_report_node` убраны жёсткие срезы `[:60]` и `[:80]`;
+  - сохранена обзорная таблица, добавлен раздел `Полные детали по позициям`;
+  - полный `reason` и `specs` выводятся без truncation;
+  - добавлено safe markdown-экранирование, чтобы длинные значения не ломали таблицу.
+
+- [x] **B3.25 — Document Question guard: не просить повторно тексты при загруженных docs**
+  Выполнено:
+  - усилен system prompt для `document_question` (ответ только по переданному контексту);
+  - добавлен low-result fallback при `0` релевантных фрагментов;
+  - добавлен post-guard: если модель просит «загрузите/предоставьте тексты» при непустых `session_docs`,
+    выполняется одноразовая регенерация ответа с жёстким ограничением.
+
+- [x] **B3.26 — Синхронизация `backend/.env` с `backend/.env.example`**
+  Выполнено:
+  - `backend/.env` дополнен недостающей секцией RAG;
+  - добавлен `RAG_MODE_OVERRIDE="auto"` с тем же комментарием, что в `backend/.env.example`.
+
+- [x] **B3.27 — Citation-контракт для `document_question` (inline [n] + sources + heuristic_v1)**
+  Выполнено:
+  - добавлен контракт ответа `answer_text + sources + confidence + answer_mode + fallback_type`;
+  - внедрены inline citations `[n]` с post-validation диапазона ссылок;
+  - `SourceRef` расширен: `raw_score`, `normalized_score`, `grade`, `z_score`, `char_span`;
+  - policy сделана mode-aware (`simple` vs `corrective/agentic`) без единого жёсткого глобального порога;
+  - добавлен retry (1 раз) + deterministic fallback без LLM при citation-fail;
+  - confidence помечен явно: `confidence_method="heuristic_v1"`, `confidence_version="1"`;
+  - в логах зафиксированы диагностические признаки (`mode/top_raw/citations/fallback/confidence`).
+  Live-валидация:
+  - after rebuild: Playwright smoke (`ТЗ + КП` -> выбор `3`) показал корректный контракт в UI:
+    inline citations `[n]`, блок `Источники` (doc/chunk/span/relevance/raw), блок `Надёжность`.
+
+- [ ] **B3.28 — Coverage heuristic v1.1 для `document_question`**
+  Контекст:
+  - в v1 сознательно не включали coverage по подпунктам запроса, чтобы не раздуть первый PR.
+  Что нужно сделать:
+  - добавить lightweight coverage-эвристику (покрытие ключевых аспектов multi-hop запроса);
+  - включить coverage как дополнительный сигнал в policy/ confidence v2;
+  - валидировать на eval-наборе и обновить пороги без ломки UI-контракта.
+
+- [ ] **B3.21 — Quality upgrade: отдельная embedding-модель для intent classification**
+  Intent routing не обязан использовать тот же embedder, что и retrieval. Следующий этап
+  качества — выделить intent classifier в отдельный контур и сравнить модели на реальном
+  routing eval-наборе.
+  Что нужно сделать:
+  - подготовить eval harness для интентов `compare_documents`, `equipment_analysis`,
+    `document_question`, `document_analysis`, `general_chat`;
+  - сравнить как минимум:
+    - `sentence-transformers/LaBSE` (baseline),
+    - `intfloat/multilingual-e5-large-instruct`,
+    - `BAAI/bge-m3`,
+    - семейство `Qwen3-Embedding-*`;
+  - мерить не только accuracy, но и false positives на дорогих workflow;
+  - по результатам решить, нужен ли отдельный `intent_embedder` помимо retrieval embedder.
+
+- [ ] **B3.22 — Dynamic selection of models and embedders**
+  Следствие будущего quality-upgrade: система должна уметь выбирать не только LLM profile,
+  но и embedder profile.
+  Что нужно сделать:
+  - ввести понятия `llm_profile`, `retrieval_embedder_profile`, `intent_embedder_profile`;
+  - поддержать безопасное переключение между ними через backend-конфиг и будущий Ops/UI слой;
+  - предусмотреть профили вроде `default`, `high-accuracy-routing`, `low-vram`, `cpu-safe`.
+
+- [ ] **B3.23 — Multi-GPU placement policy для LLM и embeddings**
+  Текущая нагрузка может перекошенно ложиться на GPU 0: `llama-server` без явного `main_gpu`
+  и `st_server` с дефолтным `cuda` практически приводят к использованию первой карты.
+  Монитор на GPU 0 может добавлять шум, но не является главным root cause.
+  Что нужно сделать:
+  - проверить явное управление `main_gpu` для GGUF/LLM;
+  - добавить pinning embeddings на конкретный GPU при наличии нескольких карт;
+  - определить production policy:
+    - LLM → multi-GPU / tensor split;
+    - embeddings → отдельная карта, если возможно;
+    - fallback profiles для low-VRAM и CPU-safe режимов.
+
 - [ ] Vision-анализ изображений (Qwen-VL интеграция)
 - [ ] LLM-based Intent Classification (замена keyword routing, Tier 3+)
 - [ ] Agentic RAG as LangGraph Tool (RetrieveNode внутри workflows)

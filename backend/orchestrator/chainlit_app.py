@@ -12,13 +12,15 @@ Chainlit App — замена Open WebUI для Agent Navigator Pro.
 """
 
 import asyncio
+import copy
 import logging
 import os
+import re
 import sys
 import time
 import shutil
 import httpx
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, TypedDict, Literal
 
 # Добавляем пути (оставляем для обратной совместимости, но используем абсолютные)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -32,6 +34,64 @@ from services.model_manager.ums_client import ums_client
 from orchestrator.shared.http_client import get_shared_client
 
 logger = logging.getLogger("chainlit_app")
+
+INTENT_LOW_MARGIN_THRESHOLD = 0.12
+INTENT_LOW_CONFIDENCE_THRESHOLD = 0.55
+ROUTE_CHOICE_TIMEOUT_S = 90
+
+_COMPARE_QUERY_KEYWORDS = [
+    "сравни", "сравнение", "различия", "отличия", "что изменилось", "покажи разницу",
+]
+_EQUIPMENT_QUERY_KEYWORDS = [
+    "тз", "техническое задание", "коммерческое предложение", "кп", "смета",
+    "оборудование", "подходит", "что подходит", "что нам подходит",
+    "соответствует", "соответствие", "подходит ли",
+]
+_DOC_QUESTION_KEYWORDS = [
+    "что", "какой", "какая", "какие", "сколько", "найди", "покажи", "указано",
+    "написано", "содержится", "есть ли",
+]
+_DOC_QUESTION_UPLOAD_REQUEST_PHRASES = [
+    "предоставьте тексты",
+    "предоставьте текст",
+    "пришлите текст",
+    "загрузите тексты",
+    "загрузите текст",
+    "нужно увидеть тексты",
+    "мне нужно увидеть тексты",
+    "предоставьте содержание",
+    "нужно содержание",
+]
+
+DOC_QA_MIN_CHUNKS_SIMPLE = int(os.getenv("DOC_QA_MIN_CHUNKS_SIMPLE", "1"))
+DOC_QA_MIN_CHUNKS_MULTIHOP = int(os.getenv("DOC_QA_MIN_CHUNKS_MULTIHOP", "2"))
+DOC_QA_MIN_RAW_SCORE_SIMPLE = float(os.getenv("DOC_QA_MIN_RAW_SCORE_SIMPLE", "0.01"))
+DOC_QA_MIN_ZSCORE_CORRECTIVE = float(os.getenv("DOC_QA_MIN_ZSCORE_CORRECTIVE", "-0.5"))
+
+
+class SourceRef(TypedDict):
+    source_id: int
+    document_id: str
+    chunk_id: int
+    char_span: Dict[str, Optional[int]]
+    page: Optional[int]
+    quote: str
+    raw_score: float
+    normalized_score: float
+    grade: Optional[str]
+    z_score: Optional[float]
+
+
+class DocQuestionResponse(TypedDict):
+    answer_text: str
+    sources: List[SourceRef]
+    answer_mode: Literal["grounded_answer", "insufficient_evidence"]
+    fallback_type: Literal["none", "citation_validation_failed", "insufficient_evidence"]
+    fallback_reason: Optional[str]
+    confidence: float
+    confidence_label: Literal["high", "medium", "low"]
+    confidence_method: Literal["heuristic_v1"]
+    confidence_version: Literal["1"]
 
 
 # === RAG Mode Helper ===
@@ -103,6 +163,14 @@ def _get_session_history() -> List[Dict[str, str]]:
     return history
 
 
+def _get_pending_route_choice() -> Optional[Dict[str, Any]]:
+    return cl.user_session.get("pending_route_choice")
+
+
+def _set_pending_route_choice(data: Optional[Dict[str, Any]]) -> None:
+    cl.user_session.set("pending_route_choice", data)
+
+
 # === Intent Detection ===
 
 def _detect_intent(query: str, file_count: int = 0, has_session_docs: bool = False) -> str:
@@ -163,6 +231,194 @@ def _detect_intent(query: str, file_count: int = 0, has_session_docs: bool = Fal
         return "greeting"
 
     return "general_chat"
+
+
+def _has_any_keyword(query_lower: str, keywords: List[str]) -> bool:
+    return any(kw in query_lower for kw in keywords)
+
+
+def _is_low_confidence(classifier_result: Optional[Dict[str, Any]]) -> bool:
+    if not classifier_result:
+        return True
+    return (
+        classifier_result.get("confidence", 0.0) < INTENT_LOW_CONFIDENCE_THRESHOLD
+        or classifier_result.get("margin", 0.0) < INTENT_LOW_MARGIN_THRESHOLD
+    )
+
+
+def _get_last_session_docs(session_docs: Dict[str, Any], count: int = 2) -> List[Dict[str, Any]]:
+    items = list(session_docs.items())[-count:]
+    return [{"name": name, **doc_info} for name, doc_info in items]
+
+
+def _build_route_choice_prompt(recommended_route: str, mode: str) -> str:
+    if mode == "tz_vs_smeta":
+        base = "Похоже, у вас ТЗ и коммерческое предложение."
+    else:
+        base = "Я вижу два загруженных документа."
+
+    if recommended_route == "equipment_analysis":
+        return (
+            f"{base} Запрос неоднозначный. Что вы хотите сделать?\n\n"
+            "1. Проверить, что из КП подходит под ТЗ\n"
+            "2. Просто сравнить документы\n"
+            "3. Задать вопрос по содержимому"
+        )
+    if recommended_route == "compare_documents":
+        return (
+            f"{base} Запрос неоднозначный. Что вы хотите сделать?\n\n"
+            "1. Сравнить документы\n"
+            "2. Проверить соответствие ТЗ и КП\n"
+            "3. Задать вопрос по содержимому"
+        )
+    return (
+        f"{base} Запрос неоднозначный. Что вы хотите сделать?\n\n"
+        "1. Задать вопрос по документам\n"
+        "2. Сравнить документы\n"
+        "3. Проверить соответствие ТЗ и КП"
+    )
+
+
+def _build_route_choice_state(
+    query: str,
+    recommended_route: str,
+    new_files: List[Dict[str, Any]],
+    mode: str,
+) -> Dict[str, Any]:
+    if recommended_route == "equipment_analysis":
+        choices = {"1": "equipment_analysis", "2": "compare_documents", "3": "document_question"}
+    elif recommended_route == "compare_documents":
+        choices = {"1": "compare_documents", "2": "equipment_analysis", "3": "document_question"}
+    else:
+        choices = {"1": "document_question", "2": "compare_documents", "3": "equipment_analysis"}
+    return {
+        "query": query,
+        "new_files": copy.deepcopy(new_files),
+        "choices": choices,
+        "recommended_route": recommended_route,
+        "mode": mode,
+        "expires_at": time.time() + ROUTE_CHOICE_TIMEOUT_S,
+    }
+
+
+def _resolve_pending_route_choice(query: str, pending_choice: Optional[Dict[str, Any]]) -> Optional[str]:
+    if not pending_choice:
+        return None
+    if pending_choice.get("expires_at", 0) < time.time():
+        return None
+    choice = query.strip().lower()
+    if choice in ("отмена", "cancel"):
+        return "cancel"
+    return pending_choice.get("choices", {}).get(choice)
+
+
+def _get_classifier_result(query: str) -> Optional[Dict[str, Any]]:
+    classifier_result = None
+    rag = cl.user_session.get("rag_pipeline")
+    if rag and rag._classifier_initialized:
+        classifier_result = rag.classify_intent(query)
+    elif cl.user_session.get("intent_classifier"):
+        standalone = cl.user_session.get("intent_classifier")
+        try:
+            classifier_result = standalone.classify(query)
+        except Exception as e:
+            logger.warning(f"Standalone classifier error: {e}")
+    return classifier_result
+
+
+def _get_intent_decision(
+    query: str,
+    file_count: int = 0,
+    has_session_docs: bool = False,
+    session_docs: Optional[Dict[str, Any]] = None,
+    classifier_result: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    query_lower = query.lower().strip()
+    session_docs = session_docs if session_docs is not None else (_get_session_docs() if has_session_docs else {})
+    has_session_docs = has_session_docs or bool(session_docs)
+    total_docs = max(file_count, len(session_docs))
+    two_docs = total_docs >= 2
+    single_doc = total_docs == 1
+    classifier_result = classifier_result if classifier_result is not None else _get_classifier_result(query)
+
+    compare_signal = _has_any_keyword(query_lower, _COMPARE_QUERY_KEYWORDS)
+    equipment_signal = _has_any_keyword(query_lower, _EQUIPMENT_QUERY_KEYWORDS)
+    doc_question_signal = _has_any_keyword(query_lower, _DOC_QUESTION_KEYWORDS)
+
+    mode = None
+    if two_docs and session_docs:
+        docs = _get_last_session_docs(session_docs, count=2)
+        if len(docs) == 2:
+            mode = _detect_equipment_mode(
+                docs[0]["name"],
+                docs[1]["name"],
+                query,
+                text_1=docs[0].get("text", "")[:1000],
+                text_2=docs[1].get("text", "")[:1000],
+            )
+
+    if two_docs and mode == "tz_vs_smeta" and equipment_signal:
+        if classifier_result and classifier_result.get("intent") == "equipment_analysis" and not _is_low_confidence(classifier_result):
+            return {
+                "intent": "equipment_analysis",
+                "requires_choice": False,
+                "confidence": classifier_result.get("confidence", 0.0),
+                "margin": classifier_result.get("margin", 0.0),
+                "reason": "tz_vs_smeta_high_confidence",
+            }
+        return {
+            "intent": "equipment_analysis",
+            "requires_choice": True,
+            "recommended_route": "equipment_analysis",
+            "confidence": (classifier_result or {}).get("confidence", 0.0),
+            "margin": (classifier_result or {}).get("margin", 0.0),
+            "reason": "tz_vs_smeta_ambiguous",
+            "mode": mode or "tz_vs_smeta",
+        }
+
+    if classifier_result:
+        intent = classifier_result["intent"]
+        needs_rag = classifier_result["needs_rag"]
+        low_confidence = _is_low_confidence(classifier_result)
+
+        if intent == "document_analysis":
+            if not single_doc:
+                if two_docs:
+                    intent = "document_question"
+                else:
+                    intent = "general_chat"
+            elif not (file_count >= 1 or has_session_docs):
+                intent = "general_chat"
+
+        if two_docs and low_confidence and compare_signal and not equipment_signal:
+            return {
+                "intent": "compare_documents",
+                "requires_choice": True,
+                "recommended_route": "compare_documents",
+                "confidence": classifier_result.get("confidence", 0.0),
+                "margin": classifier_result.get("margin", 0.0),
+                "reason": "compare_ambiguous",
+                "mode": mode or "unknown",
+            }
+
+        if has_session_docs and needs_rag and intent not in ("compare_documents", "equipment_analysis", "document_analysis"):
+            intent = "document_question"
+
+        return {
+            "intent": intent,
+            "requires_choice": False,
+            "confidence": classifier_result.get("confidence", 0.0),
+            "margin": classifier_result.get("margin", 0.0),
+            "reason": "semantic_router",
+        }
+
+    return {
+        "intent": _detect_intent(query, file_count=file_count, has_session_docs=has_session_docs),
+        "requires_choice": False,
+        "confidence": 0.0,
+        "margin": 0.0,
+        "reason": "minimal_fallback",
+    }
 
 
 # === File Loading ===
@@ -242,26 +498,242 @@ async def _stream_response(prompt: str, msg: cl.Message, history: List):
     Chainlit -> UMS -> llama-server даёт GeneratorExit/cancel-scope
     ошибки в httpcore/anyio. Для UI-чата используем обычный infer.
     """
+    msg.content = await _infer_assistant_text(prompt)
+
+    await msg.send()
+    history.append({"role": "assistant", "content": msg.content})
+
+
+async def _infer_assistant_text(prompt: str, temperature: float = 0.7) -> str:
     try:
         response = await asyncio.to_thread(
             ums_client.infer,
             "qwen-14b-llm",
-            {"prompt": prompt, "temperature": 0.7},
+            {"prompt": prompt, "temperature": temperature},
         )
-        msg.content = response.get("choices", [{}])[0].get("text", str(response))
+        return response.get("choices", [{}])[0].get("text", str(response))
     except Exception:
         try:
             logger.warning("Direct chat infer failed, retrying sync inference", exc_info=True)
             response = ums_client.infer(
-                "qwen-14b-llm", {"prompt": prompt, "temperature": 0.7}
+                "qwen-14b-llm", {"prompt": prompt, "temperature": temperature}
             )
-            content = response.get("choices", [{}])[0].get("text", str(response))
-            msg.content = content
+            return response.get("choices", [{}])[0].get("text", str(response))
         except Exception as e:
-            msg.content = f"Ошибка генерации: {e}"
+            return f"Ошибка генерации: {e}"
 
-    await msg.send()
-    history.append({"role": "assistant", "content": msg.content})
+
+def _needs_doc_question_regen(answer_text: str, has_session_docs: bool) -> bool:
+    if not has_session_docs:
+        return False
+    text = (answer_text or "").lower()
+    if any(phrase in text for phrase in _DOC_QUESTION_UPLOAD_REQUEST_PHRASES):
+        return True
+    # Более общий guard: модель уходит в "уточните/пришлите содержание", хотя контекст уже передан.
+    if "уточните" in text and ("содержан" in text or "текст" in text or "требован" in text):
+        return True
+    if "не могу предоставить точный ответ" in text and ("уточните" in text or "предостав" in text):
+        return True
+    return False
+
+
+def _normalize_quote(text: str, max_len: int = 320) -> str:
+    flat = " ".join((text or "").split())
+    if len(flat) <= max_len:
+        return flat
+    return flat[:max_len].rsplit(" ", 1)[0] + "..."
+
+
+def _normalize_score_minmax(raw: float, min_score: float, max_score: float) -> float:
+    if max_score <= min_score:
+        return 1.0 if raw == max_score else 0.8
+    return max(0.0, min(1.0, (raw - min_score) / (max_score - min_score)))
+
+
+def _build_sources_from_rag_result(rag_result: Any, rag_pipeline: Any, max_sources: int = 5) -> List[SourceRef]:
+    chunks = list(getattr(rag_result, "chunks", []) or [])[:max_sources]
+    if not chunks:
+        return []
+
+    all_raw_scores = [float(c.score) for c in chunks]
+    min_score = min(all_raw_scores)
+    max_score = max(all_raw_scores)
+    all_chunk_meta = list(getattr(rag_pipeline, "_chunks", []) or [])
+
+    sources: List[SourceRef] = []
+    for idx, c in enumerate(chunks, 1):
+        chunk_id = int(getattr(c, "index", -1))
+        chunk_obj = all_chunk_meta[chunk_id] if 0 <= chunk_id < len(all_chunk_meta) else None
+        meta = getattr(chunk_obj, "metadata", {}) if chunk_obj is not None else {}
+        start_char = getattr(chunk_obj, "start_char", None) if chunk_obj is not None else None
+        end_char = getattr(chunk_obj, "end_char", None) if chunk_obj is not None else None
+        sources.append(
+            {
+                "source_id": idx,
+                "document_id": str(meta.get("doc_name", f"doc_{chunk_id}" if chunk_id >= 0 else "unknown")),
+                "chunk_id": chunk_id,
+                "char_span": {"start_char": start_char, "end_char": end_char},
+                "page": None,
+                "quote": _normalize_quote(getattr(c, "text", "")),
+                "raw_score": float(getattr(c, "score", 0.0)),
+                "normalized_score": _normalize_score_minmax(float(getattr(c, "score", 0.0)), min_score, max_score),
+                "grade": getattr(c, "metadata", {}).get("grade"),
+                "z_score": getattr(c, "metadata", {}).get("z_score"),
+            }
+        )
+    return sources
+
+
+def _extract_citation_ids(answer_text: str) -> List[int]:
+    return [int(m.group(1)) for m in re.finditer(r"\[(\d+)\]", answer_text or "")]
+
+
+def _citations_are_valid(answer_text: str, source_count: int) -> bool:
+    cited = _extract_citation_ids(answer_text)
+    if not cited:
+        return False
+    return all(1 <= cid <= source_count for cid in cited)
+
+
+def _is_multihop_query(query: str) -> bool:
+    query_lower = (query or "").lower()
+    markers = ["сравни", "сопостав", "что подходит", "какие отличия", "и ", " vs ", " между "]
+    return any(m in query_lower for m in markers)
+
+
+def _has_sufficient_evidence(
+    sources: List[SourceRef],
+    mode: str,
+    query: str,
+    citations_valid: bool,
+) -> bool:
+    if not citations_valid:
+        return False
+    min_chunks = DOC_QA_MIN_CHUNKS_MULTIHOP if _is_multihop_query(query) else DOC_QA_MIN_CHUNKS_SIMPLE
+    if len(sources) < min_chunks:
+        return False
+
+    top = sources[0]
+    raw_top = float(top.get("raw_score", 0.0))
+    z_top = top.get("z_score")
+    grade_top = (top.get("grade") or "").lower()
+    mode = (mode or "simple").lower()
+
+    if mode in ("corrective", "agentic"):
+        if z_top is not None:
+            return float(z_top) >= DOC_QA_MIN_ZSCORE_CORRECTIVE
+        return grade_top in ("excellent", "good") or raw_top >= DOC_QA_MIN_RAW_SCORE_SIMPLE
+    return raw_top >= DOC_QA_MIN_RAW_SCORE_SIMPLE
+
+
+def _confidence_label(value: float) -> Literal["high", "medium", "low"]:
+    if value >= 0.75:
+        return "high"
+    if value >= 0.5:
+        return "medium"
+    return "low"
+
+
+def _compute_confidence_v1(
+    sources: List[SourceRef],
+    cited_ids: List[int],
+    answer_mode: Literal["grounded_answer", "insufficient_evidence"],
+) -> tuple[float, Literal["high", "medium", "low"]]:
+    cited_sources = [s for s in sources if s["source_id"] in cited_ids] if cited_ids else []
+    if not cited_sources:
+        base = 0.2
+    else:
+        avg_raw = sum(float(s.get("raw_score", 0.0)) for s in cited_sources) / len(cited_sources)
+        avg_norm = sum(float(s.get("normalized_score", 0.0)) for s in cited_sources) / len(cited_sources)
+        good_bonus = 0.08 if any((s.get("grade") or "").lower() in ("good", "excellent") for s in cited_sources) else 0.0
+        base = max(0.0, min(1.0, 0.25 + 0.35 * avg_norm + 0.30 * avg_raw + good_bonus))
+
+    if answer_mode == "insufficient_evidence":
+        base = min(base, 0.35)
+    return base, _confidence_label(base)
+
+
+def _build_doc_question_deterministic_fallback(
+    query: str,
+    sources: List[SourceRef],
+    fallback_type: Literal["citation_validation_failed", "insufficient_evidence"],
+) -> DocQuestionResponse:
+    top_sources = sources[:2]
+    if top_sources:
+        lines = [
+            f"По запросу «{query}» в найденных фрагментах есть только следующие подтверждённые данные:",
+        ]
+        for s in top_sources:
+            lines.append(f"- [{s['source_id']}] {s['quote']}")
+        lines.append("Данных недостаточно для точного вывода без дополнительных подтверждений.")
+        answer_text = "\n".join(lines)
+    else:
+        answer_text = (
+            f"По запросу «{query}» в текущем контексте загруженных документов "
+            "недостаточно подтверждённых данных для точного вывода."
+        )
+
+    confidence, label = _compute_confidence_v1(sources, [], "insufficient_evidence")
+    return {
+        "answer_text": answer_text,
+        "sources": sources,
+        "answer_mode": "insufficient_evidence",
+        "fallback_type": fallback_type,
+        "fallback_reason": "Недостаточно подтверждённых данных или невалидный citation-ответ модели.",
+        "confidence": confidence,
+        "confidence_label": label,
+        "confidence_method": "heuristic_v1",
+        "confidence_version": "1",
+    }
+
+
+def _build_doc_question_prompt_with_sources(query: str, history: List, sources: List[SourceRef]) -> str:
+    lines = []
+    for s in sources:
+        span = s["char_span"]
+        lines.append(
+            f"[{s['source_id']}] doc={s['document_id']} chunk={s['chunk_id']} "
+            f"span=({span.get('start_char')},{span.get('end_char')}) quote={s['quote']}"
+        )
+    catalog = "\n".join(lines)
+    system_msg = (
+        "Ты помощник Agent Navigator.\n"
+        "Отвечай только на основе CATALOG OF SOURCES.\n"
+        "Каждое фактическое утверждение помечай ссылками [n] из каталога.\n"
+        "Запрещено использовать ссылки вне диапазона каталога.\n"
+        "Если данных недостаточно, прямо скажи это и укажи ограничения, не выдумывай.\n"
+        "Не проси повторно загрузить документы/тексты.\n\n"
+        f"CATALOG OF SOURCES:\n{catalog}"
+    )
+    return _build_prompt(query, history, system_msg)
+
+
+def _render_doc_question_markdown(resp: DocQuestionResponse) -> str:
+    lines = [resp["answer_text"].strip(), "", "### Источники"]
+    if resp["sources"]:
+        for s in resp["sources"]:
+            score_pct = int(round(float(s["normalized_score"]) * 100))
+            lines.append(
+                f"- [{s['source_id']}] `{s['document_id']}` chunk={s['chunk_id']} "
+                f"span=({s['char_span'].get('start_char')},{s['char_span'].get('end_char')}) "
+                f"relevance={score_pct}% raw={s['raw_score']:.4f}"
+            )
+            lines.append(f"  Цитата: {s['quote']}")
+    else:
+        lines.append("- Источники не найдены.")
+    lines.extend(
+        [
+            "",
+            "### Надёжность",
+            f"- confidence: {resp['confidence']:.2f} ({resp['confidence_label']})",
+            f"- method: {resp['confidence_method']} v{resp['confidence_version']}",
+            f"- mode: {resp['answer_mode']}",
+            f"- fallback: {resp['fallback_type']}",
+        ]
+    )
+    if resp.get("fallback_reason"):
+        lines.append(f"- reason: {resp['fallback_reason']}")
+    return "\n".join(lines)
 
 
 # === Chainlit Handlers ===
@@ -395,6 +867,26 @@ async def on_message(message: cl.Message):
     history = _get_session_history()
     session_docs = _get_session_docs()
 
+    pending_choice = _get_pending_route_choice()
+    if pending_choice:
+        selected_route = _resolve_pending_route_choice(query, pending_choice)
+        if pending_choice.get("expires_at", 0) < time.time():
+            _set_pending_route_choice(None)
+        elif selected_route:
+            _set_pending_route_choice(None)
+            if selected_route == "cancel":
+                await cl.Message(content="Выбор отменён.").send()
+            else:
+                await _execute_intent(
+                    selected_route,
+                    pending_choice["query"],
+                    pending_choice.get("new_files", []),
+                    session_docs,
+                    history,
+                )
+            history.append({"role": "user", "content": query})
+            return
+
     # Обработка файлов
     new_files = []
     if message.elements:
@@ -459,9 +951,46 @@ async def on_message(message: cl.Message):
                         logger.error(f"RAG Re-indexing failed: {e}")
                         step.output = f"⚠️ Re-indexing failed: {e}"
 
-    # Роутинг
-    intent = _detect_intent(query, len(new_files), has_session_docs=bool(session_docs))
+    decision = _get_intent_decision(
+        query,
+        file_count=len(new_files),
+        has_session_docs=bool(session_docs),
+        session_docs=session_docs,
+    )
+    if decision.get("requires_choice"):
+        recommended_route = decision["recommended_route"]
+        prompt_text = _build_route_choice_prompt(recommended_route, decision.get("mode", "unknown"))
+        state = _build_route_choice_state(query, recommended_route, new_files, decision.get("mode", "unknown"))
+        response = await cl.AskActionMessage(
+            content=prompt_text,
+            actions=[
+                cl.Action(name="route_choice", payload={"route": state["choices"]["1"]}, label="1"),
+                cl.Action(name="route_choice", payload={"route": state["choices"]["2"]}, label="2"),
+                cl.Action(name="route_choice", payload={"route": state["choices"]["3"]}, label="3"),
+                cl.Action(name="route_choice", payload={"route": "cancel"}, label="Отмена"),
+            ],
+            timeout=ROUTE_CHOICE_TIMEOUT_S,
+            raise_on_timeout=False,
+        ).send()
+        if response and response.get("payload", {}).get("route"):
+            await _execute_intent(response["payload"]["route"], query, new_files, session_docs, history)
+        else:
+            _set_pending_route_choice(state)
+            await cl.Message(
+                content=(
+                    "Не дождался выбора. Ответьте сообщением: "
+                    "1 — первый вариант, 2 — второй, 3 — третий, или 'отмена'."
+                )
+            ).send()
+            history.append({"role": "user", "content": query})
+            return
+    else:
+        await _execute_intent(decision["intent"], query, new_files, session_docs, history)
 
+    history.append({"role": "user", "content": query})
+
+
+async def _execute_intent(intent: str, query: str, new_files: List, session_docs: Dict, history: List):
     if intent == "compare_documents":
         await _handle_compare(query, new_files, session_docs)
     elif intent == "equipment_analysis":
@@ -472,8 +1001,6 @@ async def on_message(message: cl.Message):
         await _handle_doc_question(query, session_docs, history)
     else:
         await _handle_chat(query, session_docs, history)
-
-    history.append({"role": "user", "content": query})
 
 
 # === Workflow: Сравнение документов ===
@@ -776,58 +1303,125 @@ async def _handle_document_analysis(query: str, new_files: List, session_docs: D
 # === Document Question (RAG) ===
 
 async def _handle_doc_question(query: str, session_docs: Dict, history: List):
-    """Вопрос по документам через AdaptiveRAGPipeline с fallback на naive stuffing."""
+    """Вопрос по документам с inline citations, sources-блоком и evidence-policy."""
 
     rag = cl.user_session.get("rag_pipeline")
-    context_text = ""
+    rag_result = None
+    rag_meta: Dict[str, Any] = {}
+    rag_mode = "simple"
 
     if rag and rag._indexed:
         async with cl.Step(name="Поиск по документам", type="retrieval") as step:
             try:
-                # embed_fn делает sync HTTP → выносим в thread
-                result = await asyncio.to_thread(rag.retrieve, query)
-                context_text = result.context_text
-                n_chunks = len(result.chunks)
-                meta = result.metadata or {}
-                intent = result.intent or {}
+                rag_result = await asyncio.to_thread(rag.retrieve, query)
+                rag_meta = rag_result.metadata or {}
+                rag_mode = str(rag_meta.get("mode", "simple"))
+                intent = rag_result.intent or {}
+                found_chunks = len(rag_result.chunks or [])
                 step.output = (
-                    f"Найдено {n_chunks} релевантных фрагментов "
-                    f"(mode: {meta.get('mode', '?')}, "
+                    f"Найдено {found_chunks} релевантных фрагментов "
+                    f"(mode: {rag_meta.get('mode', '?')}, "
                     f"intent: {intent.get('intent', '?')}, "
                     f"confidence: {intent.get('confidence', 0):.2f})"
                 )
             except Exception as e:
                 logger.warning(f"RAG retrieve failed, falling back to naive: {e}")
-                context_text = ""  # fallback ниже
+                rag_result = None
 
-    # Fallback: naive context stuffing (RAG не инициализирован, не проиндексирован, или упал)
-    if not context_text and session_docs:
-        async with cl.Step(name="Контекст документов", type="retrieval") as step:
-            total = 0
-            max_chars = 16000
-            for fname, doc_info in session_docs.items():
-                text = doc_info.get("text", "")
-                remaining = max_chars - total
-                if remaining <= 0:
-                    break
-                if len(text) > remaining:
-                    text = text[:remaining] + "..."
-                context_text += f"--- Документ: {fname} ---\n{text}\n\n"
-                total += len(text)
-            step.output = f"Контекст из {len(session_docs)} документов ({total} символов)"
-
-    if not context_text:
-        await cl.Message(content="Документы не содержат текста для анализа.").send()
+    if rag_result is None:
+        await cl.Message(
+            content=(
+                "По текущему запросу не удалось получить проверяемые источники из RAG. "
+                "Уточните формулировку или вопрос к конкретной позиции."
+            )
+        ).send()
         return
 
-    system_msg = (
-        "Ты помощник Agent Navigator. Отвечай на вопросы по документам.\n\n"
-        f"Контекст документов:\n{context_text}"
-    )
+    sources = _build_sources_from_rag_result(rag_result, rag)
+    if not sources:
+        fallback = _build_doc_question_deterministic_fallback(
+            query=query,
+            sources=[],
+            fallback_type="insufficient_evidence",
+        )
+        rendered = _render_doc_question_markdown(fallback)
+        msg = cl.Message(content=rendered)
+        await msg.send()
+        history.append({"role": "assistant", "content": rendered})
+        return
 
-    prompt = _build_prompt(query, history, system_msg)
-    msg = cl.Message(content="")
-    await _stream_response(prompt, msg, history)
+    prompt = _build_doc_question_prompt_with_sources(query, history, sources)
+    response_text = await _infer_assistant_text(prompt, temperature=0.3)
+    citations_valid = _citations_are_valid(response_text, source_count=len(sources))
+
+    if not citations_valid or _needs_doc_question_regen(response_text, has_session_docs=bool(session_docs)):
+        strict_prompt = _build_doc_question_prompt_with_sources(
+            query,
+            history,
+            sources,
+        ) + "\n\nЖЕСТКОЕ ПРАВИЛО: обязательно используй только валидные ссылки [n] из каталога."
+        response_text = await _infer_assistant_text(strict_prompt, temperature=0.2)
+        citations_valid = _citations_are_valid(response_text, source_count=len(sources))
+
+    if not citations_valid:
+        fallback = _build_doc_question_deterministic_fallback(
+            query=query,
+            sources=sources,
+            fallback_type="citation_validation_failed",
+        )
+        rendered = _render_doc_question_markdown(fallback)
+        logger.info(
+            "DocQuestion fallback: type=%s mode=%s sources=%s",
+            fallback["fallback_type"],
+            rag_mode,
+            len(sources),
+        )
+        msg = cl.Message(content=rendered)
+        await msg.send()
+        history.append({"role": "assistant", "content": rendered})
+        return
+
+    cited_ids = _extract_citation_ids(response_text)
+    has_evidence = _has_sufficient_evidence(
+        sources=sources,
+        mode=rag_mode,
+        query=query,
+        citations_valid=True,
+    )
+    if not has_evidence:
+        payload = _build_doc_question_deterministic_fallback(
+            query=query,
+            sources=sources,
+            fallback_type="insufficient_evidence",
+        )
+    else:
+        confidence, label = _compute_confidence_v1(sources, cited_ids, "grounded_answer")
+        payload: DocQuestionResponse = {
+            "answer_text": response_text,
+            "sources": sources,
+            "answer_mode": "grounded_answer",
+            "fallback_type": "none",
+            "fallback_reason": None,
+            "confidence": confidence,
+            "confidence_label": label,
+            "confidence_method": "heuristic_v1",
+            "confidence_version": "1",
+        }
+
+    logger.info(
+        "DocQuestion result: mode=%s chunks=%s citations=%s answer_mode=%s fallback=%s top_raw=%.4f conf=%.2f",
+        rag_mode,
+        len(sources),
+        len(cited_ids),
+        payload["answer_mode"],
+        payload["fallback_type"],
+        float(sources[0]["raw_score"]) if sources else 0.0,
+        payload["confidence"],
+    )
+    rendered = _render_doc_question_markdown(payload)
+    msg = cl.Message(content=rendered)
+    await msg.send()
+    history.append({"role": "assistant", "content": rendered})
 
 
 # === General Chat ===

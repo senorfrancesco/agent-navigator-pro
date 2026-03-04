@@ -1179,8 +1179,6 @@ SAME — без изменений, PRICE_CHANGE — изменилась цен
 
 async def generate_equipment_report_node(state: EquipmentState) -> dict:
     """Node 4: Генерация Markdown отчёта с сохранением и дедупликацией."""
-    import glob as glob_mod
-
     name_1 = state.get("name_1") or os.path.basename(state["input_1"])
     name_2 = state.get("name_2") or os.path.basename(state["input_2"])
     mode = state.get("mode", "tz_vs_smeta")
@@ -1218,6 +1216,21 @@ async def generate_equipment_report_node(state: EquipmentState) -> dict:
     report += f"**Извлечено позиций:** из документа 1: {len(items_1)}, из документа 2: {len(items_2)}\n\n"
 
     if results:
+        def _md_cell(value: Any) -> str:
+            text = str(value or "-").strip()
+            if not text:
+                text = "-"
+            text = text.replace("\r\n", "\n").replace("\r", "\n")
+            text = text.replace("|", "\\|").replace("\n", "<br>")
+            return text
+
+        def _md_block(value: Any) -> str:
+            text = str(value or "-").strip()
+            if not text:
+                text = "-"
+            text = text.replace("\r\n", "\n").replace("\r", "\n")
+            return text.replace("|", "\\|")
+
         # Подсчёт статусов
         status_counts = {}
         for r in results:
@@ -1247,14 +1260,37 @@ async def generate_equipment_report_node(state: EquipmentState) -> dict:
         for idx, r in enumerate(results, 1):
             i1 = r.get("item_1") or {}
             i2 = r.get("item_2") or {}
-            name1 = i1.get("name", "-")[:60]
-            name2 = i2.get("name", "-")[:60]
+            name1 = _md_cell(i1.get("name", "-"))
+            name2 = _md_cell(i2.get("name", "-"))
             status = r.get("result", "?")
             icon = _ICONS.get(status, "❓")
-            reason = r.get("reason", "")[:80]
+            reason = _md_cell(r.get("reason", ""))
             report += f"| {idx} | {name1} | {name2} | {icon} {status} | {reason} |\n"
 
         report += "\n"
+        report += "## Полные детали по позициям\n\n"
+
+        for idx, r in enumerate(results, 1):
+            i1 = r.get("item_1") or {}
+            i2 = r.get("item_2") or {}
+            status = r.get("result", "?")
+            icon = _ICONS.get(status, "❓")
+            similarity = r.get("similarity")
+
+            report += f"### {idx}. {icon} {status}\n\n"
+            report += f"- **Позиция 1:** {_md_block(i1.get('name', '-'))}\n"
+            report += f"- **Позиция 2:** {_md_block(i2.get('name', '-'))}\n"
+
+            specs_1 = i1.get("specs")
+            specs_2 = i2.get("specs")
+            if specs_1:
+                report += f"- **Характеристики 1:** {_md_block(specs_1)}\n"
+            if specs_2:
+                report += f"- **Характеристики 2:** {_md_block(specs_2)}\n"
+            if similarity is not None:
+                report += f"- **Similarity:** {similarity}\n"
+
+            report += f"- **Примечание:** {_md_block(r.get('reason', ''))}\n\n"
 
     # Сохранение в файл через общую утилиту
     try:

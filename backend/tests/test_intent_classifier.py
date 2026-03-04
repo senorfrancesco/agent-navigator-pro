@@ -29,6 +29,8 @@ TEST_QUERIES = [
     ("Найди в файле информацию о сроках", "document_question", True),
     ("Проанализируй смету", "equipment_analysis", True),
     ("Проверь оборудование по ТЗ", "equipment_analysis", True),
+    ("Что нам подходит из коммерческого предложения", "equipment_analysis", True),
+    ("Что из КП соответствует ТЗ", "equipment_analysis", True),
     ("Что ты умеешь", "general_chat", False),
     ("Помоги мне", "general_chat", False),
 ]
