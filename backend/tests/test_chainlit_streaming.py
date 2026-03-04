@@ -82,6 +82,12 @@ class TestStreamResponse:
         assert msg.content == "direct infer response"
         assert history[-1]["content"] == "direct infer response"
 
+    def test_build_rag_budget_uses_effective_context_tokens(self):
+        budget = self._module._build_rag_budget(8000, override_top_k=None)
+        assert budget["effective_context_tokens"] == 8000
+        assert budget["max_context_chars"] >= 4000
+        assert 3 <= budget["top_k"] <= 15
+
     @pytest.mark.asyncio
     async def test_stream_response_retries_sync_on_threaded_infer_failure(self):
         msg = FakeMessage()

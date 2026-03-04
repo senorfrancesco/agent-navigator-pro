@@ -787,3 +787,30 @@
 - [x] **[2026-03-03 15:42]** Task #4: (без названия) — ✅ completed
 - [x] **[2026-03-03 15:42]** Task #2: (без названия) — ✅ completed
 - [x] **[2026-03-03 15:42]** Task #1: (без названия) — ✅ completed
+
+
+## v3.0 — Preflight Runtime Profile (2026-03-04)
+
+- [x] **P3.1 — Добавить минимальный preflight-каркас**  
+  Добавлен `scripts/preflight.py` с режимами `default/adaptive/manual`,
+  расчётом `effective_context_tokens` и генерацией `backend/.env.runtime`.
+
+- [x] **P3.2 — Подключить runtime-профиль в startup**  
+  `scripts/run_all.sh` теперь подгружает `backend/.env.runtime` поверх `backend/.env`.
+
+
+- [x] **P3.4 — UMS: effective context в runtime/status + Chainlit budgeting**  
+  Реализован расчёт `effective_context_tokens` в `unified_model_server.py` с учётом:
+  `ctx_size`, `-np` (parallel slots) и guardrail cap (`RUNTIME_CONTEXT_HARD_CAP` / `EFFECTIVE_CONTEXT_HARD_CAP`).
+  Значение сохраняется в `state["effective_context_tokens"]` и отдаётся в `/status` вместе с runtime-деталями.
+  Chainlit теперь использует `/status.effective_context_tokens` как источник budget для RAG (`top_k` + `max_context_chars`),
+  а `rag_mode` остаётся из tier/override.
+
+- [x] **P3.5 — Workaround: fallback budget при недоступном UMS/status**  
+  Временный fallback в Chainlit: если `/status` недоступен, используется env `EFFECTIVE_CONTEXT_TOKENS` (default 4096)
+  и вычисляется безопасный budget локально. Это сохранено как soft-fallback, основной источник истины — UMS `/status`.
+
+- [x] **P3.3 — Follow-up: UMS `/status` должен отдавать `effective_context_tokens`**  
+  Временный workaround: до внедрения в UMS orchestrator может читать `EFFECTIVE_CONTEXT_TOKENS`
+  из runtime env; это нужно заменить на единый источник истины в `UMS /status`.
+

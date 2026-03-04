@@ -94,21 +94,57 @@ class DocQuestionResponse(TypedDict):
     confidence_version: Literal["1"]
 
 
-# === RAG Mode Helper ===
+# === RAG Runtime Helper ===
 
-async def _get_rag_mode() -> str:
-    """Определяет RAG mode: из env override или из UMS tier config."""
-    override = os.getenv("RAG_MODE_OVERRIDE", "auto")
-    if override != "auto":
-        return override
+
+def _build_rag_budget(effective_context_tokens: Optional[int], override_top_k: Optional[int] = None) -> Dict[str, int]:
+    """Строит RAG budget из effective context, с безопасными границами."""
+    tokens = int(effective_context_tokens or int(os.getenv("EFFECTIVE_CONTEXT_TOKENS", "4096")))
+    chars_per_token = max(1, int(os.getenv("RAG_CHARS_PER_TOKEN", "4")))
+    rag_ratio = float(os.getenv("RAG_CONTEXT_RATIO", "0.60"))
+    target_chunk_chars = max(200, int(os.getenv("RAG_TARGET_CHUNK_CHARS", "1200")))
+
+    max_context_chars = int(tokens * chars_per_token * rag_ratio)
+    max_context_chars = max(4000, min(max_context_chars, 96000))
+
+    if override_top_k is not None:
+        top_k = max(1, min(int(override_top_k), 20))
+    else:
+        top_k = max(3, min(max_context_chars // target_chunk_chars, 15))
+
+    return {
+        "effective_context_tokens": tokens,
+        "max_context_chars": max_context_chars,
+        "top_k": top_k,
+    }
+
+
+async def _get_rag_runtime_config() -> Dict[str, Any]:
+    """Возвращает runtime-конфиг RAG из UMS /status: mode + budget."""
+    override_mode = os.getenv("RAG_MODE_OVERRIDE", "auto")
+    override_top_k_raw = os.getenv("RAG_RETRIEVAL_TOP_K")
+    override_top_k = int(override_top_k_raw) if (override_top_k_raw and override_top_k_raw.isdigit()) else None
+
+    runtime = {
+        "rag_mode": "simple",
+        "effective_context_tokens": int(os.getenv("EFFECTIVE_CONTEXT_TOKENS", "4096")),
+    }
+
     try:
         ums_url = os.getenv("UMS_URL", "http://localhost:8090")
         client = await get_shared_client()
         resp = await client.get(f"{ums_url}/status", timeout=5.0)
         data = resp.json()
-        return data.get("tier", {}).get("rag_mode", "simple")
+        runtime["rag_mode"] = data.get("tier", {}).get("rag_mode", runtime["rag_mode"])
+        runtime["effective_context_tokens"] = data.get("effective_context_tokens") or runtime["effective_context_tokens"]
     except Exception:
-        return "simple"
+        pass
+
+    if override_mode != "auto":
+        runtime["rag_mode"] = override_mode
+
+    runtime.update(_build_rag_budget(runtime.get("effective_context_tokens"), override_top_k=override_top_k))
+    return runtime
 
 
 # === Authentication ===
@@ -848,8 +884,13 @@ async def on_chat_resume(thread):
                     from services.model_manager.ums_client import create_ums_embed_fn
                     
                     embed_fn = create_ums_embed_fn()
-                    rag_mode = await _get_rag_mode()
-                    rag = AdaptiveRAGPipeline(embed_fn=embed_fn, rag_mode=rag_mode)
+                    rag_runtime = await _get_rag_runtime_config()
+                    rag = AdaptiveRAGPipeline(
+                        embed_fn=embed_fn,
+                        rag_mode=rag_runtime["rag_mode"],
+                        top_k=rag_runtime["top_k"],
+                        max_context_chars=rag_runtime["max_context_chars"],
+                    )
                     
                     all_texts = [d["text"] for d in session_docs.values()]
                     all_names = [n for n in session_docs.keys()]
@@ -921,17 +962,26 @@ async def on_message(message: cl.Message):
                 from services.model_manager.ums_client import create_ums_embed_fn
 
                 embed_fn = create_ums_embed_fn()
-                rag_mode = await _get_rag_mode()
+                rag_runtime = await _get_rag_runtime_config()
                 search_type = "BM25+Dense (hybrid)" if embed_fn else "BM25-only"
 
-                rag = AdaptiveRAGPipeline(embed_fn=embed_fn, rag_mode=rag_mode)
+                rag = AdaptiveRAGPipeline(
+                    embed_fn=embed_fn,
+                    rag_mode=rag_runtime["rag_mode"],
+                    top_k=rag_runtime["top_k"],
+                    max_context_chars=rag_runtime["max_context_chars"],
+                )
                 all_texts = [d["text"] for d in session_docs.values() if d.get("text")]
                 all_names = [n for n, d in session_docs.items() if d.get("text")]
                 if all_texts:
                     # TD-3: Выносим тяжелую индексацию в поток, чтобы не блокировать event loop
                     try:
                         await asyncio.to_thread(rag.index_documents, all_texts, doc_names=all_names)
-                        step.output = f"RAG: mode={rag_mode}, search={search_type}, indexed {len(all_texts)} docs"
+                        step.output = (
+                            f"RAG: mode={rag_runtime['rag_mode']}, search={search_type}, "
+                            f"top_k={rag_runtime['top_k']}, ctx≈{rag_runtime['effective_context_tokens']} tok, "
+                            f"indexed {len(all_texts)} docs"
+                        )
                     except Exception as e:
                         logger.error(f"RAG Indexing failed: {e}")
                         step.output = f"⚠️ RAG Indexing failed: {e}. Falling back to non-RAG mode."

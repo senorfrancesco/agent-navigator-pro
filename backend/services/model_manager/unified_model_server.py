@@ -91,7 +91,9 @@ state = {
     "active_model": None, # Последняя запрошенная "тяжелая" модель
     "processes": {},      # model_id -> process
     "device_mode": DeviceMode.HYBRID,
-    "dynamic_ports": 8100 # Начальный порт для динамических моделей
+    "dynamic_ports": 8100, # Начальный порт для динамических моделей
+    "model_runtime": {},   # model_id -> runtime info (ctx/parallel/effective)
+    "effective_context_tokens": None,
 }
 _model_start_locks: Dict[str, threading.Lock] = {}
 _model_start_locks_guard = threading.Lock()
@@ -118,6 +120,69 @@ def _get_gpu_info() -> List[Dict[str, Any]]:
 
 def _get_available_vram() -> float:
     return sum(gpu["free_gb"] for gpu in _get_gpu_info())
+
+
+def _to_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+        return value if value > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _get_llm_parallel_slots() -> int:
+    env_slots = _to_int_env("LLAMA_PARALLEL_SLOTS", 0)
+    if env_slots <= 0:
+        env_slots = _to_int_env("LLAMA_SERVER_PARALLEL", 0)
+
+    tier_slots = 1
+    tier_config = state.get("tier_config")
+    if tier_config is not None:
+        tier_slots = max(1, int(getattr(tier_config, "max_concurrent_llm", 1)))
+
+    if env_slots > 0:
+        return env_slots
+    return tier_slots
+
+
+def _get_context_hard_cap() -> int:
+    cap = _to_int_env("RUNTIME_CONTEXT_HARD_CAP", 0)
+    if cap <= 0:
+        cap = _to_int_env("EFFECTIVE_CONTEXT_HARD_CAP", 0)
+    if cap > 0:
+        return cap
+
+    tier_config = state.get("tier_config")
+    if tier_config is not None and int(getattr(tier_config, "tier", 0)) >= 4:
+        return 32768
+    return 16384
+
+
+def _compute_effective_context_tokens(ctx_size: int, parallel_slots: int, hard_cap: int) -> int:
+    slots = max(1, parallel_slots)
+    per_request = max(1024, int(ctx_size) // slots)
+    return max(1024, min(per_request, max(1024, hard_cap)))
+
+
+def _update_effective_context_state(model_id: str, config: Dict[str, Any]) -> None:
+    if config.get("type") not in ["gguf", "gguf-vl"]:
+        return
+
+    ctx_size = int(config.get("ctx_size", 8192))
+    parallel_slots = _get_llm_parallel_slots()
+    hard_cap = _get_context_hard_cap()
+    effective_context_tokens = _compute_effective_context_tokens(ctx_size, parallel_slots, hard_cap)
+
+    state["model_runtime"][model_id] = {
+        "ctx_size": ctx_size,
+        "parallel_slots": parallel_slots,
+        "context_hard_cap": hard_cap,
+        "effective_context_tokens": effective_context_tokens,
+    }
+    state["effective_context_tokens"] = effective_context_tokens
 
 def resolve_model_path(path_str: str) -> str:
     path = Path(os.path.expanduser(path_str))
@@ -212,8 +277,10 @@ def _stop_model(model_id: str):
         except:
             try: os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except: pass
+        state["model_runtime"].pop(model_id, None)
         if state["active_model"] == model_id:
             state["active_model"] = None
+            state["effective_context_tokens"] = None
 
 def _stop_all_servers():
     for model_id in list(state["processes"].keys()):
@@ -275,6 +342,7 @@ def _start_server(model_id: str, device_mode: DeviceMode):
         existing_proc = state["processes"].get(model_id)
         if existing_proc is not None:
             if existing_proc.poll() is None:
+                _update_effective_context_state(model_id, config)
                 return  # Уже работает
             state["processes"].pop(model_id, None)
 
@@ -313,8 +381,10 @@ def _start_server(model_id: str, device_mode: DeviceMode):
                     raise
             raise RuntimeError(f"Failed to start {model_id}: {last_error}")
         else:
+            parallel_slots = _get_llm_parallel_slots()
             cmd = ["llama-server", "-m", model_path, "--port", str(config["port"]),
                    "--host", "0.0.0.0", "-c", str(config["ctx_size"]),
+                   "-np", str(parallel_slots),
                    "-ngl", str(config["gpu_layers"] if device_mode != DeviceMode.CPU else 0)]
             if n_gpu > 1 and device_mode != DeviceMode.CPU:
                 cmd.extend(["--tensor-split", ",".join(["1"] * n_gpu)])
@@ -327,6 +397,7 @@ def _start_server(model_id: str, device_mode: DeviceMode):
             state["processes"][model_id] = process
             if is_heavy:
                 state["active_model"] = model_id
+                _update_effective_context_state(model_id, config)
             return
         except Exception as e:
             logger.error(f"Start failed: {e}")
@@ -345,6 +416,16 @@ class EmbeddingRequest(BaseModel):
     input: Any  # str | List[str]
     model: str = "labse-embedding"
     encoding_format: Optional[str] = "float"
+
+def _get_llm_concurrency_limit() -> int:
+    configured = _to_int_env("MAX_CONCURRENT_LLM", 0)
+    if configured > 0:
+        return configured
+    tier_config = state.get("tier_config")
+    if tier_config is not None:
+        return max(1, int(getattr(tier_config, "max_concurrent_llm", 1)))
+    return 1
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -371,6 +452,11 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Hardware profiling failed, using defaults: {e}")
         state["system_profile"] = None
         state["tier_config"] = None
+
+    global _llm_semaphore
+    llm_concurrency = _get_llm_concurrency_limit()
+    _llm_semaphore = asyncio.Semaphore(llm_concurrency)
+    logger.info(f"LLM concurrency limit: {llm_concurrency}")
 
     # Предзагрузка Qwen LLM — убирает задержку перед первым запросом
     try:
@@ -467,11 +553,19 @@ async def get_status():
     if state.get("tier_config"):
         tc = state["tier_config"]
         tier_info = {"tier": tc.tier, "rag_mode": tc.rag_mode, "embedding_backend": tc.embedding_backend}
+
+    active_runtime = None
+    active_model = state.get("active_model")
+    if active_model:
+        active_runtime = state.get("model_runtime", {}).get(active_model)
+
     return {
-        "active_heavy_model": state["active_model"],
+        "active_heavy_model": active_model,
         "running": list(state["processes"].keys()),
         "vram_free_gb": _get_available_vram(),
         "tier": tier_info,
+        "effective_context_tokens": state.get("effective_context_tokens"),
+        "runtime": active_runtime,
     }
 
 @app.post("/v1/embeddings")

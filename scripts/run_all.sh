@@ -36,6 +36,14 @@ else
     echo -e "${YELLOW}Создайте .env из .env.example: cp .env.example .env${NC}"
 fi
 
+RUNTIME_ENV_FILE="$BACKEND_DIR/.env.runtime"
+if [ -f "$RUNTIME_ENV_FILE" ]; then
+    echo -e "${BLUE}Загрузка runtime-профиля из .env.runtime...${NC}"
+    set -a
+    source "$RUNTIME_ENV_FILE"
+    set +a
+fi
+
 # -------------------------------------------
 # Определение Conda окружения
 # -------------------------------------------
