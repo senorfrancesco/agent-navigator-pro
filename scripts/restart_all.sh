@@ -42,4 +42,4 @@ echo -e "${GREEN}  Порты свободны${NC}"
 # 3. Запуск
 echo ""
 echo -e "${YELLOW}--- Фаза 3: Запуск ---${NC}"
-"$SCRIPT_DIR/run_all.sh"
+"$SCRIPT_DIR/bootstrap.sh" --ui chainlit

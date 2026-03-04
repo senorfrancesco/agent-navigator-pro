@@ -787,3 +787,10 @@
 - [x] **[2026-03-03 15:42]** Task #4: (без названия) — ✅ completed
 - [x] **[2026-03-03 15:42]** Task #2: (без названия) — ✅ completed
 - [x] **[2026-03-03 15:42]** Task #1: (без названия) — ✅ completed
+
+### Ops/DevEx (2026-03-04)
+
+- [x] **D3.1 — Единый bootstrap для launcher-скриптов**
+  Добавлен `scripts/bootstrap.sh` с выбором UI-профиля `--ui chainlit|openwebui`.
+  Общая логика запуска вынесена в `scripts/lib/common.sh`, а `run_all.sh`/`run_openwebui.sh` оставлены как совместимые обёртки.
+  `restart_all.sh` переведён на вызов нового entrypoint.
