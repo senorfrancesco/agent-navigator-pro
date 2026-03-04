@@ -13,6 +13,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BACKEND_DIR="$PROJECT_ROOT/backend"
 ENV_FILE="$BACKEND_DIR/.env"
+RUNTIME_ENV_FILE="$BACKEND_DIR/.env.runtime"
 
 # Цвета для вывода
 RED='\033[0;31m'
@@ -24,9 +25,20 @@ NC='\033[0m' # No Color
 echo -e "${GREEN}=== Запуск системы Agent Navigator Pro v3.0 (Chainlit) ===${NC}"
 
 # -------------------------------------------
-# Загрузка переменных окружения из .env
+# Загрузка переменных окружения из .env.runtime (fallback: .env)
 # -------------------------------------------
-if [ -f "$ENV_FILE" ]; then
+if [ -f "$RUNTIME_ENV_FILE" ]; then
+    if [ -f "$ENV_FILE" ]; then
+        echo -e "${BLUE}Загрузка базовых переменных из .env...${NC}"
+        set -a
+        source "$ENV_FILE"
+        set +a
+    fi
+    echo -e "${BLUE}Загрузка runtime-переменных из .env.runtime...${NC}"
+    set -a
+    source "$RUNTIME_ENV_FILE"
+    set +a
+elif [ -f "$ENV_FILE" ]; then
     echo -e "${BLUE}Загрузка переменных из .env...${NC}"
     set -a
     source "$ENV_FILE"

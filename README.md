@@ -106,6 +106,19 @@ cp .env.example .env
 
 ### 4. Запуск системы
 
+Перед стартом сервисов можно (и рекомендуется) выполнить preflight:
+
+```bash
+./scripts/preflight.py --mode all --profile adaptive
+```
+
+Флаги preflight:
+
+- `--mode`: фаза выполнения (`all`, `detect`, `plan`, `apply`, `report`)
+- `--profile`: профиль расчёта (`default`, `adaptive`, `manual`)
+- `--non-interactive`: отключить интерактивные вопросы (актуально для CI/серверов)
+- `--yes`: автоматически принять default-значения в интерактивных шагах
+
 Рекомендуемый полный запуск:
 
 ```bash
@@ -114,6 +127,7 @@ cp .env.example .env
 
 Скрипт:
 
+- загружает `backend/.env.runtime` при наличии (fallback на `backend/.env`)
 - поднимает `tmux`-сессию `agent-navigator`
 - запускает `agent_api`, `document_server`, `legal_server`, `UMS`
 - поднимает `chainlit` через `docker compose`

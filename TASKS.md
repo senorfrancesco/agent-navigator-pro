@@ -205,6 +205,18 @@
 - [x] **B3.10 — Отчёт не сохранялся в контейнере**
   `compare.py`: путь через `__file__` заменён на `os.getenv("UPLOADS_DIR")` (`/app/uploads` в Docker).
 
+### Runtime preflight (2026-03-04)
+
+- [x] **R3.22 — Preflight-скрипт detect/plan/apply/report**
+  Добавлен `scripts/preflight.py` с фазами detect/plan/apply/report и записью в `backend/.env.runtime`.
+
+- [x] **R3.23 — run_all.sh: поддержка .env.runtime с fallback на .env**
+  Приоритет: `backend/.env.runtime` (поверх базового `.env`), fallback на `.env` если runtime-файл отсутствует.
+
+- [ ] **TD3.24 — Убрать обращение к private-методу TierSelector._build_config()**
+  В `scripts/preflight.py` пока используется `_build_config()` как временный workaround для принудительного выбора tier.
+  Follow-up: добавить публичный API в `TierSelector` для deterministic сборки конфигурации по tier.
+
 ### Backlog
 
 - [ ] **B3.11 — Убрать JSON salvage из DEBUG-POLISH**
