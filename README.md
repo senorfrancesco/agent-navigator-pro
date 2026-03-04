@@ -1,173 +1,248 @@
 # Agent Navigator Pro
 
-**Agent Navigator Pro** — это агентная система для анализа юридических документов и смет, построенная на микросервисной архитектуре. Проект использует локальные LLM (Qwen) и Embedding модели (LaBSE) для обеспечения приватности и безопасности данных.
+**Agent Navigator Pro** — агентная система для анализа документов, RAG-поиска, сравнения юридических актов и проверки соответствия ТЗ/КП. Основной пользовательский интерфейс проекта сейчас — **Chainlit** на порту `3000`. **Open WebUI** оставлен как legacy-вариант и запускается отдельным docker profile на порту `3001`.
 
-В качестве пользовательского интерфейса используется **Open WebUI**, работающий в Docker, который взаимодействует с Python-бэкендом на хосте через OpenAI-compatible API.
+## Архитектура
 
-## 🏗 Архитектура
+Система разделена на два слоя:
 
-Система разделена на два слоя: **Host Backend** (микросервисы) и **Docker Frontend** (Open WebUI).
+- Docker UI: `chainlit-ui`
+- Host backend: `agent_api`, `document_server`, `legal_server`, `unified_model_server`
 
 ```mermaid
 graph TD
-    subgraph Docker ["Docker Container"]
-        UI["Open WebUI (Port 3000)"]
+    subgraph Docker ["Docker"]
+        CL["Chainlit UI :3000"]
+        OW["Open WebUI (legacy) :3001"]
     end
-    
-    subgraph Host ["Local Host System"]
-        AG["Agent API (Port 8000)"]
-        W["Workflows (LangGraph)"]
-        
-        subgraph Services ["Microservices"]
-            DS["Document Server (8001)"]
-            LS["Legal Server (8002)"]
-            UMS["Unified Model Server (8090)"]
-        end
-        
-        subgraph Inference ["Inference Engines"]
-            LSVR["llama-server (Qwen)"]
-            ST["st_server (LaBSE)"]
-        end
+
+    subgraph Host ["Local Host"]
+        AG["Agent API :8000"]
+        ORCH["LangGraph Workflows"]
+        DS["Document Server :8001"]
+        LS["Legal Server :8002"]
+        UMS["Unified Model Server :8090"]
+        LLM["llama-server (Qwen)"]
+        ST["st_server (LaBSE)"]
     end
-    
+
     subgraph Storage ["Shared Storage"]
-        FS["backend/open_webui_uploads"]
+        UP["backend/open_webui_uploads"]
+        DB["Chainlit SQLite history"]
     end
-    
-    UI -- "OpenAI API (HTTP)" --> AG
-    UI -- "Bind Mount" --> FS
-    AG -- "Read Files" --> FS
-    
-    AG --> W
-    W --> DS
-    W --> LS
+
+    CL --> AG
+    OW --> AG
+    AG --> ORCH
+    ORCH --> DS
+    ORCH --> LS
     DS --> UMS
     LS --> UMS
-    UMS --> LSVR
+    UMS --> LLM
     UMS --> ST
+    CL --> UP
+    OW --> UP
+    AG --> UP
+    CL --> DB
 ```
 
-### Ключевые Компоненты
+## Основные компоненты
 
 | Компонент | Технология | Порт | Роль |
-| :--- | :--- | :--- | :--- |
-| **Open WebUI** | Docker | 3000 | Интерфейс чата, управление историей, загрузка файлов. |
-| **Agent API** | FastAPI | 8000 | Точка входа, совместимая с OpenAI. Оркестратор агентов. |
-| **Orchestrator** | LangGraph | - | Логика воркфлоу (`compare`, `equipment`). |
-| **Document Server** | FastAPI | 8001 | Парсинг документов (PDF, DOCX) с поддержкой OCR. |
-| **Legal Server** | FastAPI | 8002 | Юридический анализ, сравнение текстов (Batch Matching). |
-| **UMS** | FastAPI | 8090 | Единый сервер управления моделями. |
-| **ST Server** | FastAPI | 8093 | Сервер для SentenceTransformers (LaBSE). |
+| --- | --- | --- | --- |
+| `chainlit-ui` | Docker + Chainlit | `3000` | Основной интерфейс чата, history, шаги workflow, загрузка файлов |
+| `open-webui` | Docker + Open WebUI | `3001` | Legacy UI, запускается только через `--profile legacy` |
+| `agent_api` | FastAPI | `8000` | OpenAI-compatible entrypoint, маршрутизация в workflow |
+| `document_server` | FastAPI | `8001` | Парсинг PDF/DOCX, OCR, таблицы, чанки |
+| `legal_server` | FastAPI | `8002` | Batch matching и сравнение юридических документов |
+| `UMS` | FastAPI | `8090` | Управление моделями, `/infer`, `/v1/embeddings`, startup/fallback |
+| `llama-server` | llama.cpp | dynamic | Генерация LLM-ответов |
+| `st_server` | SentenceTransformers | `8093` | Embeddings для LaBSE |
 
-## 🚀 Быстрый Старт
+## Что умеет система
 
-### 1. Предварительные требования
+- обычный чат с локальной LLM
+- RAG-вопросы по загруженным документам
+- `document_analysis` для одиночного документа
+- `compare_documents` для двух юридических документов
+- `equipment_analysis` для ТЗ, смет и коммерческих предложений
+- сохранение markdown-отчётов в [`backend/open_webui_uploads`](backend/open_webui_uploads)
 
-*   **OS:** Linux (рекомендуется Ubuntu).
-*   **GPU:** NVIDIA GPU с драйверами и CUDA 12+ (протестировано на RTX 2070 x2).
-*   **Docker:** Установлен и настроен (с поддержкой `host-gateway`).
-*   **Conda:** Anaconda или Miniconda.
+## Быстрый старт
 
-### 2. Установка Бэкенда
+### 1. Требования
 
-1.  Создайте окружение Conda:
-    ```bash
-    conda create -n diploma_llm python=3.11
-    conda activate diploma_llm
-    ```
+- Linux
+- NVIDIA GPU и CUDA для основного LLM-path
+- Docker и Docker Compose
+- Conda или совместимое Python 3.11 окружение
 
-2.  Установите зависимости:
-    ```bash
-    cd backend
-    pip install -r requirements.txt
-    ```
-
-3.  Скачайте модели (Qwen, LaBSE) в папку `backend/models` (структура описана в `backend/models/README.md` или `.env.example`).
-
-4.  Настройте `.env`:
-    ```bash
-    cp .env.example .env
-    # Убедитесь, что пути к моделям верны
-    ```
-
-### 3. Запуск Системы
-
-Система запускается в два этапа: Бэкенд и Фронтенд.
-
-#### Шаг А: Запуск Бэкенда (на Хосте)
-
-Используйте скрипт `run_all.sh` (рекомендуется запускать в отдельном терминале):
+### 2. Установка backend-зависимостей
 
 ```bash
 cd backend
-./run_all.sh
+pip install -r requirements.txt
 ```
-*Этот скрипт запустит `tmux` сессию с 5 окнами для всех микросервисов.*
 
-#### Шаг Б: Запуск Open WebUI (в Docker)
-
-Запустите контейнер с монтированием папки загрузок, чтобы агент видел файлы:
+Если используешь `conda`:
 
 ```bash
-# Создаем папку для обмена файлами
-mkdir -p backend/open_webui_uploads
-chmod 777 backend/open_webui_uploads
-
-# Запускаем контейнер
-docker run -d -p 3000:8080 \
-  --add-host=host.docker.internal:host-gateway \
-  -v open-webui:/app/backend/data \
-  -v $(pwd)/backend/open_webui_uploads:/app/backend/data/uploads \
-  --name open-webui \
-  --restart always \
-  ghcr.io/open-webui/open-webui:main
+conda create -n diploma_llm python=3.11
+conda activate diploma_llm
+cd backend
+pip install -r requirements.txt
 ```
 
-### 4. Настройка Подключения
+### 3. Настройка `.env`
 
-1.  Откройте браузер: `http://localhost:3000`.
-2.  Создайте аккаунт администратора.
-3.  Перейдите в **Settings -> Admin Settings -> Connections**.
-4.  В разделе **OpenAI API**:
-    *   **URL:** `http://172.17.0.1:8000/v1` (или IP вашего `docker0` интерфейса).
-    *   **Key:** `sk-any-key` (любой текст).
-5.  Нажмите "Сохранить" и проверьте соединение.
-6.  В списке моделей должна появиться `agent-navigator`.
-
-## 💡 Использование
-
-1.  **Простой чат:** Выберите модель `agent-navigator` и общайтесь как с обычным ассистентом.
-2.  **Сравнение документов:**
-    *   Загрузите два файла (PDF, DOCX) через скрепку 📎.
-    *   Напишите: *"Сравни эти документы"* или *"Проанализируй юридические риски"*.
-    *   Агент автоматически найдет файлы в общей папке, запустит воркфлоу сравнения и выдаст подробный Markdown отчет.
-    *   Отчет также сохранится в папке `backend/open_webui_uploads`.
-3.  **Анализ сметы:**
-    *   Загрузите ТЗ и Смету.
-    *   Напишите: *"Проверь соответствие сметы техническому заданию"*.
-
-## 🛠 Разработка и Отладка
-
-*   **Логи:** Логи микросервисов доступны в `tmux` сессии (`tmux attach -t agent-navigator`) или в файлах `*.log` в папках сервисов.
-*   **Перезапуск API:** Если вы меняете код оркестратора, нужно перезапустить только `agent_api.py`.
-*   **Ошибки 500:** Чаще всего связаны с правами доступа к папке `backend/open_webui_uploads` или недоступностью UMS.
-
-## Структура Проекта
-
+```bash
+cd backend
+cp .env.example .env
 ```
+
+После этого проверь пути к моделям и сервисные переменные в `backend/.env.example`.
+
+### 4. Запуск системы
+
+Рекомендуемый полный запуск:
+
+```bash
+./scripts/run_all.sh
+```
+
+Скрипт:
+
+- поднимает `tmux`-сессию `agent-navigator`
+- запускает `agent_api`, `document_server`, `legal_server`, `UMS`
+- поднимает `chainlit` через `docker compose`
+
+### 5. Отдельный запуск Chainlit
+
+Если backend уже работает:
+
+```bash
+docker compose up -d chainlit
+docker compose logs --tail=200 -f chainlit
+```
+
+UI будет доступен на:
+
+- `http://localhost:3000`
+
+Legacy Open WebUI при необходимости:
+
+```bash
+docker compose --profile legacy up -d open-webui
+```
+
+Он будет доступен на:
+
+- `http://localhost:3001`
+
+## Типовые сценарии
+
+### RAG-вопрос по документу
+
+1. Загрузи файл в Chainlit
+2. Задай вопрос вроде:
+   `Какой гарантийный срок указан в документе?`
+
+### Анализ одного документа
+
+Задай:
+
+```text
+Проанализируй этот документ и кратко опиши его содержание.
+```
+
+### Сравнение двух юридических документов
+
+Загрузи 2 файла и задай:
+
+```text
+Сравни эти два юридических документа и выдели ключевые различия.
+```
+
+### Сравнение ТЗ и коммерческого предложения
+
+Загрузи 2 файла и задай:
+
+```text
+Сравни ТЗ и коммерческое предложение, проверь соответствие оборудования.
+```
+
+## Полезные команды
+
+Полный backend test suite без integration:
+
+```bash
+cd backend
+pytest tests/ -v -m "not integration"
+```
+
+Таргетные тесты по стабильности Chainlit/UMS:
+
+```bash
+pytest backend/tests/test_chainlit_streaming.py \
+  backend/tests/test_unified_model_server_streaming.py \
+  backend/tests/test_unified_model_server_startup.py -q
+```
+
+Статус контейнеров:
+
+```bash
+docker compose ps
+```
+
+Логи Chainlit:
+
+```bash
+docker compose logs --tail=200 chainlit
+```
+
+Подключение к `tmux`:
+
+```bash
+tmux attach -t agent-navigator
+```
+
+## Текущее состояние UI и runtime
+
+- основной UI: `Chainlit`
+- direct chat сейчас работает в **non-stream** режиме как production-safe default
+- `Open WebUI` сохранён как legacy path
+- локализация `ru-RU`, `chainlit.md`, логотип и аватар теперь обслуживаются из repo-side ресурсов
+- отчёты сохраняются в [`backend/open_webui_uploads`](backend/open_webui_uploads)
+
+## Структура проекта
+
+```text
 .
-├── backend/                           # Python Backend
-│   ├── orchestrator/                  # Agent API и LangGraph Workflows
-│   │   ├── agent_api.py               # Точка входа
-│   │   └── workflows/                 # Логика агентов (compare.py, equipment.py)
-│   ├── services/                      # Микросервисы
-│   │   ├── document_server/           # Работа с файлами
-│   │   ├── legal_server/              # Юридическая логика
-│   │   └── model_manager/             # UMS и ST Server
-│   ├── models/                        # Локальные модели (GGUF, ST)
-│   ├── open_webui_uploads/            # Общая папка с Docker
-│   └── run_all.sh                     # Скрипт запуска
-├── for_cli/                           # Логи контекста и отчеты
-├── docker-compose.yaml                # (Опционально)
-└── README.md                          # Этот файл
+├── backend/
+│   ├── orchestrator/
+│   │   ├── agent_api.py
+│   │   ├── chainlit_app.py
+│   │   ├── rag/
+│   │   └── workflows/
+│   ├── services/
+│   │   ├── document_server/
+│   │   ├── legal_server/
+│   │   ├── model_manager/
+│   │   └── hardware/
+│   ├── tests/
+│   ├── models/
+│   └── open_webui_uploads/
+├── docs/
+├── scripts/
+├── docker-compose.yaml
+├── Dockerfile.chainlit
+├── AGENTS.md
+├── TASKS.md
+└── README.md
 ```
+
+## Где смотреть дальше
+
+- backlog и техдолг: [`TASKS.md`](TASKS.md)
+- правила работы по репозиторию: [`AGENTS.md`](AGENTS.md)
+- модели: [`backend/models/README.md`](backend/models/README.md)
