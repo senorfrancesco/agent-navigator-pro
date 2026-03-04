@@ -12,6 +12,7 @@ import httpx
 import numpy as np
 from typing import Dict, Any, Optional, List, AsyncGenerator, Callable
 import json
+import random
 
 UMS_URL = os.getenv("UMS_URL", "http://localhost:8090")
 
@@ -75,12 +76,27 @@ class UMSClient:
             "device_mode": device_mode,
             "priority": "normal"
         }
-        retries = 3
+        retries = int(os.getenv("UMS_INFER_RETRIES", "5"))
+        base_delay_s = float(os.getenv("UMS_RETRY_BASE_DELAY_S", "1.5"))
+        max_delay_s = float(os.getenv("UMS_RETRY_MAX_DELAY_S", "12"))
+        timeout_s = float(os.getenv("UMS_INFER_TIMEOUT_S", "300"))
         last_error = None
+
+        def _should_retry(exc: Exception) -> bool:
+            # Повторяем при временных ошибках доступности/перегрузки модели.
+            if isinstance(exc, httpx.TimeoutException):
+                return True
+            if isinstance(exc, httpx.HTTPStatusError):
+                code = exc.response.status_code
+                return code in {429, 500, 502, 503, 504}
+            if isinstance(exc, httpx.RequestError):
+                return True
+            return False
+
         for attempt in range(retries):
             try:
                 print(f"[UMS_CLIENT] Async inference for model: {model_id} (attempt {attempt+1})")
-                async with httpx.AsyncClient(timeout=300.0) as client:
+                async with httpx.AsyncClient(timeout=timeout_s) as client:
                     response = await client.post(url, json=request_body)
                     response.raise_for_status()
                     data = response.json()
@@ -91,8 +107,13 @@ class UMSClient:
             except Exception as e:
                 last_error = e
                 print(f"[UMS_CLIENT] Async error (attempt {attempt+1}/{retries}): {e}")
-                if attempt < retries - 1:
-                    await asyncio.sleep(2)
+                if attempt < retries - 1 and _should_retry(e):
+                    # Exponential backoff + небольшой jitter, чтобы не создавать burst.
+                    backoff = min(max_delay_s, base_delay_s * (2 ** attempt))
+                    jitter = random.uniform(0.0, min(0.5, backoff * 0.2))
+                    await asyncio.sleep(backoff + jitter)
+                    continue
+                break
         raise RuntimeError(f"Failed to connect to UMS after {retries} attempts: {last_error}")
 
     async def async_infer_stream(self, model_id: str, payload: Dict[str, Any], device_mode: str = "hybrid") -> AsyncGenerator[str, None]:

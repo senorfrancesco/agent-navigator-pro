@@ -314,7 +314,15 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
                 response = await ums_client.async_infer("qwen-14b-llm", {
                     "prompt": prompt, "temperature": 0.1, "max_tokens": 1500
                 })
-                content = response.get("content", "")
+                content = ""
+                if "choices" in response:
+                    choice = response["choices"][0]
+                    content = choice.get("text", "") or choice.get("message", {}).get("content", "")
+                elif "content" in response:
+                    content = response["content"]
+                else:
+                    content = str(response)
+
                 if content.strip():
                     chunk_summaries.append(content.strip())
                 await asyncio.sleep(1.0)
