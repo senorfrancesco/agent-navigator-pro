@@ -268,7 +268,7 @@
   - `Matched: 8 pairs`
   - полноценный `Report_Equipment_1772624340.md` вместо warning-only отчёта.
 
-- [ ] **B3.14 — Runtime warnings при стриминге / завершении Chainlit-задач**
+- [x] **B3.14 — Runtime warnings при стриминге / завершении Chainlit-задач**
   В live E2E RAG-сценария зафиксированы:
   - `RuntimeError: async generator ignored GeneratorExit`
   - `RuntimeError: Attempted to exit cancel scope in a different task than it was entered in`
@@ -303,8 +303,15 @@
   - полный backend suite после рефакторинга остаётся зелёным;
   - direct chat при этом сознательно оставлен в non-stream режиме как production default,
     пока не будет отдельного решения о возврате token-by-token UX поверх новой proxy-схемы.
+  Статус после live-проверки:
+  - smoke `привет` и `document_question` больше не воспроизводят
+    `RuntimeError: async generator ignored GeneratorExit` и
+    `Attempted to exit cancel scope in a different task`;
+  - direct chat штатно отвечает через обычный `infer`;
+  - таргетный набор `test_chainlit_streaming.py`,
+    `test_unified_model_server_streaming.py` проходит.
 
-- [ ] **B3.15 — Очистка и консолидация устаревших markdown-документов**
+- [x] **B3.15 — Очистка и консолидация устаревших markdown-документов**
   В корне репо накопились временные и частично устаревшие `.md` файлы, которые уже расходятся
   с текущим состоянием кода и `TASKS.md`.
   Что нужно сделать:
@@ -324,6 +331,11 @@
   - `AGENTS.md` выглядит актуальным и полезным для репо;
   - `TASKS.md` должен оставаться единственным operational backlog / working log;
   - исторические отчёты не должны конкурировать с `TASKS.md` и `README.md`.
+  Статус:
+  - устаревший `tasks.md` удалён;
+  - исторические markdown-документы разобраны и не используются как operational source;
+  - backlog и актуальные решения закреплены в `TASKS.md`,
+    документация синхронизирована через `README.md` и `AGENTS.md`.
 
 - [ ] **B3.16 — Проверить и стабилизировать кейс `llama-server defunct` / uptime после простоя**
   В исторических стабилизационных заметках несколько раз фигурировал сценарий, где
@@ -345,7 +357,7 @@
   - если кэш не даёт эффекта, определить причину:
     разные prompt-prefixes, отсутствие cache reuse, неудачный batching или сброс процесса.
 
-- [ ] **B3.18 — VRAM-aware fallback для `labse-embedding` / `st_server`**
+- [x] **B3.18 — VRAM-aware fallback для `labse-embedding` / `st_server`**
   В live runtime после исправления direct chat streaming всплыл отдельный ресурсный дефект:
   `LaBSE` пытается стартовать на `cuda`, когда вся VRAM занята `qwen-14b-llm`, и падает
   с `CUDA out of memory`.
@@ -362,6 +374,13 @@
     - GPU-start fail -> CPU fallback;
     - явный `device_mode=cpu` не должен сначала пробовать `cuda`;
     - concurrent startup одного `model_id` не должен запускать второй процесс.
+  Статус после реализации:
+  - в `UMS` добавлены `cuda -> cpu` fallback, early-exit detection,
+    per-model startup lock и stale listener cleanup по порту;
+  - regression tests на startup/fallback проходят;
+  - live-проверка embeddings-path подтвердила стабильный запуск `st_server`
+    без повторного ложного старта и без повторного `CUDA out of memory`
+    после очистки stale listener на `8093`.
 
 - [x] **B3.19 — Cleanup Chainlit UI/runtime warnings**
   Остаточные warning-и после стабилизации backend уже не блокируют сценарии, но шумят в логах
