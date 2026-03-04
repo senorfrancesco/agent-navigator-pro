@@ -571,6 +571,29 @@
   - стабильность при `N` параллельных пользователях
   - качество ответов на regression-наборе юр. кейсов
 
+- [ ] **T4.13 — Runtime Context Budget + Preflight Profiles (вместо фиксированного MAX_CONTEXT_CHARS)**
+  Коротко: лимит контекста нужно брать автоматически, но не как сырой максимум окна модели,
+  а как эффективный per-request budget с защитными ограничениями.
+  Почему:
+  - иначе возникают OOM, деградация latency/throughput и ложные ожидания по доступному контексту;
+  - в llama.cpp контекст делится между parallel slots, а в vLLM long context требует отдельных guardrails.
+  Что внедрить:
+  - убрать фиксированный `MAX_CONTEXT_CHARS` из runtime policy;
+  - перейти на token budget: `effective_context_tokens` на запрос (с учётом backend/slot parallelism);
+  - для RAG выделять безопасную долю окна (ориентир `55–65%`) под retrieved context;
+  - добавить runtime cap profile для vLLM (например 16k/32k), даже если `max_model_len` больше;
+  - расширить UMS/status полем `effective_context_tokens` для orchestrator;
+  - добавить preflight-конфигуратор (`default | adaptive | manual`) с записью в `.env.runtime`.
+  Источники (ресёрч):
+  - llama-cpp-python API (`n_ctx=0` = взять из модели):
+    https://llama-cpp-python.readthedocs.io/en/stable/api-reference/
+  - llama.cpp README (контекст делится на слоты при `-np`):
+    https://github.com/ggml-org/llama.cpp
+  - vLLM OpenAI server (`--max-model-len` берётся из model config, если не задан):
+    https://docs.vllm.ai/en/v0.7.0/serving/openai_compatible_server.html
+  - vLLM arg docs (long context, OOM/perf риски):
+    https://docs.vllm.ai/en/v0.9.1/api/vllm/engine/arg_utils.html
+
 - [ ] **T4.12 — Security hardening для Ops UI и Model Control API**
   Ввести `RBAC` (`admin`/`operator`/`viewer`), аудит действий и ограничение опасных операций.
   Защитить endpoints управления моделями (`authN`/`authZ` + `rate limiting`).
