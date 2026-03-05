@@ -13,12 +13,14 @@ EmbeddingIntentClassifier — классификация интентов без
 по близости к центроидам кластеров.
 """
 
-import os
-import yaml
 import logging
+import os
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional
+
 import numpy as np
+import yaml
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional
 
 logger = logging.getLogger("classifier")
 
@@ -31,15 +33,8 @@ class ClassificationResult:
     scores: Dict[str, float]
 
 
-# Резервные эталонные фразы (если YAML не найден)
-DEFAULT_INTENT_EXAMPLES = {
-    "greeting": ["Привет", "Здравствуйте", "Добрый день"],
-    "compare_documents": ["Сравни документы", "Какие различия"],
-    "equipment_analysis": ["Проанализируй смету", "Проверь оборудование"],
-    "document_analysis": ["Что в этом документе", "Сделай обзор"],
-    "document_question": ["Найди информацию о", "Что написано про"],
-    "general_chat": ["Что ты умеешь", "Помоги мне"],
-}
+class IntentExamplesConfigError(RuntimeError):
+    """Ошибка конфигурации intent-примеров."""
 
 # Какие интенты требуют RAG
 INTENT_NEEDS_RAG = {
@@ -68,20 +63,49 @@ class EmbeddingIntentClassifier:
             os.path.dirname(__file__), "..", "data", "intent_examples.yaml"
         )
 
+    def _validate_examples(self, examples: Any) -> Dict[str, List[str]]:
+        """Проверяет, что YAML содержит словарь intent -> non-empty list[str]."""
+        if not isinstance(examples, dict) or not examples:
+            raise IntentExamplesConfigError("YAML должен быть непустым словарём intent -> list[str]")
+
+        validated_examples: Dict[str, List[str]] = {}
+        for intent, phrases in examples.items():
+            if not isinstance(intent, str) or not intent.strip():
+                raise IntentExamplesConfigError("Ключ intent должен быть непустой строкой")
+
+            if not isinstance(phrases, list) or not phrases:
+                raise IntentExamplesConfigError(
+                    f"Intent '{intent}' должен содержать непустой список примеров"
+                )
+
+            if not all(isinstance(phrase, str) and phrase.strip() for phrase in phrases):
+                raise IntentExamplesConfigError(
+                    f"Intent '{intent}' должен содержать только непустые строки"
+                )
+
+            validated_examples[intent] = phrases
+
+        return validated_examples
+
     def _load_examples(self) -> Dict[str, List[str]]:
-        """Загружает примеры из YAML-файла."""
-        if os.path.exists(self.examples_path):
-            try:
-                with open(self.examples_path, 'r', encoding='utf-8') as f:
-                    examples = yaml.safe_load(f)
-                    if isinstance(examples, dict) and len(examples) > 0:
-                        logger.info(f"Loaded intent examples from {self.examples_path}")
-                        return examples
-            except Exception as e:
-                logger.error(f"Error loading intent examples from {self.examples_path}: {e}")
-        
-        logger.warning("Using default intent examples (hardcoded fallback)")
-        return DEFAULT_INTENT_EXAMPLES
+        """Загружает примеры из YAML-файла и валидирует контракт структуры."""
+        path = Path(self.examples_path)
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                raw_examples = yaml.safe_load(f)
+            examples = self._validate_examples(raw_examples)
+            logger.info("Loaded intent examples from %s", path)
+            return examples
+        except FileNotFoundError as exc:
+            logger.error("Intent examples config error: path=%s reason=%s", path, exc)
+            raise IntentExamplesConfigError(
+                f"Intent examples file not found: {path}"
+            ) from exc
+        except (yaml.YAMLError, IntentExamplesConfigError) as exc:
+            logger.error("Intent examples config error: path=%s reason=%s", path, exc)
+            raise IntentExamplesConfigError(
+                f"Invalid intent examples config at {path}: {exc}"
+            ) from exc
 
     def initialize(self, custom_examples: Optional[Dict[str, List[str]]] = None):
         """

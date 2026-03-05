@@ -459,6 +459,10 @@
   Intent routing не обязан использовать тот же embedder, что и retrieval. Следующий этап
   качества — выделить intent classifier в отдельный контур и сравнить модели на реальном
   routing eval-наборе.
+  NB (контракт надёжности роутинга, 2026-03-04):
+  - intent routing зависит от валидного `intent_examples.yaml`;
+  - недоступность или невалидность конфигурации считается явной ошибкой старта/инициализации,
+    а не скрытым переходом на доменный fallback.
   Что нужно сделать:
   - подготовить eval harness для интентов `compare_documents`, `equipment_analysis`,
     `document_question`, `document_analysis`, `general_chat`;
@@ -689,6 +693,11 @@
   `rag/classifier.py`: примеры интентов прямо в коде. Любое изменение требует деплоя.
   Fix: YAML-файл `data/intent_examples.yaml` + загрузка из vector DB (Chroma/FAISS) без перезапуска.
   Доп.: 10-15 примеров недостаточно для семантически близких интентов (document_question vs document_analysis).
+  Обновлённый контракт (2026-03-04):
+  - загрузка примеров теперь fail-fast (без предметного hardcoded fallback);
+  - `_load_examples()` принимает только строгую структуру `intent -> non-empty list[str]`;
+  - при отсутствии/битом YAML пишется `ERROR` с путём и причиной, затем поднимается
+    `IntentExamplesConfigError` для явной деградации маршрутизации.
 
 - [x] **TD-3 — `index_documents` блокирует event loop**
   `chainlit_app.py::on_message`: sync вызов `rag.index_documents(...)` в async handler.

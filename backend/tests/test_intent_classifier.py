@@ -4,7 +4,10 @@
 
 import numpy as np
 import pytest
-from orchestrator.rag.classifier import EmbeddingIntentClassifier
+from orchestrator.rag.classifier import (
+    EmbeddingIntentClassifier,
+    IntentExamplesConfigError,
+)
 
 
 def _mock_embed_fn(texts):
@@ -114,3 +117,67 @@ class TestEmbeddingIntentClassifier:
         for q, _, _ in TEST_QUERIES:
             result = self.classifier.classify(q)
             assert result["margin"] >= 0
+
+    def test_load_examples_valid_yaml(self, tmp_path):
+        """_load_examples() принимает только валидную структуру YAML."""
+        examples_file = tmp_path / "intent_examples.yaml"
+        examples_file.write_text(
+            """
+general_chat:
+  - "Привет"
+  - "Помоги"
+""".strip(),
+            encoding="utf-8",
+        )
+
+        classifier = EmbeddingIntentClassifier(embed_fn=_mock_embed_fn)
+        classifier.examples_path = str(examples_file)
+
+        examples = classifier._load_examples()
+        assert examples == {"general_chat": ["Привет", "Помоги"]}
+
+    def test_load_examples_empty_yaml_raises(self, tmp_path, caplog):
+        """Пустой YAML — ошибка конфигурации и fail-fast."""
+        examples_file = tmp_path / "intent_examples.yaml"
+        examples_file.write_text("", encoding="utf-8")
+
+        classifier = EmbeddingIntentClassifier(embed_fn=_mock_embed_fn)
+        classifier.examples_path = str(examples_file)
+
+        with caplog.at_level("ERROR", logger="classifier"):
+            with pytest.raises(IntentExamplesConfigError):
+                classifier._load_examples()
+
+        assert str(examples_file) in caplog.text
+
+    def test_load_examples_invalid_format_raises(self, tmp_path, caplog):
+        """Неверный формат YAML (не list[str]) отклоняется."""
+        examples_file = tmp_path / "intent_examples.yaml"
+        examples_file.write_text(
+            """
+general_chat: "не список"
+""".strip(),
+            encoding="utf-8",
+        )
+
+        classifier = EmbeddingIntentClassifier(embed_fn=_mock_embed_fn)
+        classifier.examples_path = str(examples_file)
+
+        with caplog.at_level("ERROR", logger="classifier"):
+            with pytest.raises(IntentExamplesConfigError):
+                classifier._load_examples()
+
+        assert str(examples_file) in caplog.text
+
+    def test_load_examples_missing_file_raises(self, tmp_path, caplog):
+        """Отсутствующий YAML — ошибка конфигурации и fail-fast."""
+        missing_file = tmp_path / "missing_intent_examples.yaml"
+
+        classifier = EmbeddingIntentClassifier(embed_fn=_mock_embed_fn)
+        classifier.examples_path = str(missing_file)
+
+        with caplog.at_level("ERROR", logger="classifier"):
+            with pytest.raises(IntentExamplesConfigError):
+                classifier._load_examples()
+
+        assert str(missing_file) in caplog.text
