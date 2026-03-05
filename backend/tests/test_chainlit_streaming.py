@@ -185,3 +185,78 @@ class TestAsyncInferStream:
             await stream.aclose()
 
         assert response.exited is True
+
+
+class _SessionStore:
+    def __init__(self):
+        self._data = {}
+
+    def get(self, key, default=None):
+        return self._data.get(key, default)
+
+    def set(self, key, value):
+        self._data[key] = value
+
+
+class _FakeStep:
+    def __init__(self, name=None, type=None):
+        self.name = name
+        self.type = type
+        self.output = None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class TestResumeStreamingIntegration:
+    @pytest.fixture(autouse=True)
+    def _setup_chainlit_mock(self):
+        mock_cl = MagicMock()
+        mock_cl.user_session = _SessionStore()
+        mock_cl.Message = MagicMock()
+        mock_cl.Step = _FakeStep
+        mock_cl.User = MagicMock()
+        mock_cl.on_chat_start = lambda f: f
+        mock_cl.on_chat_resume = lambda f: f
+        mock_cl.on_message = lambda f: f
+        mock_cl.password_auth_callback = lambda f: f
+        mock_cl.data_layer = lambda f: f
+
+        sys.modules["chainlit"] = mock_cl
+        sys.modules["chainlit.data"] = MagicMock()
+        sys.modules["chainlit.data.sql_alchemy"] = MagicMock()
+
+        if "orchestrator.chainlit_app" in sys.modules:
+            importlib.reload(sys.modules["orchestrator.chainlit_app"])
+        else:
+            import orchestrator.chainlit_app
+
+        self._module = sys.modules["orchestrator.chainlit_app"]
+        yield
+
+        for mod_name in ["chainlit", "chainlit.data", "chainlit.data.sql_alchemy"]:
+            sys.modules.pop(mod_name, None)
+        sys.modules.pop("orchestrator.chainlit_app", None)
+
+    @pytest.mark.asyncio
+    async def test_resume_does_not_break_follow_up_answer(self):
+        thread = {
+            "steps": [
+                {"type": "user_message", "output": "Привет"},
+                {"type": "assistant_message", "output": "Здравствуйте"},
+            ]
+        }
+        message = SimpleNamespace(content="Как дела?", elements=[])
+
+        with patch.object(self._module, "_stream_response", new=AsyncMock()) as mock_stream:
+            await self._module.on_chat_resume(thread)
+            await self._module.on_message(message)
+
+        history = self._module.cl.user_session.get("history")
+        assert mock_stream.await_count == 1
+        assert history[0] == {"role": "user", "content": "Привет"}
+        assert history[1] == {"role": "assistant", "content": "Здравствуйте"}
+        assert history[-1] == {"role": "user", "content": "Как дела?"}
