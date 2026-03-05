@@ -29,7 +29,8 @@ from orchestrator.workflows.document_analysis import (
     generate_analysis_report_node,
     create_analysis_graph,
     DocumentAnalysisState,
-    _DOC_TYPE_KEYWORDS,
+    _load_document_type_keywords,
+    _DEFAULT_DOC_TYPE_KEYWORDS,
     _SUMMARY_PROMPTS,
     _DOC_TYPE_LABELS,
 )
@@ -38,6 +39,14 @@ from orchestrator.workflows.document_analysis import (
 # ============================================================================
 # Fixtures
 # ============================================================================
+
+
+@pytest.fixture(autouse=True)
+def clear_doc_type_keywords_cache():
+    _load_document_type_keywords.cache_clear()
+    yield
+    _load_document_type_keywords.cache_clear()
+
 
 @pytest.fixture
 def base_state() -> DocumentAnalysisState:
@@ -128,6 +137,27 @@ class TestClassifyDocType:
         text = "техническое задание, предмет закупки, требования к поставляемому, тз на, договор"
         # tz: 4 совпадения, legal: 1 ("договор")
         assert classify_doc_type(text) == "tz"
+
+    def test_classify_uses_keywords_from_config(self):
+        custom_keywords = {
+            "tz": ["special_tz_keyword"],
+            "kp": ["special_kp_keyword"],
+        }
+        with patch("orchestrator.workflows.document_analysis._load_document_type_keywords", return_value=custom_keywords):
+            assert classify_doc_type("Документ содержит special_kp_keyword") == "kp"
+
+    def test_classify_fallback_for_empty_or_invalid_config(self):
+        with patch("orchestrator.workflows.document_analysis.os.path.exists", return_value=True),              patch("builtins.open", MagicMock()),              patch("yaml.safe_load", return_value={}):
+            _load_document_type_keywords.cache_clear()
+            loaded = _load_document_type_keywords()
+            assert loaded == _DEFAULT_DOC_TYPE_KEYWORDS
+
+    def test_classify_fallback_for_broken_config(self):
+        with patch("orchestrator.workflows.document_analysis.os.path.exists", return_value=True), \
+             patch("builtins.open", side_effect=OSError("broken config")):
+            _load_document_type_keywords.cache_clear()
+            loaded = _load_document_type_keywords()
+            assert loaded == _DEFAULT_DOC_TYPE_KEYWORDS
 
     def test_legal_label_is_not_contract(self):
         assert _DOC_TYPE_LABELS["legal"] == "Юридический / нормативный документ"

@@ -787,3 +787,11 @@
 - [x] **[2026-03-03 15:42]** Task #4: (без названия) — ✅ completed
 - [x] **[2026-03-03 15:42]** Task #2: (без названия) — ✅ completed
 - [x] **[2026-03-03 15:42]** Task #1: (без названия) — ✅ completed
+
+
+### Session notes (2026-03-04)
+
+- [x] **DA-CONFIG-1 — Вынести keyword-классификацию document_analysis в YAML-конфиг**
+  `document_analysis.py`: `_DOC_TYPE_KEYWORDS` заменён на загрузку `document_type_keywords` из `backend/orchestrator/data/parsers_config.yaml` с `lru_cache`.
+  Временный workaround на отказоустойчивость: при отсутствии/битом/пустом конфиге включается минимальный встроенный fallback + warning в логах.
+
