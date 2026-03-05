@@ -1,5 +1,14 @@
 # TASKS - Agent Navigator Pro
 
+## Session Notes (2026-03-04)
+
+- [x] **CHL-SUMMARY — Инкрементальная сводка диалога в Chainlit**
+  `backend/orchestrator/chainlit_app.py`: добавлено состояние `conversation_summary` (facts/decisions/open_questions/updated_at + critical_entities),
+  инкрементальное обновление через LLM по схеме `previous summary + последние сообщения`,
+  guardrails на сохранение критичных сущностей (документы/суммы/даты/требования ТЗ/КП),
+  и fallback на старый tail-history режим при ошибке суммаризации с warning-логом.
+
+
 ## v3.0 — Hardware-Adaptive Agentic System + Chainlit (2026-02-26)
 
 ### Фаза 0 — Критические фиксы

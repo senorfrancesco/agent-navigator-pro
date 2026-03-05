@@ -13,6 +13,8 @@ Chainlit App — замена Open WebUI для Agent Navigator Pro.
 
 import asyncio
 import copy
+import datetime
+import json
 import logging
 import os
 import re
@@ -477,12 +479,131 @@ async def _load_files(files: List[Dict]) -> List[Dict]:
 # === Prompt Builder ===
 
 MAX_HISTORY_MESSAGES = 10
+SUMMARY_TAIL_MESSAGES = int(os.getenv("SUMMARY_TAIL_MESSAGES", "8"))
+
+
+def _utc_now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _get_conversation_summary() -> Dict[str, Any]:
+    summary = cl.user_session.get("conversation_summary")
+    if summary is None:
+        summary = {
+            "facts": [],
+            "decisions": [],
+            "open_questions": [],
+            "critical_entities": [],
+            "updated_at": None,
+        }
+        cl.user_session.set("conversation_summary", summary)
+    return summary
+
+
+def _summary_to_text(summary: Dict[str, Any]) -> str:
+    updated_at = summary.get("updated_at") or "n/a"
+    sections = [
+        f"Обновлено: {updated_at}",
+        "Факты:",
+        *(f"- {item}" for item in summary.get("facts", [])),
+        "Решения:",
+        *(f"- {item}" for item in summary.get("decisions", [])),
+        "Открытые вопросы:",
+        *(f"- {item}" for item in summary.get("open_questions", [])),
+        "Критичные сущности:",
+        *(f"- {item}" for item in summary.get("critical_entities", [])),
+    ]
+    return "\n".join(sections)
+
+
+def _extract_critical_entities(messages: List[Dict[str, str]]) -> List[str]:
+    entities: List[str] = []
+    seen = set()
+    patterns = [
+        r"\b[\w.-]+\.(?:pdf|docx?|xlsx?|pptx?)\b",
+        r"\b\d{1,3}(?:[\s\u00A0]\d{3})*(?:[.,]\d+)?\s?(?:₽|руб(?:\.|лей)?|USD|EUR|\$|€)\b",
+        r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b",
+    ]
+    requirement_markers = ("тз", "кп", "техническ", "требован", "должен", "должна", "обяз")
+
+    for msg in messages:
+        content = (msg.get("content") or "").strip()
+        if not content:
+            continue
+
+        for pattern in patterns:
+            for match in re.findall(pattern, content, flags=re.IGNORECASE):
+                value = str(match).strip()
+                key = value.lower()
+                if key not in seen:
+                    seen.add(key)
+                    entities.append(value)
+
+        lower = content.lower()
+        if any(marker in lower for marker in requirement_markers):
+            line = " ".join(content.split())
+            if len(line) > 220:
+                line = line[:220].rsplit(" ", 1)[0] + "..."
+            key = line.lower()
+            if key not in seen:
+                seen.add(key)
+                entities.append(line)
+
+    return entities[:25]
+
+
+async def _update_conversation_summary(history: List[Dict[str, str]]) -> None:
+    fallback_reason = cl.user_session.get("summary_fallback_reason")
+    if fallback_reason:
+        return
+
+    previous = _get_conversation_summary()
+    tail = history[-SUMMARY_TAIL_MESSAGES:]
+    summary_prompt = (
+        "<|im_start|>system\n"
+        "Ты обновляешь conversation summary. Верни строго JSON с полями: "
+        "facts (список), decisions (список), open_questions (список), critical_entities (список). "
+        "Сохраняй и не теряй критичные сущности: названия документов, суммы, даты, требования ТЗ/КП.\n"
+        "<|im_end|>\n"
+        f"<|im_start|>user\nПредыдущий summary:\n{json.dumps(previous, ensure_ascii=False)}\n<|im_end|>\n"
+        f"<|im_start|>user\nПоследние сообщения:\n{json.dumps(tail, ensure_ascii=False)}\n<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+
+    try:
+        raw = await _infer_assistant_text(summary_prompt, temperature=0.1)
+        match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+        payload = json.loads(match.group(0) if match else raw)
+        updated = {
+            "facts": payload.get("facts", [])[:12],
+            "decisions": payload.get("decisions", [])[:12],
+            "open_questions": payload.get("open_questions", [])[:12],
+            "critical_entities": payload.get("critical_entities", [])[:25],
+            "updated_at": _utc_now_iso(),
+        }
+        extracted = _extract_critical_entities(tail)
+        for item in extracted:
+            if item not in updated["critical_entities"]:
+                updated["critical_entities"].append(item)
+        updated["critical_entities"] = updated["critical_entities"][:25]
+        cl.user_session.set("conversation_summary", updated)
+    except Exception as e:
+        cl.user_session.set("summary_fallback_reason", str(e))
+        logger.warning("Conversation summarization failed, fallback to history tail mode", exc_info=True)
 
 
 def _build_prompt(query: str, history: List, system_msg: str = "") -> str:
     if not system_msg:
         system_msg = "Ты помощник Agent Navigator. Помогай пользователю."
     prompt = f"<|im_start|>system\n{system_msg}<|im_end|>\n"
+    fallback_reason = cl.user_session.get("summary_fallback_reason")
+    if not fallback_reason:
+        summary = _get_conversation_summary()
+        if summary.get("updated_at"):
+            prompt += f"<|im_start|>system\nКРАТКАЯ СВОДКА ДИАЛОГА:\n{_summary_to_text(summary)}\n<|im_end|>\n"
+    else:
+        logger.warning("Prompt builder uses fallback without summary: %s", fallback_reason)
+
     for msg in history[-MAX_HISTORY_MESSAGES:]:
         prompt += f"<|im_start|>{msg['role']}\n{msg['content']}<|im_end|>\n"
     prompt += f"<|im_start|>user\n{query}<|im_end|>\n<|im_start|>assistant\n"
@@ -502,6 +623,7 @@ async def _stream_response(prompt: str, msg: cl.Message, history: List):
 
     await msg.send()
     history.append({"role": "assistant", "content": msg.content})
+    await _update_conversation_summary(history)
 
 
 async def _infer_assistant_text(prompt: str, temperature: float = 0.7) -> str:
@@ -773,6 +895,14 @@ async def _init_classifier():
 async def on_chat_start():
     cl.user_session.set("documents", {})
     cl.user_session.set("history", [])
+    cl.user_session.set("conversation_summary", {
+        "facts": [],
+        "decisions": [],
+        "open_questions": [],
+        "critical_entities": [],
+        "updated_at": None,
+    })
+    cl.user_session.set("summary_fallback_reason", None)
 
     # Фоновая инициализация classifier для раннего semantic routing
     asyncio.create_task(_init_classifier())
@@ -798,6 +928,7 @@ async def on_chat_resume(thread):
     Пытается восстановить список документов и RAG-индекс.
     """
     cl.user_session.set("documents", {})
+    cl.user_session.set("summary_fallback_reason", None)
     history = []
     found_files = []
 
@@ -819,6 +950,7 @@ async def on_chat_resume(thread):
                     found_files.extend(fnames)
 
     cl.user_session.set("history", history)
+    _get_conversation_summary()
 
     # Пытаемся восстановить документы и RAG
     if found_files:
@@ -1348,6 +1480,7 @@ async def _handle_doc_question(query: str, session_docs: Dict, history: List):
         msg = cl.Message(content=rendered)
         await msg.send()
         history.append({"role": "assistant", "content": rendered})
+        await _update_conversation_summary(history)
         return
 
     prompt = _build_doc_question_prompt_with_sources(query, history, sources)
@@ -1379,6 +1512,7 @@ async def _handle_doc_question(query: str, session_docs: Dict, history: List):
         msg = cl.Message(content=rendered)
         await msg.send()
         history.append({"role": "assistant", "content": rendered})
+        await _update_conversation_summary(history)
         return
 
     cited_ids = _extract_citation_ids(response_text)
@@ -1422,6 +1556,7 @@ async def _handle_doc_question(query: str, session_docs: Dict, history: List):
     msg = cl.Message(content=rendered)
     await msg.send()
     history.append({"role": "assistant", "content": rendered})
+    await _update_conversation_summary(history)
 
 
 # === General Chat ===
