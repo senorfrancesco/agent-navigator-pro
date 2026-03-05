@@ -447,6 +447,103 @@
   - after rebuild: Playwright smoke (`ТЗ + КП` -> выбор `3`) показал корректный контракт в UI:
     inline citations `[n]`, блок `Источники` (doc/chunk/span/relevance/raw), блок `Надёжность`.
 
+- [x] **B3.29 — Context Isolation & Active Scope stabilization (Chainlit)**
+  Выполнено (P0-ядро):
+  - состояние сессии переведено на `documents_by_id` + `active_doc_ids` (ordered);
+  - `documents_by_name` оставлен как derived index (source of truth = `documents_by_id`);
+  - повторная загрузка одноимённого файла теперь создаёт новую версию (`v2`, `v3`, ...),
+    а не игнорируется по имени;
+  - применён Hybrid+ policy:
+    - есть новые файлы в текущем сообщении -> auto-switch active set на них;
+    - новых файлов нет -> active set не меняется автоматически;
+  - RAG индексируется по `active_doc_ids`, добавлен in-session cache с TTL/LRU
+    (`RAG_INDEX_CACHE_MAX`, `RAG_INDEX_CACHE_TTL_S`);
+  - `document_question` получил doc-target resolution по имени файла в вопросе
+    (например, `quotation_12`) и fail-safe fallback, если по целевому документу
+    нет подтверждённых фрагментов;
+  - ambiguity routing для `two_docs + low_confidence` теперь стабильно уводится в выбор
+    (не только узкий keyword-gate), добавлен `route_choice_id` в state/logs;
+  - compare/equipment переведены на fail-closed поведение:
+    без валидного набора файлов не происходит молчаливого выбора "последних двух";
+  - в UI/step output добавлена явная строка текущего контекста:
+    `Активный набор: ...`.
+  Локальная верификация:
+  - `pytest backend/tests/test_document_analysis.py -q` -> pass (добавлены новые unit-тесты
+    на versioning, ambiguity choice, target-doc resolution и ordered active scope).
+  Что осталось проверить в live E2E:
+  - длинная сессия `ТЗ/КП -> юрдоки -> вопрос по quotation_12`;
+  - кейс с >2 активными файлами и подтверждением выбора набора.
+
+- [x] **B3.30 — Prod-pattern для общего обращения (small-talk) без сброса document context**
+  Контекст:
+  - в live-сценарии после успешного workflow (`equipment_analysis`) реплика `Спасибо`
+    приводит к ответу «загрузите документы», хотя `active_docs` уже непустой;
+  - для production это неверное UX-поведение: social/greeting intents не должны
+    сбрасывать рабочий контекст и не должны триггерить повторную загрузку файлов.
+  Что внедрить:
+  - ввести явный `social_intent_guard` (`greeting`, `thanks`, `ack`, `small_talk`);
+  - для social intent отвечать коротко и сохранять `active_doc_ids`/`active_mode` без изменений;
+  - запретить fallback «загрузите документы», если `active_docs_count > 0`;
+  - оставить ask-clarification только для task-intents с низкой уверенностью/маржой;
+  - в route logs добавить причину social-ветки (`social_guard`) и флаг сохранения контекста.
+  Критерии готовности:
+  - после `ТЗ+КП -> анализ -> "Спасибо"` система не просит повторно загружать файлы;
+  - `active_doc_ids` до/после social-реплики идентичны;
+  - long-session E2E не показывает ложных перезапусков workflow на social-сообщениях.
+  Статус после реализации:
+  - в `chainlit_app.py` добавлен строгий `social` detector (`_is_social_query`);
+  - в `_get_intent_decision` добавлен ранний `social_guard` при непустом `session_docs`
+    (reason=`social_guard`, без workflow/ask-choice);
+  - в `_execute_intent` для social-сообщений не выполняется принудительный switch в `active_mode=chat`
+    при активном документном контексте;
+  - в `_handle_chat` добавлен детерминированный social-ответ без просьбы повторно загружать файлы;
+  - тесты `backend/tests/test_document_analysis.py` дополнены кейсами
+    `is_social_query` и `social_guard` (pass).
+  Источники best practices (research):
+  - LangGraph persistence/checkpointing: https://docs.langchain.com/oss/python/langgraph/persistence
+  - LangGraph conditional routing: https://docs.langchain.com/oss/python/langgraph/graph-api
+  - NotebookLM research notebooks:
+    - Production-Ready AI Agents
+    - LLM agents
+    - Agent Navigator Pro: Hybrid Routing + Multi-GPU Research
+
+- [ ] **B3.31 — API Orchestration Layer + Runtime Mode Switch (`auto | chat | specialized`)**
+  Контекст:
+  - при смешении диалога и графовых workflow в одном потоке растёт риск ложного роутинга;
+  - нужен единый прод-контур, где API/оркестратор является слоем принятия решений между UI и наборами исполнителей
+    (chat, doc_qa, compare, equipment, vision).
+  Архитектурное правило (обязательное):
+  - UI не принимает routing/policy-решений;
+  - UI только отображает состояние, прогресс и action-подсказки;
+  - все решения (`route`, `executor`, `model_profile`, `fallback`, `action_required`) принимает backend-оркестратор.
+  Что внедрить:
+  - добавить режим выполнения в сессию/запрос: `auto`, `chat_only`, `specialized_tasks`;
+  - в `chat_only` полностью запретить запуск дорогих workflow;
+  - в `specialized_tasks` вести только task-роутинг с явным подтверждением при ambiguity;
+  - в `auto` использовать policy по confidence/margin + ask-choice вместо автозапуска;
+  - ввести capability-router: `intent -> executor -> model_profile` (а не “одна модель на всё”);
+  - унифицировать API-контракт ответа для UI:
+    `mode`, `route`, `model_profile`, `sources`, `confidence`, `trace_id`, `action_required`.
+  Критерии готовности:
+  - одинаковые запросы в одном режиме дают предсказуемый маршрут;
+  - в `chat_only` workflow не стартуют;
+  - в `specialized_tasks` social/greeting не ломают active scope и не сбрасывают контекст;
+  - UI получает единый ответный контракт вне зависимости от выбранного исполнителя;
+  - в UI отсутствуют локальные ветки бизнес-роутинга (только рендер backend-решений).
+
+- [ ] **B3.32 — LangChain adoption strategy (точечно, без full rewrite core)**
+  Контекст:
+  - текущая архитектура уже держит продовый контур через `LangGraph + AdaptiveRAGPipeline + Chainlit`;
+  - Open WebUI использовался как legacy UI-клиент к нашему API (`/v1/chat/completions`), а не как источник оркестрации.
+  Решение:
+  - не делать полную миграцию core-логики на “чистый LangChain”;
+  - использовать LangChain точечно там, где есть измеримая выгода (retriever/reranker/evals/observability adapters);
+  - сохранить доменный routing/policy/state (`active_doc_ids`, `pending-choice`, `doc/equipment/compare`) в текущем orchestrator.
+  Критерии готовности:
+  - оформлен ADR с trade-offs и списком допустимых LangChain-интеграций;
+  - выбран 1 pilot-модуль для точечной интеграции без смены публичного API-контракта;
+  - подтверждено, что user-flow и UI-контракт не ломаются.
+
 - [ ] **B3.28 — Coverage heuristic v1.1 для `document_question`**
   Контекст:
   - в v1 сознательно не включали coverage по подпунктам запроса, чтобы не раздуть первый PR.
