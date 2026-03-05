@@ -610,24 +610,42 @@ class TestDocumentAnalysisIntent:
             _detect_intent,
             _get_intent_decision,
             _resolve_pending_route_choice,
+            _is_social_query,
+            _is_docs_summary_query,
             _needs_doc_question_regen,
+            _resolve_target_doc_name,
             _extract_citation_ids,
             _citations_are_valid,
             _has_sufficient_evidence,
             _build_doc_question_deterministic_fallback,
             _compute_confidence_v1,
             _build_sources_from_rag_result,
+            _strip_model_source_sections,
+            _register_loaded_document,
+            _get_active_docs,
+            _set_active_doc_ids,
+            _get_session_docs,
+            _build_route_choice_state,
         )
         self._detect_intent = _detect_intent
         self._get_intent_decision = _get_intent_decision
         self._resolve_pending_route_choice = _resolve_pending_route_choice
+        self._is_social_query = _is_social_query
+        self._is_docs_summary_query = _is_docs_summary_query
         self._needs_doc_question_regen = _needs_doc_question_regen
+        self._resolve_target_doc_name = _resolve_target_doc_name
         self._extract_citation_ids = _extract_citation_ids
         self._citations_are_valid = _citations_are_valid
         self._has_sufficient_evidence = _has_sufficient_evidence
         self._build_doc_question_deterministic_fallback = _build_doc_question_deterministic_fallback
         self._compute_confidence_v1 = _compute_confidence_v1
         self._build_sources_from_rag_result = _build_sources_from_rag_result
+        self._strip_model_source_sections = _strip_model_source_sections
+        self._register_loaded_document = _register_loaded_document
+        self._get_active_docs = _get_active_docs
+        self._set_active_doc_ids = _set_active_doc_ids
+        self._get_session_docs = _get_session_docs
+        self._build_route_choice_state = _build_route_choice_state
         self._mock_session = mock_session
         self._mock_cl = mock_cl
 
@@ -713,6 +731,29 @@ class TestDocumentAnalysisIntent:
         assert result["requires_choice"] is True
         assert result["recommended_route"] == "compare_documents"
 
+    def test_two_docs_low_margin_without_compare_keyword_still_choice(self):
+        session_docs = {
+            "old.pdf": {"text": "Старая редакция договора"},
+            "new.pdf": {"text": "Новая редакция договора"},
+        }
+        classifier_result = {
+            "intent": "document_question",
+            "confidence": 0.53,
+            "margin": 0.01,
+            "needs_rag": True,
+        }
+
+        result = self._get_intent_decision(
+            "По этим двум документам дай общий вывод",
+            file_count=2,
+            has_session_docs=True,
+            session_docs=session_docs,
+            classifier_result=classifier_result,
+        )
+
+        assert result["requires_choice"] is True
+        assert result["recommended_route"] in {"compare_documents", "document_question"}
+
     def test_document_question_stays_document_question_without_equipment_signal(self):
         session_docs = {
             "doc1.pdf": {"text": "Гарантийные обязательства"},
@@ -736,6 +777,86 @@ class TestDocumentAnalysisIntent:
         assert result["intent"] == "document_question"
         assert result["requires_choice"] is False
 
+    def test_docs_summary_query_routes_to_documents_summary(self):
+        session_docs = {
+            "doc1.pdf": {"text": "Текст 1"},
+            "doc2.pdf": {"text": "Текст 2"},
+        }
+        classifier_result = {
+            "intent": "document_question",
+            "confidence": 0.66,
+            "margin": 0.09,
+            "needs_rag": True,
+        }
+        result = self._get_intent_decision(
+            "О чём эти документы?",
+            file_count=2,
+            has_session_docs=True,
+            session_docs=session_docs,
+            classifier_result=classifier_result,
+        )
+        assert result["intent"] == "documents_summary"
+        assert result["requires_choice"] is False
+
+    def test_analyze_two_docs_query_routes_to_documents_summary(self):
+        session_docs = {
+            "contract_v1.pdf": {"text": "Договор версия 1"},
+            "contract_v2.pdf": {"text": "Договор версия 2"},
+        }
+        classifier_result = {
+            "intent": "document_analysis",
+            "confidence": 0.64,
+            "margin": 0.05,
+            "needs_rag": True,
+        }
+        result = self._get_intent_decision(
+            "Проанализируй эти документы",
+            file_count=2,
+            has_session_docs=True,
+            session_docs=session_docs,
+            classifier_result=classifier_result,
+        )
+        assert result["intent"] == "documents_summary"
+        assert result["requires_choice"] is False
+
+    def test_classifier_doc_question_without_docs_falls_back_to_general_chat(self):
+        classifier_result = {
+            "intent": "document_question",
+            "confidence": 0.70,
+            "margin": 0.22,
+            "needs_rag": True,
+        }
+        result = self._get_intent_decision(
+            "А об обычных облаках на небе?",
+            file_count=0,
+            has_session_docs=False,
+            session_docs={},
+            classifier_result=classifier_result,
+        )
+        assert result["intent"] == "general_chat"
+        assert result["requires_choice"] is False
+
+    def test_document_analysis_with_two_docs_requires_choice(self):
+        session_docs = {
+            "doc1.pdf": {"text": "Первый документ"},
+            "doc2.pdf": {"text": "Второй документ"},
+        }
+        classifier_result = {
+            "intent": "document_analysis",
+            "confidence": 0.81,
+            "margin": 0.30,
+            "needs_rag": True,
+        }
+        result = self._get_intent_decision(
+            "Сделай анализ документа",
+            file_count=2,
+            has_session_docs=True,
+            session_docs=session_docs,
+            classifier_result=classifier_result,
+        )
+        assert result["requires_choice"] is True
+        assert result["reason"] == "document_analysis_multi_doc"
+
     def test_resolve_pending_route_choice(self):
         pending = {
             "expires_at": time.time() + 60,
@@ -752,6 +873,48 @@ class TestDocumentAnalysisIntent:
         }
         assert self._resolve_pending_route_choice("1", pending) is None
 
+    def test_is_social_query_positive_and_negative(self):
+        assert self._is_social_query("Спасибо!") is True
+        assert self._is_social_query("Окей") is True
+        assert self._is_social_query("Спасибо, сравни документы") is False
+
+    def test_social_guard_with_active_docs(self):
+        session_docs = {
+            "Quotation_12.pdf": {"text": "Коммерческое предложение"},
+            "f5.pdf": {"text": "Техническое задание"},
+        }
+        classifier_result = {
+            "intent": "greeting",
+            "confidence": 0.72,
+            "margin": 0.28,
+            "needs_rag": False,
+        }
+        result = self._get_intent_decision(
+            "Спасибо",
+            file_count=0,
+            has_session_docs=True,
+            session_docs=session_docs,
+            classifier_result=classifier_result,
+        )
+
+        assert result["intent"] == "greeting"
+        assert result["requires_choice"] is False
+        assert result["reason"] == "social_guard"
+
+    def test_social_guard_without_classifier(self):
+        session_docs = {
+            "Quotation_12.pdf": {"text": "Коммерческое предложение"},
+        }
+        result = self._get_intent_decision(
+            "Привет",
+            file_count=0,
+            has_session_docs=True,
+            session_docs=session_docs,
+            classifier_result=None,
+        )
+        assert result["intent"] == "greeting"
+        assert result["reason"] == "social_guard"
+
     def test_doc_question_regen_detection_when_docs_loaded(self):
         text = "Пожалуйста, предоставьте тексты ТЗ и коммерческого предложения для анализа."
         assert self._needs_doc_question_regen(text, has_session_docs=True) is True
@@ -767,9 +930,138 @@ class TestDocumentAnalysisIntent:
         )
         assert self._needs_doc_question_regen(text, has_session_docs=True) is True
 
+    def test_resolve_target_doc_name_by_filename_stem(self):
+        active_docs = [
+            {"display_name": "Quotation_12.pdf", "version": 1},
+            {"display_name": "H12300274_1688590800.pdf", "version": 1},
+        ]
+        target = self._resolve_target_doc_name(
+            "В документе quotation_12 какие есть позиции?",
+            active_docs,
+        )
+        assert target == "Quotation_12.pdf"
+
+    def test_register_same_filename_creates_new_version(self):
+        store = {}
+        self._mock_session.get.side_effect = lambda key: store.get(key)
+        self._mock_session.set.side_effect = lambda key, value: store.__setitem__(key, value)
+
+        first = self._register_loaded_document(
+            display_name="Quotation_12.pdf",
+            path="/tmp/q1.pdf",
+            text="v1",
+            source_message_id="m1",
+        )
+        second = self._register_loaded_document(
+            display_name="Quotation_12.pdf",
+            path="/tmp/q2.pdf",
+            text="v2",
+            source_message_id="m2",
+        )
+
+        assert first["version"] == 1
+        assert second["version"] == 2
+        assert first["document_id"] != second["document_id"]
+        legacy_docs = self._get_session_docs()
+        assert legacy_docs["Quotation_12.pdf"]["version"] == 2
+
+    def test_route_choice_state_keeps_active_order_and_id(self):
+        store = {}
+        self._mock_session.get.side_effect = lambda key: store.get(key)
+        self._mock_session.set.side_effect = lambda key, value: store.__setitem__(key, value)
+
+        first = self._register_loaded_document(
+            display_name="doc_a.pdf",
+            path="/tmp/a.pdf",
+            text="A",
+            source_message_id="m1",
+        )
+        second = self._register_loaded_document(
+            display_name="doc_b.pdf",
+            path="/tmp/b.pdf",
+            text="B",
+            source_message_id="m2",
+        )
+
+        ordered = [second["document_id"], first["document_id"]]
+        self._set_active_doc_ids(ordered)
+        state = self._build_route_choice_state(
+            query="Сравни документы",
+            recommended_route="compare_documents",
+            new_files=[],
+            mode="unknown",
+        )
+
+        assert state["active_doc_ids"] == ordered
+        assert isinstance(state["route_choice_id"], str)
+        assert len(state["route_choice_id"]) >= 6
+        assert "origin_trace_id" in state
+        assert state["choices"]["4"] == "documents_summary"
+
+    def test_route_choice_state_keeps_active_docs_order_and_id(self):
+        store = {}
+        self._mock_session.get.side_effect = lambda key: store.get(key)
+        self._mock_session.set.side_effect = lambda key, value: store.__setitem__(key, value)
+
+        a = self._register_loaded_document(
+            display_name="A.pdf",
+            path="/tmp/a.pdf",
+            text="a",
+            source_message_id="m1",
+        )
+        b = self._register_loaded_document(
+            display_name="B.pdf",
+            path="/tmp/b.pdf",
+            text="b",
+            source_message_id="m2",
+        )
+        self._set_active_doc_ids([b["document_id"], a["document_id"]])
+
+        state = self._build_route_choice_state(
+            query="Сравни документы",
+            recommended_route="compare_documents",
+            new_files=[],
+            mode="unknown",
+        )
+        assert state["active_doc_ids"] == [b["document_id"], a["document_id"]]
+        assert state["route_choice_id"]
+        assert state["choices"]["4"] == "documents_summary"
+
+    def test_compare_low_confidence_without_equipment_signal_uses_unknown_mode(self):
+        session_docs = {
+            "C222.pdf": {"text": "Постановление, юридический текст"},
+            "C221.pdf": {"text": "Постановление, юридический текст"},
+        }
+        classifier_result = {
+            "intent": "compare_documents",
+            "confidence": 0.62,
+            "margin": 0.01,
+            "needs_rag": True,
+        }
+        result = self._get_intent_decision(
+            "Сравни эти документы юридические",
+            file_count=2,
+            has_session_docs=True,
+            session_docs=session_docs,
+            classifier_result=classifier_result,
+        )
+        assert result["requires_choice"] is True
+        assert result["mode"] == "unknown"
+
     def test_extract_citation_ids(self):
         cited = self._extract_citation_ids("Ответ [1] и [3], но не [x]")
         assert cited == [1, 3]
+
+    def test_strip_model_source_sections(self):
+        text = (
+            "Это основной ответ [1].\n\n"
+            "### Источники\n"
+            "- [1] foo\n\n"
+            "### Надёжность\n"
+            "- confidence: 0.8"
+        )
+        cleaned = self._strip_model_source_sections(text)
+        assert cleaned.strip() == "Это основной ответ [1]."
 
     def test_citations_are_valid(self):
         assert self._citations_are_valid("Ответ [1][2]", source_count=2) is True
