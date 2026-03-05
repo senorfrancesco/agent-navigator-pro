@@ -253,6 +253,13 @@
   Повторный live E2E после пересборки `chainlit` подтвердил корректный label в UI и в
   `Report_Analysis_1772624000.md`.
 
+- [x] **B3.14 — Guardrail для неполного restore контекста в Chainlit**
+  `chainlit_app.py`: добавлен `context_state` в `user_session` и проверка валидности восстановленного контекста
+  (`missing_docs`, `index_not_ready`, `resume_partial`). При невалидном контексте роутинг деградирует в `general_chat`
+  с подсказкой, как пере-загрузить документы; document-oriented интенты блокируются до явного подтверждения
+  пользователя при `resume_partial`. Причины деградации логируются через `logger.warning`.
+
+
 - [x] **B3.13 — `equipment_analysis` падает на matching этапе из-за `404 /batch_match`**
   Live E2E на `documents/f5jsglrkyfe8p3ogd02g405d9q3r9lfn.pdf` +
   `documents/Quotation_12.pdf`:

@@ -12,6 +12,7 @@
 """
 
 import os
+import asyncio
 import sys
 import pytest
 import tempfile
@@ -617,6 +618,8 @@ class TestDocumentAnalysisIntent:
             _build_doc_question_deterministic_fallback,
             _compute_confidence_v1,
             _build_sources_from_rag_result,
+            _build_context_state,
+            _execute_intent,
         )
         self._detect_intent = _detect_intent
         self._get_intent_decision = _get_intent_decision
@@ -628,6 +631,8 @@ class TestDocumentAnalysisIntent:
         self._build_doc_question_deterministic_fallback = _build_doc_question_deterministic_fallback
         self._compute_confidence_v1 = _compute_confidence_v1
         self._build_sources_from_rag_result = _build_sources_from_rag_result
+        self._build_context_state = _build_context_state
+        self._execute_intent = _execute_intent
         self._mock_session = mock_session
         self._mock_cl = mock_cl
 
@@ -735,6 +740,81 @@ class TestDocumentAnalysisIntent:
 
         assert result["intent"] == "document_question"
         assert result["requires_choice"] is False
+
+
+    def test_detect_intent_degrades_on_resume_partial_without_confirmation(self):
+        result = self._detect_intent(
+            "Сравни документы",
+            file_count=2,
+            has_session_docs=True,
+            context_state={
+                "reason": "resume_partial",
+                "confirmed_partial": False,
+                "has_valid_docs": True,
+                "index_ready": True,
+            },
+        )
+        assert result == "general_chat"
+
+    def test_get_intent_decision_degrades_when_index_not_ready(self):
+        session_docs = {
+            "doc1.pdf": {"text": "Текст", "path": "/tmp/doc1.pdf"},
+        }
+        classifier_result = {
+            "intent": "document_question",
+            "confidence": 0.81,
+            "margin": 0.21,
+            "needs_rag": True,
+        }
+
+        result = self._get_intent_decision(
+            "Что написано в документе?",
+            file_count=1,
+            has_session_docs=True,
+            session_docs=session_docs,
+            classifier_result=classifier_result,
+            context_state={
+                "reason": "index_not_ready",
+                "confirmed_partial": True,
+                "has_valid_docs": True,
+                "index_ready": False,
+                "message": "Индекс не готов",
+            },
+        )
+
+        assert result["intent"] == "general_chat"
+        assert result["reason"] == "context_invalid_index_not_ready"
+
+    def test_execute_intent_blocks_doc_routes_when_resume_partial_not_confirmed(self):
+        session_docs = {"doc1.pdf": {"text": "Текст", "path": "/tmp/doc1.pdf"}}
+        history = []
+
+        with patch(
+            "orchestrator.chainlit_app._handle_compare", new_callable=AsyncMock
+        ) as mock_compare, patch(
+            "orchestrator.chainlit_app._handle_chat", new_callable=AsyncMock
+        ) as mock_chat:
+            self._mock_cl.Message.return_value.send = AsyncMock()
+
+            asyncio.run(
+                self._execute_intent(
+                    "compare_documents",
+                    "Сравни",
+                    [],
+                    session_docs,
+                    history,
+                    context_state={
+                        "reason": "resume_partial",
+                        "confirmed_partial": False,
+                        "has_valid_docs": True,
+                        "index_ready": True,
+                        "message": "Контекст неполный",
+                    },
+                )
+            )
+
+            assert mock_compare.await_count == 0
+            assert mock_chat.await_count == 1
 
     def test_resolve_pending_route_choice(self):
         pending = {

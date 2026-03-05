@@ -38,6 +38,20 @@ logger = logging.getLogger("chainlit_app")
 INTENT_LOW_MARGIN_THRESHOLD = 0.12
 INTENT_LOW_CONFIDENCE_THRESHOLD = 0.55
 ROUTE_CHOICE_TIMEOUT_S = 90
+_DOC_REQUIRED_INTENTS = {"document_question", "compare_documents", "equipment_analysis"}
+_RESTORE_CONFIRMATION_PHRASES = [
+    "подтверждаю",
+    "да, продолжай",
+    "продолжай",
+    "всё равно",
+    "все равно",
+    "запусти",
+]
+_CONTEXT_RECOVERY_MESSAGE = (
+    "Контекст документов восстановлен не полностью. "
+    "Чтобы вернуть документные сценарии, загрузите документы заново "
+    "(кнопка скрепки) и дождитесь сообщения о готовности RAG-индекса."
+)
 
 _COMPARE_QUERY_KEYWORDS = [
     "сравни", "сравнение", "различия", "отличия", "что изменилось", "покажи разницу",
@@ -171,15 +185,112 @@ def _set_pending_route_choice(data: Optional[Dict[str, Any]]) -> None:
     cl.user_session.set("pending_route_choice", data)
 
 
+def _get_context_state() -> Dict[str, Any]:
+    state = cl.user_session.get("context_state")
+    if state is None:
+        state = {
+            "status": "empty",
+            "reason": "missing_docs",
+            "has_valid_docs": False,
+            "index_ready": False,
+            "expected_docs": 0,
+            "valid_docs": 0,
+            "source": "runtime",
+            "message": _CONTEXT_RECOVERY_MESSAGE,
+            "confirmed_partial": False,
+        }
+        cl.user_session.set("context_state", state)
+    return state
+
+
+def _set_context_state(state: Dict[str, Any]) -> None:
+    cl.user_session.set("context_state", state)
+
+
+def _build_context_state(
+    session_docs: Dict[str, Any],
+    rag_pipeline: Optional[Any],
+    *,
+    source: str = "runtime",
+    expected_docs: Optional[int] = None,
+    confirmed_partial: Optional[bool] = None,
+) -> Dict[str, Any]:
+    valid_docs = sum(
+        1
+        for doc_info in session_docs.values()
+        if isinstance(doc_info, dict)
+        and doc_info.get("text")
+        and str(doc_info.get("text", "")).strip()
+        and doc_info.get("path")
+    )
+    has_valid_docs = valid_docs > 0
+    index_ready = bool(rag_pipeline and getattr(rag_pipeline, "_indexed", False))
+    expected = expected_docs if expected_docs is not None else valid_docs
+
+    reason = "ready"
+    status = "ready"
+    if expected_docs is not None and expected_docs > valid_docs:
+        reason = "resume_partial"
+        status = "degraded"
+        logger.warning(
+            "Context degraded: resume_partial (expected_docs=%s, valid_docs=%s)",
+            expected_docs,
+            valid_docs,
+        )
+    elif not has_valid_docs:
+        reason = "missing_docs"
+        status = "empty"
+        logger.warning("Context degraded: missing_docs")
+    elif not index_ready:
+        reason = "index_not_ready"
+        status = "degraded"
+        logger.warning("Context degraded: index_not_ready")
+
+    return {
+        "status": status,
+        "reason": reason,
+        "has_valid_docs": has_valid_docs,
+        "index_ready": index_ready,
+        "expected_docs": expected,
+        "valid_docs": valid_docs,
+        "source": source,
+        "message": _CONTEXT_RECOVERY_MESSAGE,
+        "confirmed_partial": bool(confirmed_partial),
+    }
+
+
+def _is_explicit_restore_confirmation(query: str) -> bool:
+    query_lower = query.lower().strip()
+    return any(phrase in query_lower for phrase in _RESTORE_CONFIRMATION_PHRASES)
+
+
 # === Intent Detection ===
 
-def _detect_intent(query: str, file_count: int = 0, has_session_docs: bool = False) -> str:
+def _detect_intent(
+    query: str,
+    file_count: int = 0,
+    has_session_docs: bool = False,
+    context_state: Optional[Dict[str, Any]] = None,
+) -> str:
     """
     Семантическая классификация интентов (Semantic Router).
     TD-10: Жесткие списки ключевых слов удалены. Вся маршрутизация идет
     через EmbeddingIntentClassifier (поиск ближайших соседей в векторном пространстве).
     """
     query_lower = query.lower()
+    if context_state is None:
+        context_state = {
+            "reason": "ready",
+            "confirmed_partial": True,
+            "has_valid_docs": has_session_docs or file_count > 0,
+            "index_ready": True,
+        }
+
+    if context_state.get("reason") == "resume_partial" and not context_state.get("confirmed_partial"):
+        return "general_chat"
+
+    has_ready_context = context_state.get("has_valid_docs", False) and context_state.get("index_ready", False)
+    has_session_docs = has_session_docs and has_ready_context
 
     # Уровень 1: Semantic Router (Основной и приоритетный)
     # Источник A: classifier из RAG pipeline (после загрузки файлов)
@@ -204,6 +315,9 @@ def _detect_intent(query: str, file_count: int = 0, has_session_docs: bool = Fal
             has_file = file_count >= 1 or (has_session_docs and len(_get_session_docs()) >= 1)
             if not has_file:
                 intent = "general_chat"
+
+        if needs_rag and not has_ready_context:
+            return "general_chat"
 
         if has_session_docs and needs_rag and intent not in ("compare_documents", "equipment_analysis", "document_analysis"):
             intent = "document_question"
@@ -332,10 +446,20 @@ def _get_intent_decision(
     has_session_docs: bool = False,
     session_docs: Optional[Dict[str, Any]] = None,
     classifier_result: Optional[Dict[str, Any]] = None,
+    context_state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     query_lower = query.lower().strip()
+    if context_state is None:
+        context_state = {
+            "reason": "ready",
+            "confirmed_partial": True,
+            "has_valid_docs": has_session_docs or bool(session_docs),
+            "index_ready": True,
+            "message": _CONTEXT_RECOVERY_MESSAGE,
+        }
     session_docs = session_docs if session_docs is not None else (_get_session_docs() if has_session_docs else {})
     has_session_docs = has_session_docs or bool(session_docs)
+    context_ready = context_state.get("has_valid_docs", False) and context_state.get("index_ready", False)
     total_docs = max(file_count, len(session_docs))
     two_docs = total_docs >= 2
     single_doc = total_docs == 1
@@ -344,6 +468,17 @@ def _get_intent_decision(
     compare_signal = _has_any_keyword(query_lower, _COMPARE_QUERY_KEYWORDS)
     equipment_signal = _has_any_keyword(query_lower, _EQUIPMENT_QUERY_KEYWORDS)
     doc_question_signal = _has_any_keyword(query_lower, _DOC_QUESTION_KEYWORDS)
+
+    if context_state.get("reason") == "resume_partial" and not context_state.get("confirmed_partial"):
+        return {
+            "intent": "general_chat",
+            "requires_choice": False,
+            "confidence": 0.0,
+            "margin": 0.0,
+            "reason": "resume_partial_requires_confirmation",
+            "context_message": context_state.get("message", _CONTEXT_RECOVERY_MESSAGE),
+        }
+
 
     mode = None
     if two_docs and session_docs:
@@ -401,6 +536,16 @@ def _get_intent_decision(
                 "mode": mode or "unknown",
             }
 
+        if needs_rag and not context_ready:
+            return {
+                "intent": "general_chat",
+                "requires_choice": False,
+                "confidence": classifier_result.get("confidence", 0.0),
+                "margin": classifier_result.get("margin", 0.0),
+                "reason": f"context_invalid_{context_state.get('reason', 'unknown')}",
+                "context_message": context_state.get("message", _CONTEXT_RECOVERY_MESSAGE),
+            }
+
         if has_session_docs and needs_rag and intent not in ("compare_documents", "equipment_analysis", "document_analysis"):
             intent = "document_question"
 
@@ -413,7 +558,12 @@ def _get_intent_decision(
         }
 
     return {
-        "intent": _detect_intent(query, file_count=file_count, has_session_docs=has_session_docs),
+        "intent": _detect_intent(
+            query,
+            file_count=file_count,
+            has_session_docs=has_session_docs,
+            context_state=context_state,
+        ),
         "requires_choice": False,
         "confidence": 0.0,
         "margin": 0.0,
@@ -773,6 +923,7 @@ async def _init_classifier():
 async def on_chat_start():
     cl.user_session.set("documents", {})
     cl.user_session.set("history", [])
+    _set_context_state(_build_context_state({}, None, source="chat_start"))
 
     # Фоновая инициализация classifier для раннего semantic routing
     asyncio.create_task(_init_classifier())
@@ -798,6 +949,7 @@ async def on_chat_resume(thread):
     Пытается восстановить список документов и RAG-индекс.
     """
     cl.user_session.set("documents", {})
+    _set_context_state(_build_context_state({}, None, source="resume"))
     history = []
     found_files = []
 
@@ -853,11 +1005,35 @@ async def on_chat_resume(thread):
                     
                     all_texts = [d["text"] for d in session_docs.values()]
                     all_names = [n for n in session_docs.keys()]
-                    await asyncio.to_thread(rag.index_documents, all_texts, doc_names=all_names)
-                    cl.user_session.set("rag_pipeline", rag)
-                    
-                    step.output = f"Восстановлено {len(names)} документов, RAG готов."
+                    try:
+                        await asyncio.to_thread(rag.index_documents, all_texts, doc_names=all_names)
+                        cl.user_session.set("rag_pipeline", rag)
+                        context_state = _build_context_state(
+                            session_docs,
+                            rag,
+                            source="resume",
+                            expected_docs=len(unique_files),
+                        )
+                        _set_context_state(context_state)
+                        step.output = f"Восстановлено {len(names)} документов, RAG готов."
+                    except Exception as e:
+                        logger.warning(f"Resume RAG indexing failed: {e}")
+                        context_state = _build_context_state(
+                            session_docs,
+                            None,
+                            source="resume",
+                            expected_docs=len(unique_files),
+                        )
+                        _set_context_state(context_state)
+                        step.output = "Документы восстановлены частично. Индекс пока не готов."
                 else:
+                    context_state = _build_context_state(
+                        session_docs,
+                        None,
+                        source="resume",
+                        expected_docs=len(unique_files),
+                    )
+                    _set_context_state(context_state)
                     step.output = "Не удалось восстановить текст документов."
 
 
@@ -866,6 +1042,11 @@ async def on_message(message: cl.Message):
     query = message.content
     history = _get_session_history()
     session_docs = _get_session_docs()
+    context_state = _get_context_state()
+
+    if context_state.get("reason") == "resume_partial" and _is_explicit_restore_confirmation(query):
+        context_state = {**context_state, "confirmed_partial": True}
+        _set_context_state(context_state)
 
     pending_choice = _get_pending_route_choice()
     if pending_choice:
@@ -883,6 +1064,7 @@ async def on_message(message: cl.Message):
                     pending_choice.get("new_files", []),
                     session_docs,
                     history,
+                    context_state=context_state,
                 )
             history.append({"role": "user", "content": query})
             return
@@ -951,11 +1133,16 @@ async def on_message(message: cl.Message):
                         logger.error(f"RAG Re-indexing failed: {e}")
                         step.output = f"⚠️ Re-indexing failed: {e}"
 
+    rag = cl.user_session.get("rag_pipeline")
+    context_state = _build_context_state(session_docs, rag, source="runtime", confirmed_partial=context_state.get("confirmed_partial"))
+    _set_context_state(context_state)
+
     decision = _get_intent_decision(
         query,
         file_count=len(new_files),
         has_session_docs=bool(session_docs),
         session_docs=session_docs,
+        context_state=context_state,
     )
     if decision.get("requires_choice"):
         recommended_route = decision["recommended_route"]
@@ -973,7 +1160,7 @@ async def on_message(message: cl.Message):
             raise_on_timeout=False,
         ).send()
         if response and response.get("payload", {}).get("route"):
-            await _execute_intent(response["payload"]["route"], query, new_files, session_docs, history)
+            await _execute_intent(response["payload"]["route"], query, new_files, session_docs, history, context_state=context_state)
         else:
             _set_pending_route_choice(state)
             await cl.Message(
@@ -985,12 +1172,30 @@ async def on_message(message: cl.Message):
             history.append({"role": "user", "content": query})
             return
     else:
-        await _execute_intent(decision["intent"], query, new_files, session_docs, history)
+        await _execute_intent(decision["intent"], query, new_files, session_docs, history, context_state=context_state)
 
     history.append({"role": "user", "content": query})
 
 
-async def _execute_intent(intent: str, query: str, new_files: List, session_docs: Dict, history: List):
+async def _execute_intent(
+    intent: str,
+    query: str,
+    new_files: List,
+    session_docs: Dict,
+    history: List,
+    context_state: Optional[Dict[str, Any]] = None,
+):
+    context_state = context_state or _get_context_state()
+    if intent in _DOC_REQUIRED_INTENTS:
+        context_ready = context_state.get("has_valid_docs", False) and context_state.get("index_ready", False)
+        partial_resume_without_confirmation = (
+            context_state.get("reason") == "resume_partial" and not context_state.get("confirmed_partial")
+        )
+        if not context_ready or partial_resume_without_confirmation:
+            await cl.Message(content=context_state.get("message", _CONTEXT_RECOVERY_MESSAGE)).send()
+            await _handle_chat(query, session_docs, history)
+            return
+
     if intent == "compare_documents":
         await _handle_compare(query, new_files, session_docs)
     elif intent == "equipment_analysis":
