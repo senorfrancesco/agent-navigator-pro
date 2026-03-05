@@ -489,6 +489,22 @@ def _build_prompt(query: str, history: List, system_msg: str = "") -> str:
     return prompt
 
 
+def _build_resume_status_message(
+    restored_messages: int,
+    found_documents: int,
+    rag_ready: bool,
+) -> str:
+    """Единый формат системного сообщения после восстановления чата."""
+    rag_status = "готов" if rag_ready else "не готов"
+    return (
+        "🔄 **Восстановление чата завершено**\n"
+        f"- Восстановлено сообщений: **{restored_messages}**\n"
+        f"- Найдено документов: **{found_documents}**\n"
+        f"- RAG-индекс: **{rag_status}**\n\n"
+        "Активный чат переключён на выбранный тред из истории."
+    )
+
+
 # === Stream Response ===
 
 async def _stream_response(prompt: str, msg: cl.Message, history: List):
@@ -798,8 +814,11 @@ async def on_chat_resume(thread):
     Пытается восстановить список документов и RAG-индекс.
     """
     cl.user_session.set("documents", {})
+    cl.user_session.set("rag_pipeline", None)
     history = []
     found_files = []
+    found_documents_count = 0
+    rag_ready = False
 
     if thread and thread.get("steps"):
         for step in thread["steps"]:
@@ -819,10 +838,12 @@ async def on_chat_resume(thread):
                     found_files.extend(fnames)
 
     cl.user_session.set("history", history)
+    restored_messages_count = len(history)
 
     # Пытаемся восстановить документы и RAG
     if found_files:
         unique_files = list(set(found_files))
+        found_documents_count = len(unique_files)
         session_docs = {}
         files_to_load = []
         
@@ -855,10 +876,19 @@ async def on_chat_resume(thread):
                     all_names = [n for n in session_docs.keys()]
                     await asyncio.to_thread(rag.index_documents, all_texts, doc_names=all_names)
                     cl.user_session.set("rag_pipeline", rag)
-                    
+                    rag_ready = True
+
                     step.output = f"Восстановлено {len(names)} документов, RAG готов."
                 else:
                     step.output = "Не удалось восстановить текст документов."
+
+    await cl.Message(
+        content=_build_resume_status_message(
+            restored_messages=restored_messages_count,
+            found_documents=found_documents_count,
+            rag_ready=rag_ready,
+        )
+    ).send()
 
 
 @cl.on_message

@@ -131,10 +131,10 @@
   },
   "threadHistory": {
     "sidebar": {
-      "title": "Предыдущие чаты",
+      "title": "Список чатов",
       "filters": {
         "search": "Поиск",
-        "placeholder": "Искать по диалогам..."
+        "placeholder": "Найти чат..."
       },
       "timeframes": {
         "today": "Сегодня",
@@ -149,7 +149,7 @@
       }
     },
     "thread": {
-      "untitled": "Диалог без названия",
+      "untitled": "Чат без названия",
       "menu": {
         "rename": "Переименовать",
         "share": "Поделиться",
