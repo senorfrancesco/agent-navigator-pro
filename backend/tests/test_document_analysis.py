@@ -606,6 +606,7 @@ class TestDocumentAnalysisIntent:
         else:
             import orchestrator.chainlit_app
 
+        from orchestrator import chainlit_app
         from orchestrator.chainlit_app import (
             _detect_intent,
             _get_intent_decision,
@@ -617,6 +618,7 @@ class TestDocumentAnalysisIntent:
             _build_doc_question_deterministic_fallback,
             _compute_confidence_v1,
             _build_sources_from_rag_result,
+            _load_routing_keywords_config,
         )
         self._detect_intent = _detect_intent
         self._get_intent_decision = _get_intent_decision
@@ -628,6 +630,8 @@ class TestDocumentAnalysisIntent:
         self._build_doc_question_deterministic_fallback = _build_doc_question_deterministic_fallback
         self._compute_confidence_v1 = _compute_confidence_v1
         self._build_sources_from_rag_result = _build_sources_from_rag_result
+        self._load_routing_keywords_config = _load_routing_keywords_config
+        self._chainlit_module = chainlit_app
         self._mock_session = mock_session
         self._mock_cl = mock_cl
 
@@ -735,6 +739,41 @@ class TestDocumentAnalysisIntent:
 
         assert result["intent"] == "document_question"
         assert result["requires_choice"] is False
+
+    def test_custom_keyword_config_changes_fallback_compare_routing(self):
+        with patch.object(self._chainlit_module, "_MINIMAL_COMPARE_PATTERNS", ["delta"]):
+            result = self._detect_intent("Покажи delta между файлами", file_count=2, has_session_docs=True)
+        assert result == "compare_documents"
+
+    def test_custom_keyword_config_changes_intent_decision_equipment_signal(self):
+        session_docs = {
+            "doc1.pdf": {"text": "Коммерческое предложение"},
+            "doc2.pdf": {"text": "Техническое задание"},
+        }
+        classifier_result = {
+            "intent": "document_question",
+            "confidence": 0.4,
+            "margin": 0.1,
+            "needs_rag": True,
+        }
+        with (
+            patch.object(self._chainlit_module, "_EQUIPMENT_QUERY_KEYWORDS", ["custom-eq"]),
+            patch("orchestrator.chainlit_app._detect_equipment_mode", return_value="tz_vs_smeta"),
+        ):
+            result = self._get_intent_decision(
+                "custom-eq запрос",
+                file_count=2,
+                has_session_docs=True,
+                session_docs=session_docs,
+                classifier_result=classifier_result,
+            )
+        assert result["intent"] == "equipment_analysis"
+
+    def test_routing_config_loader_fallback_on_read_error(self):
+        with patch("orchestrator.chainlit_app.open", side_effect=OSError("boom")):
+            config = self._load_routing_keywords_config()
+        assert config["compare_query_keywords"]
+        assert config["minimal_fallback_patterns"]["greeting"]
 
     def test_resolve_pending_route_choice(self):
         pending = {

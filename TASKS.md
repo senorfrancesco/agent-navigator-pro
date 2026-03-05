@@ -743,6 +743,8 @@
 - [x] **TD-10 — Keyword routing как последний fallback (хрупко)**
   Keyword lists (`COMPARE_KEYWORDS`, `EQUIPMENT_KEYWORDS` и др.) работают, но хрупки к новым формулировкам.
   По best practice: keyword routing должен быть **первым слоем** (fast-pass), а не fallback-ом последнего уровня.
+  Follow-up: первый слой keyword routing реализован; следующий шаг — externalized config для routing keywords
+  без хардкода в `chainlit_app.py` (через YAML-конфиг и безопасные defaults).
 
 - [x] **TD-11 — Нет shared HTTP-клиента**
   Каждый вызов создаёт `httpx.AsyncClient(timeout=...)` заново. Нет connection pooling.

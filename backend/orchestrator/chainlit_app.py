@@ -20,6 +20,7 @@ import sys
 import time
 import shutil
 import httpx
+import yaml
 from typing import Dict, List, Optional, Any, TypedDict, Literal
 
 # Добавляем пути (оставляем для обратной совместимости, но используем абсолютные)
@@ -39,29 +40,82 @@ INTENT_LOW_MARGIN_THRESHOLD = 0.12
 INTENT_LOW_CONFIDENCE_THRESHOLD = 0.55
 ROUTE_CHOICE_TIMEOUT_S = 90
 
-_COMPARE_QUERY_KEYWORDS = [
-    "сравни", "сравнение", "различия", "отличия", "что изменилось", "покажи разницу",
-]
-_EQUIPMENT_QUERY_KEYWORDS = [
-    "тз", "техническое задание", "коммерческое предложение", "кп", "смета",
-    "оборудование", "подходит", "что подходит", "что нам подходит",
-    "соответствует", "соответствие", "подходит ли",
-]
-_DOC_QUESTION_KEYWORDS = [
-    "что", "какой", "какая", "какие", "сколько", "найди", "покажи", "указано",
-    "написано", "содержится", "есть ли",
-]
-_DOC_QUESTION_UPLOAD_REQUEST_PHRASES = [
-    "предоставьте тексты",
-    "предоставьте текст",
-    "пришлите текст",
-    "загрузите тексты",
-    "загрузите текст",
-    "нужно увидеть тексты",
-    "мне нужно увидеть тексты",
-    "предоставьте содержание",
-    "нужно содержание",
-]
+_DEFAULT_ROUTING_KEYWORDS = {
+    "compare_query_keywords": [
+        "сравни", "сравнение", "различия", "отличия", "что изменилось", "покажи разницу",
+    ],
+    "equipment_query_keywords": [
+        "тз", "техническое задание", "коммерческое предложение", "кп", "смета",
+        "оборудование", "подходит", "что подходит", "что нам подходит",
+        "соответствует", "соответствие", "подходит ли",
+    ],
+    "doc_question_keywords": [
+        "что", "какой", "какая", "какие", "сколько", "найди", "покажи", "указано",
+        "написано", "содержится", "есть ли",
+    ],
+    "minimal_fallback_patterns": {
+        "compare_documents": ["сравни", "различия"],
+        "equipment_analysis": ["смет", "тз"],
+        "document_analysis": ["анализ", "документ"],
+        "greeting": ["привет", "здравствуй"],
+        "doc_question_upload_request_phrases": [
+            "предоставьте тексты",
+            "предоставьте текст",
+            "пришлите текст",
+            "загрузите тексты",
+            "загрузите текст",
+            "нужно увидеть тексты",
+            "мне нужно увидеть тексты",
+            "предоставьте содержание",
+            "нужно содержание",
+        ],
+    },
+}
+
+
+def _load_routing_keywords_config() -> Dict[str, Any]:
+    path = os.path.join(os.path.dirname(__file__), "data", "routing_keywords.yaml")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
+            if not isinstance(config, dict):
+                raise ValueError("routing keywords config must be dict")
+            return config
+    except Exception as e:
+        logger.warning(
+            "Failed to read routing config %s: %s. Falling back to safe defaults.",
+            path,
+            e,
+        )
+        return copy.deepcopy(_DEFAULT_ROUTING_KEYWORDS)
+
+
+def _routing_list(config: Dict[str, Any], key: str) -> List[str]:
+    value = config.get(key)
+    return value if isinstance(value, list) and value else copy.deepcopy(_DEFAULT_ROUTING_KEYWORDS[key])
+
+
+def _routing_pattern_list(config: Dict[str, Any], key: str) -> List[str]:
+    patterns = config.get("minimal_fallback_patterns", {})
+    if isinstance(patterns, dict):
+        value = patterns.get(key)
+        if isinstance(value, list) and value:
+            return value
+    return copy.deepcopy(_DEFAULT_ROUTING_KEYWORDS["minimal_fallback_patterns"][key])
+
+
+_ROUTING_KEYWORDS_CONFIG = _load_routing_keywords_config()
+_COMPARE_QUERY_KEYWORDS = _routing_list(_ROUTING_KEYWORDS_CONFIG, "compare_query_keywords")
+_EQUIPMENT_QUERY_KEYWORDS = _routing_list(_ROUTING_KEYWORDS_CONFIG, "equipment_query_keywords")
+_DOC_QUESTION_KEYWORDS = _routing_list(_ROUTING_KEYWORDS_CONFIG, "doc_question_keywords")
+_MINIMAL_COMPARE_PATTERNS = _routing_pattern_list(_ROUTING_KEYWORDS_CONFIG, "compare_documents")
+_MINIMAL_EQUIPMENT_PATTERNS = _routing_pattern_list(_ROUTING_KEYWORDS_CONFIG, "equipment_analysis")
+_MINIMAL_DOCUMENT_ANALYSIS_PATTERNS = _routing_pattern_list(_ROUTING_KEYWORDS_CONFIG, "document_analysis")
+_MINIMAL_GREETING_PATTERNS = _routing_pattern_list(_ROUTING_KEYWORDS_CONFIG, "greeting")
+_DOC_QUESTION_UPLOAD_REQUEST_PHRASES = _routing_pattern_list(
+    _ROUTING_KEYWORDS_CONFIG,
+    "doc_question_upload_request_phrases",
+)
 
 DOC_QA_MIN_CHUNKS_SIMPLE = int(os.getenv("DOC_QA_MIN_CHUNKS_SIMPLE", "1"))
 DOC_QA_MIN_CHUNKS_MULTIHOP = int(os.getenv("DOC_QA_MIN_CHUNKS_MULTIHOP", "2"))
@@ -213,21 +267,21 @@ def _detect_intent(query: str, file_count: int = 0, has_session_docs: bool = Fal
 
     # Уровень 2: Minimal Fallback (только если UMS/Classifier недоступен)
     logger.warning("Semantic Router offline. Using minimal fallback routing.")
-    if "сравни" in query_lower or "различия" in query_lower:
+    if _has_any_keyword(query_lower, _MINIMAL_COMPARE_PATTERNS):
         return "compare_documents"
-    if "смет" in query_lower or "тз" in query_lower:
+    if _has_any_keyword(query_lower, _MINIMAL_EQUIPMENT_PATTERNS):
         return "equipment_analysis"
     
     single_file = file_count == 1 or (has_session_docs and len(_get_session_docs()) == 1)
-    if single_file and ("анализ" in query_lower or "документ" in query_lower):
+    if single_file and _has_any_keyword(query_lower, _MINIMAL_DOCUMENT_ANALYSIS_PATTERNS):
         return "document_analysis"
 
     if has_session_docs:
-        if "привет" in query_lower or "здравствуй" in query_lower:
+        if _has_any_keyword(query_lower, _MINIMAL_GREETING_PATTERNS):
             return "greeting"
         return "document_question"
 
-    if "привет" in query_lower or "здравствуй" in query_lower:
+    if _has_any_keyword(query_lower, _MINIMAL_GREETING_PATTERNS):
         return "greeting"
 
     return "general_chat"
