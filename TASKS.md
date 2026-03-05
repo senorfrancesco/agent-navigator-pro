@@ -515,6 +515,59 @@
   - Видимый список тредов и восстановление контекста документов при resume.
   - Отдельный smoke-test для сценария: загрузка файлов → logout/login → resume.
 
+### UX — Chat Navigation & History
+
+- [ ] **UX-CH-1 (P0) — Полное восстановление session context при переключении/resume**
+  Расширить текущий `on_chat_resume`: кроме истории сообщений восстанавливать
+  `session_docs`, `rag_pipeline`, выбранный тред и метаданные последней активной сессии.
+  **Связь с выполненным:** эволюция `TD-4` и `T3.15` (базовый resume/history уже внедрён,
+  теперь закрываем пробелы полного контекста, а не дублируем старый фикс).
+  **DoD:**
+  - После logout/login и переключения на существующий тред контекст документов
+    восстанавливается без ручной пере-загрузки файлов.
+  - В логах есть явный маркер успешного restore (`thread_id`, `doc_count`, `rag_ready`).
+  - Добавлен/обновлён тест в `backend/tests/test_chainlit_chat_history.py`
+    (или профильный `backend/tests/test_chainlit_*`).
+  **Целевые модули:** `backend/orchestrator/chainlit_app.py`, `backend/tests/test_chainlit_chat_history.py`.
+
+- [ ] **UX-CH-2 (P0) — Stale-context validation для resume-сессий**
+  Добавить валидацию устаревшего контекста: проверка существования файлов, `mtime/hash`
+  и корректности ссылок на артефакты перед восстановлением RAG.
+  **Связь с выполненным:** продолжение `TD-4` (после восстановления документов нужен
+  guardrail против «битого»/устаревшего состояния).
+  **DoD:**
+  - При обнаружении stale/отсутствующих документов сессия корректно деградирует в
+    chat-only режим с пользовательским уведомлением.
+  - Восстановление не падает с исключением при частично удалённых файлах.
+  - Добавлены тесты негативных сценариев в `backend/tests/test_chainlit_chat_history.py`
+    (missing file / changed file).
+  **Целевые модули:** `backend/orchestrator/chainlit_app.py`, `backend/tests/test_chainlit_chat_history.py`.
+
+- [ ] **UX-CH-3 (P1) — UX-индикаторы статуса восстановления**
+  Показать пользователю этапы восстановления: «восстанавливаю историю»,
+  «проверяю документы», «контекст готов»/«частично восстановлен».
+  **Связь с выполненным:** развивает `T4.2` (discoverability) и делает результат `TD-4`
+  прозрачным для пользователя в Chainlit UI.
+  **DoD:**
+  - В `chainlit_app.py` реализованы статусные сообщения/steps на этапах resume.
+  - Для частичного восстановления есть отдельный warning-state и понятный текст действия.
+  - Добавлен smoke-тест/проверка отображения шагов в `backend/tests/test_chainlit_streaming.py`
+    или отдельном `backend/tests/test_chainlit_resume_ux.py`.
+  **Целевые модули:** `backend/orchestrator/chainlit_app.py`, `backend/tests/test_chainlit_streaming.py`.
+
+- [ ] **UX-CH-4 (P1) — Тесты переключения между чатами (thread switch regression pack)**
+  Собрать отдельный набор регрессий на переключение тредов с разным состоянием документов
+  и mixed-сценариями (новый чат ↔ старый чат ↔ новый чат).
+  **Связь с выполненным:** закрепляет изменения после `T3.15` + `TD-4`, чтобы не
+  возвращался баг «история есть, контекста нет».
+  **DoD:**
+  - Покрыты минимум 4 сценария: clean thread, thread с документами,
+    thread с удалённым документом, быстрое переключение между тредами.
+  - Тесты добавлены в `backend/tests/test_chainlit_chat_history.py`
+    и/или `backend/tests/test_chainlit_resume_switching.py`.
+  - Набор проходит локально в `pytest backend/tests/test_chainlit_chat_history.py -v`.
+  **Целевые модули:** `backend/orchestrator/chainlit_app.py`, `backend/tests/test_chainlit_chat_history.py`, `backend/tests/test_chainlit_resume_switching.py`.
+
 - [ ] **T4.3 — LLM Profile Selector в Chainlit (без raw model-id в UI)**
   Добавить выбор профиля инференса (например: `default-chat`, `long-context`, `legal-compare`).
   Профиль маппится на backend-конфиг (модель, ctx, temperature, device_mode).
@@ -774,6 +827,7 @@
 
 ## Session Log
 
+- [x] **[2026-03-04 00:00]** Product decision: поднять приоритет Chat UX (navigation/history/resume) — ✅ recorded
 - [x] **[2026-03-03 16:12]** Task #4: (без названия) — ✅ completed
 - [x] **[2026-03-03 16:11]** Task #6: (без названия) — ✅ completed
 - [x] **[2026-03-03 16:09]** Task #3: (без названия) — ✅ completed
