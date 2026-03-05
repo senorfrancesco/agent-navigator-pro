@@ -205,6 +205,13 @@
 - [x] **B3.10 — Отчёт не сохранялся в контейнере**
   `compare.py`: путь через `__file__` заменён на `os.getenv("UPLOADS_DIR")` (`/app/uploads` в Docker).
 
+
+- [x] **B3.12 — Контракт восстановления Chainlit session state (resume v1)**
+  `backend/orchestrator/chainlit_app.py`: формализован контракт `on_chat_resume` (history, session_docs, rag_index_state, selected_route_mode).
+  Добавлена сериализация в `metadata.session_state` для шагов загрузки/индексации и восстановление без эвристик (legacy fallback оставлен для старых тредов).
+  UX: явный статус при переключении чата и пояснение «история сообщений» vs «рабочий контекст документов».
+  Тест: `test_chainlit_resume_state.py` — 4 регрессионных сценария (0 файлов, 1 файл, 2+ файла compare/equipment, A→B→A).
+
 ### Backlog
 
 - [ ] **B3.11 — Убрать JSON salvage из DEBUG-POLISH**

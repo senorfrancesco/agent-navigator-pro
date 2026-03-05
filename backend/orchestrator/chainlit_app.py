@@ -67,6 +67,7 @@ DOC_QA_MIN_CHUNKS_SIMPLE = int(os.getenv("DOC_QA_MIN_CHUNKS_SIMPLE", "1"))
 DOC_QA_MIN_CHUNKS_MULTIHOP = int(os.getenv("DOC_QA_MIN_CHUNKS_MULTIHOP", "2"))
 DOC_QA_MIN_RAW_SCORE_SIMPLE = float(os.getenv("DOC_QA_MIN_RAW_SCORE_SIMPLE", "0.01"))
 DOC_QA_MIN_ZSCORE_CORRECTIVE = float(os.getenv("DOC_QA_MIN_ZSCORE_CORRECTIVE", "-0.5"))
+SESSION_STATE_VERSION = "1"
 
 
 class SourceRef(TypedDict):
@@ -169,6 +170,56 @@ def _get_pending_route_choice() -> Optional[Dict[str, Any]]:
 
 def _set_pending_route_choice(data: Optional[Dict[str, Any]]) -> None:
     cl.user_session.set("pending_route_choice", data)
+
+
+def _get_route_mode() -> str:
+    return cl.user_session.get("selected_route_mode") or "general_chat"
+
+
+def _build_session_state_payload(rag_index_state: str = "unknown") -> Dict[str, Any]:
+    docs = _get_session_docs()
+    return {
+        "version": SESSION_STATE_VERSION,
+        "history": copy.deepcopy(_get_session_history()),
+        "session_docs": [
+            {
+                "name": name,
+                "path": data.get("path"),
+            }
+            for name, data in docs.items()
+            if data.get("path")
+        ],
+        "rag_index_state": rag_index_state,
+        "selected_route_mode": _get_route_mode(),
+    }
+
+
+def _attach_session_state_metadata(target: Any, rag_index_state: str = "unknown") -> None:
+    if target is None:
+        return
+    payload = {"session_state": _build_session_state_payload(rag_index_state)}
+    current = getattr(target, "metadata", None)
+    if isinstance(current, dict):
+        current.update(payload)
+        target.metadata = current
+    else:
+        target.metadata = payload
+
+
+def _extract_state_from_thread(thread: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not thread:
+        return None
+
+    thread_meta = thread.get("metadata") if isinstance(thread, dict) else None
+    if isinstance(thread_meta, dict) and isinstance(thread_meta.get("session_state"), dict):
+        return thread_meta["session_state"]
+
+    for step in reversed(thread.get("steps", [])):
+        step_meta = step.get("metadata") if isinstance(step, dict) else None
+        if isinstance(step_meta, dict) and isinstance(step_meta.get("session_state"), dict):
+            return step_meta["session_state"]
+
+    return None
 
 
 # === Intent Detection ===
@@ -773,6 +824,7 @@ async def _init_classifier():
 async def on_chat_start():
     cl.user_session.set("documents", {})
     cl.user_session.set("history", [])
+    cl.user_session.set("selected_route_mode", "general_chat")
 
     # Фоновая инициализация classifier для раннего semantic routing
     asyncio.create_task(_init_classifier())
@@ -794,24 +846,97 @@ async def on_chat_start():
 @cl.on_chat_resume
 async def on_chat_resume(thread):
     """
-    Восстановление сессии из сохранённой истории (TD-4 Fix).
-    Пытается восстановить список документов и RAG-индекс.
+    Контракт восстановления on_chat_resume (v1):
+    1) history — обязательная история сообщений для multi-turn;
+    2) session_docs — список документов рабочего контекста (имя + путь), отдельно от истории;
+    3) rag_index_state — состояние индекса (ready/reindexing/empty/failed);
+    4) selected_route_mode — выбранный режим маршрутизации/интент последнего запроса.
+
+    Данные берутся из metadata.session_state чата/шагов.
+    Heuristic fallback используется только для обратной совместимости со старыми тредами.
     """
     cl.user_session.set("documents", {})
+    cl.user_session.set("history", [])
+    cl.user_session.set("selected_route_mode", "general_chat")
+
+    restored = _extract_state_from_thread(thread or {})
+    if restored:
+        history = restored.get("history") if isinstance(restored.get("history"), list) else []
+        cl.user_session.set("history", history)
+        cl.user_session.set("selected_route_mode", restored.get("selected_route_mode") or "general_chat")
+
+        session_docs = {}
+        files_to_load = []
+        for item in restored.get("session_docs", []):
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            path = item.get("path")
+            if not name or not path:
+                continue
+            if os.path.exists(path):
+                files_to_load.append({"name": name, "path": path})
+
+        rag_index_state = "empty"
+        if files_to_load:
+            rag_index_state = "reindexing"
+            async with cl.Step(name="Восстановление рабочего контекста", type="tool") as step:
+                loaded = await _load_files(files_to_load)
+                for f in loaded:
+                    if f.get("text"):
+                        session_docs[f["name"]] = {"text": f["text"], "path": f["path"]}
+                cl.user_session.set("documents", session_docs)
+
+                if session_docs:
+                    from orchestrator.rag.pipeline import AdaptiveRAGPipeline
+                    from services.model_manager.ums_client import create_ums_embed_fn
+
+                    embed_fn = create_ums_embed_fn()
+                    rag_mode = await _get_rag_mode()
+                    rag = AdaptiveRAGPipeline(embed_fn=embed_fn, rag_mode=rag_mode)
+                    all_texts = [d["text"] for d in session_docs.values() if d.get("text")]
+                    all_names = [n for n, d in session_docs.items() if d.get("text")]
+                    try:
+                        if all_texts:
+                            await asyncio.to_thread(rag.index_documents, all_texts, doc_names=all_names)
+                        cl.user_session.set("rag_pipeline", rag)
+                        rag_index_state = "ready"
+                    except Exception as e:
+                        rag_index_state = "failed"
+                        logger.error(f"RAG restore indexing failed: {e}")
+                else:
+                    rag_index_state = "empty"
+
+                status_human = "индекс готов" if rag_index_state == "ready" else "индекс восстанавливается"
+                step.output = (
+                    "Чат восстановлен: "
+                    f"{len(session_docs)} файлов, {status_human}.\n\n"
+                    "История сообщений восстановлена отдельно от рабочего контекста документов."
+                )
+                _attach_session_state_metadata(step, rag_index_state)
+
+        await cl.Message(
+            content=(
+                "✅ Чат восстановлен.\n"
+                f"Файлов в рабочем контексте: {len(session_docs)}.\n"
+                f"Состояние индекса: {'готов' if rag_index_state == 'ready' else 'восстанавливается'}.\n\n"
+                "ℹ️ История сообщений — это переписка. "
+                "Рабочий контекст документов — это загруженные файлы для анализа и RAG."
+            )
+        ).send()
+        return
+
+    # Legacy fallback для старых чатов без metadata.session_state
     history = []
     found_files = []
-
     if thread and thread.get("steps"):
         for step in thread["steps"]:
-            # Восстанавливаем историю сообщений
             if step.get("type") == "user_message":
                 history.append({"role": "user", "content": step.get("output", "")})
             elif step.get("type") == "assistant_message":
                 history.append({"role": "assistant", "content": step.get("output", "")})
-            
-            # Ищем информацию о загруженных файлах в шагах
+
             if step.get("name") == "Загрузка документов" and step.get("output"):
-                # Парсим строку "Загружено: file1.pdf, file2.docx"
                 output = step.get("output", "")
                 if "Загружено:" in output:
                     files_str = output.split("Загружено:")[1].strip()
@@ -819,46 +944,60 @@ async def on_chat_resume(thread):
                     found_files.extend(fnames)
 
     cl.user_session.set("history", history)
-
-    # Пытаемся восстановить документы и RAG
+    session_docs = {}
+    rag_index_state = "empty"
     if found_files:
         unique_files = list(set(found_files))
-        session_docs = {}
         files_to_load = []
-        
         for fname in unique_files:
-            # Путь в контейнере
             c_path = os.path.join(UPLOADS_DIR, fname)
             if os.path.exists(c_path):
                 files_to_load.append({"name": fname, "path": c_path})
-        
+
         if files_to_load:
-            async with cl.Step(name="Восстановление документов", type="tool") as step:
+            rag_index_state = "reindexing"
+            async with cl.Step(name="Восстановление рабочего контекста", type="tool") as step:
                 loaded = await _load_files(files_to_load)
-                names = []
                 for f in loaded:
                     if f.get("text"):
                         session_docs[f["name"]] = {"text": f["text"], "path": f["path"]}
-                        names.append(f["name"])
                 cl.user_session.set("documents", session_docs)
-                
-                # Инициализируем RAG
+
                 if session_docs:
                     from orchestrator.rag.pipeline import AdaptiveRAGPipeline
                     from services.model_manager.ums_client import create_ums_embed_fn
-                    
+
                     embed_fn = create_ums_embed_fn()
                     rag_mode = await _get_rag_mode()
                     rag = AdaptiveRAGPipeline(embed_fn=embed_fn, rag_mode=rag_mode)
-                    
+
                     all_texts = [d["text"] for d in session_docs.values()]
                     all_names = [n for n in session_docs.keys()]
-                    await asyncio.to_thread(rag.index_documents, all_texts, doc_names=all_names)
-                    cl.user_session.set("rag_pipeline", rag)
-                    
-                    step.output = f"Восстановлено {len(names)} документов, RAG готов."
-                else:
-                    step.output = "Не удалось восстановить текст документов."
+                    try:
+                        await asyncio.to_thread(rag.index_documents, all_texts, doc_names=all_names)
+                        cl.user_session.set("rag_pipeline", rag)
+                        rag_index_state = "ready"
+                    except Exception as e:
+                        logger.error(f"RAG restore indexing failed (legacy): {e}")
+                        rag_index_state = "failed"
+
+                status_human = "индекс готов" if rag_index_state == "ready" else "индекс восстанавливается"
+                step.output = (
+                    "Чат восстановлен: "
+                    f"{len(session_docs)} файлов, {status_human}.\n\n"
+                    "История сообщений восстановлена отдельно от рабочего контекста документов."
+                )
+                _attach_session_state_metadata(step, rag_index_state)
+
+    await cl.Message(
+        content=(
+            "✅ Чат восстановлен.\n"
+            f"Файлов в рабочем контексте: {len(session_docs)}.\n"
+            f"Состояние индекса: {'готов' if rag_index_state == 'ready' else 'восстанавливается'}.\n\n"
+            "ℹ️ История сообщений — это переписка. "
+            "Рабочий контекст документов — это загруженные файлы для анализа и RAG."
+        )
+    ).send()
 
 
 @cl.on_message
@@ -877,6 +1016,7 @@ async def on_message(message: cl.Message):
             if selected_route == "cancel":
                 await cl.Message(content="Выбор отменён.").send()
             else:
+                cl.user_session.set("selected_route_mode", selected_route)
                 await _execute_intent(
                     selected_route,
                     pending_choice["query"],
@@ -907,6 +1047,7 @@ async def on_message(message: cl.Message):
                     elif f.get("error"):
                         await cl.Message(content=f"Ошибка загрузки {f['name']}: {f['error']}").send()
                 step.output = f"Загружено: {', '.join(names)}" if names else "Нет новых файлов"
+                _attach_session_state_metadata(step, "reindexing" if names else "empty")
 
             # Обновляем new_files с корректными путями из session_docs (не UUID-пути Chainlit)
             new_files = [{"name": n, "path": session_docs[n]["path"]} for n in names if n in session_docs]
@@ -932,9 +1073,11 @@ async def on_message(message: cl.Message):
                     try:
                         await asyncio.to_thread(rag.index_documents, all_texts, doc_names=all_names)
                         step.output = f"RAG: mode={rag_mode}, search={search_type}, indexed {len(all_texts)} docs"
+                        _attach_session_state_metadata(step, "ready")
                     except Exception as e:
                         logger.error(f"RAG Indexing failed: {e}")
                         step.output = f"⚠️ RAG Indexing failed: {e}. Falling back to non-RAG mode."
+                        _attach_session_state_metadata(step, "failed")
                 
                 cl.user_session.set("rag_pipeline", rag)
         else:
@@ -947,9 +1090,11 @@ async def on_message(message: cl.Message):
                     try:
                         await asyncio.to_thread(rag.index_documents, all_texts, doc_names=all_names)
                         step.output = f"Переиндексировано {len(all_texts)} документов"
+                        _attach_session_state_metadata(step, "ready")
                     except Exception as e:
                         logger.error(f"RAG Re-indexing failed: {e}")
                         step.output = f"⚠️ Re-indexing failed: {e}"
+                        _attach_session_state_metadata(step, "failed")
 
     decision = _get_intent_decision(
         query,
@@ -957,6 +1102,7 @@ async def on_message(message: cl.Message):
         has_session_docs=bool(session_docs),
         session_docs=session_docs,
     )
+    cl.user_session.set("selected_route_mode", decision.get("intent", "general_chat"))
     if decision.get("requires_choice"):
         recommended_route = decision["recommended_route"]
         prompt_text = _build_route_choice_prompt(recommended_route, decision.get("mode", "unknown"))
@@ -973,6 +1119,7 @@ async def on_message(message: cl.Message):
             raise_on_timeout=False,
         ).send()
         if response and response.get("payload", {}).get("route"):
+            cl.user_session.set("selected_route_mode", response["payload"]["route"])
             await _execute_intent(response["payload"]["route"], query, new_files, session_docs, history)
         else:
             _set_pending_route_choice(state)
@@ -985,6 +1132,7 @@ async def on_message(message: cl.Message):
             history.append({"role": "user", "content": query})
             return
     else:
+        cl.user_session.set("selected_route_mode", decision["intent"])
         await _execute_intent(decision["intent"], query, new_files, session_docs, history)
 
     history.append({"role": "user", "content": query})
