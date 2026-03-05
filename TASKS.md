@@ -205,6 +205,21 @@
 - [x] **B3.10 — Отчёт не сохранялся в контейнере**
   `compare.py`: путь через `__file__` заменён на `os.getenv("UPLOADS_DIR")` (`/app/uploads` в Docker).
 
+### Bugfixes v3.0 (2026-03-04)
+
+- [x] **B3.12 — Resume: ручное восстановление контекста документов**
+  `chainlit_app.py`: при `on_chat_resume` показывается статус найденных документов и состояния индекса.
+  Если индекс не поднят — отображается action-кнопка «Нажмите, чтобы восстановить контекст документов».
+  Добавлен action-handler `restore_doc_context`: фоновая переиндексация + уведомление о результате.
+
+- [x] **B3.13 — Guard для minimal fallback без контекста**
+  `chainlit_app.py`: когда semantic router недоступен (`minimal_fallback`) и есть документы без индекса,
+  приложение явно сообщает причину и предлагает ручное восстановление, вместо молчаливого ухода в general chat.
+
+- [x] **B3.14 — Smoke test resume + manual restore**
+  `backend/tests/test_chainlit_resume_restore_smoke.py`: минимальные сценарии для resume со сломанным индексом
+  и для ручного запуска восстановление через action.
+
 ### Backlog
 
 - [ ] **B3.11 — Убрать JSON salvage из DEBUG-POLISH**

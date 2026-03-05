@@ -171,6 +171,77 @@ def _set_pending_route_choice(data: Optional[Dict[str, Any]]) -> None:
     cl.user_session.set("pending_route_choice", data)
 
 
+def _extract_resume_files(thread: Optional[Dict[str, Any]]) -> List[str]:
+    found_files: List[str] = []
+    if thread and thread.get("steps"):
+        for step in thread["steps"]:
+            if step.get("name") != "Загрузка документов" or not step.get("output"):
+                continue
+            output = step.get("output", "")
+            if "Загружено:" not in output:
+                continue
+            files_str = output.split("Загружено:", 1)[1].strip()
+            found_files.extend([f.strip() for f in files_str.split(",") if f.strip()])
+    return sorted(set(found_files))
+
+
+def _is_doc_like_query(query: str) -> bool:
+    query_lower = query.lower()
+    return (
+        _has_any_keyword(query_lower, _DOC_QUESTION_KEYWORDS)
+        or _has_any_keyword(query_lower, _COMPARE_QUERY_KEYWORDS)
+        or _has_any_keyword(query_lower, _EQUIPMENT_QUERY_KEYWORDS)
+    )
+
+
+async def _reindex_session_documents(session_docs: Dict[str, Any]) -> Dict[str, Any]:
+    all_texts = [d["text"] for d in session_docs.values() if d.get("text")]
+    all_names = [n for n, d in session_docs.items() if d.get("text")]
+    if not all_texts:
+        return {"indexed": False, "reason": "no_text"}
+
+    from orchestrator.rag.pipeline import AdaptiveRAGPipeline
+    from services.model_manager.ums_client import create_ums_embed_fn
+
+    embed_fn = create_ums_embed_fn()
+    rag_mode = await _get_rag_mode()
+    rag = AdaptiveRAGPipeline(embed_fn=embed_fn, rag_mode=rag_mode)
+    await asyncio.to_thread(rag.index_documents, all_texts, doc_names=all_names)
+    cl.user_session.set("rag_pipeline", rag)
+    return {"indexed": bool(rag._indexed), "rag_mode": rag_mode, "count": len(all_names)}
+
+
+async def _run_manual_restore_index() -> None:
+    session_docs = _get_session_docs()
+    if not session_docs:
+        await cl.Message(content="Нет документов для восстановления индекса.").send()
+        return
+
+    try:
+        async with cl.Step(name="Восстановление индекса", type="tool") as step:
+            result = await _reindex_session_documents(session_docs)
+            if result.get("indexed"):
+                step.output = (
+                    f"Индекс восстановлен: {result['count']} документов "
+                    f"(mode={result.get('rag_mode', 'simple')})."
+                )
+            else:
+                step.output = "Не удалось восстановить индекс: отсутствует текст документов."
+        if result.get("indexed"):
+            await cl.Message(content="✅ Контекст документов восстановлен. Можно продолжать вопросы по файлам.").send()
+        else:
+            await cl.Message(content="⚠️ Контекст не восстановлен: в сессии нет доступного текста документов.").send()
+    except Exception as e:
+        logger.exception("Manual index restore failed: %s", e)
+        await cl.Message(content=f"⚠️ Восстановление индекса завершилось ошибкой: {e}").send()
+
+
+@cl.action_callback("restore_doc_context")
+async def on_restore_doc_context(_action):
+    await cl.Message(content="Запускаю восстановление контекста документов в фоне…").send()
+    asyncio.create_task(_run_manual_restore_index())
+
+
 # === Intent Detection ===
 
 def _detect_intent(query: str, file_count: int = 0, has_session_docs: bool = False) -> str:
@@ -799,7 +870,7 @@ async def on_chat_resume(thread):
     """
     cl.user_session.set("documents", {})
     history = []
-    found_files = []
+    found_files = _extract_resume_files(thread)
 
     if thread and thread.get("steps"):
         for step in thread["steps"]:
@@ -808,25 +879,15 @@ async def on_chat_resume(thread):
                 history.append({"role": "user", "content": step.get("output", "")})
             elif step.get("type") == "assistant_message":
                 history.append({"role": "assistant", "content": step.get("output", "")})
-            
-            # Ищем информацию о загруженных файлах в шагах
-            if step.get("name") == "Загрузка документов" and step.get("output"):
-                # Парсим строку "Загружено: file1.pdf, file2.docx"
-                output = step.get("output", "")
-                if "Загружено:" in output:
-                    files_str = output.split("Загружено:")[1].strip()
-                    fnames = [f.strip() for f in files_str.split(",") if f.strip()]
-                    found_files.extend(fnames)
 
     cl.user_session.set("history", history)
 
     # Пытаемся восстановить документы и RAG
     if found_files:
-        unique_files = list(set(found_files))
         session_docs = {}
         files_to_load = []
-        
-        for fname in unique_files:
+
+        for fname in found_files:
             # Путь в контейнере
             c_path = os.path.join(UPLOADS_DIR, fname)
             if os.path.exists(c_path):
@@ -841,24 +902,61 @@ async def on_chat_resume(thread):
                         session_docs[f["name"]] = {"text": f["text"], "path": f["path"]}
                         names.append(f["name"])
                 cl.user_session.set("documents", session_docs)
-                
+
                 # Инициализируем RAG
                 if session_docs:
-                    from orchestrator.rag.pipeline import AdaptiveRAGPipeline
-                    from services.model_manager.ums_client import create_ums_embed_fn
-                    
-                    embed_fn = create_ums_embed_fn()
-                    rag_mode = await _get_rag_mode()
-                    rag = AdaptiveRAGPipeline(embed_fn=embed_fn, rag_mode=rag_mode)
-                    
-                    all_texts = [d["text"] for d in session_docs.values()]
-                    all_names = [n for n in session_docs.keys()]
-                    await asyncio.to_thread(rag.index_documents, all_texts, doc_names=all_names)
-                    cl.user_session.set("rag_pipeline", rag)
-                    
-                    step.output = f"Восстановлено {len(names)} документов, RAG готов."
+                    try:
+                        result = await _reindex_session_documents(session_docs)
+                        if result.get("indexed"):
+                            step.output = (
+                                f"Восстановлено {len(names)} документов, "
+                                f"индекс готов (mode={result.get('rag_mode', 'simple')})."
+                            )
+                        else:
+                            step.output = (
+                                f"Восстановлено {len(names)} документов, "
+                                "но индекс отсутствует: нет текста для индексации."
+                            )
+                    except Exception as e:
+                        logger.warning("Resume re-index failed: %s", e)
+                        step.output = (
+                            f"Восстановлено {len(names)} документов, "
+                            f"но индекс не поднялся: {e}"
+                        )
+                        await cl.Message(
+                            content=(
+                                "⚠️ Документы найдены, но индекс контекста не восстановлен. "
+                                "Нажмите, чтобы восстановить контекст документов вручную."
+                            ),
+                            actions=[
+                                cl.Action(
+                                    name="restore_doc_context",
+                                    payload={"source": "resume"},
+                                    label="Нажмите, чтобы восстановить контекст документов",
+                                )
+                            ],
+                        ).send()
                 else:
                     step.output = "Не удалось восстановить текст документов."
+
+    index_state = "готов" if (cl.user_session.get("rag_pipeline") and cl.user_session.get("rag_pipeline")._indexed) else "отсутствует"
+    await cl.Message(
+        content=(
+            f"Resume: найдено документов — {len(_get_session_docs())}; "
+            f"состояние индекса — {index_state}."
+        )
+    ).send()
+    if index_state == "отсутствует" and _get_session_docs():
+        await cl.Message(
+            content="Контекст документов пока недоступен.",
+            actions=[
+                cl.Action(
+                    name="restore_doc_context",
+                    payload={"source": "resume_summary"},
+                    label="Нажмите, чтобы восстановить контекст документов",
+                )
+            ],
+        ).send()
 
 
 @cl.on_message
@@ -957,6 +1055,30 @@ async def on_message(message: cl.Message):
         has_session_docs=bool(session_docs),
         session_docs=session_docs,
     )
+
+    rag = cl.user_session.get("rag_pipeline")
+    if (
+        decision.get("reason") == "minimal_fallback"
+        and session_docs
+        and _is_doc_like_query(query)
+        and (rag is None or not rag._indexed)
+    ):
+        await cl.Message(
+            content=(
+                "Семантический роутер сейчас недоступен, а индекс документов отсутствует. "
+                "Поэтому не переключаюсь в обычный чат, чтобы не потерять контекст вопроса."
+            ),
+            actions=[
+                cl.Action(
+                    name="restore_doc_context",
+                    payload={"source": "fallback_guard"},
+                    label="Нажмите, чтобы восстановить контекст документов",
+                )
+            ],
+        ).send()
+        history.append({"role": "user", "content": query})
+        return
+
     if decision.get("requires_choice"):
         recommended_route = decision["recommended_route"]
         prompt_text = _build_route_choice_prompt(recommended_route, decision.get("mode", "unknown"))
@@ -1309,6 +1431,22 @@ async def _handle_doc_question(query: str, session_docs: Dict, history: List):
     rag_result = None
     rag_meta: Dict[str, Any] = {}
     rag_mode = "simple"
+
+    if session_docs and (rag is None or not rag._indexed):
+        await cl.Message(
+            content=(
+                "Вижу загруженные документы, но индекс контекста отсутствует. "
+                "Поэтому не могу ответить с проверяемыми ссылками по документам."
+            ),
+            actions=[
+                cl.Action(
+                    name="restore_doc_context",
+                    payload={"source": "doc_question"},
+                    label="Нажмите, чтобы восстановить контекст документов",
+                )
+            ],
+        ).send()
+        return
 
     if rag and rag._indexed:
         async with cl.Step(name="Поиск по документам", type="retrieval") as step:
