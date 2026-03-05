@@ -8,6 +8,7 @@ import json
 import hashlib
 import uuid
 import time
+import logging
 import sys
 import os
 import re
@@ -38,6 +39,7 @@ except ImportError:
     def get_system_resources(): return {"error": "Resource monitor not found"}
 
 app = FastAPI(title="Agent Navigator Pro Orchestrator", version="2.3.0")
+logger = logging.getLogger(__name__)
 
 app.add_middleware(
     CORSMiddleware,
@@ -271,9 +273,154 @@ def determine_document_order(
 # === Сессионный менеджер документов ===
 
 MAX_HISTORY_MESSAGES = 10  # Максимум сообщений в multi-turn промпте
+SUMMARY_RECENT_MESSAGES = 6
+SUMMARY_TRIGGER_MESSAGES = int(os.getenv("CHAT_SUMMARY_TRIGGER_MESSAGES", "12"))
+SUMMARY_TRIGGER_TOKENS = int(os.getenv("CHAT_SUMMARY_TRIGGER_TOKENS", "1800"))
+ENABLE_CHAT_SUMMARY_MEMORY = os.getenv("ENABLE_CHAT_SUMMARY_MEMORY", "false").lower() in {"1", "true", "yes", "on"}
 
 
-def _build_multiturn_prompt(messages: List[Dict[str, Any]], system_suffix: str = "") -> str:
+def _estimate_tokens(text: str) -> int:
+    """Грубая оценка токенов: ~4 символа на токен для mixed RU/EN текста."""
+    return max(1, len(text) // 4)
+
+
+def _extract_text_content(content: Any) -> str:
+    """Извлекает текст из plain/multimodal content."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text")
+    return str(content or "")
+
+
+def _detect_simple_intent(text: str) -> str:
+    """Лёгкая intent-эвристика для отслеживания смены темы."""
+    query = text.lower()
+    if any(kw in query for kw in ["сравни", "различ", "изменени"]):
+        return "compare_documents"
+    if any(kw in query for kw in ["смет", "оборуд", "тз", "закуп"]):
+        return "equipment_analysis"
+    if any(kw in query for kw in ["документ", "файл", "раздел", "пункт", "статья"]):
+        return "document_question"
+    return "general_chat"
+
+
+def _extract_facts_for_consistency(text: str) -> Tuple[List[str], List[str]]:
+    """Достаёт числовые факты и упоминания файлов для консистентности summary."""
+    numbers = re.findall(r"\b\d+[\d\s.,]*\b", text)
+    files = re.findall(r"\b[\w\- ]+\.(?:pdf|docx|doc|xlsx|xls|csv|txt|md|png|jpg|jpeg)\b", text, flags=re.IGNORECASE)
+
+    norm_numbers = []
+    for n in numbers:
+        normalized = re.sub(r"\s+", "", n.strip())
+        if normalized and normalized not in norm_numbers:
+            norm_numbers.append(normalized)
+
+    norm_files = []
+    for f in files:
+        name = f.strip()
+        if name and name not in norm_files:
+            norm_files.append(name)
+
+    return norm_numbers, norm_files
+
+
+def _generate_summary_from_messages(messages: List[Dict[str, Any]]) -> str:
+    """Lightweight summary без отдельного LLM вызова."""
+    if not messages:
+        return ""
+
+    pieces: List[str] = []
+    for msg in messages[-12:]:
+        role = msg.get("role", "user")
+        if role == "system":
+            continue
+        content = _extract_text_content(msg.get("content", "")).strip()
+        if not content:
+            continue
+        clipped = content.replace("\n", " ")[:180]
+        prefix = "Пользователь" if role == "user" else "Ассистент"
+        pieces.append(f"- {prefix}: {clipped}")
+
+    return "\n".join(pieces[:10])
+
+
+def _ensure_summary_consistency(summary_text: str, recent_messages: List[Dict[str, Any]]) -> str:
+    """Добавляет в summary новые числовые факты и файлы из последних сообщений."""
+    recent_text = "\n".join(_extract_text_content(m.get("content", "")) for m in recent_messages)
+    numbers, files = _extract_facts_for_consistency(recent_text)
+    missing_numbers = [n for n in numbers if n not in summary_text]
+    missing_files = [f for f in files if f not in summary_text]
+
+    additions = []
+    if missing_numbers:
+        additions.append("Числовые факты: " + ", ".join(missing_numbers[:8]))
+    if missing_files:
+        additions.append("Файлы: " + ", ".join(missing_files[:8]))
+    if additions:
+        summary_text = (summary_text + "\n- " + " | ".join(additions)).strip()
+    return summary_text
+
+
+def _prepare_messages_with_summary_memory(session: Dict[str, Any], messages: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], str]:
+    """Готовит хвост диалога + summary memory и пишет метрики в лог."""
+    state = session.setdefault(
+        "chat_summary_state",
+        {
+            "summary_text": "",
+            "summary_updates_count": 0,
+            "fallback_count": 0,
+            "avg_prompt_reduction": 0.0,
+            "last_intent": "general_chat",
+        },
+    )
+
+    conversation = [m for m in messages if m.get("role") != "system"]
+    if not conversation:
+        return messages, ""
+
+    total_chars = sum(len(_extract_text_content(m.get("content", ""))) for m in conversation)
+    total_tokens = _estimate_tokens("\n".join(_extract_text_content(m.get("content", "")) for m in conversation))
+    latest_user_text = next((_extract_text_content(m.get("content", "")) for m in reversed(conversation) if m.get("role") == "user"), "")
+    latest_intent = _detect_simple_intent(latest_user_text)
+
+    intent_shift = latest_intent != state.get("last_intent", "general_chat")
+    should_update = (
+        len(conversation) >= SUMMARY_TRIGGER_MESSAGES
+        or total_tokens >= SUMMARY_TRIGGER_TOKENS
+        or intent_shift
+    )
+
+    try:
+        if should_update:
+            summary_source = conversation[:-SUMMARY_RECENT_MESSAGES] if len(conversation) > SUMMARY_RECENT_MESSAGES else conversation
+            new_summary = _generate_summary_from_messages(summary_source)
+            new_summary = _ensure_summary_consistency(new_summary, conversation[-SUMMARY_RECENT_MESSAGES:])
+            state["summary_text"] = new_summary
+            state["summary_updates_count"] += 1
+            state["last_intent"] = latest_intent
+    except Exception:
+        state["fallback_count"] += 1
+        logger.exception("Chat summary memory fallback")
+
+    recent_messages = conversation[-SUMMARY_RECENT_MESSAGES:]
+    reduced_chars = sum(len(_extract_text_content(m.get("content", ""))) for m in recent_messages) + len(state.get("summary_text", ""))
+    prompt_reduction = max(0.0, (total_chars - reduced_chars) / total_chars) if total_chars else 0.0
+    updates = max(1, state.get("summary_updates_count", 0))
+    prev_avg = float(state.get("avg_prompt_reduction", 0.0))
+    state["avg_prompt_reduction"] = ((prev_avg * (updates - 1)) + prompt_reduction) / updates
+
+    logger.info(
+        "chat_summary_memory metrics: summary_updates_count=%s summary_chars=%s fallback_count=%s avg_prompt_reduction=%.3f",
+        state.get("summary_updates_count", 0),
+        len(state.get("summary_text", "")),
+        state.get("fallback_count", 0),
+        state.get("avg_prompt_reduction", 0.0),
+    )
+    return recent_messages, state.get("summary_text", "")
+
+
+def _build_multiturn_prompt(messages: List[Dict[str, Any]], system_suffix: str = "", summary_memory: str = "") -> str:
     """
     Строит ChatML промпт из массива messages[] (OpenAI format).
     Обрезает до MAX_HISTORY_MESSAGES последних сообщений.
@@ -288,6 +435,8 @@ def _build_multiturn_prompt(messages: List[Dict[str, Any]], system_suffix: str =
     system_msg = "Ты помощник Agent Navigator. Помогай пользователю."
     if system_suffix:
         system_msg += f"\n\n{system_suffix}"
+    if summary_memory:
+        system_msg += f"\n\nКраткая память диалога:\n{summary_memory}"
 
     # Отделяем system от остальных сообщений
     conversation = []
@@ -299,6 +448,8 @@ def _build_multiturn_prompt(messages: List[Dict[str, Any]], system_suffix: str =
             content = " ".join(p.get("text", "") for p in content if p.get("type") == "text")
         if role == "system":
             system_msg = content + (f"\n\n{system_suffix}" if system_suffix else "")
+            if summary_memory:
+                system_msg += f"\n\nКраткая память диалога:\n{summary_memory}"
         else:
             conversation.append({"role": role, "content": content})
 
@@ -537,8 +688,12 @@ async def run_workflow_stream(session_id: str, query: str, attachments: List[Fil
                 print(f"[RAG] Pipeline error: {e}")
 
         if messages and len(messages) > 1:
-            # Multi-turn: строим ChatML из всей истории
-            prompt = _build_multiturn_prompt(messages, system_suffix=doc_context_suffix)
+            # Multi-turn: строим ChatML из истории + summary memory (gradual rollout)
+            prompt_messages = messages
+            summary_memory = ""
+            if ENABLE_CHAT_SUMMARY_MEMORY:
+                prompt_messages, summary_memory = _prepare_messages_with_summary_memory(session, messages)
+            prompt = _build_multiturn_prompt(prompt_messages, system_suffix=doc_context_suffix, summary_memory=summary_memory)
         else:
             # Single-turn fallback
             system_msg = "Ты помощник Agent Navigator. Помогай пользователю."

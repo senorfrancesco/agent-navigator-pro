@@ -208,6 +208,23 @@ docker compose logs --tail=200 chainlit
 tmux attach -t agent-navigator
 ```
 
+## Chat Summary Memory (gradual rollout)
+
+В `agent_api` добавлена lightweight memory-сводка для multi-turn чата (только для ветки direct chat).
+
+- Фича управляется флагом окружения: `ENABLE_CHAT_SUMMARY_MEMORY=true`.
+- По умолчанию флаг выключен (`false`) для постепенного rollout.
+- Пересуммаризация выполняется при достижении порогов:
+  - по числу сообщений (`CHAT_SUMMARY_TRIGGER_MESSAGES`, default `12`),
+  - по длине истории в токенах (`CHAT_SUMMARY_TRIGGER_TOKENS`, default `1800`),
+  - при смене intent (intent shift) в последнем пользовательском сообщении.
+- В логах пишутся метрики summary-памяти:
+  - `summary_updates_count`,
+  - `summary_chars`,
+  - `fallback_count`,
+  - `avg_prompt_reduction`.
+- Есть lightweight-проверка консистентности: если в последних сообщениях появились новые числовые факты или имена файлов, они принудительно добавляются в summary.
+
 ## Текущее состояние UI и runtime
 
 - основной UI: `Chainlit`

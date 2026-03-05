@@ -9,7 +9,11 @@ import pytest
 # Добавляем путь к бэкенду
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from orchestrator.agent_api import _build_multiturn_prompt, MAX_HISTORY_MESSAGES
+from orchestrator.agent_api import (
+    _build_multiturn_prompt,
+    _prepare_messages_with_summary_memory,
+    MAX_HISTORY_MESSAGES,
+)
 
 
 class TestBuildMultiturnPrompt:
@@ -106,3 +110,44 @@ class TestBuildMultiturnPrompt:
         prompt = _build_multiturn_prompt(messages)
         # Не должно быть assistant\n в конце (т.к. последнее — assistant)
         assert not prompt.endswith("<|im_start|>assistant\n")
+
+    def test_summary_memory_in_system_prompt(self):
+        """Summary memory добавляется в system промпт."""
+        messages = [{"role": "user", "content": "вопрос"}]
+        prompt = _build_multiturn_prompt(messages, summary_memory="- Пользователь: факт 123")
+        assert "Краткая память диалога" in prompt
+        assert "факт 123" in prompt
+
+
+class TestSummaryMemoryState:
+    """Тесты lightweight summary memory и консистентности."""
+
+    def test_summary_contains_recent_numeric_and_file_facts(self):
+        session = {}
+        messages = [
+            {"role": "user", "content": "Привет"},
+            {"role": "assistant", "content": "Здравствуйте"},
+            {"role": "user", "content": "Проверь файл report_v2.pdf и значение 42"},
+            {"role": "assistant", "content": "Принято"},
+            {"role": "user", "content": "Также учти 12345"},
+        ]
+
+        prompt_messages, summary = _prepare_messages_with_summary_memory(session, messages)
+
+        assert prompt_messages
+        assert "report_v2.pdf" in summary
+        assert "42" in summary or "12345" in summary
+
+    def test_summary_metrics_accumulate(self):
+        session = {}
+        messages = [
+            {"role": "user", "content": f"Сообщение {i}"}
+            for i in range(16)
+        ]
+
+        _prepare_messages_with_summary_memory(session, messages)
+        state = session.get("chat_summary_state", {})
+
+        assert state.get("summary_updates_count", 0) >= 1
+        assert "summary_text" in state
+        assert isinstance(state.get("avg_prompt_reduction", 0.0), float)

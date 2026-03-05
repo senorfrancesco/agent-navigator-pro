@@ -704,6 +704,15 @@
 
 ### 🟡 Medium
 
+- [ ] **FOLLOW-UP — Улучшить качество summary memory (LLM-based compression + NER facts)**
+  Текущая реализация summary memory в `agent_api` intentionally lightweight (эвристики + regex),
+  чтобы поддержать безопасный gradual rollout через env-флаг.
+  Follow-up:
+  1. Перейти с эвристического сжатия на LLM-based компрессию истории с бюджетом токенов.
+  2. Усилить consistency-check через NER/IE (числа, даты, суммы, названия документов, версии файлов).
+  3. Добавить персистентные метрики (Prometheus/OpenTelemetry) и алерты по `fallback_count`.
+  4. Ввести A/B оценку качества ответов при `ENABLE_CHAT_SUMMARY_MEMORY=true`.
+
 - [x] **TD-6 — Дублирование логики отчётов в 3 файлах**
   Логика дедупликации и сохранения отчётов скопирована в `compare.py`, `equipment.py`, `document_analysis.py`.
   Fix: `backend/orchestrator/shared/report_utils.py` — общие `save_report()`, `dedup_check()`, `format_header()`.
