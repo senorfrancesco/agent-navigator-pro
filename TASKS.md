@@ -205,6 +205,16 @@
 - [x] **B3.10 — Отчёт не сохранялся в контейнере**
   `compare.py`: путь через `__file__` заменён на `os.getenv("UPLOADS_DIR")` (`/app/uploads` в Docker).
 
+### Chat memory summary hardening (2026-03-04)
+
+- [x] **B3.13 — Heuristic chat-summary memory + fallback mode**
+  `backend/orchestrator/chainlit_app.py`: добавлена сводка ранней истории чата с инвариантами
+  (критичные даты/числа/файлы сохраняются, последние сообщения всегда в prompt).
+  Временный workaround: без отдельного LLM-саммаризатора, используется
+  детерминированная эвристика по regex + последние реплики, чтобы не ломать чат при
+  ошибках суммаризации. Follow-up: заменить на отдельный легковесный summary-model
+  с quality-метриками и guardrail-тестами на long-context regression.
+
 ### Backlog
 
 - [ ] **B3.11 — Убрать JSON salvage из DEBUG-POLISH**

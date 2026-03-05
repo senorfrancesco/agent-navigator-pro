@@ -477,13 +477,88 @@ async def _load_files(files: List[Dict]) -> List[Dict]:
 # === Prompt Builder ===
 
 MAX_HISTORY_MESSAGES = 10
+SUMMARY_TRIGGER_MESSAGES = 12
+SUMMARY_KEEP_RECENT = 6
+MAX_SUMMARY_CHARS = 1200
+SUMMARY_SESSION_KEY = "history_summary"
+
+_CRITICAL_FACT_PATTERNS = [
+    r"\b\d{1,2}[./]\d{1,2}[./]\d{2,4}\b",
+    r"\b\d{4}-\d{2}-\d{2}\b",
+    r"\b\d+[\d\s]*(?:₽|руб(?:\.|лей)?|%|шт|дн(?:ей|я)?|мес(?:яц(?:ев|а)?)?)\b",
+    r"\b[\w.-]+\.(?:pdf|docx|doc|xlsx|xls|txt|zip)\b",
+]
+
+
+def _extract_critical_facts(text: str) -> List[str]:
+    facts: List[str] = []
+    for pattern in _CRITICAL_FACT_PATTERNS:
+        for match in re.findall(pattern, text or "", flags=re.IGNORECASE):
+            fact = " ".join(str(match).split())
+            if fact and fact not in facts:
+                facts.append(fact)
+    return facts
+
+
+def _generate_history_summary(history: List[Dict[str, str]]) -> str:
+    if not history:
+        return ""
+
+    critical_facts: List[str] = []
+    topic_notes: List[str] = []
+    for msg in history:
+        content = (msg.get("content") or "").strip()
+        if not content:
+            continue
+
+        for fact in _extract_critical_facts(content):
+            if fact not in critical_facts:
+                critical_facts.append(fact)
+
+        if len(content) > 220:
+            content = content[:220].rsplit(" ", 1)[0] + "..."
+        role = msg.get("role", "user")
+        topic_notes.append(f"- {role}: {content}")
+
+    topic_notes = topic_notes[-8:]
+    lines: List[str] = []
+    if critical_facts:
+        lines.append("Критичные факты: " + "; ".join(critical_facts[:20]))
+    if topic_notes:
+        lines.append("Контекст диалога:\n" + "\n".join(topic_notes))
+    summary = "\n\n".join(lines).strip()
+    if len(summary) > MAX_SUMMARY_CHARS:
+        summary = summary[:MAX_SUMMARY_CHARS].rsplit(" ", 1)[0] + "..."
+    return summary
+
+
+def _refresh_history_summary(history: List[Dict[str, str]]) -> str:
+    if len(history) <= SUMMARY_TRIGGER_MESSAGES:
+        cl.user_session.set(SUMMARY_SESSION_KEY, "")
+        return ""
+
+    summary_source = history[:-SUMMARY_KEEP_RECENT]
+    try:
+        summary = _generate_history_summary(summary_source)
+        cl.user_session.set(SUMMARY_SESSION_KEY, summary)
+        return summary
+    except Exception as e:
+        logger.warning("History summarization failed, fallback to recent-only mode: %s", e)
+        return cl.user_session.get(SUMMARY_SESSION_KEY) or ""
 
 
 def _build_prompt(query: str, history: List, system_msg: str = "") -> str:
     if not system_msg:
         system_msg = "Ты помощник Agent Navigator. Помогай пользователю."
+    summary = cl.user_session.get(SUMMARY_SESSION_KEY) or ""
+    if len(history) > SUMMARY_TRIGGER_MESSAGES and not summary:
+        summary = _refresh_history_summary(history)
+    if summary:
+        system_msg += f"\n\nСводка раннего контекста:\n{summary}"
+
     prompt = f"<|im_start|>system\n{system_msg}<|im_end|>\n"
-    for msg in history[-MAX_HISTORY_MESSAGES:]:
+    history_slice = history[-SUMMARY_KEEP_RECENT:] if summary else history[-MAX_HISTORY_MESSAGES:]
+    for msg in history_slice:
         prompt += f"<|im_start|>{msg['role']}\n{msg['content']}<|im_end|>\n"
     prompt += f"<|im_start|>user\n{query}<|im_end|>\n<|im_start|>assistant\n"
     return prompt
@@ -773,6 +848,7 @@ async def _init_classifier():
 async def on_chat_start():
     cl.user_session.set("documents", {})
     cl.user_session.set("history", [])
+    cl.user_session.set(SUMMARY_SESSION_KEY, "")
 
     # Фоновая инициализация classifier для раннего semantic routing
     asyncio.create_task(_init_classifier())
@@ -819,6 +895,7 @@ async def on_chat_resume(thread):
                     found_files.extend(fnames)
 
     cl.user_session.set("history", history)
+    _refresh_history_summary(history)
 
     # Пытаемся восстановить документы и RAG
     if found_files:
