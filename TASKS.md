@@ -685,9 +685,11 @@
 
 ### 🟠 High
 
-- [x] **TD-2 — `INTENT_EXAMPLES` — hardcoded training data**
-  `rag/classifier.py`: примеры интентов прямо в коде. Любое изменение требует деплоя.
-  Fix: YAML-файл `data/intent_examples.yaml` + загрузка из vector DB (Chroma/FAISS) без перезапуска.
+- [~] **TD-2 — `INTENT_EXAMPLES` — hardcoded training data (частично выполнено)**
+  Статус: **частично выполнено**.
+  - ✅ intent examples вынесены в YAML (`data/intent_examples.yaml`), загрузка идёт из конфига;
+  - ⚠️ в коде всё ещё остаются fallback/route keyword-эвристики в Python-модулях маршрутизации/классификации.
+  Целевые точки: `rag/classifier.py`, `chainlit_app.py`, `data/*.yaml`.
   Доп.: 10-15 примеров недостаточно для семантически близких интентов (document_question vs document_analysis).
 
 - [x] **TD-3 — `index_documents` блокирует event loop**
@@ -740,9 +742,39 @@
 
 ### 🔵 Low
 
-- [x] **TD-10 — Keyword routing как последний fallback (хрупко)**
-  Keyword lists (`COMPARE_KEYWORDS`, `EQUIPMENT_KEYWORDS` и др.) работают, но хрупки к новым формулировкам.
+- [~] **TD-10 — Keyword routing как последний fallback (хрупко, частично выполнено)**
+  Статус: **частично выполнено**.
+  - ✅ часть intent-примеров и парсерных правил уже вынесена в YAML-конфиги (`data/*.yaml`);
+  - ⚠️ предметные fallback/route keywords всё ещё живут в коде и требуют полной externalization.
+  Целевые точки: `chainlit_app.py`, `rag/classifier.py`, `workflows/document_analysis.py`, `data/*.yaml`.
   По best practice: keyword routing должен быть **первым слоем** (fast-pass), а не fallback-ом последнего уровня.
+
+- [ ] **TD-15 — Externalized routing keywords (open)**
+  Приоритет: **🟠 High**.
+  Описание: вынести `COMPARE_KEYWORDS`/`EQUIPMENT_KEYWORDS`/связанные route-фразы из Python-кода в конфиг (`data/*.yaml`) с единым загрузчиком.
+  Целевые файлы: `chainlit_app.py`, `rag/classifier.py`, `workflows/document_analysis.py`, `data/*.yaml`.
+  DoD:
+  1. В Python-модулях маршрутизации/классификации нет предметных keyword-списков;
+  2. keywords читаются только из конфигов;
+  3. изменение keywords не требует деплоя кода.
+
+- [ ] **TD-16 — Strict config validation / fail-fast policy (open)**
+  Приоритет: **🟠 High**.
+  Описание: ввести строгую валидацию конфигов роутинга/классификации на старте (обязательные ключи, типы, non-empty списки) и жёсткий fail-fast при невалидной конфигурации.
+  Целевые файлы: `chainlit_app.py`, `rag/classifier.py`, `workflows/document_analysis.py`, `data/*.yaml`.
+  DoD:
+  1. При невалидном YAML сервис не стартует (явная ошибка);
+  2. нет silent fallback на hardcoded keyword-списки в Python;
+  3. в routing/classification модулях отсутствуют предметные keyword-константы.
+
+- [ ] **TD-17 — Унификация keyword-конфигов между workflow (open)**
+  Приоритет: **🟡 Medium**.
+  Описание: унифицировать формат keyword-конфигов между workflow (единая схема + общий loader), чтобы `chainlit_app`, `rag/classifier`, `document_analysis` использовали один источник истины.
+  Целевые файлы: `chainlit_app.py`, `rag/classifier.py`, `workflows/document_analysis.py`, `data/*.yaml`.
+  DoD:
+  1. Единая schema для keyword-конфигов во всех workflow;
+  2. отсутствие дублированных keyword-словарей/списков в Python-модулях маршрутизации/классификации;
+  3. единый путь обновления keywords через `data/*.yaml`.
 
 - [x] **TD-11 — Нет shared HTTP-клиента**
   Каждый вызов создаёт `httpx.AsyncClient(timeout=...)` заново. Нет connection pooling.
