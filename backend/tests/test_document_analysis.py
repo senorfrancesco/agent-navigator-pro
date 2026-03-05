@@ -16,6 +16,7 @@ import sys
 import pytest
 import tempfile
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Пути для импорта
@@ -617,6 +618,9 @@ class TestDocumentAnalysisIntent:
             _build_doc_question_deterministic_fallback,
             _compute_confidence_v1,
             _build_sources_from_rag_result,
+            _collect_inaccessible_session_files,
+            on_chat_resume,
+            _get_rag_state,
         )
         self._detect_intent = _detect_intent
         self._get_intent_decision = _get_intent_decision
@@ -628,6 +632,9 @@ class TestDocumentAnalysisIntent:
         self._build_doc_question_deterministic_fallback = _build_doc_question_deterministic_fallback
         self._compute_confidence_v1 = _compute_confidence_v1
         self._build_sources_from_rag_result = _build_sources_from_rag_result
+        self._collect_inaccessible_session_files = _collect_inaccessible_session_files
+        self._on_chat_resume = on_chat_resume
+        self._get_rag_state = _get_rag_state
         self._mock_session = mock_session
         self._mock_cl = mock_cl
 
@@ -766,6 +773,75 @@ class TestDocumentAnalysisIntent:
             "Пожалуйста, уточните требования ТЗ и содержание коммерческого предложения."
         )
         assert self._needs_doc_question_regen(text, has_session_docs=True) is True
+
+    def test_collect_inaccessible_session_files_detects_missing(self):
+        with patch("orchestrator.chainlit_app._find_accessible_session_file", side_effect=["/app/uploads/a.pdf", None]):
+            missing = self._collect_inaccessible_session_files(["a.pdf", "b.pdf"])
+
+        assert missing == ["b.pdf"]
+
+    def test_on_chat_resume_warns_when_history_files_missing(self):
+        sent_messages = []
+
+        class _StepCtx:
+            def __init__(self, *args, **kwargs):
+                self.output = ""
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        class _Msg:
+            def __init__(self, content):
+                self.content = content
+
+            async def send(self):
+                sent_messages.append(self.content)
+
+        module = sys.modules["orchestrator.chainlit_app"]
+        module.cl.Step = _StepCtx
+        module.cl.Message = _Msg
+        module.cl.user_session = SimpleNamespace(
+            _store={},
+            get=lambda self, k, d=None: self._store.get(k, d),
+            set=lambda self, k, v: self._store.__setitem__(k, v),
+        )
+        # bind methods to instance
+        module.cl.user_session.get = module.cl.user_session.get.__get__(module.cl.user_session, type(module.cl.user_session))
+        module.cl.user_session.set = module.cl.user_session.set.__get__(module.cl.user_session, type(module.cl.user_session))
+
+        thread = {
+            "steps": [
+                {"type": "user_message", "output": "Привет"},
+                {"name": "Загрузка документов", "output": "Загружено: lost.pdf"},
+            ]
+        }
+
+        with patch("orchestrator.chainlit_app._find_accessible_session_file", return_value=None):
+            import asyncio
+            asyncio.run(self._on_chat_resume(thread))
+
+        assert any("недоступна" in msg for msg in sent_messages)
+        assert self._get_rag_state() == "missing"
+
+    def test_intent_decision_avoids_document_question_when_rag_missing(self):
+        classifier_result = {
+            "intent": "document_question",
+            "confidence": 0.9,
+            "margin": 0.3,
+            "needs_rag": True,
+        }
+        result = self._get_intent_decision(
+            "Что в документе по срокам?",
+            has_session_docs=True,
+            session_docs={"doc.pdf": {"text": "x"}},
+            classifier_result=classifier_result,
+            rag_state="missing",
+        )
+
+        assert result["intent"] == "general_chat"
 
     def test_extract_citation_ids(self):
         cited = self._extract_citation_ids("Ответ [1] и [3], но не [x]")

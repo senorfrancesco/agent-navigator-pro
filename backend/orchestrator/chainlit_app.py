@@ -171,6 +171,18 @@ def _set_pending_route_choice(data: Optional[Dict[str, Any]]) -> None:
     cl.user_session.set("pending_route_choice", data)
 
 
+def _set_rag_state(state: Literal["indexed", "partial", "missing"]) -> None:
+    cl.user_session.set("rag_state", state)
+
+
+def _get_rag_state() -> Literal["indexed", "partial", "missing"]:
+    state = cl.user_session.get("rag_state")
+    if state in ("indexed", "partial", "missing"):
+        return state
+    rag = cl.user_session.get("rag_pipeline")
+    return "indexed" if rag and getattr(rag, "_indexed", False) else "missing"
+
+
 # === Intent Detection ===
 
 def _detect_intent(query: str, file_count: int = 0, has_session_docs: bool = False) -> str:
@@ -332,6 +344,7 @@ def _get_intent_decision(
     has_session_docs: bool = False,
     session_docs: Optional[Dict[str, Any]] = None,
     classifier_result: Optional[Dict[str, Any]] = None,
+    rag_state: Optional[Literal["indexed", "partial", "missing"]] = None,
 ) -> Dict[str, Any]:
     query_lower = query.lower().strip()
     session_docs = session_docs if session_docs is not None else (_get_session_docs() if has_session_docs else {})
@@ -340,6 +353,7 @@ def _get_intent_decision(
     two_docs = total_docs >= 2
     single_doc = total_docs == 1
     classifier_result = classifier_result if classifier_result is not None else _get_classifier_result(query)
+    rag_state = rag_state or _get_rag_state()
 
     compare_signal = _has_any_keyword(query_lower, _COMPARE_QUERY_KEYWORDS)
     equipment_signal = _has_any_keyword(query_lower, _EQUIPMENT_QUERY_KEYWORDS)
@@ -402,7 +416,14 @@ def _get_intent_decision(
             }
 
         if has_session_docs and needs_rag and intent not in ("compare_documents", "equipment_analysis", "document_analysis"):
-            intent = "document_question"
+            if rag_state == "missing":
+                logger.warning(
+                    "Routing degradation: semantic router requested RAG intent='%s' with missing index. Fallback to general_chat.",
+                    intent,
+                )
+                intent = "general_chat"
+            else:
+                intent = "document_question"
 
         return {
             "intent": intent,
@@ -412,8 +433,15 @@ def _get_intent_decision(
             "reason": "semantic_router",
         }
 
+    fallback_intent = _detect_intent(query, file_count=file_count, has_session_docs=has_session_docs)
+    if fallback_intent == "document_question" and rag_state == "missing":
+        logger.warning(
+            "Routing degradation: minimal fallback produced document_question but RAG is missing, forcing general_chat"
+        )
+        fallback_intent = "general_chat"
+
     return {
-        "intent": _detect_intent(query, file_count=file_count, has_session_docs=has_session_docs),
+        "intent": fallback_intent,
         "requires_choice": False,
         "confidence": 0.0,
         "margin": 0.0,
@@ -435,6 +463,31 @@ def _to_host_path(container_path: str) -> str:
     if HOST_UPLOADS_DIR and container_path.startswith(UPLOADS_DIR):
         return container_path.replace(UPLOADS_DIR, HOST_UPLOADS_DIR, 1)
     return container_path
+
+
+def _resolve_session_file_candidates(filename: str) -> List[str]:
+    candidates = [
+        os.path.join(UPLOADS_DIR, filename),
+    ]
+    if HOST_UPLOADS_DIR:
+        candidates.append(os.path.join(HOST_UPLOADS_DIR, filename))
+    # deduplicate preserving order
+    return list(dict.fromkeys(candidates))
+
+
+def _find_accessible_session_file(filename: str) -> Optional[str]:
+    for path in _resolve_session_file_candidates(filename):
+        if os.path.exists(path) and os.access(path, os.R_OK):
+            return path
+    return None
+
+
+def _collect_inaccessible_session_files(filenames: List[str]) -> List[str]:
+    missing: List[str] = []
+    for fname in filenames:
+        if not _find_accessible_session_file(fname):
+            missing.append(fname)
+    return missing
 
 
 def _save_to_uploads(src_path: str, filename: str) -> str:
@@ -773,6 +826,7 @@ async def _init_classifier():
 async def on_chat_start():
     cl.user_session.set("documents", {})
     cl.user_session.set("history", [])
+    _set_rag_state("missing")
 
     # Фоновая инициализация classifier для раннего semantic routing
     asyncio.create_task(_init_classifier())
@@ -798,6 +852,7 @@ async def on_chat_resume(thread):
     Пытается восстановить список документов и RAG-индекс.
     """
     cl.user_session.set("documents", {})
+    _set_rag_state("missing")
     history = []
     found_files = []
 
@@ -822,43 +877,87 @@ async def on_chat_resume(thread):
 
     # Пытаемся восстановить документы и RAG
     if found_files:
-        unique_files = list(set(found_files))
+        unique_files = sorted(set(found_files))
         session_docs = {}
         files_to_load = []
-        
+        missing_files = _collect_inaccessible_session_files(unique_files)
+
         for fname in unique_files:
-            # Путь в контейнере
-            c_path = os.path.join(UPLOADS_DIR, fname)
-            if os.path.exists(c_path):
+            c_path = _find_accessible_session_file(fname)
+            if c_path:
                 files_to_load.append({"name": fname, "path": c_path})
-        
-        if files_to_load:
+
+        if missing_files:
+            logger.warning(
+                "Resume degradation: %d/%d files are not accessible via UPLOADS_DIR/HOST_UPLOADS_DIR: %s",
+                len(missing_files),
+                len(unique_files),
+                ", ".join(missing_files),
+            )
+
+        if files_to_load or missing_files:
             async with cl.Step(name="Восстановление документов", type="tool") as step:
-                loaded = await _load_files(files_to_load)
+                loaded = await _load_files(files_to_load) if files_to_load else []
                 names = []
+                failed_to_parse = []
                 for f in loaded:
                     if f.get("text"):
                         session_docs[f["name"]] = {"text": f["text"], "path": f["path"]}
                         names.append(f["name"])
+                    else:
+                        failed_to_parse.append(f["name"])
+
+                if failed_to_parse:
+                    logger.warning(
+                        "Resume degradation: failed to parse %d restored files: %s",
+                        len(failed_to_parse),
+                        ", ".join(failed_to_parse),
+                    )
+
                 cl.user_session.set("documents", session_docs)
-                
-                # Инициализируем RAG
+
+                # Инициализируем RAG только при наличии текстов
                 if session_docs:
                     from orchestrator.rag.pipeline import AdaptiveRAGPipeline
                     from services.model_manager.ums_client import create_ums_embed_fn
-                    
+
                     embed_fn = create_ums_embed_fn()
                     rag_mode = await _get_rag_mode()
                     rag = AdaptiveRAGPipeline(embed_fn=embed_fn, rag_mode=rag_mode)
-                    
+
                     all_texts = [d["text"] for d in session_docs.values()]
                     all_names = [n for n in session_docs.keys()]
                     await asyncio.to_thread(rag.index_documents, all_texts, doc_names=all_names)
                     cl.user_session.set("rag_pipeline", rag)
-                    
-                    step.output = f"Восстановлено {len(names)} документов, RAG готов."
+
+                    if missing_files or failed_to_parse:
+                        _set_rag_state("partial")
+                        logger.warning(
+                            "Resume degradation: RAG partially restored (indexed=%d, missing=%d, failed=%d)",
+                            len(names),
+                            len(missing_files),
+                            len(failed_to_parse),
+                        )
+                    else:
+                        _set_rag_state("indexed")
+                    step.output = f"Восстановлено {len(names)} документов, RAG: {_get_rag_state()}."
                 else:
-                    step.output = "Не удалось восстановить текст документов."
+                    _set_rag_state("missing")
+                    logger.warning(
+                        "Resume degradation: document history exists but no files restored (missing=%d)",
+                        len(missing_files),
+                    )
+                    step.output = "Не удалось восстановить документы из истории."
+
+                if missing_files:
+                    await cl.Message(
+                        content=(
+                            "⚠️ Часть документов из истории недоступна: "
+                            f"{', '.join(missing_files)}.\n"
+                            "Пожалуйста, загрузите недостающие файлы повторно, "
+                            "чтобы восстановить полноту ответов по документам."
+                        )
+                    ).send()
 
 
 @cl.on_message
@@ -931,11 +1030,15 @@ async def on_message(message: cl.Message):
                     # TD-3: Выносим тяжелую индексацию в поток, чтобы не блокировать event loop
                     try:
                         await asyncio.to_thread(rag.index_documents, all_texts, doc_names=all_names)
+                        _set_rag_state("indexed")
                         step.output = f"RAG: mode={rag_mode}, search={search_type}, indexed {len(all_texts)} docs"
                     except Exception as e:
-                        logger.error(f"RAG Indexing failed: {e}")
+                        logger.warning(f"RAG degradation: indexing failed: {e}")
+                        _set_rag_state("missing")
                         step.output = f"⚠️ RAG Indexing failed: {e}. Falling back to non-RAG mode."
-                
+                else:
+                    _set_rag_state("missing")
+
                 cl.user_session.set("rag_pipeline", rag)
         else:
             # Повторная загрузка: переиндексация
@@ -946,16 +1049,21 @@ async def on_message(message: cl.Message):
                     # TD-3: Переиндексация тоже в потоке
                     try:
                         await asyncio.to_thread(rag.index_documents, all_texts, doc_names=all_names)
+                        _set_rag_state("indexed")
                         step.output = f"Переиндексировано {len(all_texts)} документов"
                     except Exception as e:
-                        logger.error(f"RAG Re-indexing failed: {e}")
+                        logger.warning(f"RAG degradation: re-indexing failed: {e}")
+                        _set_rag_state("partial")
                         step.output = f"⚠️ Re-indexing failed: {e}"
+                else:
+                    _set_rag_state("missing")
 
     decision = _get_intent_decision(
         query,
         file_count=len(new_files),
         has_session_docs=bool(session_docs),
         session_docs=session_docs,
+        rag_state=_get_rag_state(),
     )
     if decision.get("requires_choice"):
         recommended_route = decision["recommended_route"]
@@ -1304,6 +1412,25 @@ async def _handle_document_analysis(query: str, new_files: List, session_docs: D
 
 async def _handle_doc_question(query: str, session_docs: Dict, history: List):
     """Вопрос по документам с inline citations, sources-блоком и evidence-policy."""
+
+    rag_state = _get_rag_state()
+    if rag_state == "missing":
+        logger.warning("RAG degradation: document question requested with missing index")
+        await cl.Message(
+            content=(
+                "Сейчас индекс документов недоступен, поэтому я не могу выполнить поиск по файлам. "
+                "Пожалуйста, загрузите документы повторно."
+            )
+        ).send()
+        return
+    if rag_state == "partial":
+        logger.warning("RAG degradation: partial index is used for document question")
+        await cl.Message(
+            content=(
+                "⚠️ Индекс документов восстановлен частично. Ответ может быть неполным; "
+                "рекомендую пере-загрузить недостающие файлы."
+            )
+        ).send()
 
     rag = cl.user_session.get("rag_pipeline")
     rag_result = None

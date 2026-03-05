@@ -787,3 +787,11 @@
 - [x] **[2026-03-03 15:42]** Task #4: (без названия) — ✅ completed
 - [x] **[2026-03-03 15:42]** Task #2: (без названия) — ✅ completed
 - [x] **[2026-03-03 15:42]** Task #1: (без названия) — ✅ completed
+
+## Follow-up notes (2026-03-04)
+
+- [ ] **F-up: Устойчивость resume при отсутствующих файлах**
+  `backend/orchestrator/chainlit_app.py`: добавлен degrade-path при восстановлении истории,
+  `rag_state` (`indexed`/`partial`/`missing`) и warning-логирование.
+  Нужно проверить в staging host/container mapping (`UPLOADS_DIR`/`HOST_UPLOADS_DIR`) для всех окружений,
+  чтобы снизить долю `partial/missing` при resume после рестартов.
