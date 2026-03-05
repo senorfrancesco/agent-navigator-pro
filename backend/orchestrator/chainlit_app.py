@@ -119,10 +119,17 @@ ADMIN_PASSWORD = os.getenv("CHAINLIT_ADMIN_PASSWORD", "admin")
 
 @cl.password_auth_callback
 def auth_callback(username: str, password: str) -> Optional[cl.User]:
-    if (username, password) == (ADMIN_USER, ADMIN_PASSWORD):
+    normalized_username = username.strip()
+    if (normalized_username, password) == (ADMIN_USER, ADMIN_PASSWORD):
+        # Стабильный identifier для привязки истории к одному пользователю.
+        stable_identifier = normalized_username.casefold()
         return cl.User(
-            identifier=username,
-            metadata={"role": "admin", "provider": "credentials"},
+            identifier=stable_identifier,
+            metadata={
+                "role": "admin",
+                "provider": "credentials",
+                "username": normalized_username,
+            },
         )
     return None
 
@@ -131,7 +138,7 @@ def auth_callback(username: str, password: str) -> Optional[cl.User]:
 
 _DB_URL = os.getenv(
     "CHAINLIT_DB_URL",
-    "sqlite+aiosqlite:///.data/chainlit.db",
+    "sqlite+aiosqlite:///app/orchestrator/.data/chainlit.db",
 )
 
 try:

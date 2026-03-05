@@ -38,11 +38,13 @@ services:
       - ./backend/.env
     volumes:
       - ./backend/open_webui_uploads:/app/uploads
+      # Единое хранилище истории Chainlit (SQLite в volume, не теряется при рестарте контейнера)
       - chainlit-data:/app/orchestrator/.data
     environment:
       - CHAINLIT_AUTH_SECRET=${CHAINLIT_AUTH_SECRET:-agent-navigator-secret-key-change-me}
       - CHAINLIT_ADMIN_USER=${CHAINLIT_ADMIN_USER:-admin}
       - CHAINLIT_ADMIN_PASSWORD=${CHAINLIT_ADMIN_PASSWORD:-admin}
+      # Единый путь БД в контейнере: /app/orchestrator/.data/chainlit.db
       - CHAINLIT_DB_URL=${CHAINLIT_DB_URL:-sqlite+aiosqlite:///app/orchestrator/.data/chainlit.db}
       - UMS_URL=http://host.docker.internal:8090
       - DOC_SERVER_URL=http://host.docker.internal:8001

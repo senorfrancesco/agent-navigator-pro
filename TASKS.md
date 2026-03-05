@@ -787,3 +787,11 @@
 - [x] **[2026-03-03 15:42]** Task #4: (без названия) — ✅ completed
 - [x] **[2026-03-03 15:42]** Task #2: (без названия) — ✅ completed
 - [x] **[2026-03-03 15:42]** Task #1: (без названия) — ✅ completed
+
+#### 2026-03-04 — Chainlit history persistence: единый DB path + ops-checklist
+
+- Принято и зафиксировано единое значение `CHAINLIT_DB_URL`: `sqlite+aiosqlite:///app/orchestrator/.data/chainlit.db`.
+- Подтверждён единый volume-монтаж для persistence: `chainlit-data:/app/orchestrator/.data`.
+- Синхронизированы дефолты `backend/.env.example` с docker-runtime, чтобы избежать рассинхрона локального/контейнерного путей.
+- В `chainlit_app.py` стабилизирован `identifier` в auth callback (через нормализацию username) для предсказуемой привязки истории.
+- В README добавлены памятка по сохранности истории и операционный чек-лист диагностики кейса «история не отображается».

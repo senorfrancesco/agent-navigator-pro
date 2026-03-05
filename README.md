@@ -131,6 +131,11 @@ UI будет доступен на:
 
 - `http://localhost:3000`
 
+Памятка по истории Chainlit:
+- история чатов хранится в SQLite по пути `/app/orchestrator/.data/chainlit.db` внутри контейнера;
+- каталог `/app/orchestrator/.data` смонтирован в именованный volume `chainlit-data`;
+- при обычном `docker compose restart chainlit` или `docker compose up -d chainlit` история не теряется, пока не удалён volume (`docker volume rm ...`).
+
 Legacy Open WebUI при необходимости:
 
 ```bash
@@ -201,6 +206,24 @@ docker compose ps
 ```bash
 docker compose logs --tail=200 chainlit
 ```
+
+## Чек-лист диагностики: «история не отображается»
+
+1. **Auth / пользователь**
+   - войдите тем же логином, что и раньше (`CHAINLIT_ADMIN_USER`);
+   - в `chainlit_app.py` используется стабильный `identifier` (нормализованный username), поэтому история привязывается к одному пользователю.
+2. **DB URL внутри контейнера**
+   - проверьте `CHAINLIT_DB_URL` в `docker-compose.yaml` или runtime env;
+   - ожидаемое значение: `sqlite+aiosqlite:///app/orchestrator/.data/chainlit.db`.
+3. **Volume подключён к правильному пути**
+   - в compose должен быть mount `chainlit-data:/app/orchestrator/.data`;
+   - проверьте, что volume существует: `docker volume ls | grep chainlit-data`.
+4. **Файл БД реально создаётся**
+   - проверьте внутри контейнера: `docker compose exec chainlit ls -la /app/orchestrator/.data`;
+   - должен существовать `chainlit.db`.
+5. **Restart policy / жизненный цикл контейнера**
+   - для сервиса `chainlit` используется `restart: unless-stopped`;
+   - убедитесь, что не выполнялся `docker compose down -v` (он удаляет volume и историю).
 
 Подключение к `tmux`:
 
