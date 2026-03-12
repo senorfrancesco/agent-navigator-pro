@@ -86,6 +86,19 @@ else
     echo -e "${GREEN}[OK]${NC} tmux установлен"
 fi
 
+# Установка конфигурации tmux (Oh My Tmux) из репозитория
+echo ""
+echo "Установка конфигурации tmux..."
+mkdir -p "$HOME/.config/tmux"
+
+if [ -f "$PROJECT_ROOT/config/tmux/tmux.conf" ]; then
+    cp "$PROJECT_ROOT/config/tmux/tmux.conf" "$HOME/.config/tmux/tmux.conf"
+    cp "$PROJECT_ROOT/config/tmux/tmux.conf.local" "$HOME/.config/tmux/tmux.conf.local"
+    echo -e "${GREEN}[OK]${NC} Конфигурация tmux установлена (~/.config/tmux/)"
+else
+    echo -e "${YELLOW}[!]${NC} config/tmux/ не найден, пропускаю"
+fi
+
 # ============================================================
 # Шаг 3: Установка библиотек для Python и обработки документов
 # ============================================================

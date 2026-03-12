@@ -162,19 +162,55 @@
 
 ### Блок B — Retrieval Eval (B3.34)
 
-- [ ] **B3.34 — Retrieval eval: LaBSE vs Qwen3-Embedding-0.6B**
-  - Собрать retrieval eval dataset (session_only, knowledge_base_only, mixed, unanswerable, duplicate-heavy)
-  - Метрики: Recall@k, MRR, nDCG@k, evidence hit-rate, answer faithfulness
-  - Только после eval решать, унифицировать ли dense embedder
+- [x] **B3.34 — Retrieval eval: LaBSE vs Qwen3-Embedding-0.6B**
+  - Собран канонический retrieval eval harness: `backend/evals/retrieval_embedder_eval.py`
+  - Собран curated dataset: `session_only`, `knowledge_base_only`, `mixed`, `unanswerable`, `duplicate-heavy`
+  - Метрики: `Recall@k`, `MRR`, `nDCG@k`, `evidence_hit_rate`, `source_origin_accuracy`, `answer_faithfulness`
+  - Реальный CPU-прогон на минимальном curated наборе:
+    - `LaBSE`: `recall_at_k=1.0`, `mrr=1.0`, `ndcg_at_k=1.0`, `evidence_hit_rate=1.0`, `source_origin_accuracy=1.0`, `answer_faithfulness=0.9143`
+    - `Qwen3-Embedding-0.6B`: те же значения на этом наборе
+  - Решение по результату: dense retrieval пока **не унифицировать**; `LaBSE` остаётся retrieval/legal baseline, потому что текущий curated набор показывает паритет, а не явный выигрыш `Qwen3`
+  - Pragmatic notes:
+    - `answer_faithfulness` в этом harness — deterministic lexical proxy, а не LLM judge
+    - `bm25` mode оставлен как baseline/debug path, но решение `LaBSE vs Qwen3` принимается только по dense/hybrid runs
+
+- [ ] **B3.34a — Retrieval eval dataset expansion**
+  - Расширить curated retrieval eval dataset hard negatives / ambiguity-cases / более тяжёлым legal wording
+  - Повторить `LaBSE vs Qwen3-Embedding-0.6B` после расширения набора
 
 ### Блок C — Knowledge Base RAG (B3.33)
 
-- [ ] **B3.33 — Session RAG vs Knowledge-Base RAG: продуктовая модель**
-  - Формально разделить `session_rag` и `knowledge_base_rag`
-  - Source registry: sources, chunks, embeddings, content_hash, index_version
-  - Merged retrieval policy: candidate budget, dedup, score normalization, rerank
-  - Source provenance: `source_origin = session | knowledge_base`
-  - UX: отдельные tabs/workspace modes для scope
+- [x] **B3.33 — Session RAG vs Knowledge-Base RAG: продуктовая модель**
+  - Выполнено через backend-owned KB source registry:
+    - `kb_sources`
+    - `kb_chunks`
+    - `content_hash`
+    - `index_version`
+    - `embedding_model_id`
+    - `chunking_version`
+  - `knowledge_base_rag` интегрирован в unified backend core:
+    - `orchestration_runtime` знает про `knowledge_collection_id`
+    - `execution_runtime` использует merged retrieval без отдельного UI/API contour
+  - Merged retrieval policy V1 реализована:
+    - `session_rag` -> только активные session docs
+    - `knowledge_base_rag` -> KB + session overlay
+    - candidate budget per scope
+    - dedup по normalized text
+    - score normalization до финального shortlist
+  - Source provenance проходит в doc-QA sources:
+    - `source_origin = session | knowledge_base`
+    - `collection_id`
+    - `display_name`
+  - Verification:
+    - targeted KB/runtime suite зелёный
+    - `cd backend && pytest tests/ -q -m "not integration"` -> `386 passed, 4 deselected`
+  Pragmatic V1 follow-up:
+  - persisted embeddings / vector index / reranker остаются отдельным follow-up, сейчас KB retrieval строится transient over persisted chunks
+
+- [ ] **B3.33a — Knowledge Base retrieval hardening**
+  - Persisted embeddings или vector index для KB collection
+  - Retrieval embedder profile / rerank stage после merge shortlist
+  - Более явный score fusion/tie-break для дубликатов `session` vs `knowledge_base`
 
 ### Блок D — Honest Tiers & Citations (B3.35, B3.36)
 

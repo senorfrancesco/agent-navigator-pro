@@ -70,39 +70,104 @@ graph TD
 - `equipment_analysis` для ТЗ, смет и коммерческих предложений
 - сохранение markdown-отчётов в [`backend/open_webui_uploads`](backend/open_webui_uploads)
 
+## Установка
+
+### Способ 1 — одна команда (Ubuntu/Debian)
+
+Клонировать репозиторий, установить все зависимости (Docker, Miniconda, Python env) и подготовить конфиг:
+
+```bash
+git clone <repo-url> agent-navigator-pro && cd agent-navigator-pro
+bash scripts/setup_ubuntu.sh
+```
+
+Скрипт устанавливает: `tmux`, `docker`, `conda`, `python 3.11`, все pip-зависимости, создаёт `backend/.env` из шаблона и нужные директории.
+
+Если репозиторий уже клонирован — запустить установку через launcher:
+
+```bash
+./scripts/launcher.sh --install
+```
+
+### Способ 2 — curl без клонирования
+
+Если хочешь скачать и запустить установщик напрямую на сервер:
+
+```bash
+# Скачать только скрипт установки
+curl -fsSL https://raw.githubusercontent.com/<org>/agent-navigator-pro/v3.0/scripts/setup_ubuntu.sh | bash
+```
+
+> **Примечание:** после выполнения `setup_ubuntu.sh` потребуется клонировать репозиторий вручную и указать пути к моделям в `backend/.env`.
+
+### Способ 3 — ручная установка (любой дистрибутив)
+
+```bash
+# 1. Системные зависимости
+sudo apt-get install -y tmux git curl wget docker.io docker-compose-plugin
+
+# 2. Miniconda
+wget -O miniconda.sh https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+bash miniconda.sh -b -p ~/miniconda3
+source ~/miniconda3/etc/profile.d/conda.sh
+
+# 3. Python env
+conda create -n diploma_llm python=3.11 -y
+conda activate diploma_llm
+pip install -r backend/requirements.txt
+
+# 4. Docker (если GPU)
+distribution=$(. /etc/os-release; echo $ID$VERSION_ID)
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -s -L https://nvidia.github.io/libnvidia-container/$distribution/libnvidia-container.list | \
+  sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+  sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
+sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker
+```
+
+---
+
 ## Быстрый старт
 
 ### 1. Требования
 
-- Linux
-- NVIDIA GPU и CUDA для основного LLM-path
-- Docker и Docker Compose
-- Conda или совместимое Python 3.11 окружение
+| | Минимум (GPU) | CPU-only |
+|---|---|---|
+| GPU | NVIDIA ≥12 GB VRAM | — |
+| RAM | ≥32 GB | ≥64 GB |
+| Диск | ≥200 GB | ≥200 GB |
+| Docker | 24+ с Compose v2 | то же |
+| Python | 3.11 (conda) | то же |
+| OS | Ubuntu 22.04+ / Debian 12+ | то же |
 
-### 2. Установка backend-зависимостей
-
-```bash
-cd backend
-pip install -r requirements.txt
-```
-
-Если используешь `conda`:
-
-```bash
-conda create -n diploma_llm python=3.11
-conda activate diploma_llm
-cd backend
-pip install -r requirements.txt
-```
-
-### 3. Настройка `.env`
+### 2. Настройка `.env`
 
 ```bash
 cd backend
 cp .env.example .env
 ```
 
-После этого проверь пути к моделям и сервисные переменные в `backend/.env.example`.
+Обязательно задать пути к моделям:
+
+```bash
+# Пути — абсолютные
+MODEL_PATH_QWEN14B="/path/to/models/gguf/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
+MODEL_PATH_LABSE="/path/to/models/st/LaBSE"
+
+# GPU: -1 = все слои на GPU, 0 = CPU only
+N_GPU_LAYERS_QWEN14B=-1
+
+# Сменить для production
+CHAINLIT_ADMIN_PASSWORD="your-secure-password"
+CHAINLIT_AUTH_SECRET="your-secret-key"
+```
+
+### 3. Сборка Docker-образа
+
+```bash
+docker compose build chainlit
+```
 
 ### 4. Запуск системы
 
@@ -190,6 +255,33 @@ docker compose --profile legacy up -d open-webui
 Сравни ТЗ и коммерческое предложение, проверь соответствие оборудования.
 ```
 
+## Benchmark — тест производительности
+
+После запуска системы можно измерить скорость через все режимы работы:
+
+```bash
+# Все сценарии (health, embedding, chat, RAG, compare, equipment)
+python scripts/benchmark.py
+
+# Только чат и embedding (быстро, без файлов)
+python scripts/benchmark.py --scenarios health,embedding,chat
+
+# 3 повтора для усреднения + сохранить результат
+python scripts/benchmark.py --repeats 3 --output results/gpu.json
+```
+
+Для сравнения **CPU vs GPU vs Hybrid**:
+
+```bash
+# 1. GPU-режим: задать N_GPU_LAYERS_QWEN14B=-1 в .env → перезапустить → запустить
+python scripts/benchmark.py --output results/gpu.json
+
+# 2. CPU-режим: задать N_GPU_LAYERS_QWEN14B=0 в .env → перезапустить → запустить
+python scripts/benchmark.py --output results/cpu.json
+```
+
+Скрипт автоматически фиксирует параметры `.env` и UMS runtime profile в JSON-результат.
+
 ## Полезные команды
 
 Runtime preflight report:
@@ -205,12 +297,19 @@ cd backend
 pytest tests/ -v -m "not integration"
 ```
 
-Таргетные тесты по стабильности Chainlit/UMS:
+Health-check всех сервисов:
 
 ```bash
-pytest backend/tests/test_chainlit_streaming.py \
-  backend/tests/test_unified_model_server_streaming.py \
-  backend/tests/test_unified_model_server_startup.py -q
+curl -s http://localhost:8000/health && echo " Agent API OK"
+curl -s http://localhost:8001/health && echo " Doc Server OK"
+curl -s http://localhost:8002/health && echo " Legal Server OK"
+curl -s http://localhost:8090/health && echo " UMS OK"
+```
+
+Статус загруженных моделей:
+
+```bash
+curl -s http://localhost:8090/status | python3 -m json.tool
 ```
 
 Статус контейнеров:
@@ -265,6 +364,15 @@ tmux attach -t agent-navigator
 ├── TASKS.md
 └── README.md
 ```
+
+## Руководства
+
+| Документ | Что внутри |
+|----------|-----------|
+| [docs/guides/system-overview.md](docs/guides/system-overview.md) | Как работает система: архитектура, компоненты, поток данных, гибридный GPU/CPU режим |
+| [docs/guides/tmux.md](docs/guides/tmux.md) | tmux: установка конфига, хоткеи (с учётом переназначений), работа с сессией проекта |
+| [docs/guides/conda.md](docs/guides/conda.md) | Conda: установка, окружение `diploma_llm`, основные команды, зависимости проекта |
+| [docs/deploy-guide.md](docs/deploy-guide.md) | Деплой на сервер: требования, перенос, сборка Docker, запуск, чеклист |
 
 ## Где смотреть дальше
 

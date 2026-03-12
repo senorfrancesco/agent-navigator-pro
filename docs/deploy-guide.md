@@ -48,6 +48,11 @@ sudo systemctl restart docker
 # tmux
 sudo apt-get install -y tmux
 
+# Конфигурация tmux (Oh My Tmux) из репозитория
+mkdir -p ~/.config/tmux
+cp config/tmux/tmux.conf ~/.config/tmux/tmux.conf
+cp config/tmux/tmux.conf.local ~/.config/tmux/tmux.conf.local
+
 # Miniconda
 wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
 bash Miniconda3-latest-Linux-x86_64.sh -b
