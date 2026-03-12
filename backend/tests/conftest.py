@@ -27,3 +27,15 @@ def isolate_orchestration_state_store(monkeypatch, tmp_path):
     monkeypatch.setattr(state_store_module, "_STORE_SINGLETON", None, raising=False)
     yield
     monkeypatch.setattr(state_store_module, "_STORE_SINGLETON", None, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def isolate_knowledge_base_store(monkeypatch, tmp_path):
+    from orchestrator import knowledge_base_store as kb_store_module
+
+    db_url = f"sqlite:///{tmp_path / 'orchestrator_kb.db'}"
+    monkeypatch.setenv("ORCHESTRATOR_KB_DB_URL", db_url)
+    monkeypatch.setattr(kb_store_module, "DEFAULT_KB_DB_URL", db_url, raising=False)
+    monkeypatch.setattr(kb_store_module, "_STORE_SINGLETON", None, raising=False)
+    yield
+    monkeypatch.setattr(kb_store_module, "_STORE_SINGLETON", None, raising=False)

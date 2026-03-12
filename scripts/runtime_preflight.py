@@ -55,6 +55,7 @@ def build_runtime_plan(
     device_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
     from services.model_manager.unified_model_server import DeviceMode, resolve_runtime_budget
+    from services.hardware.tier_selector import describe_rag_mode
 
     runtime_profile = str(runtime_profile or "adaptive").strip().lower()
     if runtime_profile not in SUPPORTED_PROFILES:
@@ -90,6 +91,7 @@ def build_runtime_plan(
     )
     budget["device_mode"] = selected_device_mode
     budget["rag_mode"] = tier_info["rag_mode"]
+    budget["rag_mode_label"] = describe_rag_mode(tier_info["rag_mode"])
     budget["embedding_backend"] = tier_info["embedding_backend"]
     budget["tier"] = tier_info["tier"]
     budget["source"] = runtime_profile

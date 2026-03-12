@@ -19,6 +19,8 @@ def _build_minimal_deps() -> ExecutionDependencies:
         build_prompt=lambda query, history, system_msg="": f"{system_msg}\n{query}",
         get_profile_system_prompt=lambda: "Ты ассистент.",
         has_retrieval_adapter=lambda: False,
+        get_retrieval_embed_fn=lambda: None,
+        get_knowledge_base_store=lambda: None,
         get_active_doc_ids=lambda: [],
         get_all_docs=lambda: [],
         get_active_docs=lambda: [],
@@ -293,3 +295,56 @@ def test_execute_orchestration_reuses_same_run_for_same_thread_and_persists_resu
     assert first["run_id"] == second["run_id"]
     assert first["state_ref"] == second["state_ref"]
     assert second["state_version"] > first["state_version"]
+
+
+def test_execute_orchestration_routes_kb_doc_question_through_unified_backend_core(monkeypatch):
+    deps = _build_minimal_deps()
+    deps.has_retrieval_adapter = lambda: True
+    deps.get_retrieval_embed_fn = lambda: object()
+    deps.get_knowledge_base_store = lambda: object()
+    deps.infer_assistant_text = AsyncMock(return_value="Ответ по базе [1]")
+    deps.citations_are_valid = lambda answer_text, source_count: True
+    deps.extract_citation_ids = lambda answer_text: [1]
+    deps.has_sufficient_evidence = lambda **kwargs: True
+    deps.compute_confidence_v1 = lambda sources, cited_ids, answer_mode: (0.9, "high")
+    deps.render_doc_question_markdown = lambda payload: payload["answer_text"]
+
+    monkeypatch.setattr(
+        "orchestrator.execution_runtime.retrieve_merged_chunks",
+        lambda **kwargs: {
+            "chunks": [
+                {
+                    "chunk_id": "kb-doc:0",
+                    "document_id": "kb-doc",
+                    "display_name": "kb_policy.txt",
+                    "collection_id": "legal",
+                    "source_origin": "knowledge_base",
+                    "text": "Штраф за просрочку составляет 3 процента.",
+                    "metadata_json": {"start_char": 0, "end_char": 42},
+                    "raw_score": 0.91,
+                    "normalized_score": 0.88,
+                }
+            ],
+            "source_scope_summary": "knowledge_base",
+        },
+    )
+
+    response = asyncio.run(
+        execute_orchestration(
+            {
+                "message": "Какой штраф за просрочку?",
+                "assistant_mode": "rag_qa",
+                "runtime_mode": "specialized_tasks",
+                "rag_scope": "knowledge_base_rag",
+                "knowledge_collection_id": "legal",
+                "history": [],
+            },
+            deps=deps,
+        )
+    )
+
+    assert response["route"] == "document_question"
+    assert response["executor"] == "document_question"
+    assert response["assistant_message"] == "Ответ по базе [1]"
+    assert response["sources"][0]["source_origin"] == "knowledge_base"
+    assert response["sources"][0]["collection_id"] == "legal"

@@ -256,3 +256,30 @@ def test_unsure_classifier_without_docs_falls_back_to_safe_chat_path():
 
     assert response["route"] == "general_chat"
     assert response["executor"] == "chat"
+
+
+def test_knowledge_base_rag_routes_doc_question_without_upload_required():
+    response = decide_orchestration(
+        query="Что указано в базе знаний про штрафы?",
+        trace_id="trace890",
+        runtime_mode="specialized_tasks",
+        file_count=0,
+        has_session_docs=False,
+        session_docs={},
+        active_doc_ids=[],
+        rag_scope="knowledge_base_rag",
+        knowledge_collection_id="legal",
+        classifier_result={
+            "intent": "general_chat",
+            "predicted_intent": "document_question",
+            "confidence": 0.42,
+            "margin": 0.08,
+            "needs_rag": True,
+            "abstained": True,
+        },
+    )
+
+    assert response["route"] == "document_question"
+    assert response["executor"] == "document_question"
+    assert response["reason"] in {"minimal_fallback", "semantic_router"}
+    assert response["action_required"] is None

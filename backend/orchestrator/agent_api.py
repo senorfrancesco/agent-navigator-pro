@@ -26,6 +26,7 @@ from pydantic import BaseModel
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from services.model_manager.ums_client import ums_client
 from orchestrator.shared.http_client import get_shared_client
+from orchestrator.knowledge_base_store import get_knowledge_base_store
 from orchestrator.execution_runtime import (
     ExecutionDependencies,
     _build_session_doc_list,
@@ -42,6 +43,7 @@ except ImportError:
     def get_system_resources(): return {"error": "Resource monitor not found"}
 
 app = FastAPI(title="Agent Navigator Pro Orchestrator", version="2.3.0")
+LEGAL_EMBEDDER_MODEL = os.getenv("LEGAL_EMBEDDER_MODEL", "labse-embedding")
 
 app.add_middleware(
     CORSMiddleware,
@@ -174,6 +176,7 @@ async def _infer_with_effective_settings(
 
 def _build_api_execution_dependencies(request: OrchestrationRequest, effective_settings: Dict[str, Any]) -> ExecutionDependencies:
     session_docs = request.session_docs or {}
+    retrieval_embed_fn: Optional[Any] = None
 
     def _docs_list() -> List[Dict[str, Any]]:
         return _build_session_doc_list(session_docs)
@@ -193,6 +196,39 @@ def _build_api_execution_dependencies(request: OrchestrationRequest, effective_s
 
     async def _noop_async(*args: Any, **kwargs: Any) -> None:
         return None
+
+    def _get_retrieval_embed_fn() -> Any:
+        nonlocal retrieval_embed_fn
+        if retrieval_embed_fn is not None:
+            return retrieval_embed_fn
+        try:
+            from services.model_manager.ums_client import create_ums_embed_fn
+
+            retrieval_embed_fn = create_ums_embed_fn(model_id=LEGAL_EMBEDDER_MODEL)
+        except Exception:
+            retrieval_embed_fn = None
+        return retrieval_embed_fn
+
+    def _citations_are_valid(answer_text: str, source_count: int) -> bool:
+        cited = _extract_citation_ids(answer_text)
+        return bool(cited) and all(1 <= cid <= source_count for cid in cited)
+
+    def _extract_citation_ids(answer_text: str) -> List[int]:
+        return [int(match.group(1)) for match in re.finditer(r"\[(\d+)\]", answer_text or "")]
+
+    def _has_sufficient_evidence(**kwargs: Any) -> bool:
+        return bool(kwargs.get("sources"))
+
+    def _compute_confidence_v1(sources: List[Dict[str, Any]], cited_ids: List[int], answer_mode: str) -> tuple[float, str]:
+        if not sources:
+            return 0.1, "low"
+        cited_sources = [s for s in sources if s.get("source_id") in cited_ids] if cited_ids else list(sources)
+        avg_norm = sum(float(s.get("normalized_score", 0.0)) for s in cited_sources) / len(cited_sources)
+        if avg_norm >= 0.75:
+            return 0.8, "high"
+        if avg_norm >= 0.45:
+            return 0.6, "medium"
+        return 0.35, "low"
 
     def _doc_question_fallback(**kwargs: Any) -> Dict[str, Any]:
         fallback_type = kwargs.get("fallback_type", "insufficient_evidence")
@@ -229,7 +265,9 @@ def _build_api_execution_dependencies(request: OrchestrationRequest, effective_s
         infer_assistant_text=_infer,
         build_prompt=_build_api_prompt,
         get_profile_system_prompt=_profile_prompt,
-        has_retrieval_adapter=lambda: False,
+        has_retrieval_adapter=lambda: _get_retrieval_embed_fn() is not None,
+        get_retrieval_embed_fn=_get_retrieval_embed_fn,
+        get_knowledge_base_store=get_knowledge_base_store,
         get_active_doc_ids=lambda: list(request.active_doc_ids or []),
         get_all_docs=_docs_list,
         get_active_docs=_docs_list,
@@ -247,11 +285,11 @@ def _build_api_execution_dependencies(request: OrchestrationRequest, effective_s
             history,
             "Ты grounded document QA ассистент. Отвечай только по источникам.",
         ),
-        citations_are_valid=lambda answer_text, source_count: True,
+        citations_are_valid=_citations_are_valid,
         needs_doc_question_regen=lambda answer_text, has_session_docs: False,
-        extract_citation_ids=lambda answer_text: [],
-        has_sufficient_evidence=lambda **kwargs: False,
-        compute_confidence_v1=lambda sources, cited_ids, answer_mode: (0.1, "low"),
+        extract_citation_ids=_extract_citation_ids,
+        has_sufficient_evidence=_has_sufficient_evidence,
+        compute_confidence_v1=_compute_confidence_v1,
         strip_model_source_sections=lambda answer_text: answer_text,
         to_host_path=lambda path: path,
         active_set_status_line=lambda: "",
@@ -524,6 +562,8 @@ async def orchestrate(request: OrchestrationRequest):
         query=request.message,
         trace_id=request.trace_id,
         runtime_mode=resolve_request_runtime_mode(request.model_dump(exclude_none=True), effective_settings),
+        rag_scope=str(effective_settings.get("rag_scope") or "off"),
+        knowledge_collection_id=effective_settings.get("knowledge_collection_id"),
         file_count=request.file_count,
         has_session_docs=request.has_session_docs,
         session_docs=request.session_docs or {},

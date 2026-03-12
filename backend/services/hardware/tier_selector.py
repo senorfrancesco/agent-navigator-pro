@@ -2,10 +2,10 @@
 Tier Selector — маппинг SystemProfile → TierConfig.
 
 4 уровня адаптации:
-  Tier 1: CPU only, 32-64GB RAM → Simple RAG
-  Tier 2: CPU 128GB или слабый GPU → Corrective RAG
-  Tier 3: GPU 24GB+ → Agentic RAG
-  Tier 4: Multi-GPU / H100 → Multi-Agent RAG
+  Tier 1: CPU only, 32-64GB RAM -> basic retrieval
+  Tier 2: CPU 128GB или слабый GPU -> corrective retrieval
+  Tier 3: GPU 24GB+ -> iterative retrieval
+  Tier 4: Multi-GPU / H100 -> planned multi-agent
 """
 
 import os
@@ -15,6 +15,19 @@ from typing import Optional
 
 from .profiler import SystemProfile
 from .vram_calculator import VRAMCalculator
+
+
+RAG_MODE_PUBLIC_LABELS = {
+    "simple": "basic retrieval",
+    "corrective": "corrective retrieval",
+    "agentic": "iterative retrieval",
+    "multi-agent": "planned multi-agent",
+}
+
+
+def describe_rag_mode(rag_mode: str) -> str:
+    normalized = str(rag_mode or "simple").strip().lower()
+    return RAG_MODE_PUBLIC_LABELS.get(normalized, normalized or "basic retrieval")
 
 
 class Tier(IntEnum):
@@ -57,7 +70,7 @@ class TierConfig:
             f"llm={self.llm_model_id} {self.llm_quant} ctx={self.llm_ctx_size} "
             f"gpu_layers={self.llm_gpu_layers}, "
             f"embedding={self.embedding_backend}/{self.embedding_device}, "
-            f"rag={self.rag_mode})"
+            f"rag={self.rag_mode} [{describe_rag_mode(self.rag_mode)}])"
         )
 
 
@@ -105,7 +118,7 @@ class TierSelector:
         return builders[tier](profile, usable_vram)
 
     def _tier1(self, profile: SystemProfile, usable_vram: float = 0) -> TierConfig:
-        """CPU + 32-64GB RAM: Qwen-7B Q4, Simple RAG."""
+        """CPU + 32-64GB RAM: Qwen-7B Q4, basic retrieval."""
         gpu_layers = self._get_gpu_layers_override()
         if gpu_layers is None:
             gpu_layers = 0  # CPU only
@@ -128,7 +141,7 @@ class TierSelector:
         )
 
     def _tier2(self, profile: SystemProfile, usable_vram: float = 0) -> TierConfig:
-        """CPU 128GB или слабый GPU: Qwen-14B Q4, Corrective RAG."""
+        """CPU 128GB или слабый GPU: Qwen-14B Q4, corrective retrieval."""
         gpu_layers = self._get_gpu_layers_override()
         if gpu_layers is None:
             if usable_vram >= 4:
@@ -163,7 +176,7 @@ class TierSelector:
         )
 
     def _tier3(self, profile: SystemProfile, usable_vram: float = 0) -> TierConfig:
-        """GPU 24GB+: Qwen-14B Q8 или Qwen-32B Q4, Agentic RAG."""
+        """GPU 24GB+: Qwen-14B/Qwen-32B, iterative retrieval (compat key: agentic)."""
         gpu_layers = self._get_gpu_layers_override()
 
         # Выбор модели по VRAM
@@ -203,7 +216,7 @@ class TierSelector:
         )
 
     def _tier4(self, profile: SystemProfile, usable_vram: float = 0) -> TierConfig:
-        """Multi-GPU / H100: DeepSeek-V3 / Qwen-72B, Multi-Agent RAG."""
+        """Multi-GPU / H100: large-model path, planned multi-agent (compat key: multi-agent)."""
         gpu_layers = self._get_gpu_layers_override()
         if gpu_layers is None:
             gpu_layers = -1

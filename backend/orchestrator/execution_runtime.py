@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
+from orchestrator.knowledge_base_retrieval import retrieve_merged_chunks
 from orchestrator.orchestration_runtime import decide_orchestration, is_social_query
 from orchestrator.state_store import get_orchestration_state_store
 from orchestrator.ui_control_plane import get_prompt_profile_system_message, resolve_effective_settings
@@ -24,6 +25,8 @@ class ExecutionDependencies:
     build_prompt: SyncAnyFn
     get_profile_system_prompt: SyncAnyFn
     has_retrieval_adapter: SyncAnyFn
+    get_retrieval_embed_fn: SyncAnyFn
+    get_knowledge_base_store: SyncAnyFn
     get_active_doc_ids: SyncAnyFn
     get_all_docs: SyncAnyFn
     get_active_docs: SyncAnyFn
@@ -498,11 +501,14 @@ async def _execute_doc_question(
     query: str,
     history: List[Dict[str, Any]],
     session_docs: Dict[str, Any],
+    effective_settings: Dict[str, Any],
     deps: ExecutionDependencies,
 ) -> Dict[str, Any]:
     all_docs = deps.get_all_docs() or _build_session_doc_list(session_docs)
     active_docs = deps.get_active_docs() or _build_session_doc_list(session_docs)
     target_doc_name = deps.resolve_target_doc_name(query, all_docs)
+    rag_scope = str(effective_settings.get("rag_scope") or "off")
+    knowledge_collection_id = effective_settings.get("knowledge_collection_id")
 
     scope_docs = active_docs
     if target_doc_name:
@@ -518,8 +524,49 @@ async def _execute_doc_question(
     rag_meta: Dict[str, Any] = {}
     rag_mode = "simple"
     retrieval_available = bool(deps.has_retrieval_adapter())
+    kb_sources: Optional[List[Dict[str, Any]]] = None
 
-    if rag is not None and getattr(rag, "_indexed", False):
+    if rag_scope in {"session_rag", "knowledge_base_rag"}:
+        kb_sources = retrieve_merged_chunks(
+            query=query,
+            rag_scope=rag_scope,
+            knowledge_collection_id=knowledge_collection_id,
+            session_docs=session_docs,
+            active_doc_ids=[str(doc["document_id"]) for doc in scope_docs if doc.get("document_id")],
+            embed_fn=deps.get_retrieval_embed_fn(),
+            kb_store=deps.get_knowledge_base_store(),
+            top_k=max(20, int(getattr(deps.get_rag_pipeline() or object(), "top_k", 5)) * 4) if target_doc_name else 20,
+            candidate_budget_per_scope=12,
+        ).get("chunks")
+
+    if kb_sources:
+        sources = []
+        for idx, chunk in enumerate(kb_sources[:20], start=1):
+            meta = dict(chunk.get("metadata_json") or {})
+            sources.append(
+                {
+                    "source_id": idx,
+                    "document_id": str(chunk.get("document_id")),
+                    "display_name": str(chunk.get("display_name") or chunk.get("document_id")),
+                    "chunk_id": str(chunk.get("chunk_id")),
+                    "collection_id": chunk.get("collection_id"),
+                    "source_origin": chunk.get("source_origin"),
+                    "char_span": {
+                        "start_char": meta.get("start_char"),
+                        "end_char": meta.get("end_char"),
+                    },
+                    "page": meta.get("page"),
+                    "quote": str(chunk.get("text", "")),
+                    "raw_score": float(chunk.get("raw_score", 0.0)),
+                    "normalized_score": float(chunk.get("normalized_score", 0.0)),
+                    "grade": None,
+                    "z_score": None,
+                }
+            )
+    else:
+        sources = []
+
+    if not sources and rag is not None and getattr(rag, "_indexed", False):
         try:
             retrieve_top_k = max(20, int(getattr(rag, "top_k", 5)) * 4) if target_doc_name else None
             rag_result = await asyncio.to_thread(rag.retrieve, query, retrieve_top_k)
@@ -528,7 +575,7 @@ async def _execute_doc_question(
         except Exception:
             rag_result = None
 
-    if rag_result is None and not retrieval_available:
+    if rag_result is None and not sources and not retrieval_available:
         payload = deps.build_doc_question_deterministic_fallback(
             query=query,
             sources=[],
@@ -544,7 +591,7 @@ async def _execute_doc_question(
             "sources": payload.get("sources", []),
         }
 
-    if rag_result is None:
+    if rag_result is None and not sources:
         return {
             "assistant_message": (
                 "По текущему запросу не удалось получить проверяемые источники из RAG. "
@@ -552,7 +599,8 @@ async def _execute_doc_question(
             )
         }
 
-    sources = deps.build_sources_from_rag_result(rag_result, rag, max_sources=20)
+    if not sources:
+        sources = deps.build_sources_from_rag_result(rag_result, rag, max_sources=20)
     if target_doc_name:
         sources = [
             s
@@ -690,6 +738,8 @@ async def execute_orchestration(
         query=request.get("message", ""),
         trace_id=request.get("trace_id"),
         runtime_mode=runtime_mode,
+        rag_scope=str(effective_settings.get("rag_scope") or "off"),
+        knowledge_collection_id=effective_settings.get("knowledge_collection_id"),
         file_count=int(request.get("file_count", 0)),
         has_session_docs=bool(request.get("has_session_docs", False)),
         session_docs=session_docs,
@@ -742,6 +792,7 @@ async def execute_orchestration(
                 query=request.get("message", ""),
                 history=history,
                 session_docs=session_docs,
+                effective_settings=effective_settings,
                 deps=deps,
             )
         elif executor == "documents_summary":

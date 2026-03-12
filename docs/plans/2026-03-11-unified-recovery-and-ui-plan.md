@@ -506,6 +506,17 @@ Merged retrieval policy должна быть зафиксирована явн�
   что ответ собран из `session`, `knowledge_base` или обоих контуров;
 - citations/evidence блок нужен в обоих режимах.
 
+Status on 2026-03-13:
+
+- `B3.33` выполнен как V1:
+  - backend-owned KB source registry и ingestion helper добавлены;
+  - `knowledge_base_rag` интегрирован в unified backend execution core;
+  - merged retrieval `knowledge_base + session overlay` работает без отдельного UI/API contour;
+  - provenance `source_origin | collection_id | display_name` проходит в doc-QA sources.
+- Follow-up оставлен отдельно:
+  - persisted embeddings / vector index / reranker;
+  - более богатый evidence UX поверх уже возвращаемой provenance metadata.
+
 ### Что считать правильным UX для document QA
 
 Минимальный правильный grounded flow:
@@ -541,6 +552,12 @@ Merged retrieval policy должна быть зафиксирована явн�
 - стабильность `source_scope_summary`
 - answer faithfulness / groundedness
 - citation usefulness на контрольном наборе вопросов
+
+Status update 2026-03-13:
+- minimal curated retrieval eval harness and dataset implemented;
+- first `LaBSE` vs `Qwen3-Embedding-0.6B` CPU run on the curated matrix showed parity;
+- retrieval dense embedder is therefore not unified yet; `LaBSE` remains the baseline until the dataset is expanded;
+- eval harness now uses strict dataset validation and deterministic JSON reporting, so future migration decisions must go through this surface rather than ad hoc spot-checks.
 
 ### Что уточнить по tiers
 

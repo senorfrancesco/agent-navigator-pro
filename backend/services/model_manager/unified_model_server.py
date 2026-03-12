@@ -587,8 +587,15 @@ async def infer(request: InferRequest):
 async def get_status():
     tier_info = None
     if state.get("tier_config"):
+        from services.hardware.tier_selector import describe_rag_mode
+
         tc = state["tier_config"]
-        tier_info = {"tier": tc.tier, "rag_mode": tc.rag_mode, "embedding_backend": tc.embedding_backend}
+        tier_info = {
+            "tier": tc.tier,
+            "rag_mode": tc.rag_mode,
+            "rag_mode_label": describe_rag_mode(tc.rag_mode),
+            "embedding_backend": tc.embedding_backend,
+        }
     runtime_budget = resolve_runtime_budget()
     return {
         "active_heavy_model": state["active_model"],

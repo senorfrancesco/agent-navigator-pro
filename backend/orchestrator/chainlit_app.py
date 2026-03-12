@@ -33,6 +33,7 @@ except ImportError:
     raise ImportError("chainlit not installed. Run: pip install chainlit")
 
 from services.model_manager.ums_client import ums_client
+from services.hardware.tier_selector import describe_rag_mode
 from orchestrator.rag.classifier import LLMIntentClassifier, select_classifier_result
 from orchestrator.shared.http_client import get_shared_client
 from orchestrator.orchestration_runtime import (
@@ -45,6 +46,7 @@ from orchestrator.execution_runtime import (
     ExecutionDependencies,
     execute_orchestration as _backend_execute_orchestration,
 )
+from orchestrator.knowledge_base_store import get_knowledge_base_store
 from orchestrator.state_store import get_orchestration_state_store
 from orchestrator.ui_control_plane import (
     ASSISTANT_MODE_ITEMS as _ASSISTANT_MODE_ITEMS,
@@ -78,6 +80,7 @@ INTENT_CLASSIFIER_EMBEDDER_CONFIDENCE_THRESHOLD = float(
 INTENT_CLASSIFIER_EMBEDDER_MARGIN_THRESHOLD = float(
     os.getenv("INTENT_CLASSIFIER_EMBEDDER_MARGIN_THRESHOLD", "0.10")
 )
+LEGAL_EMBEDDER_MODEL = os.getenv("LEGAL_EMBEDDER_MODEL", "labse-embedding")
 
 _DOC_QUESTION_UPLOAD_REQUEST_PHRASES = [
     "предоставьте тексты",
@@ -101,7 +104,11 @@ RAG_INDEX_CACHE_TTL_S = int(os.getenv("RAG_INDEX_CACHE_TTL_S", "1800"))
 class SourceRef(TypedDict):
     source_id: int
     document_id: str
+    display_name: str
     chunk_id: int
+    collection_id: Optional[str]
+    source_origin: Optional[str]
+    section: Optional[str]
     char_span: Dict[str, Optional[int]]
     page: Optional[int]
     quote: str
@@ -114,6 +121,7 @@ class SourceRef(TypedDict):
 class DocQuestionResponse(TypedDict):
     answer_text: str
     sources: List[SourceRef]
+    source_scope_summary: str
     answer_mode: Literal["grounded_answer", "insufficient_evidence"]
     fallback_type: Literal["none", "citation_validation_failed", "insufficient_evidence"]
     fallback_reason: Optional[str]
@@ -136,6 +144,7 @@ def _default_runtime_budget_metadata() -> Dict[str, Any]:
         "generation_tokens_reserve": max(256, effective_context_tokens - retrieved_context_tokens_budget),
         "context_budget_ratio": context_budget_ratio,
         "rag_mode": "simple",
+        "rag_mode_label": describe_rag_mode("simple"),
     }
 
 
@@ -144,6 +153,7 @@ async def _get_runtime_budget_metadata() -> Dict[str, Any]:
     fallback = _default_runtime_budget_metadata()
     if override != "auto":
         fallback["rag_mode"] = override
+        fallback["rag_mode_label"] = describe_rag_mode(override)
         return fallback
     try:
         ums_url = os.getenv("UMS_URL", "http://localhost:8090")
@@ -161,6 +171,8 @@ async def _get_runtime_budget_metadata() -> Dict[str, Any]:
             ),
             "context_budget_ratio": float(data.get("context_budget_ratio") or fallback["context_budget_ratio"]),
             "rag_mode": data.get("tier", {}).get("rag_mode", fallback["rag_mode"]),
+            "rag_mode_label": data.get("tier", {}).get("rag_mode_label")
+            or describe_rag_mode(data.get("tier", {}).get("rag_mode", fallback["rag_mode"])),
         }
         cl.user_session.set("runtime_budget_metadata", budget)
         return budget
@@ -697,7 +709,7 @@ def _derive_default_thread_name() -> str:
     mode_titles = {
         "general_chat": "General Chat",
         "coding": "Coding Assistant",
-        "agentic": "Agentic",
+        "agentic": "Agentic (iterative)",
         "specific_tasks": "Specific Tasks",
         "rag_qa": "RAG Q&A",
     }
@@ -730,6 +742,7 @@ def _build_context_status_markdown(title: str = "Текущий контекст
         lines.append("- active_set: пусто")
     if runtime_budget:
         lines.append(f"- runtime_profile: `{runtime_budget.get('runtime_profile')}`")
+        lines.append(f"- rag_mode: `{runtime_budget.get('rag_mode')}` ({runtime_budget.get('rag_mode_label')})")
     if effective.get("knowledge_collection_id"):
         lines.append(f"- knowledge_collection_id: `{effective.get('knowledge_collection_id')}`")
     return "\n".join(lines)
@@ -821,11 +834,35 @@ async def _persist_current_backend_state(*, status: str = "active", last_error: 
 
 
 def _build_execution_dependencies() -> ExecutionDependencies:
+    def _get_retrieval_embed_fn():
+        rag_pipeline = cl.user_session.get("rag_pipeline")
+        retriever = getattr(rag_pipeline, "retriever", None)
+        embed_fn = getattr(retriever, "embed_fn", None)
+        if embed_fn is not None:
+            return embed_fn
+
+        cached = cl.user_session.get("retrieval_embed_fn")
+        if cached is not None:
+            return cached
+
+        try:
+            from services.model_manager.ums_client import create_ums_embed_fn
+
+            embed_fn = create_ums_embed_fn(model_id=LEGAL_EMBEDDER_MODEL)
+        except Exception:
+            embed_fn = None
+        cl.user_session.set("retrieval_embed_fn", embed_fn)
+        return embed_fn
+
     return ExecutionDependencies(
         infer_assistant_text=_infer_assistant_text,
         build_prompt=_build_prompt,
         get_profile_system_prompt=_get_profile_system_prompt,
-        has_retrieval_adapter=lambda: True,
+        has_retrieval_adapter=lambda: (_get_retrieval_embed_fn() is not None) or bool(
+            getattr(cl.user_session.get("rag_pipeline"), "_indexed", False)
+        ),
+        get_retrieval_embed_fn=_get_retrieval_embed_fn,
+        get_knowledge_base_store=get_knowledge_base_store,
         get_active_doc_ids=_get_active_doc_ids,
         get_all_docs=_get_all_docs,
         get_active_docs=_get_active_docs,
@@ -1006,6 +1043,7 @@ def _format_effective_settings_summary(effective: Optional[Dict[str, Any]] = Non
     ]
     if runtime_budget:
         lines.append(f"- runtime_profile: `{runtime_budget.get('runtime_profile')}`")
+        lines.append(f"- rag_mode: `{runtime_budget.get('rag_mode')}` ({runtime_budget.get('rag_mode_label')})")
         lines.append(f"- effective_context_tokens: `{runtime_budget.get('effective_context_tokens')}`")
         lines.append(
             f"- retrieved_context_tokens_budget: `{runtime_budget.get('retrieved_context_tokens_budget')}`"
@@ -1186,6 +1224,8 @@ def _get_intent_decision(
         query=query,
         trace_id=cl.user_session.get("request_trace_id"),
         runtime_mode=_get_runtime_mode(),
+        rag_scope=str(_get_effective_settings().get("rag_scope") or "off"),
+        knowledge_collection_id=_get_effective_settings().get("knowledge_collection_id"),
         file_count=file_count,
         has_session_docs=has_session_docs,
         session_docs=session_docs,
@@ -1497,7 +1537,11 @@ def _build_sources_from_rag_result(rag_result: Any, rag_pipeline: Any, max_sourc
             {
                 "source_id": idx,
                 "document_id": str(meta.get("doc_name", f"doc_{chunk_id}" if chunk_id >= 0 else "unknown")),
+                "display_name": str(meta.get("doc_name", f"doc_{chunk_id}" if chunk_id >= 0 else "unknown")),
                 "chunk_id": chunk_id,
+                "collection_id": None,
+                "source_origin": "session",
+                "section": meta.get("section"),
                 "char_span": {"start_char": start_char, "end_char": end_char},
                 "page": None,
                 "quote": _normalize_quote(getattr(c, "text", "")),
@@ -1584,6 +1628,7 @@ def _build_doc_question_deterministic_fallback(
     sources: List[SourceRef],
     fallback_type: Literal["citation_validation_failed", "insufficient_evidence"],
     fallback_reason: Optional[str] = None,
+    source_scope_summary: str = "off",
 ) -> DocQuestionResponse:
     top_sources = sources[:2]
     if top_sources:
@@ -1604,6 +1649,7 @@ def _build_doc_question_deterministic_fallback(
     return {
         "answer_text": answer_text,
         "sources": sources,
+        "source_scope_summary": source_scope_summary,
         "answer_mode": "insufficient_evidence",
         "fallback_type": fallback_type,
         "fallback_reason": fallback_reason or "Недостаточно подтверждённых данных или невалидный citation-ответ модели.",
@@ -1618,9 +1664,12 @@ def _build_doc_question_prompt_with_sources(query: str, history: List, sources: 
     lines = []
     for s in sources:
         span = s["char_span"]
+        section = f" section={s.get('section')}" if s.get("section") else ""
+        page = f" page={s.get('page')}" if s.get("page") is not None else ""
+        origin = f" origin={s.get('source_origin')}" if s.get("source_origin") else ""
         lines.append(
             f"[{s['source_id']}] doc={s['document_id']} chunk={s['chunk_id']} "
-            f"span=({span.get('start_char')},{span.get('end_char')}) quote={s['quote']}"
+            f"span=({span.get('start_char')},{span.get('end_char')}){section}{page}{origin} quote={s['quote']}"
         )
     catalog = "\n".join(lines)
     system_msg = _compose_doc_question_system_prompt(catalog)
@@ -1653,12 +1702,24 @@ def _strip_model_source_sections(answer_text: str) -> str:
 
 def _render_doc_question_markdown(resp: DocQuestionResponse) -> str:
     lines = [resp["answer_text"].strip(), "", "### Источники"]
+    lines.append(f"- retrieval_scope: `{resp.get('source_scope_summary', 'off')}`")
     if resp["sources"]:
         for s in resp["sources"]:
             score_pct = int(round(float(s["normalized_score"]) * 100))
+            origin = str(s.get("source_origin") or "session")
+            scope = f"{origin}"
+            if s.get("collection_id"):
+                scope += f":{s['collection_id']}"
+            location_parts = []
+            if s.get("section"):
+                location_parts.append(f"section={s['section']}")
+            if s.get("page") is not None:
+                location_parts.append(f"page={s['page']}")
+            location = f" {' '.join(location_parts)}" if location_parts else ""
             lines.append(
-                f"- [{s['source_id']}] `{s['document_id']}` chunk={s['chunk_id']} "
-                f"span=({s['char_span'].get('start_char')},{s['char_span'].get('end_char')}) "
+                f"- [{s['source_id']}] `{s.get('display_name') or s['document_id']}` "
+                f"(origin={scope}) chunk={s['chunk_id']} "
+                f"span=({s['char_span'].get('start_char')},{s['char_span'].get('end_char')}){location} "
                 f"relevance={score_pct}% raw={s['raw_score']:.4f}"
             )
             lines.append(f"  Цитата: {s['quote']}")
@@ -1811,7 +1872,7 @@ async def _ensure_rag_index_for_active_docs(step_name: Optional[str] = None) -> 
             rag, indexed_count, runtime_budget = await _reindex()
             search_type = "BM25+Dense (hybrid)" if rag.embed_fn else "BM25-only"
             step.output = (
-                f"RAG: mode={runtime_budget['rag_mode']}, search={search_type}, "
+                f"RAG: mode={runtime_budget['rag_mode']} ({runtime_budget.get('rag_mode_label')}), search={search_type}, "
                 f"profile={runtime_budget['runtime_profile']}, "
                 f"budget={runtime_budget['retrieved_context_tokens_budget']} tokens, indexed {indexed_count} docs\n"
                 f"{_active_set_status_line()}"
@@ -1940,7 +2001,7 @@ def _default_starters() -> List[cl.Starter]:
             command="preset:coding",
         ),
         cl.Starter(
-            label="Agentic",
+            label="Agentic (iterative)",
             message="Разложи задачу на шаги и предложи план исполнения с проверками.",
             command="preset:agentic",
         ),

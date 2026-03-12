@@ -125,6 +125,12 @@ Execution verdict:
 - eval не должен ограничиваться retrieval-only метриками:
   нужны также `source_origin` accuracy, mixed-scope cases и answer faithfulness.
 
+Status update 2026-03-13:
+- initial curated retrieval eval harness implemented;
+- first CPU run on the curated matrix produced parity between `LaBSE` and `Qwen3-Embedding-0.6B`;
+- decision remains conservative: keep `LaBSE` as retrieval/legal baseline and expand dataset before reconsidering migration;
+- harness is now fail-fast on invalid dataset entries and reports deterministic JSON metrics (`recall_at_k`, `mrr`, `ndcg_at_k`, `evidence_hit_rate`, `source_origin_accuracy`, lexical `answer_faithfulness`).
+
 ### Block D — Product split: Session RAG vs Knowledge Base
 
 **Primary:** `B3.33`
@@ -162,6 +168,10 @@ Execution verdict:
 
 - это следующий крупный продуктовый шаг после classifier/retrieval gates;
 - это не “мелкий UI task”, а отдельный data/model boundary.
+- Status on 2026-03-13:
+  - выполнено как V1 через backend-owned KB source registry и unified merged retrieval;
+  - `knowledge_base_rag` больше не только control-plane vocabulary;
+  - persisted embeddings / vector index / reranker вынесены в follow-up hardening phase.
 
 ### Block E — Evidence UX и honest tiers
 

@@ -128,6 +128,7 @@ def detect_intent(
     *,
     file_count: int = 0,
     has_session_docs: bool = False,
+    has_knowledge_base_docs: bool = False,
     active_docs_count: int = 0,
     classifier_result: Optional[Dict[str, Any]] = None,
 ) -> str:
@@ -144,7 +145,7 @@ def detect_intent(
             if not has_file:
                 intent = "general_chat"
 
-        if has_session_docs and needs_rag and intent not in (
+        if (has_session_docs or has_knowledge_base_docs) and needs_rag and intent not in (
             "compare_documents",
             "equipment_analysis",
             "document_analysis",
@@ -162,6 +163,11 @@ def detect_intent(
         return "document_analysis"
 
     if has_session_docs:
+        if "привет" in query_lower or "здравствуй" in query_lower:
+            return "greeting"
+        return "document_question"
+
+    if has_knowledge_base_docs:
         if "привет" in query_lower or "здравствуй" in query_lower:
             return "greeting"
         return "document_question"
@@ -373,6 +379,8 @@ def decide_orchestration(
     classifier_result: Optional[Dict[str, Any]] = None,
     new_files: Optional[List[Dict[str, Any]]] = None,
     active_doc_ids: Optional[List[str]] = None,
+    rag_scope: Optional[str] = None,
+    knowledge_collection_id: Optional[str] = None,
     forced_route: Optional[str] = None,
 ) -> Dict[str, Any]:
     session_docs = session_docs or {}
@@ -411,6 +419,10 @@ def decide_orchestration(
     social_query = is_social_query(query)
     total_docs = max(file_count, len(session_docs), len(active_doc_ids))
     has_any_docs = total_docs > 0
+    has_knowledge_base_docs = bool(
+        (rag_scope == "knowledge_base_rag") and str(knowledge_collection_id or "").strip()
+    )
+    has_retrieval_corpus = has_any_docs or has_knowledge_base_docs
     two_docs = total_docs >= 2
     single_doc = total_docs == 1
 
@@ -455,7 +467,7 @@ def decide_orchestration(
                 active_mode=_ACTIVE_MODE_BY_ROUTE[route],
                 preserve_active_mode=bool(social_query and has_any_docs),
             ),
-            ui_hints={"preserve_active_docs": bool(has_any_docs)},
+            ui_hints={"preserve_active_docs": bool(total_docs > 0)},
         )
 
     if has_session_docs and social_query:
@@ -475,10 +487,10 @@ def decide_orchestration(
                 executor=executor,
                 preserve_active_mode=True,
             ),
-            ui_hints={"preserve_active_docs": True, "preserve_active_mode": True},
+            ui_hints={"preserve_active_docs": bool(total_docs > 0), "preserve_active_mode": True},
         )
 
-    if has_any_docs and summary_signal and not compare_signal and not equipment_signal:
+    if total_docs > 0 and summary_signal and not compare_signal and not equipment_signal:
         route = "documents_summary"
         executor = _EXECUTOR_BY_ROUTE[route]
         return _response(
@@ -551,11 +563,12 @@ def decide_orchestration(
         query,
         file_count=file_count,
         has_session_docs=has_session_docs,
+        has_knowledge_base_docs=has_knowledge_base_docs,
         active_docs_count=len(active_doc_ids),
         classifier_result=classifier_result,
     )
 
-    if not has_any_docs and inferred_intent in {
+    if not has_retrieval_corpus and inferred_intent in {
         "document_question",
         "document_analysis",
         "compare_documents",
@@ -646,7 +659,7 @@ def decide_orchestration(
                 ),
             )
 
-        if has_session_docs and needs_rag and intent not in (
+        if (has_session_docs or has_knowledge_base_docs) and needs_rag and intent not in (
             "compare_documents",
             "equipment_analysis",
             "document_analysis",

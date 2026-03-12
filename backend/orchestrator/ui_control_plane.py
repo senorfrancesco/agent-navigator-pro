@@ -6,7 +6,7 @@ from typing import Any, Dict, Mapping, Optional
 ASSISTANT_MODE_ITEMS: Dict[str, str] = {
     "general_chat": "General Chat",
     "coding": "Coding Assistant",
-    "agentic": "Agentic",
+    "agentic": "Agentic (iterative)",
     "specific_tasks": "Specific Tasks",
     "rag_qa": "RAG Q&A",
 }
@@ -89,7 +89,7 @@ PROMPT_PROFILE_ITEMS: Dict[str, str] = {
 TOOL_SCOPE_ITEMS: Dict[str, str] = {
     "chat": "Chat",
     "coding": "Coding",
-    "agentic": "Agentic",
+    "agentic": "Agentic (iterative)",
     "domain_tasks": "Domain Tasks",
     "document_qa": "Document QA",
 }

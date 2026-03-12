@@ -7,6 +7,29 @@ from pydantic import ValidationError
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from orchestrator.agent_api import OrchestrationRequest, execute_orchestration_api, orchestrate
+from orchestrator.knowledge_base_ingestion import ingest_text_source_sync
+from orchestrator.knowledge_base_store import get_knowledge_base_store
+
+
+def _stub_embed_fn(texts):
+    import numpy as np
+
+    vectors = []
+    for text in texts:
+        lowered = text.lower()
+        vec = np.array(
+            [
+                1.0 if "штраф" in lowered or "просроч" in lowered else 0.0,
+                1.0 if "уведом" in lowered or "дней" in lowered else 0.0,
+                1.0 if "сервис" in lowered or "обслуж" in lowered else 0.0,
+            ],
+            dtype=np.float32,
+        )
+        if not np.any(vec):
+            vec = np.ones(3, dtype=np.float32)
+        vec /= np.linalg.norm(vec)
+        vectors.append(vec)
+    return np.array(vectors)
 
 
 @pytest.mark.asyncio
@@ -264,6 +287,42 @@ async def test_execute_orchestration_api_doc_question_reports_retrieval_unavaila
     assert response["route"] == "document_question"
     assert "retrieval" in response["assistant_message"].lower()
     assert "adapter" in response["assistant_message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_execute_orchestration_api_reads_knowledge_base_via_unified_core(monkeypatch):
+    ingest_text_source_sync(
+        collection_id="legal",
+        display_name="kb_policy.txt",
+        text="За просрочку поставки применяется штраф 3 процента.",
+        store=get_knowledge_base_store(),
+        embedding_model_id="labse-embedding",
+    )
+
+    async def fake_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr("orchestrator.agent_api.asyncio.to_thread", fake_to_thread)
+    monkeypatch.setattr("services.model_manager.ums_client.create_ums_embed_fn", lambda **kwargs: _stub_embed_fn)
+    monkeypatch.setattr(
+        "orchestrator.agent_api.ums_client.infer",
+        lambda model_id, payload: {"content": "Штраф составляет 3 процента [1]"},
+    )
+
+    request = OrchestrationRequest(
+        message="Какой штраф за просрочку поставки?",
+        assistant_mode="rag_qa",
+        rag_scope="knowledge_base_rag",
+        knowledge_collection_id="legal",
+        history=[],
+    )
+
+    response = await execute_orchestration_api(request)
+
+    assert response["route"] == "document_question"
+    assert response["assistant_message"] == "Штраф составляет 3 процента [1]"
+    assert response["sources"][0]["source_origin"] == "knowledge_base"
+    assert response["sources"][0]["collection_id"] == "legal"
 
 
 @pytest.mark.asyncio
