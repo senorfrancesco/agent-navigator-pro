@@ -13,10 +13,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BACKEND_DIR="$PROJECT_ROOT/backend"
 ENV_FILE="$BACKEND_DIR/.env"
+RUNTIME_ENV_FILE="${AGENT_NAVIGATOR_RUNTIME_ENV_FILE:-$BACKEND_DIR/.env.runtime}"
 ATTACH_TMUX=true
+FROM_LAUNCHER=false
 
 for arg in "$@"; do
     case "$arg" in
+        --from-launcher)
+            FROM_LAUNCHER=true
+            ;;
         --no-attach)
             ATTACH_TMUX=false
             ;;
@@ -27,6 +32,10 @@ for arg in "$@"; do
             ;;
     esac
 done
+
+if [ "$FROM_LAUNCHER" = false ]; then
+    exec bash "$SCRIPT_DIR/launcher.sh" --target container $([ "$ATTACH_TMUX" = false ] && echo "--no-attach")
+fi
 
 # Цвета для вывода
 RED='\033[0;31m'
@@ -48,6 +57,13 @@ if [ -f "$ENV_FILE" ]; then
 else
     echo -e "${YELLOW}Предупреждение: .env файл не найден. Используются значения по умолчанию.${NC}"
     echo -e "${YELLOW}Создайте .env из .env.example: cp .env.example .env${NC}"
+fi
+
+if [ -f "$RUNTIME_ENV_FILE" ]; then
+    echo -e "${BLUE}Загрузка runtime overrides $RUNTIME_ENV_FILE${NC}"
+    set -a
+    source "$RUNTIME_ENV_FILE"
+    set +a
 fi
 
 # -------------------------------------------

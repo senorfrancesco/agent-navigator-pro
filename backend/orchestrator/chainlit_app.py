@@ -45,6 +45,7 @@ from orchestrator.execution_runtime import (
     ExecutionDependencies,
     execute_orchestration as _backend_execute_orchestration,
 )
+from orchestrator.state_store import get_orchestration_state_store
 from orchestrator.ui_control_plane import (
     ASSISTANT_MODE_ITEMS as _ASSISTANT_MODE_ITEMS,
     MODEL_PROFILE_ITEMS as _MODEL_PROFILE_ITEMS,
@@ -70,6 +71,12 @@ INTENT_CLASSIFIER_EMBEDDER_MODEL = os.getenv(
 INTENT_CLASSIFIER_LLM_MODEL = os.getenv("INTENT_CLASSIFIER_LLM_MODEL", "qwen-14b-llm")
 INTENT_CLASSIFIER_LLM_CONFIDENCE_THRESHOLD = float(
     os.getenv("INTENT_CLASSIFIER_LLM_CONFIDENCE_THRESHOLD", "0.75")
+)
+INTENT_CLASSIFIER_EMBEDDER_CONFIDENCE_THRESHOLD = float(
+    os.getenv("INTENT_CLASSIFIER_EMBEDDER_CONFIDENCE_THRESHOLD", "0.60")
+)
+INTENT_CLASSIFIER_EMBEDDER_MARGIN_THRESHOLD = float(
+    os.getenv("INTENT_CLASSIFIER_EMBEDDER_MARGIN_THRESHOLD", "0.10")
 )
 
 _DOC_QUESTION_UPLOAD_REQUEST_PHRASES = [
@@ -118,19 +125,48 @@ class DocQuestionResponse(TypedDict):
 
 # === RAG Mode Helper ===
 
-async def _get_rag_mode() -> str:
-    """Определяет RAG mode: из env override или из UMS tier config."""
+def _default_runtime_budget_metadata() -> Dict[str, Any]:
+    effective_context_tokens = int(os.getenv("CHAINLIT_DEFAULT_EFFECTIVE_CONTEXT_TOKENS", "8192"))
+    context_budget_ratio = float(os.getenv("CHAINLIT_RETRIEVED_CONTEXT_RATIO", "0.60"))
+    retrieved_context_tokens_budget = int(effective_context_tokens * context_budget_ratio)
+    return {
+        "runtime_profile": "default",
+        "effective_context_tokens": effective_context_tokens,
+        "retrieved_context_tokens_budget": retrieved_context_tokens_budget,
+        "generation_tokens_reserve": max(256, effective_context_tokens - retrieved_context_tokens_budget),
+        "context_budget_ratio": context_budget_ratio,
+        "rag_mode": "simple",
+    }
+
+
+async def _get_runtime_budget_metadata() -> Dict[str, Any]:
     override = os.getenv("RAG_MODE_OVERRIDE", "auto")
+    fallback = _default_runtime_budget_metadata()
     if override != "auto":
-        return override
+        fallback["rag_mode"] = override
+        return fallback
     try:
         ums_url = os.getenv("UMS_URL", "http://localhost:8090")
         client = await get_shared_client()
         resp = await client.get(f"{ums_url}/status", timeout=5.0)
         data = resp.json()
-        return data.get("tier", {}).get("rag_mode", "simple")
+        budget = {
+            "runtime_profile": data.get("runtime_profile") or fallback["runtime_profile"],
+            "effective_context_tokens": int(data.get("effective_context_tokens") or fallback["effective_context_tokens"]),
+            "retrieved_context_tokens_budget": int(
+                data.get("retrieved_context_tokens_budget") or fallback["retrieved_context_tokens_budget"]
+            ),
+            "generation_tokens_reserve": int(
+                data.get("generation_tokens_reserve") or fallback["generation_tokens_reserve"]
+            ),
+            "context_budget_ratio": float(data.get("context_budget_ratio") or fallback["context_budget_ratio"]),
+            "rag_mode": data.get("tier", {}).get("rag_mode", fallback["rag_mode"]),
+        }
+        cl.user_session.set("runtime_budget_metadata", budget)
+        return budget
     except Exception:
-        return "simple"
+        cl.user_session.set("runtime_budget_metadata", fallback)
+        return fallback
 
 
 # === Authentication ===
@@ -304,6 +340,18 @@ def _ensure_session_state() -> None:
         cl.user_session.set("last_trace_id", None)
     if cl.user_session.get("active_mode") is None:
         cl.user_session.set("active_mode", None)
+    if cl.user_session.get("runtime_budget_metadata") is None:
+        cl.user_session.set("runtime_budget_metadata", _default_runtime_budget_metadata())
+    if cl.user_session.get("run_id") is None:
+        cl.user_session.set("run_id", None)
+    if cl.user_session.get("state_ref") is None:
+        cl.user_session.set("state_ref", None)
+    if cl.user_session.get("state_version") is None:
+        cl.user_session.set("state_version", None)
+    if cl.user_session.get("thread_name") is None:
+        cl.user_session.set("thread_name", None)
+    if cl.user_session.get("thread_name_locked") is None:
+        cl.user_session.set("thread_name_locked", False)
 
     # Legacy migration: {name: {text, path}} -> documents_by_id/documents_by_name
     docs_by_id = cl.user_session.get("documents_by_id") or {}
@@ -466,6 +514,11 @@ def _active_set_status_line() -> str:
     return f"Активный набор: {', '.join(labels)} ({len(labels)} docs)"
 
 
+def _get_active_doc_labels() -> List[str]:
+    active_docs = _get_active_docs()
+    return [_doc_label(str(d["display_name"]), int(d.get("version", 1))) for d in active_docs]
+
+
 def _next_doc_version(display_name: str) -> int:
     docs_by_name = _get_documents_by_name()
     docs_by_id = _get_documents_by_id()
@@ -545,6 +598,228 @@ def _apply_session_state_patch(patch: Optional[Dict[str, Any]]) -> None:
         cl.user_session.set("effective_settings", resolve_effective_settings(merged_state))
 
 
+def _sync_run_metadata_from_response(response: Optional[Dict[str, Any]]) -> None:
+    if not response:
+        return
+    if "run_id" in response:
+        cl.user_session.set("run_id", response.get("run_id"))
+    if "state_ref" in response:
+        cl.user_session.set("state_ref", response.get("state_ref"))
+    if "state_version" in response:
+        cl.user_session.set("state_version", response.get("state_version"))
+
+
+def _build_backend_resume_snapshot() -> Dict[str, Any]:
+    _ensure_session_state()
+    return {
+        "history": copy.deepcopy(_get_session_history()),
+        "documents_by_id": copy.deepcopy(_get_documents_by_id()),
+        "active_doc_ids": list(_get_active_doc_ids()),
+        "pending_action": copy.deepcopy(_get_pending_route_choice()),
+        "runtime_mode": _get_runtime_mode(),
+        "control_plane_state": copy.deepcopy(_get_control_plane_state()),
+        "effective_settings": copy.deepcopy(_get_effective_settings()),
+        "last_route": cl.user_session.get("last_route"),
+        "last_executor": cl.user_session.get("last_executor"),
+        "last_trace_id": cl.user_session.get("last_trace_id"),
+        "active_mode": cl.user_session.get("active_mode"),
+        "runtime_budget_metadata": copy.deepcopy(cl.user_session.get("runtime_budget_metadata") or {}),
+        "thread_name": cl.user_session.get("thread_name"),
+        "thread_name_locked": bool(cl.user_session.get("thread_name_locked")),
+    }
+
+
+def _restore_backend_resume_snapshot(snapshot: Dict[str, Any]) -> None:
+    _ensure_session_state()
+    docs_by_id = copy.deepcopy(snapshot.get("documents_by_id") or {})
+    cl.user_session.set("history", copy.deepcopy(snapshot.get("history") or []))
+    cl.user_session.set("documents_by_id", docs_by_id)
+    cl.user_session.set("documents_by_name", {})
+    _get_documents_by_name()
+    cl.user_session.set("active_doc_ids", list(snapshot.get("active_doc_ids") or []))
+    _set_pending_route_choice(copy.deepcopy(snapshot.get("pending_action")))
+
+    runtime_mode = _backend_normalize_runtime_mode(snapshot.get("runtime_mode"))
+    control_plane_state = copy.deepcopy(snapshot.get("control_plane_state") or build_initial_control_plane_state(runtime_mode))
+    effective_settings = copy.deepcopy(snapshot.get("effective_settings") or resolve_effective_settings(control_plane_state))
+    cl.user_session.set("runtime_mode", _backend_normalize_runtime_mode(effective_settings.get("runtime_mode")))
+    cl.user_session.set("control_plane_state", control_plane_state)
+    cl.user_session.set("effective_settings", effective_settings)
+
+    for key in ("last_route", "last_executor", "last_trace_id", "active_mode"):
+        cl.user_session.set(key, snapshot.get(key))
+    cl.user_session.set(
+        "runtime_budget_metadata",
+        copy.deepcopy(snapshot.get("runtime_budget_metadata") or _default_runtime_budget_metadata()),
+    )
+    cl.user_session.set("thread_name", snapshot.get("thread_name"))
+    cl.user_session.set("thread_name_locked", bool(snapshot.get("thread_name_locked")))
+
+    _sync_legacy_documents_cache()
+
+
+def _build_thread_metadata() -> Dict[str, Any]:
+    effective = _get_effective_settings()
+    active_doc_ids = _get_active_doc_ids()
+    active_doc_labels = _get_active_doc_labels()
+    pending_action = _get_pending_route_choice()
+    return {
+        "assistant_mode": effective.get("assistant_mode"),
+        "runtime_mode": effective.get("runtime_mode"),
+        "rag_scope": effective.get("rag_scope"),
+        "model_profile": effective.get("model_profile"),
+        "resolved_model_id": effective.get("resolved_model_id"),
+        "device_mode": effective.get("device_mode"),
+        "context_budget_profile": effective.get("context_budget_profile"),
+        "knowledge_collection_id": effective.get("knowledge_collection_id"),
+        "active_doc_ids": active_doc_ids,
+        "active_doc_labels": active_doc_labels,
+        "active_doc_count": len(active_doc_labels),
+        "has_pending_action": bool(pending_action),
+        "last_route": cl.user_session.get("last_route"),
+        "last_executor": cl.user_session.get("last_executor"),
+    }
+
+
+def _derive_thread_name_from_message(user_message: Optional[str]) -> Optional[str]:
+    text = " ".join((user_message or "").split())
+    if not text:
+        return None
+    if len(text) <= 80:
+        return text
+    return text[:77].rsplit(" ", 1)[0] + "..."
+
+
+def _derive_default_thread_name() -> str:
+    effective = _get_effective_settings()
+    active_labels = _get_active_doc_labels()
+    assistant_mode = effective.get("assistant_mode") or "general_chat"
+    mode_titles = {
+        "general_chat": "General Chat",
+        "coding": "Coding Assistant",
+        "agentic": "Agentic",
+        "specific_tasks": "Specific Tasks",
+        "rag_qa": "RAG Q&A",
+    }
+    base = mode_titles.get(str(assistant_mode), "Agent Navigator")
+    if active_labels:
+        return f"{base} — {active_labels[0]}"
+    return base
+
+
+def _build_context_status_markdown(title: str = "Текущий контекст") -> str:
+    effective = _get_effective_settings()
+    runtime_budget = cl.user_session.get("runtime_budget_metadata") or {}
+    active_labels = _get_active_doc_labels()
+    pending_action = _get_pending_route_choice()
+    lines = [
+        f"### {title}",
+        f"- assistant_mode: `{effective.get('assistant_mode')}`",
+        f"- runtime_mode: `{effective.get('runtime_mode')}`",
+        f"- rag_scope: `{effective.get('rag_scope')}`",
+        f"- model_profile: `{effective.get('model_profile')}`",
+        f"- resolved_model_id: `{effective.get('resolved_model_id')}`",
+        f"- device_mode: `{effective.get('device_mode')}`",
+        f"- context_budget_profile: `{effective.get('context_budget_profile')}`",
+        f"- Active docs: `{len(active_labels)}`",
+        f"- pending_action: `{'yes' if pending_action else 'no'}`",
+    ]
+    if active_labels:
+        lines.append(f"- active_set: {', '.join(active_labels)}")
+    else:
+        lines.append("- active_set: пусто")
+    if runtime_budget:
+        lines.append(f"- runtime_profile: `{runtime_budget.get('runtime_profile')}`")
+    if effective.get("knowledge_collection_id"):
+        lines.append(f"- knowledge_collection_id: `{effective.get('knowledge_collection_id')}`")
+    return "\n".join(lines)
+
+
+def _build_welcome_markdown() -> str:
+    return (
+        "## Добро пожаловать в Agent Navigator\n\n"
+        "Используйте starter cards или настройки справа, чтобы быстро переключить сценарий.\n\n"
+        f"{_build_context_status_markdown(title='Стартовый контекст')}"
+    )
+
+
+def _build_resume_markdown(*, restored_via: str) -> str:
+    subtitles = {
+        "backend_snapshot": "Контекст восстановлен из backend snapshot.",
+        "legacy_history": "Контекст восстановлен из сохранённой истории Chainlit.",
+        "empty_thread": "Тред найден, но активный контекст отсутствовал.",
+    }
+    subtitle = subtitles.get(restored_via, "Контекст чата восстановлен.")
+    return f"## Контекст восстановлен\n\n{subtitle}\n\n{_build_context_status_markdown()}"
+
+
+async def _sync_thread_presentation(user_message: Optional[str] = None) -> None:
+    ids = _get_current_chainlit_session_ids()
+    thread_id = ids.get("thread_id")
+    if not thread_id:
+        return
+
+    current_name = cl.user_session.get("thread_name")
+    locked = bool(cl.user_session.get("thread_name_locked"))
+    proposed_name = None
+    next_locked = locked
+    if user_message and not locked:
+        proposed_name = _derive_thread_name_from_message(user_message)
+        next_locked = bool(proposed_name)
+    elif not current_name:
+        proposed_name = _derive_default_thread_name()
+        next_locked = False
+
+    if proposed_name:
+        cl.user_session.set("thread_name", proposed_name)
+        cl.user_session.set("thread_name_locked", next_locked)
+    metadata = _build_thread_metadata()
+
+    try:
+        from chainlit.data import get_data_layer
+
+        data_layer = get_data_layer()
+        if data_layer is not None:
+            await data_layer.update_thread(
+                thread_id=thread_id,
+                name=proposed_name,
+                metadata=metadata,
+            )
+    except Exception:
+        logger.debug("Thread presentation sync skipped", exc_info=True)
+
+
+async def _persist_current_backend_state(*, status: str = "active", last_error: Optional[str] = None) -> None:
+    _ensure_session_state()
+    ids = _get_current_chainlit_session_ids()
+    store = get_orchestration_state_store()
+    run_record = await store.get_or_create_run(
+        thread_id=ids.get("thread_id"),
+        session_id=ids.get("session_id"),
+        workflow_type="chainlit",
+    )
+    record = await store.save_run(
+        run_id=run_record.run_id,
+        status=status,
+        pending_action_id=(_get_pending_route_choice() or {}).get("pending_action_id")
+        or (_get_pending_route_choice() or {}).get("route_choice_id"),
+        resume_state_blob=_build_backend_resume_snapshot(),
+        checkpoint_blob={
+            "route": cl.user_session.get("last_route"),
+            "executor": cl.user_session.get("last_executor"),
+            "trace_id": cl.user_session.get("last_trace_id"),
+            "runtime_mode": _get_runtime_mode(),
+            "assistant_mode": _get_effective_settings().get("assistant_mode"),
+            "rag_scope": _get_effective_settings().get("rag_scope"),
+            "knowledge_collection_id": _get_effective_settings().get("knowledge_collection_id"),
+        },
+        last_error=last_error,
+    )
+    cl.user_session.set("run_id", record.run_id)
+    cl.user_session.set("state_ref", record.state_ref)
+    cl.user_session.set("state_version", record.version)
+
+
 def _build_execution_dependencies() -> ExecutionDependencies:
     return ExecutionDependencies(
         infer_assistant_text=_infer_assistant_text,
@@ -577,20 +852,28 @@ def _build_execution_dependencies() -> ExecutionDependencies:
 
 
 async def _render_execution_response(response: Dict[str, Any], history: List[Dict[str, str]]) -> None:
+    _sync_run_metadata_from_response(response)
     _apply_session_state_patch(response.get("session_state_patch"))
     assistant_message = response.get("assistant_message")
     if assistant_message:
         await cl.Message(content=assistant_message).send()
         history.append({"role": "assistant", "content": assistant_message})
+    await _persist_current_backend_state(
+        status="waiting_action" if response.get("action_required") else "completed",
+        last_error=assistant_message if str(assistant_message or "").lower().startswith("ошибка") else None,
+    )
 
 
 def _get_current_chainlit_session_ids() -> Dict[str, Optional[str]]:
-    thread_id = cl.user_session.get("thread_id")
-    session_id = cl.user_session.get("id")
+    def _normalize(value: Any) -> Optional[str]:
+        return value if isinstance(value, str) and value.strip() else None
+
+    thread_id = _normalize(cl.user_session.get("thread_id"))
+    session_id = _normalize(cl.user_session.get("id"))
     try:
         session = getattr(cl, "context").session
-        thread_id = thread_id or getattr(session, "thread_id", None)
-        session_id = session_id or getattr(session, "id", None)
+        thread_id = thread_id or _normalize(getattr(session, "thread_id", None))
+        session_id = session_id or _normalize(getattr(session, "id", None))
     except Exception:
         pass
     return {"thread_id": thread_id, "session_id": session_id}
@@ -609,6 +892,9 @@ def _build_execution_request(
     ids = _get_current_chainlit_session_ids()
     return {
         "message": message,
+        "run_id": cl.user_session.get("run_id"),
+        "state_ref": cl.user_session.get("state_ref"),
+        "state_version": cl.user_session.get("state_version"),
         "session_id": ids["session_id"],
         "thread_id": ids["thread_id"],
         "history": list(_get_session_history()),
@@ -624,6 +910,8 @@ def _build_execution_request(
         "generation_overrides": dict(effective.get("generation") or {}),
         "custom_system_prompt": effective.get("custom_system_prompt"),
         "tool_scope": effective.get("tool_scope"),
+        "ui_state": _build_backend_resume_snapshot(),
+        "control_plane_state": copy.deepcopy(_get_control_plane_state()),
         "file_count": len(new_files),
         "has_session_docs": bool(session_docs),
         "session_docs": session_docs,
@@ -700,6 +988,7 @@ def _apply_control_plane_preset(command: Optional[str]) -> Optional[Dict[str, An
 
 def _format_effective_settings_summary(effective: Optional[Dict[str, Any]] = None) -> str:
     effective = effective or _get_effective_settings()
+    runtime_budget = cl.user_session.get("runtime_budget_metadata") or {}
     generation = effective.get("generation") or {}
     lines = [
         "### Активная конфигурация",
@@ -708,11 +997,19 @@ def _format_effective_settings_summary(effective: Optional[Dict[str, Any]] = Non
         f"- rag_scope: `{effective.get('rag_scope')}`",
         f"- model_profile: `{effective.get('model_profile')}`",
         f"- resolved_model_id: `{effective.get('resolved_model_id')}`",
+        f"- device_mode: `{effective.get('device_mode')}`",
+        f"- context_budget_profile: `{effective.get('context_budget_profile')}`",
         f"- prompt_profile: `{effective.get('prompt_profile')}`",
         f"- temperature: `{generation.get('temperature')}`",
         f"- top_p: `{generation.get('top_p')}`",
         f"- max_tokens: `{generation.get('max_tokens')}`",
     ]
+    if runtime_budget:
+        lines.append(f"- runtime_profile: `{runtime_budget.get('runtime_profile')}`")
+        lines.append(f"- effective_context_tokens: `{runtime_budget.get('effective_context_tokens')}`")
+        lines.append(
+            f"- retrieved_context_tokens_budget: `{runtime_budget.get('retrieved_context_tokens_budget')}`"
+        )
     if effective.get("knowledge_collection_id"):
         lines.append(f"- knowledge_collection_id: `{effective.get('knowledge_collection_id')}`")
     if effective.get("custom_system_prompt"):
@@ -860,6 +1157,8 @@ def _get_classifier_result(query: str) -> Optional[Dict[str, Any]]:
         embedder_result=embedder_result,
         llm_result=llm_result,
         llm_confidence_threshold=INTENT_CLASSIFIER_LLM_CONFIDENCE_THRESHOLD,
+        embedder_confidence_threshold=INTENT_CLASSIFIER_EMBEDDER_CONFIDENCE_THRESHOLD,
+        embedder_margin_threshold=INTENT_CLASSIFIER_EMBEDDER_MARGIN_THRESHOLD,
     )
 
 
@@ -1484,35 +1783,48 @@ async def _ensure_rag_index_for_active_docs(step_name: Optional[str] = None) -> 
     from orchestrator.rag.pipeline import AdaptiveRAGPipeline
     from services.model_manager.ums_client import create_ums_embed_fn
 
-    async def _reindex() -> tuple[AdaptiveRAGPipeline, int, str]:
+    async def _reindex() -> tuple[AdaptiveRAGPipeline, int, Dict[str, Any]]:
         nonlocal rag
         embed_fn = create_ums_embed_fn()
-        rag_mode = await _get_rag_mode()
+        runtime_budget = await _get_runtime_budget_metadata()
+        rag_mode = runtime_budget["rag_mode"]
         if rag is None:
-            rag = AdaptiveRAGPipeline(embed_fn=embed_fn, rag_mode=rag_mode)
+            rag = AdaptiveRAGPipeline(
+                embed_fn=embed_fn,
+                rag_mode=rag_mode,
+                effective_context_tokens=runtime_budget.get("effective_context_tokens"),
+                retrieved_context_ratio=runtime_budget.get("context_budget_ratio", 0.60),
+            )
         else:
             rag.rag_mode = rag_mode
+            rag.configure_runtime_budget(
+                effective_context_tokens=runtime_budget.get("effective_context_tokens"),
+                retrieved_context_ratio=runtime_budget.get("context_budget_ratio", 0.60),
+            )
         texts = [str(d.get("text", "")) for d in active_docs if d.get("text")]
         names = [str(d.get("display_name", "")) for d in active_docs if d.get("text")]
         await asyncio.to_thread(rag.index_documents, texts, doc_names=names)
-        return rag, len(texts), rag_mode
+        return rag, len(texts), runtime_budget
 
     if step_name:
         async with cl.Step(name=step_name, type="tool") as step:
-            rag, indexed_count, rag_mode = await _reindex()
+            rag, indexed_count, runtime_budget = await _reindex()
             search_type = "BM25+Dense (hybrid)" if rag.embed_fn else "BM25-only"
             step.output = (
-                f"RAG: mode={rag_mode}, search={search_type}, indexed {indexed_count} docs\n"
+                f"RAG: mode={runtime_budget['rag_mode']}, search={search_type}, "
+                f"profile={runtime_budget['runtime_profile']}, "
+                f"budget={runtime_budget['retrieved_context_tokens_budget']} tokens, indexed {indexed_count} docs\n"
                 f"{_active_set_status_line()}"
             )
     else:
-        rag, _, _ = await _reindex()
+        rag, _, runtime_budget = await _reindex()
 
     cache[index_key] = {
         "pipeline": rag,
         "doc_ids": active_ids,
         "indexed_at": now_ts,
         "last_used": now_ts,
+        "runtime_budget": runtime_budget,
     }
     if RAG_INDEX_CACHE_MAX > 0 and len(cache) > RAG_INDEX_CACHE_MAX:
         sorted_keys = sorted(
@@ -1610,7 +1922,10 @@ async def on_chat_start():
 
     # Фоновая инициализация classifier для раннего semantic routing
     asyncio.create_task(_init_classifier())
+    await _persist_current_backend_state(status="initialized")
     await _send_control_plane_settings()
+    await _sync_thread_presentation()
+    await cl.Message(content=_build_welcome_markdown()).send()
 
 def _default_starters() -> List[cl.Starter]:
     return [
@@ -1666,6 +1981,8 @@ async def on_settings_update(settings: Dict[str, Any]):
     _ensure_session_state()
     effective = _store_control_plane_state(_extract_control_plane_state_from_settings(settings))
     cl.user_session.set("effective_settings_summary", _format_effective_settings_summary(effective))
+    await _sync_thread_presentation()
+    await _persist_current_backend_state()
     await _send_control_plane_settings()
 
 
@@ -1680,6 +1997,8 @@ async def on_chat_resume(thread):
         cl.user_session.set("id", ids["session_id"])
     if thread and thread.get("id"):
         cl.user_session.set("thread_id", str(thread.get("id")))
+        cl.user_session.set("thread_name", thread.get("name"))
+        cl.user_session.set("thread_name_locked", bool(thread.get("name")))
     elif ids["thread_id"]:
         cl.user_session.set("thread_id", ids["thread_id"])
     cl.user_session.set("documents", {})
@@ -1698,6 +2017,23 @@ async def on_chat_resume(thread):
     cl.user_session.set("rag_index_key", "")
     cl.user_session.set("rag_index_doc_ids", [])
     cl.user_session.set("rag_pipeline_cache", {})
+    store = get_orchestration_state_store()
+    restored_run = await store.load_run(
+        thread_id=cl.user_session.get("thread_id"),
+        session_id=cl.user_session.get("id"),
+    )
+    if restored_run is not None:
+        cl.user_session.set("run_id", restored_run.run_id)
+        cl.user_session.set("state_ref", restored_run.state_ref)
+        cl.user_session.set("state_version", restored_run.version)
+        if restored_run.resume_state_blob:
+            _restore_backend_resume_snapshot(restored_run.resume_state_blob)
+            if _get_active_doc_ids():
+                await _ensure_rag_index_for_active_docs(step_name="Восстановление индекса")
+            await _send_control_plane_settings()
+            await _sync_thread_presentation()
+            await cl.Message(content=_build_resume_markdown(restored_via="backend_snapshot")).send()
+            return
     history = []
     found_files = []
 
@@ -1761,6 +2097,13 @@ async def on_chat_resume(thread):
                     step.output = "Не удалось восстановить текст документов."
 
     await _send_control_plane_settings()
+    await _sync_thread_presentation()
+    await cl.Message(
+        content=_build_resume_markdown(
+            restored_via="legacy_history" if (history or found_files) else "empty_thread"
+        )
+    ).send()
+    await _persist_current_backend_state()
 
 
 @cl.on_message
@@ -1773,6 +2116,7 @@ async def on_message(message: cl.Message):
     if preset_effective is not None:
         cl.user_session.set("effective_settings_summary", _format_effective_settings_summary(preset_effective))
         await _send_control_plane_settings()
+        await _sync_thread_presentation()
 
     query = message.content
     history = _get_session_history()
@@ -1950,6 +2294,7 @@ async def on_message(message: cl.Message):
                     deps=_build_execution_dependencies(),
                 )
                 await _render_execution_response(execution_response, history)
+            await _sync_thread_presentation(user_message=query)
         else:
             _set_pending_route_choice(state)
             await cl.Message(
@@ -1959,15 +2304,19 @@ async def on_message(message: cl.Message):
                     f"{_active_set_status_line()}"
                 )
             ).send()
+            await _sync_thread_presentation(user_message=query)
             history.append({"role": "user", "content": query})
             return
     elif action_required:
         _apply_session_state_patch(response.get("session_state_patch"))
         await cl.Message(content=response.get("assistant_message") or action_required.get("title") or "Нужно действие пользователя.").send()
+        await _sync_thread_presentation(user_message=query)
         history.append({"role": "user", "content": query})
         return
     else:
         await _render_execution_response(response, history)
+
+    await _sync_thread_presentation(user_message=query)
 
     history.append({"role": "user", "content": query})
 

@@ -106,17 +106,34 @@ cp .env.example .env
 
 ### 4. Запуск системы
 
-Рекомендуемый полный запуск:
+Канонический runtime entrypoint:
 
 ```bash
-./scripts/run_all.sh
+./scripts/launcher.sh --target native --profile adaptive
 ```
 
-Скрипт:
+Container-oriented path:
 
-- поднимает `tmux`-сессию `agent-navigator`
-- запускает `agent_api`, `document_server`, `legal_server`, `UMS`
-- поднимает `chainlit` через `docker compose`
+```bash
+./scripts/launcher.sh --target container --profile default
+```
+
+Launcher:
+
+- запускает controlled bootstrap/preflight слой
+- строит и применяет `backend/.env.runtime`
+- запускает нужный target (`native` или `container`)
+- печатает runtime summary через `UMS /status`
+
+Совместимые wrapper scripts сохранены:
+
+```bash
+./scripts/run_native.sh
+./scripts/run_all.sh
+./scripts/run_container.sh
+```
+
+Они делегируют в `launcher.sh` и оставлены как compatibility aliases.
 
 ### 5. Отдельный запуск Chainlit
 
@@ -174,6 +191,12 @@ docker compose --profile legacy up -d open-webui
 ```
 
 ## Полезные команды
+
+Runtime preflight report:
+
+```bash
+./scripts/launcher.sh --target native --profile adaptive --report-only
+```
 
 Полный backend test suite без integration:
 

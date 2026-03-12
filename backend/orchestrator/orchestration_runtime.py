@@ -15,6 +15,7 @@ import uuid
 from typing import Any, Dict, List, Literal, Optional
 
 from orchestrator.workflows.equipment import detect_equipment_mode
+from orchestrator.rag.classifier import UNSURE_INTENT
 
 INTENT_LOW_MARGIN_THRESHOLD = 0.12
 INTENT_LOW_CONFIDENCE_THRESHOLD = 0.55
@@ -104,6 +105,8 @@ def is_social_query(query: str) -> bool:
 def is_low_confidence(classifier_result: Optional[Dict[str, Any]]) -> bool:
     if not classifier_result:
         return True
+    if classifier_result.get("abstained") or classifier_result.get("intent") == UNSURE_INTENT:
+        return True
     return (
         classifier_result.get("confidence", 0.0) < INTENT_LOW_CONFIDENCE_THRESHOLD
         or classifier_result.get("margin", 0.0) < INTENT_LOW_MARGIN_THRESHOLD
@@ -130,7 +133,9 @@ def detect_intent(
 ) -> str:
     query_lower = (query or "").lower()
 
-    if classifier_result:
+    if classifier_result and not (
+        classifier_result.get("abstained") or classifier_result.get("intent") == UNSURE_INTENT
+    ):
         intent = classifier_result["intent"]
         needs_rag = classifier_result["needs_rag"]
 

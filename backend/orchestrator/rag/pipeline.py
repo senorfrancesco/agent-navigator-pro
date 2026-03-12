@@ -16,6 +16,8 @@ from .classifier import EmbeddingIntentClassifier
 from .chunker import LegalDocumentChunker, Chunk
 
 logger = logging.getLogger("RAG")
+DEFAULT_CHARS_PER_TOKEN = 4.0
+DEFAULT_RETRIEVED_CONTEXT_RATIO = 0.60
 
 
 @dataclass
@@ -51,7 +53,10 @@ class AdaptiveRAGPipeline:
         top_k: int = 5,
         use_bm25: bool = True,
         z_score_threshold: float = -0.5,
-        max_context_chars: int = 16000,
+        max_context_chars: Optional[int] = 16000,
+        effective_context_tokens: Optional[int] = None,
+        retrieved_context_ratio: float = DEFAULT_RETRIEVED_CONTEXT_RATIO,
+        chars_per_token: float = DEFAULT_CHARS_PER_TOKEN,
     ):
         """
         Args:
@@ -61,12 +66,18 @@ class AdaptiveRAGPipeline:
             use_bm25: Использовать BM25 в hybrid search
             z_score_threshold: Порог Z-score для grading (ниже = poor)
             max_context_chars: Максимум символов контекста для LLM
+            effective_context_tokens: Effective context window runtime profile
+            retrieved_context_ratio: Доля окна под retrieved context
+            chars_per_token: Эвристика token->chars
         """
         self.embed_fn = embed_fn
         self.rag_mode = rag_mode
         self.top_k = top_k
         self.z_score_threshold = z_score_threshold
-        self.max_context_chars = max_context_chars
+        self.effective_context_tokens = effective_context_tokens
+        self.retrieved_context_ratio = max(0.1, min(0.95, retrieved_context_ratio))
+        self.chars_per_token = max(1.0, chars_per_token)
+        self.max_context_chars = self._resolve_max_context_chars(max_context_chars)
 
         self.retriever = HybridRetriever(
             embed_fn=embed_fn,
@@ -77,6 +88,37 @@ class AdaptiveRAGPipeline:
 
         self._classifier_initialized = False
         self._indexed = False
+
+    def _resolve_max_context_chars(self, max_context_chars: Optional[int]) -> int:
+        if self.effective_context_tokens:
+            retrieved_tokens_budget = int(self.effective_context_tokens * self.retrieved_context_ratio)
+            return max(256, int(retrieved_tokens_budget * self.chars_per_token))
+        if max_context_chars is None:
+            return 16000
+        return int(max_context_chars)
+
+    def configure_runtime_budget(
+        self,
+        *,
+        effective_context_tokens: Optional[int],
+        retrieved_context_ratio: Optional[float] = None,
+        max_context_chars: Optional[int] = None,
+    ) -> None:
+        self.effective_context_tokens = effective_context_tokens
+        if retrieved_context_ratio is not None:
+            self.retrieved_context_ratio = max(0.1, min(0.95, retrieved_context_ratio))
+        self.max_context_chars = self._resolve_max_context_chars(max_context_chars)
+
+    def get_runtime_budget_metadata(self) -> Dict[str, Any]:
+        retrieved_tokens_budget = None
+        if self.effective_context_tokens is not None:
+            retrieved_tokens_budget = int(self.effective_context_tokens * self.retrieved_context_ratio)
+        return {
+            "effective_context_tokens": self.effective_context_tokens,
+            "retrieved_context_ratio": self.retrieved_context_ratio,
+            "retrieved_context_tokens_budget": retrieved_tokens_budget,
+            "max_context_chars": self.max_context_chars,
+        }
 
     def index_documents(
         self,
@@ -167,7 +209,11 @@ class AdaptiveRAGPipeline:
             chunks=results,
             needs_generation=True,
             context_text=context,
-            metadata={"mode": "simple", "chunks_found": len(results)},
+            metadata={
+                "mode": "simple",
+                "chunks_found": len(results),
+                "runtime_budget": self.get_runtime_budget_metadata(),
+            },
         )
 
     def _retrieve_corrective(self, query: str, top_k: int) -> RAGResult:
@@ -214,7 +260,12 @@ class AdaptiveRAGPipeline:
                 intent=intent,
                 needs_generation=True,
                 context_text=context,
-                metadata={"mode": "corrective", "quality": "good", "chunks_found": len(good_results)},
+                metadata={
+                    "mode": "corrective",
+                    "quality": "good",
+                    "chunks_found": len(good_results),
+                    "runtime_budget": self.get_runtime_budget_metadata(),
+                },
             )
 
         # Rocchio expansion
@@ -226,7 +277,12 @@ class AdaptiveRAGPipeline:
             intent=intent,
             needs_generation=True,
             context_text=context,
-            metadata={"mode": "corrective", "quality": "expanded", "chunks_found": len(expanded_results)},
+            metadata={
+                "mode": "corrective",
+                "quality": "expanded",
+                "chunks_found": len(expanded_results),
+                "runtime_budget": self.get_runtime_budget_metadata(),
+            },
         )
 
     def _retrieve_agentic(self, query: str, top_k: int) -> RAGResult:
@@ -282,6 +338,7 @@ class AdaptiveRAGPipeline:
                 "mode": "agentic",
                 "iterations": iteration + 1,
                 "chunks_found": len(all_results),
+                "runtime_budget": self.get_runtime_budget_metadata(),
             },
         )
 

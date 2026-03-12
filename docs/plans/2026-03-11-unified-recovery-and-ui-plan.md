@@ -45,8 +45,8 @@
 1. [B3.31 — API Orchestration Layer + Runtime Mode Switch](../../TASKS.md#L510)
 2. [B3.32 — LangChain adoption strategy](../../TASKS.md#L534)
 3. [B3.21 — Quality upgrade: отдельная embedding-модель для intent classification](../../TASKS.md#L555)
-4. [T4.2 — Chainlit UX hardening](../../TASKS.md#L609)
-5. [T4.3 — LLM Profile Selector в Chainlit](../../TASKS.md#L615)
+4. [T4.2 — Chainlit UX hardening](../../TASKS.md#L609) — implemented
+5. [T4.3 — LLM Profile Selector в Chainlit](../../TASKS.md#L615) — implemented
 6. [T4.13 — Runtime Context Budget + Preflight Profiles](../../TASKS.md#L671)
 
 ### Вывод
@@ -151,13 +151,12 @@ UI должен:
 Для `resume`, `human-in-the-loop`, `action_required`, `rag_scope` и `knowledge_collection_id`
 нужен один authoritative слой состояния.
 
-Для текущего `B3.31` выбран сознательно ограниченный pragmatic step:
+Для текущего `B3.31` был выбран сознательно ограниченный pragmatic step, но он уже закрыт
+отдельной фазой [B3.31a](../../TASKS.md):
 
-- `Chainlit SQLite` / current Chainlit data layer временно остаётся authoritative
-  для `resume`, `pending action`, `state_ref` и связанных recovery-state semantics;
-- это сделано, чтобы не раздувать execution-boundary refactor до отдельной migration-фазы;
-- dedicated backend-owned orchestration persistence вынесен в отдельный future follow-up
-  [B3.31a](../../TASKS.md).
+- execution-critical state перенесён в backend-owned `orchestrator_runs`;
+- `Chainlit` session state теперь служит UI-mirror/cache;
+- `Chainlit` resume сначала читает backend snapshot и только потом использует legacy fallback.
 
 Целевая модель после `B3.31a`:
 
@@ -278,6 +277,10 @@ UI должен:
 - ADR в `docs/`
 - short rationale в `TASKS.md`
 
+### Статус
+
+Закрыто через [2026-03-12-b332-langchain-adoption-strategy.md](./2026-03-12-b332-langchain-adoption-strategy.md).
+
 ### Почему это важно
 
 Это снимает ложное давление “у нас нет оркестратора, значит надо срочно переписать всё на LangChain”.
@@ -371,6 +374,14 @@ Classifier upgrade не должен снова утянуть decision-making �
    - `manual`
 3. Ограничивать retrieved context по runtime budget, а не по магическим константам.
 
+Статус на 2026-03-13:
+
+- `T4.13` реализован как backend-owned runtime budget contract;
+- `UMS /status` публикует `runtime_profile`, `effective_context_tokens`,
+  `retrieved_context_tokens_budget`, `generation_tokens_reserve`, `context_budget_ratio`;
+- `Chainlit` и `AdaptiveRAGPipeline` используют эти поля для token-derived context budget;
+- profile selection на этой фазе ещё env-driven/backend-first, без user-facing selector.
+
 ### Затрагиваемые зоны
 
 - [backend/orchestrator/agent_api.py](../../backend/orchestrator/agent_api.py)
@@ -393,6 +404,14 @@ Classifier upgrade не должен снова утянуть decision-making �
   - `container` prod-validation path
   - optional preflight
   - health-check/report
+
+Статус на 2026-03-13:
+
+- `T4.14` реализован;
+- canonical runtime path теперь `scripts/launcher.sh` + `scripts/runtime_preflight.py`;
+- `backend/.env.runtime` используется как applied runtime output;
+- `run_all.sh`, `run_native.sh`, `run_container.sh` оставлены как compatibility wrappers;
+- richer user-facing runtime/profile selection остаётся на `T4.3`.
 
 При этом текущий этап разработки остаётся native-first:
 
@@ -538,7 +557,7 @@ agentic / multi-agent runtime.
 ## Фаза 7. Добавить управляемые UI-возможности в Chainlit
 
 **Приоритет:** после Фаз 1-5, частично можно проектировать заранее  
-**Backlog:** [T4.2](../../TASKS.md#L609), [T4.3](../../TASKS.md#L615)
+**Backlog:** [T4.2](../../TASKS.md#L609) — implemented, [T4.3](../../TASKS.md#L615) — implemented
 
 ### Что именно нужно добавить
 
@@ -1049,8 +1068,8 @@ Starter cards:
 4. [B3.32](../../TASKS.md#L534)
 5. [B3.31a](../../TASKS.md)
 6. [T4.13](../../TASKS.md#L671)
-7. [T4.2](../../TASKS.md#L609)
-8. [T4.3](../../TASKS.md#L615)
+7. [T4.2](../../TASKS.md#L609) — implemented
+8. [T4.3](../../TASKS.md#L615) — implemented
 9. UI actions / settings / profiles поверх нового contract в нативном `Chainlit`
 10. Финальная container/prod validation после стабилизации нативного контура
 

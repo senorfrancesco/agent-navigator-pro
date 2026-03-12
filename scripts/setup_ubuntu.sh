@@ -18,6 +18,8 @@ echo -e "${BLUE}============================================================${NC
 echo -e "${BLUE}Agent Navigator Pro - Полная установка для Ubuntu${NC}"
 echo -e "${BLUE}============================================================${NC}"
 echo ""
+echo -e "${YELLOW}После установки canonical runtime entrypoint: ./scripts/launcher.sh${NC}"
+echo ""
 
 # Проверка что скрипт запущен на Ubuntu/Debian
 if [ ! -f /etc/os-release ]; then

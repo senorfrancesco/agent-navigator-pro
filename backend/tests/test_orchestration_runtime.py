@@ -209,3 +209,50 @@ def test_invalid_forced_route_falls_back_to_normal_routing():
     assert response["route"] == "general_chat"
     assert response["executor"] == "chat"
     assert response["reason"] == "semantic_router"
+
+
+def test_unsure_classifier_two_docs_still_requires_choice():
+    response = decide_orchestration(
+        query="Нужно понять, что делать с этими двумя файлами",
+        trace_id="trace888",
+        runtime_mode="auto",
+        file_count=2,
+        has_session_docs=True,
+        session_docs={"old.pdf": {"text": "v1"}, "new.pdf": {"text": "v2"}},
+        active_doc_ids=["old", "new"],
+        new_files=[{"name": "old.pdf"}, {"name": "new.pdf"}],
+        classifier_result={
+            "intent": "__unsure__",
+            "predicted_intent": "compare_documents",
+            "confidence": 0.41,
+            "margin": 0.02,
+            "needs_rag": False,
+            "abstained": True,
+        },
+    )
+
+    assert response["action_required"]["type"] == "choose_route"
+    assert response["reason"] == "two_docs_low_confidence"
+
+
+def test_unsure_classifier_without_docs_falls_back_to_safe_chat_path():
+    response = decide_orchestration(
+        query="Объясни простыми словами, как работает система",
+        trace_id="trace889",
+        runtime_mode="auto",
+        file_count=0,
+        has_session_docs=False,
+        session_docs={},
+        active_doc_ids=[],
+        classifier_result={
+            "intent": "__unsure__",
+            "predicted_intent": "document_question",
+            "confidence": 0.38,
+            "margin": 0.01,
+            "needs_rag": True,
+            "abstained": True,
+        },
+    )
+
+    assert response["route"] == "general_chat"
+    assert response["executor"] == "chat"

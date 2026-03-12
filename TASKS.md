@@ -136,7 +136,8 @@
   `pending_action` и `pending_route_choice` инициализируются и обновляются через единый `_set_pending_route_choice()` path, а `_apply_session_state_patch()` больше не создаёт разъезд session-ключей.
 
 - [x] **B3.31-test-harness — Дожать полный `pytest tests/ -m "not integration"` до clean finish**
-  Закрыто через набор harness-фиксов: `backend/tests/test_document_analysis.py` переведён на канонические helper’ы из backend runtime, `backend/tests/test_equipment_workflow.py::TestDocumentServerEndpoints` переведён на `httpx.ASGITransport` вместо подвисающего `TestClient`, а hanging graph-runtime assertion заменён на structural graph assertion. Подтверждение: `cd backend && pytest tests/ -q -m "not integration"` → `331 passed, 4 deselected`.
+  Закрыто через набор harness-фиксов: `backend/tests/test_document_analysis.py` переведён на канонические helper’ы из backend runtime, `backend/tests/test_equipment_workflow.py::TestDocumentServerEndpoints` переведён на `httpx.ASGITransport` вместо подвисающего `TestClient`, hanging graph-runtime assertion заменён на structural graph assertion, а `backend/tests/test_intent_classifier.py` переведён со встроенного process-randomized `hash(...)` на стабильный `sha256`-seed для synthetic embeddings. Подтверждение: `cd backend && pytest tests/ -q -m "not integration"` → `331 passed, 4 deselected`.
+  Доп. стабилизация: `backend/tests/test_onnx_embeddings.py::TestBenchmark::test_benchmark_speed` переведён с жёсткого `speedup_50 > 1.0` на competitive smoke-check (`mean_speedup >= 0.95` + хотя бы один batch c `speedup >= 1.0`), потому что в полном suite CPU/joblib jitter делал точную mid-batch performance assertion flaky.
 
 - [ ] **B3.31-commit — Закоммитить текущие uncommitted changes**
   Harness и manifest-фиксы уже готовы к фиксации, но рабочее дерево всё ещё содержит product/runtime/tests/docs изменения поверх ранее сделанного snapshot-коммита. Перед финальным commit нужно ещё раз отделить их от локальных артефактов (`.chainlit`, `.env.native`, `.files`, backup-файлы) и собрать один чистый scoped commit.
@@ -147,12 +148,17 @@
 
 ### Блок A — Classifier Quality (B3.21)
 
-- [ ] **B3.21 — Отдельная embedding-модель для intent classification**
+- [x] **B3.21 — Отдельная embedding-модель для intent classification**
   - Benchmark уже проведён: `Qwen3-Embedding-0.6B` выиграл у `LaBSE` на routing eval
   - Production default переведён на `embedder` + `Qwen3-Embedding-0.6B`
   - `LaBSE` остаётся для legal/doc similarity
-  - Нужно: eval harness, cost-weighted routing score, `abstain/unsure` state, per-intent FP metrics
-  - См. `backend/evals/intent_embedder_eval.py`, `docs/reports/2026-03-12-intent-classifier-benchmark-report.md`
+  - Runtime contract теперь поддерживает `abstain/unsure` для `embedder`, `hybrid` и `llm -> embedder fallback`
+  - `orchestration_runtime` трактует `__unsure__` как low-confidence signal и падает в heuristics/choose-route, а не запускает document workflow на ложной уверенности
+  - Eval harness уже содержит cost-weighted routing score, unsure rate и per-intent FP metrics
+  - Env thresholds:
+    - `INTENT_CLASSIFIER_EMBEDDER_CONFIDENCE_THRESHOLD=0.60`
+    - `INTENT_CLASSIFIER_EMBEDDER_MARGIN_THRESHOLD=0.10`
+  - См. `backend/evals/intent_embedder_eval.py`, `docs/2026-03-12-intent-classifier-benchmark-report.md`
 
 ### Блок B — Retrieval Eval (B3.34)
 
@@ -182,29 +188,53 @@
 
 ### Блок E — Runtime Budgeting (T4.13)
 
-- [ ] **T4.13 — Runtime Context Budget + Preflight Profiles**
-  - Убрать фиксированный `MAX_CONTEXT_CHARS`, перейти на `effective_context_tokens`
-  - Preflight profiles: default, adaptive, manual
-  - UMS `/status` → `effective_context_tokens`
-  - RAG: 55-65% окна под retrieved context
+- [x] **T4.13 — Runtime Context Budget + Preflight Profiles**
+  - Выполнено через backend-owned runtime budget contract в `UMS` и token-derived RAG truncation
+  - `UMS /status` теперь публикует:
+    - `runtime_profile`
+    - `effective_context_tokens`
+    - `retrieved_context_tokens_budget`
+    - `generation_tokens_reserve`
+    - `context_budget_ratio`
+  - Profiles на этой фазе backend/env-driven: `default`, `adaptive`, `manual`
+  - `AdaptiveRAGPipeline` больше не живёт только на fixed `max_context_chars`: budget вычисляется от `effective_context_tokens`
+  - `Chainlit` читает runtime budget metadata из `UMS` и применяет её при RAG reindex/retrieval summary
+  Pragmatic follow-up:
+  - user-facing selector runtime/preflight profile остаётся в `T4.3`
+  - unified preflight script / `.env.runtime` / launcher consolidation остаются в `T4.14`
 
-- [ ] **T4.14 — Unified runtime launcher + PR cleanup**
+- [x] **T4.14 — Unified runtime launcher + PR cleanup**
+  - Выполнено через `scripts/launcher.sh` + `scripts/runtime_preflight.py`
   - Единый launcher API для `native | container`
   - Hardware detect + profile planning + `.env.runtime`
-  - Закрыть PR #3-#7 как superseded
+  - `run_all.sh`, `run_native.sh`, `run_container.sh` переведены в compatibility wrappers
+  - runtime profiles документированы в `docs/runtime_profiles.md`
+  Pragmatic follow-up:
+  - cleanup/закрытие PR #3-#7 как superseded остаётся отдельным repo-maintenance шагом
 
 ### Блок F — UX Hardening (T4.2, T4.3)
 
-- [ ] **T4.2 — Chainlit UX hardening**
-  - Кнопка «Новый чат», видимый список тредов
-  - Welcome screen / starter cards (уже есть base)
-  - Resume: восстановление контекста документов при login
-  - Разделение Session RAG / Knowledge Base / General Chat
+- [x] **T4.2 — Chainlit UX hardening**
+  Выполнено поверх стабилизированных `B3.31a + T4.13 + T4.14`.
+  Что закрыто:
+  - welcome/status message для нового чата с прозрачным current context summary
+  - unified resume status messaging для backend-snapshot-first и legacy-history fallback
+  - thread title/metadata sync в Chainlit data layer для видимого списка тредов
+  - явное отображение active docs / rag scope / runtime profile / pending action state в UX summary
+  - `Chainlit` остался thin control surface: routing/policy decisions не возвращались в UI
+  Pragmatic note:
+  - кнопка «Новый чат» и список тредов по-прежнему опираются на built-in Chainlit shell; в этой фазе усиливался не shell itself, а app-level thread presentation и resume UX
 
-- [ ] **T4.3 — LLM Profile Selector**
-  - Профили: default-chat, long-context, legal-compare, low-vram
-  - Маппинг profile → model_id + temperature + context budget + device_mode
-  - UI показывает effective config, не локальное значение
+- [x] **T4.3 — LLM Profile Selector**
+  Выполнено как backend-resolved control-plane слой без raw model-id selector в UI.
+  Что закрыто:
+  - user-facing model profiles: `default-chat`, `long-context`, `legal-compare`, `low-vram`
+  - env-backed mapping `model_profile -> resolved_model_id`
+  - profile hints в effective config: `device_mode`, `context_budget_profile`, `profile_generation_defaults`
+  - Chainlit `Model` tab показывает canonical profiles, а summary — effective values
+  - legacy/internal aliases (`coder`, `agentic`, `analyst`) нормализуются в canonical profiles без hard break
+  Pragmatic follow-up:
+  - per-request dynamic runtime switching в `UMS` остаётся отдельным runtime/API шагом; в этой фазе profile selector даёт backend-resolved effective config и model routing, но не живое hot-switching железа на каждый запрос
 
 ---
 
@@ -218,13 +248,47 @@
 - [ ] T3.21 — Healthchecks, logging, monitoring (docker)
 
 ### Backend State & Persistence
-- [ ] **B3.31a — Backend-authoritative orchestration state store**
-  Перенести `state_ref`, `pending_action_id`, `resume_state` из Chainlit SQLite в backend-owned store.
-  Stages: backend store рядом → authoritative writes → resume через backend → Chainlit = presentation only.
+- [x] **B3.31a — Backend-authoritative orchestration state store**
+  Выполнено через `backend/orchestrator/state_store.py` и интеграцию в unified execution path.
+  Что закрыто:
+  - `orchestrator_runs` с backend-owned `run_id/state_ref/pending_action_id/resume_state_blob/checkpoint_blob/version`
+  - authoritative writes из `execution_runtime.py` для Chainlit, REST и OpenAI-compatible path
+  - `Chainlit` resume сначала читает backend snapshot, а затем только при его отсутствии падает в legacy history bootstrap
+  - `Chainlit` session state теперь UI-mirror/cache, а не единственный источник execution-critical state
+  Pragmatic workaround / follow-up:
+  - dev/prod fallback сейчас `SQLite` через `ORCHESTRATOR_STATE_DB_URL`; Postgres-backed implementation остаётся отдельным усилением, а не blocker'ом
+  - в `resume_state_blob` пока хранится `documents_by_id` snapshot для практичного resume document workflows; это осознанный компромисс до более строгого document-ref layer
+- [ ] **B3.31b — Harden backend orchestration store for production**
+  Follow-up к `B3.31a`.
+  Что сделать:
+  - добавить Postgres-backed implementation для `orchestrator_runs`
+  - вынести document-heavy resume payload из inline `documents_by_id` в более строгий document-ref layer
+  - ввести explicit optimistic locking / idempotency semantics поверх `state_version` и `idempotency_key`
 
 ### Динамическая конфигурация
 - [ ] B3.22 — Dynamic selection of models and embedders
 - [ ] B3.23 — Multi-GPU placement policy для LLM и embeddings
+
+### Benchmark & Performance Profiling
+- [x] **T4.15 — Unified benchmark script**
+  Реализовано: `scripts/benchmark.py` — 7 сценариев (health, ums_status, embedding, chat, doc_question, compare, equipment).
+  Отправляет реальные запросы + файлы к запущенной системе, измеряет latency.
+  Поддерживает `--repeats` для усреднения, `--output` для JSON-результатов, `--scenarios` для выбора.
+  Workflow: изменить `.env` (N_GPU_LAYERS, CONTEXT_SIZE) → перезапустить → `python scripts/benchmark.py --output results/gpu.json`
+- [ ] **T4.16 — Benchmark comparison tool**
+  Скрипт для сравнения двух JSON-результатов benchmark (CPU vs GPU vs Hybrid).
+  Таблица delta по каждому сценарию + рекомендации.
+
+### Agentic Orchestrator (исследование)
+- [ ] **T5.1 — Feasibility: оркестратор + субагенты на CPU/слабом железе**
+  Текущая архитектура уже содержит элементы агентной системы:
+  - `orchestration_runtime.py` = оркестратор (decide → route)
+  - LangGraph workflows = субагенты (compare, equipment, RAG)
+  - `ExecutionDependencies` = DI для инъекции зависимостей
+  - UMS с hardware profiling = автоадаптация под ресурсы
+  Ограничения CPU: инференс Qwen 30-60с/ответ, workflows 2-5 мин.
+  Нужно: формализовать sub-agent protocol, добавить timeout budgets, fallback на меньшие модели.
+  **Текущий гибрид:** embedders (LaBSE, Qwen3-Embedding) на CPU, Qwen-14B inference на GPU — намеренный дизайн для сохранения VRAM.
 
 ### Inference & Ops
 - [ ] T4.4 — UMS Model Control API
@@ -242,7 +306,9 @@
 - [ ] B3.16 — Проверить llama-server defunct / uptime после простоя
 - [ ] B3.17 — Проверить prompt-cache эффективность
 - [ ] B3.28 — Coverage heuristic v1.1 для document_question
-- [ ] B3.32 — LangChain adoption strategy (точечно, без full rewrite)
+- [x] B3.32 — LangChain adoption strategy (точечно, без full rewrite)
+  Зафиксировано через ADR: [docs/plans/2026-03-12-b332-langchain-adoption-strategy.md](docs/plans/2026-03-12-b332-langchain-adoption-strategy.md).
+  Решение: не делать full rewrite orchestration core на LangChain; сохранять backend-first contract (`orchestration_runtime.py` + `execution_runtime.py`) каноническим; разрешать только точечные integration areas: workflow-level `LangGraph`, retriever/reranker adapters, eval harness, observability adapters и один изолированный pilot area без смены публичного API.
 - [ ] Vision-анализ (Qwen-VL интеграция)
 - [ ] Conda environment export
 

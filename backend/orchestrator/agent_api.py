@@ -72,6 +72,9 @@ class GenerationOverrides(BaseModel):
 
 class OrchestrationRequest(BaseModel):
     message: str
+    run_id: Optional[str] = None
+    state_ref: Optional[str] = None
+    state_version: Optional[int] = None
     session_id: Optional[str] = None
     thread_id: Optional[str] = None
     history: Optional[List[Dict[str, Any]]] = None
@@ -82,7 +85,17 @@ class OrchestrationRequest(BaseModel):
     assistant_mode: Optional[Literal["general_chat", "coding", "agentic", "specific_tasks", "rag_qa"]] = None
     rag_scope: Optional[Literal["off", "session_rag", "knowledge_base_rag"]] = None
     knowledge_collection_id: Optional[str] = None
-    model_profile: Optional[Literal["default-chat", "coder", "agentic", "analyst"]] = None
+    model_profile: Optional[
+        Literal[
+            "default-chat",
+            "long-context",
+            "legal-compare",
+            "low-vram",
+            "coder",
+            "agentic",
+            "analyst",
+        ]
+    ] = None
     prompt_profile: Optional[
         Literal[
             "default-assistant",

@@ -2,6 +2,8 @@ import os
 import sys
 import threading
 import time
+import asyncio
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -164,3 +166,46 @@ def test_start_server_reaps_stale_listener_before_launch():
     mock_kill.assert_called_once_with(11111)
     assert len(launch_calls) == 1
     assert ums_server.state["processes"]["labse-embedding"] is fake_process
+
+
+def test_status_exposes_adaptive_runtime_budget(monkeypatch):
+    monkeypatch.setenv("UMS_RUNTIME_PROFILE", "adaptive")
+    monkeypatch.setenv("UMS_RETRIEVED_CONTEXT_RATIO", "0.6")
+    monkeypatch.setenv("UMS_GENERATION_TOKENS_RESERVE", "1024")
+    monkeypatch.setenv("UMS_ADAPTIVE_CONTEXT_UTILIZATION", "0.75")
+
+    previous_active = ums_server.state.get("active_model")
+    previous_tier = ums_server.state.get("tier_config")
+    ums_server.state["active_model"] = "qwen-14b-llm"
+    ums_server.state["tier_config"] = SimpleNamespace(tier=2, rag_mode="corrective", embedding_backend="labse")
+    try:
+        payload = asyncio.run(ums_server.get_status())
+    finally:
+        ums_server.state["active_model"] = previous_active
+        ums_server.state["tier_config"] = previous_tier
+
+    assert payload["runtime_profile"] == "adaptive"
+    assert payload["effective_context_tokens"] == 12288
+    assert payload["retrieved_context_tokens_budget"] == 7372
+    assert payload["generation_tokens_reserve"] == 1024
+    assert payload["context_budget_ratio"] == 0.6
+
+
+def test_status_respects_manual_runtime_budget(monkeypatch):
+    monkeypatch.setenv("UMS_RUNTIME_PROFILE", "manual")
+    monkeypatch.setenv("UMS_MANUAL_EFFECTIVE_CONTEXT_TOKENS", "6144")
+    monkeypatch.setenv("UMS_RETRIEVED_CONTEXT_RATIO", "0.9")
+    monkeypatch.setenv("UMS_GENERATION_TOKENS_RESERVE", "4096")
+
+    previous_active = ums_server.state.get("active_model")
+    ums_server.state["active_model"] = "qwen-14b-llm"
+    try:
+        payload = asyncio.run(ums_server.get_status())
+    finally:
+        ums_server.state["active_model"] = previous_active
+
+    assert payload["runtime_profile"] == "manual"
+    assert payload["effective_context_tokens"] == 6144
+    assert payload["context_budget_ratio"] == 0.65
+    assert payload["generation_tokens_reserve"] == 3072
+    assert payload["retrieved_context_tokens_budget"] == 3072

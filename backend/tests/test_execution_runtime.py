@@ -85,7 +85,9 @@ def test_execute_orchestration_adds_state_ref_and_pending_action_metadata():
     assert response["route"] == "compare_documents"
     assert response["action_required"]["type"] == "choose_route"
     assert response["pending_action_id"]
-    assert response["state_ref"] == "session:session-1"
+    assert response["state_ref"].startswith("run:")
+    assert response["run_id"]
+    assert response["state_version"] == 2
     assert response["ui_effects"]["set_pending_action"]["type"] == "choose_route"
 
 
@@ -260,3 +262,34 @@ def test_execute_orchestration_doc_question_handles_rag_result_without_metadata_
     assert response["sources"] == [
         {"document_id": "doc-1", "display_name": "contract.pdf", "source_id": 1}
     ]
+
+
+def test_execute_orchestration_reuses_same_run_for_same_thread_and_persists_resume_snapshot():
+    deps = _build_minimal_deps()
+
+    first = asyncio.run(
+        execute_orchestration(
+            {
+                "message": "Привет",
+                "thread_id": "thread-42",
+                "history": [],
+                "ui_state": {"control_plane_state": {"assistant_mode": "general_chat"}},
+            },
+            deps=deps,
+        )
+    )
+    second = asyncio.run(
+        execute_orchestration(
+            {
+                "message": "Еще вопрос",
+                "thread_id": "thread-42",
+                "history": [],
+                "ui_state": {"control_plane_state": {"assistant_mode": "general_chat"}},
+            },
+            deps=deps,
+        )
+    )
+
+    assert first["run_id"] == second["run_id"]
+    assert first["state_ref"] == second["state_ref"]
+    assert second["state_version"] > first["state_version"]

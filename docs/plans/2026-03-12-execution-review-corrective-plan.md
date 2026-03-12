@@ -66,11 +66,11 @@
 
 Уточнение по persistence ownership:
 
-- в текущем `B3.31` допустим pragmatic temporary step:
-  authoritative persistence для `state_ref` / `pending_action_id` / resume-state
-  остаётся на `Chainlit SQLite`;
-- dedicated backend-owned orchestration state store выносится в отдельную future phase
-  [B3.31a](../../TASKS.md), а не считается обязательной частью finish condition текущего блока.
+- temporary pragmatic step больше не актуален;
+- отдельная фаза [B3.31a](../../TASKS.md) уже внедрила backend-owned `orchestrator_runs`
+  для `run_id/state_ref/pending_action_id/resume_state_blob/checkpoint_blob`;
+- `Chainlit` остался presentation/control-plane слоем и использует backend snapshot как
+  primary resume source.
 
 Статус execution-review:
 
@@ -192,9 +192,16 @@ Execution verdict:
 - держать native-first dev path;
 - container path использовать как packaging/prod validation.
 
+Статус на 2026-03-13:
+
+- `T4.13` реализован;
+- runtime budget теперь публикуется из `UMS /status` и используется downstream в `Chainlit`/RAG;
+- retrieved context budget вычисляется от `effective_context_tokens`, а не от fixed char caps;
+- `T4.14` тоже реализован: canonical runtime path теперь `launcher.sh + runtime_preflight.py`, а старые launch scripts оставлены как compatibility wrappers.
+
 ### Block G — UX controls и profiles
 
-**Primary:** `T4.2`, `T4.3`
+**Primary:** `T4.2` implemented, `T4.3` implemented
 
 Что можно делать только после предыдущих блоков:
 
@@ -257,6 +264,7 @@ Execution verdict:
    (`rag_scope`, `knowledge_collection_id`, `source_scope_summary`).
 6. Довести `B3.35` и `B3.36`.
 7. Только потом идти в `T4.13`, `T4.14`, `T4.2`, `T4.3`.
+   Статус на сейчас: `T4.2` implemented, `T4.3` implemented.
 
 ## Короткий управленческий вывод
 

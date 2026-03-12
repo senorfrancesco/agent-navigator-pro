@@ -49,7 +49,7 @@ async def test_orchestrate_response_includes_effective_settings():
         assistant_mode="rag_qa",
         rag_scope="knowledge_base_rag",
         knowledge_collection_id="legal",
-        model_profile="analyst",
+        model_profile="legal-compare",
         prompt_profile="strict-grounded-doc-qa",
         generation_overrides={"temperature": 0.15, "top_p": 0.5, "max_tokens": 800},
         custom_system_prompt="Отвечай с явными ссылками на источники.",
@@ -63,7 +63,9 @@ async def test_orchestrate_response_includes_effective_settings():
     assert response["effective_settings"]["assistant_mode"] == "rag_qa"
     assert response["effective_settings"]["rag_scope"] == "knowledge_base_rag"
     assert response["effective_settings"]["knowledge_collection_id"] == "legal"
-    assert response["effective_settings"]["model_profile"] == "analyst"
+    assert response["effective_settings"]["model_profile"] == "legal-compare"
+    assert response["effective_settings"]["device_mode"] == "prefer-gpu"
+    assert response["effective_settings"]["context_budget_profile"] == "legal-compare"
     assert response["effective_settings"]["prompt_profile"] == "strict-grounded-doc-qa"
     assert response["effective_settings"]["custom_system_prompt"] == "Отвечай с явными ссылками на источники."
     assert response["effective_settings"]["tool_scope"] == "document_qa"
@@ -110,7 +112,9 @@ async def test_execute_orchestration_api_returns_execution_metadata():
 
     response = await execute_orchestration_api(request)
 
-    assert response["state_ref"] == "session:session-api"
+    assert response["state_ref"].startswith("run:")
+    assert response["run_id"]
+    assert response["state_version"] == 2
     assert response["pending_action_id"]
     assert response["action_required"]["type"] == "choose_route"
     assert response["ui_effects"]["set_pending_action"]["type"] == "choose_route"
@@ -191,7 +195,7 @@ async def test_execute_orchestration_returns_top_level_control_plane_fields(monk
         assistant_mode="rag_qa",
         rag_scope="knowledge_base_rag",
         knowledge_collection_id="legal",
-        model_profile="analyst",
+        model_profile="legal-compare",
         file_count=0,
         has_session_docs=False,
     )
@@ -202,7 +206,7 @@ async def test_execute_orchestration_returns_top_level_control_plane_fields(monk
     assert response["rag_scope"] == "knowledge_base_rag"
     assert response["knowledge_collection_id"] == "legal"
     assert response["source_scope_summary"] == "knowledge_base"
-    assert response["model_profile"] == "analyst"
+    assert response["model_profile"] == "legal-compare"
 
 
 @pytest.mark.asyncio

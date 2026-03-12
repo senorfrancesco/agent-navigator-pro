@@ -25,9 +25,57 @@ RAG_SCOPE_ITEMS: Dict[str, str] = {
 
 MODEL_PROFILE_ITEMS: Dict[str, str] = {
     "default-chat": "Default Chat",
-    "coder": "Coder",
-    "agentic": "Agentic",
-    "analyst": "Analyst",
+    "long-context": "Long Context",
+    "legal-compare": "Legal Compare",
+    "low-vram": "Low VRAM",
+}
+
+MODEL_PROFILE_ALIASES: Dict[str, str] = {
+    "coder": "long-context",
+    "agentic": "long-context",
+    "analyst": "legal-compare",
+}
+
+MODEL_PROFILE_DEFINITIONS: Dict[str, Dict[str, Any]] = {
+    "default-chat": {
+        "label": "Default Chat",
+        "env_var": "CHAINLIT_MODEL_PROFILE_DEFAULT_CHAT_MODEL",
+        "fallback_model_id": "qwen-14b-llm",
+        "device_mode": "auto",
+        "context_budget_profile": "standard",
+        "generation": {"temperature": 0.7, "top_p": 0.9, "max_tokens": 2048},
+    },
+    "long-context": {
+        "label": "Long Context",
+        "env_var": "CHAINLIT_MODEL_PROFILE_LONG_CONTEXT_MODEL",
+        "fallback_model_id": "qwen-14b-llm",
+        "device_mode": "prefer-gpu",
+        "context_budget_profile": "long-context",
+        "generation": {"temperature": 0.3, "top_p": 0.9, "max_tokens": 3072},
+    },
+    "legal-compare": {
+        "label": "Legal Compare",
+        "env_var": "CHAINLIT_MODEL_PROFILE_LEGAL_COMPARE_MODEL",
+        "fallback_model_id": "qwen-14b-llm",
+        "device_mode": "prefer-gpu",
+        "context_budget_profile": "legal-compare",
+        "generation": {"temperature": 0.2, "top_p": 0.8, "max_tokens": 2048},
+    },
+    "low-vram": {
+        "label": "Low VRAM",
+        "env_var": "CHAINLIT_MODEL_PROFILE_LOW_VRAM_MODEL",
+        "fallback_model_id": "qwen-14b-llm",
+        "device_mode": "low-vram",
+        "context_budget_profile": "compact",
+        "generation": {"temperature": 0.2, "top_p": 0.8, "max_tokens": 1024},
+    },
+}
+
+MODEL_PROFILE_ENV_PREFIXES: Dict[str, str] = {
+    "default-chat": "CHAINLIT_MODEL_PROFILE_DEFAULT_CHAT",
+    "long-context": "CHAINLIT_MODEL_PROFILE_LONG_CONTEXT",
+    "legal-compare": "CHAINLIT_MODEL_PROFILE_LEGAL_COMPARE",
+    "low-vram": "CHAINLIT_MODEL_PROFILE_LOW_VRAM",
 }
 
 PROMPT_PROFILE_ITEMS: Dict[str, str] = {
@@ -98,6 +146,9 @@ CONTROL_PLANE_HARD_DEFAULTS: Dict[str, Any] = {
     "tool_scope": "chat",
     "custom_system_prompt": None,
     "generation": copy.deepcopy(DEFAULT_GENERATION),
+    "device_mode": "auto",
+    "context_budget_profile": "standard",
+    "profile_generation_defaults": copy.deepcopy(DEFAULT_GENERATION),
 }
 
 ASSISTANT_MODE_PRESETS: Dict[str, Dict[str, Any]] = {
@@ -114,52 +165,38 @@ ASSISTANT_MODE_PRESETS: Dict[str, Dict[str, Any]] = {
         "assistant_mode": "coding",
         "runtime_mode": "chat_only",
         "rag_scope": "off",
-        "model_profile": "coder",
+        "model_profile": "long-context",
         "prompt_profile": "coding-assistant",
         "tool_scope": "coding",
-        "generation": {"temperature": 0.2, "top_p": 0.9, "max_tokens": 2048},
+        "generation": copy.deepcopy(MODEL_PROFILE_DEFINITIONS["long-context"]["generation"]),
     },
     "agentic": {
         "assistant_mode": "agentic",
         "runtime_mode": "specialized_tasks",
         "rag_scope": "off",
-        "model_profile": "agentic",
+        "model_profile": "long-context",
         "prompt_profile": "tool-using-agent",
         "tool_scope": "agentic",
-        "generation": {"temperature": 0.2, "top_p": 0.9, "max_tokens": 2048},
+        "generation": copy.deepcopy(MODEL_PROFILE_DEFINITIONS["long-context"]["generation"]),
     },
     "specific_tasks": {
         "assistant_mode": "specific_tasks",
         "runtime_mode": "specialized_tasks",
         "rag_scope": "session_rag",
-        "model_profile": "analyst",
+        "model_profile": "legal-compare",
         "prompt_profile": "task-router",
         "tool_scope": "domain_tasks",
-        "generation": {"temperature": 0.2, "top_p": 0.8, "max_tokens": 2048},
+        "generation": copy.deepcopy(MODEL_PROFILE_DEFINITIONS["legal-compare"]["generation"]),
     },
     "rag_qa": {
         "assistant_mode": "rag_qa",
         "runtime_mode": "specialized_tasks",
         "rag_scope": "knowledge_base_rag",
-        "model_profile": "analyst",
+        "model_profile": "legal-compare",
         "prompt_profile": "strict-grounded-doc-qa",
         "tool_scope": "document_qa",
-        "generation": {"temperature": 0.2, "top_p": 0.8, "max_tokens": 2048},
+        "generation": copy.deepcopy(MODEL_PROFILE_DEFINITIONS["legal-compare"]["generation"]),
     },
-}
-
-MODEL_PROFILE_ENV_VARS: Dict[str, str] = {
-    "default-chat": "CHAINLIT_MODEL_PROFILE_DEFAULT_CHAT_MODEL",
-    "coder": "CHAINLIT_MODEL_PROFILE_CODER_MODEL",
-    "agentic": "CHAINLIT_MODEL_PROFILE_AGENTIC_MODEL",
-    "analyst": "CHAINLIT_MODEL_PROFILE_ANALYST_MODEL",
-}
-
-DEFAULT_MODEL_FALLBACKS: Dict[str, str] = {
-    "default-chat": "qwen-14b-llm",
-    "coder": "qwen-14b-llm",
-    "agentic": "qwen-14b-llm",
-    "analyst": "qwen-14b-llm",
 }
 
 ASSISTANT_MODE_ENV_PREFIXES: Dict[str, str] = {
@@ -180,6 +217,16 @@ def _normalize_choice(value: Any, allowed: Mapping[str, Any]) -> Optional[str]:
     if candidate in allowed:
         return candidate
     return None
+
+
+def _normalize_model_profile(value: Any) -> Optional[str]:
+    normalized = _normalize_choice(value, MODEL_PROFILE_ITEMS)
+    if normalized is not None:
+        return normalized
+    alias = _normalize_text(value)
+    if alias is None:
+        return None
+    return MODEL_PROFILE_ALIASES.get(alias)
 
 
 def _normalize_text(value: Any) -> Optional[str]:
@@ -247,6 +294,30 @@ def get_generation_defaults(assistant_mode: Optional[str] = None) -> Dict[str, A
     }
 
 
+def get_model_profile_generation_defaults(model_profile: Optional[str]) -> Dict[str, Any]:
+    normalized = _normalize_model_profile(model_profile) or CONTROL_PLANE_HARD_DEFAULTS["model_profile"]
+    definition = MODEL_PROFILE_DEFINITIONS[normalized]
+    defaults = definition["generation"]
+    prefix = MODEL_PROFILE_ENV_PREFIXES[normalized]
+    return {
+        "temperature": _read_float_env(
+            f"{prefix}_TEMPERATURE",
+            "CHAINLIT_DEFAULT_TEMPERATURE" if normalized == "default-chat" else "",
+            default=float(defaults["temperature"]),
+        ),
+        "top_p": _read_float_env(
+            f"{prefix}_TOP_P",
+            "CHAINLIT_DEFAULT_TOP_P" if normalized == "default-chat" else "",
+            default=float(defaults["top_p"]),
+        ),
+        "max_tokens": _read_int_env(
+            f"{prefix}_MAX_TOKENS",
+            "CHAINLIT_DEFAULT_MAX_TOKENS" if normalized == "default-chat" else "",
+            default=int(defaults["max_tokens"]),
+        ),
+    }
+
+
 def clamp_generation_overrides(overrides: Optional[Mapping[str, Any]], base: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     effective = copy.deepcopy(base or DEFAULT_GENERATION)
     if not overrides:
@@ -272,14 +343,16 @@ def clamp_generation_overrides(overrides: Optional[Mapping[str, Any]], base: Opt
 
 def build_preset_state(assistant_mode: str) -> Dict[str, Any]:
     preset = ASSISTANT_MODE_PRESETS[assistant_mode]
+    model_profile = _normalize_model_profile(preset["model_profile"]) or CONTROL_PLANE_HARD_DEFAULTS["model_profile"]
+    generation_defaults = get_model_profile_generation_defaults(model_profile)
     return {
         "assistant_mode": preset["assistant_mode"],
         "runtime_mode": preset["runtime_mode"],
         "rag_scope": preset["rag_scope"],
-        "model_profile": preset["model_profile"],
+        "model_profile": model_profile,
         "prompt_profile": preset["prompt_profile"],
         "tool_scope": preset["tool_scope"],
-        "generation_overrides": get_generation_defaults(assistant_mode),
+        "generation_overrides": generation_defaults,
     }
 
 
@@ -306,13 +379,15 @@ def merge_control_plane_state(
         ("assistant_mode", ASSISTANT_MODE_ITEMS),
         ("runtime_mode", RUNTIME_MODE_ITEMS),
         ("rag_scope", RAG_SCOPE_ITEMS),
-        ("model_profile", MODEL_PROFILE_ITEMS),
         ("prompt_profile", PROMPT_PROFILE_ITEMS),
         ("tool_scope", TOOL_SCOPE_ITEMS),
     ):
         normalized = _normalize_choice(payload.get(key), allowed)
         if normalized is not None:
             merged[key] = normalized
+    model_profile = _normalize_model_profile(payload.get("model_profile"))
+    if model_profile is not None:
+        merged["model_profile"] = model_profile
 
     knowledge_collection_id = _normalize_text(payload.get("knowledge_collection_id"))
     if "knowledge_collection_id" in payload:
@@ -350,20 +425,28 @@ def resolve_effective_settings(
                 "model_profile": preset["model_profile"],
                 "prompt_profile": preset["prompt_profile"],
                 "tool_scope": preset["tool_scope"],
-                "generation": get_generation_defaults(assistant_mode),
             }
         )
+        effective["generation"] = copy.deepcopy(MODEL_PROFILE_DEFINITIONS[preset["model_profile"]]["generation"])
 
     for key, allowed in (
         ("runtime_mode", RUNTIME_MODE_ITEMS),
         ("rag_scope", RAG_SCOPE_ITEMS),
-        ("model_profile", MODEL_PROFILE_ITEMS),
         ("prompt_profile", PROMPT_PROFILE_ITEMS),
         ("tool_scope", TOOL_SCOPE_ITEMS),
     ):
         normalized = _normalize_choice(raw_state.get(key), allowed)
         if normalized is not None:
             effective[key] = normalized
+    model_profile = _normalize_model_profile(raw_state.get("model_profile"))
+    if model_profile is not None:
+        effective["model_profile"] = model_profile
+
+    profile_definition = MODEL_PROFILE_DEFINITIONS[effective["model_profile"]]
+    effective["generation"] = get_model_profile_generation_defaults(effective["model_profile"])
+    effective["device_mode"] = profile_definition["device_mode"]
+    effective["context_budget_profile"] = profile_definition["context_budget_profile"]
+    effective["profile_generation_defaults"] = get_model_profile_generation_defaults(effective["model_profile"])
 
     knowledge_collection_id = _normalize_text(raw_state.get("knowledge_collection_id"))
     if knowledge_collection_id is not None:
@@ -386,7 +469,7 @@ def resolve_effective_settings(
             if normalized is not None:
                 effective["rag_scope"] = normalized
         if "model_profile" in forced:
-            normalized = _normalize_choice(forced.get("model_profile"), MODEL_PROFILE_ITEMS)
+            normalized = _normalize_model_profile(forced.get("model_profile"))
             if normalized is not None:
                 effective["model_profile"] = normalized
         if "prompt_profile" in forced:
@@ -407,6 +490,10 @@ def resolve_effective_settings(
                 base=effective.get("generation"),
             )
 
+    profile_definition = MODEL_PROFILE_DEFINITIONS[effective["model_profile"]]
+    effective["device_mode"] = profile_definition["device_mode"]
+    effective["context_budget_profile"] = profile_definition["context_budget_profile"]
+    effective["profile_generation_defaults"] = get_model_profile_generation_defaults(effective["model_profile"])
     effective["resolved_model_id"] = resolve_model_id(effective.get("model_profile"))
     return effective
 
@@ -417,6 +504,6 @@ def get_prompt_profile_system_message(prompt_profile: Optional[str]) -> str:
 
 
 def resolve_model_id(model_profile: Optional[str]) -> str:
-    normalized = _normalize_choice(model_profile, MODEL_PROFILE_ITEMS) or CONTROL_PLANE_HARD_DEFAULTS["model_profile"]
-    env_name = MODEL_PROFILE_ENV_VARS[normalized]
-    return os.getenv(env_name, DEFAULT_MODEL_FALLBACKS[normalized])
+    normalized = _normalize_model_profile(model_profile) or CONTROL_PLANE_HARD_DEFAULTS["model_profile"]
+    definition = MODEL_PROFILE_DEFINITIONS[normalized]
+    return os.getenv(definition["env_var"], definition["fallback_model_id"])

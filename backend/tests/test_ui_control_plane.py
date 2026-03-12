@@ -21,6 +21,8 @@ def test_resolve_effective_settings_defaults(monkeypatch):
     assert effective["tool_scope"] == "chat"
     assert effective["knowledge_collection_id"] is None
     assert effective["custom_system_prompt"] is None
+    assert effective["device_mode"] == "auto"
+    assert effective["context_budget_profile"] == "standard"
     assert effective["generation"] == {
         "temperature": 0.7,
         "top_p": 0.9,
@@ -35,9 +37,11 @@ def test_specific_tasks_preset_defaults_to_session_rag():
     assert effective["assistant_mode"] == "specific_tasks"
     assert effective["runtime_mode"] == "specialized_tasks"
     assert effective["rag_scope"] == "session_rag"
-    assert effective["model_profile"] == "analyst"
+    assert effective["model_profile"] == "legal-compare"
     assert effective["prompt_profile"] == "task-router"
     assert effective["tool_scope"] == "domain_tasks"
+    assert effective["device_mode"] == "prefer-gpu"
+    assert effective["context_budget_profile"] == "legal-compare"
 
 
 def test_rag_qa_preset_defaults_to_knowledge_base_rag():
@@ -46,9 +50,10 @@ def test_rag_qa_preset_defaults_to_knowledge_base_rag():
     assert effective["assistant_mode"] == "rag_qa"
     assert effective["runtime_mode"] == "specialized_tasks"
     assert effective["rag_scope"] == "knowledge_base_rag"
-    assert effective["model_profile"] == "analyst"
+    assert effective["model_profile"] == "legal-compare"
     assert effective["prompt_profile"] == "strict-grounded-doc-qa"
     assert effective["tool_scope"] == "document_qa"
+    assert effective["device_mode"] == "prefer-gpu"
 
 
 def test_explicit_overrides_win_over_preset_defaults():
@@ -57,7 +62,7 @@ def test_explicit_overrides_win_over_preset_defaults():
             "assistant_mode": "specific_tasks",
             "runtime_mode": "chat_only",
             "rag_scope": "knowledge_base_rag",
-            "model_profile": "coder",
+            "model_profile": "low-vram",
             "prompt_profile": "coding-assistant",
             "tool_scope": "coding",
             "knowledge_collection_id": "legal",
@@ -72,10 +77,12 @@ def test_explicit_overrides_win_over_preset_defaults():
     assert effective["assistant_mode"] == "specific_tasks"
     assert effective["runtime_mode"] == "chat_only"
     assert effective["rag_scope"] == "knowledge_base_rag"
-    assert effective["model_profile"] == "coder"
+    assert effective["model_profile"] == "low-vram"
     assert effective["prompt_profile"] == "coding-assistant"
     assert effective["tool_scope"] == "coding"
     assert effective["knowledge_collection_id"] == "legal"
+    assert effective["device_mode"] == "low-vram"
+    assert effective["context_budget_profile"] == "compact"
     assert effective["generation"] == {
         "temperature": 0.15,
         "top_p": 0.42,
@@ -121,10 +128,10 @@ def test_effective_settings_include_env_resolved_model_and_generation_defaults(m
     monkeypatch.setenv("CHAINLIT_DEFAULT_TEMPERATURE", "0.61")
     monkeypatch.setenv("CHAINLIT_DEFAULT_TOP_P", "0.73")
     monkeypatch.setenv("CHAINLIT_DEFAULT_MAX_TOKENS", "3072")
-    monkeypatch.setenv("CHAINLIT_MODEL_PROFILE_CODER_MODEL", "qwen-coder-32b")
+    monkeypatch.setenv("CHAINLIT_MODEL_PROFILE_LONG_CONTEXT_MODEL", "qwen-coder-32b")
 
     default_effective = resolve_effective_settings({})
-    coding_effective = resolve_effective_settings({"assistant_mode": "coding"})
+    long_context_effective = resolve_effective_settings({"model_profile": "long-context"})
 
     assert default_effective["generation"] == {
         "temperature": 0.61,
@@ -132,4 +139,16 @@ def test_effective_settings_include_env_resolved_model_and_generation_defaults(m
         "max_tokens": 3072,
     }
     assert default_effective["resolved_model_id"] == "qwen-14b-llm"
-    assert coding_effective["resolved_model_id"] == "qwen-coder-32b"
+    assert long_context_effective["resolved_model_id"] == "qwen-coder-32b"
+    assert long_context_effective["device_mode"] == "prefer-gpu"
+    assert long_context_effective["context_budget_profile"] == "long-context"
+
+
+def test_legacy_model_profile_aliases_resolve_to_canonical_profiles():
+    analyst_effective = resolve_effective_settings({"model_profile": "analyst"})
+    coder_effective = resolve_effective_settings({"model_profile": "coder"})
+
+    assert analyst_effective["model_profile"] == "legal-compare"
+    assert analyst_effective["context_budget_profile"] == "legal-compare"
+    assert coder_effective["model_profile"] == "long-context"
+    assert coder_effective["context_budget_profile"] == "long-context"

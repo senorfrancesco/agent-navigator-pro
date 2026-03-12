@@ -96,6 +96,7 @@ state = {
     "active_model": None, # Последняя запрошенная "тяжелая" модель
     "processes": {},      # model_id -> process
     "device_mode": DeviceMode.HYBRID,
+    "runtime_budget": {},
     "dynamic_ports": 8100 # Начальный порт для динамических моделей
 }
 _model_start_locks: Dict[str, threading.Lock] = {}
@@ -123,6 +124,119 @@ def _get_gpu_info() -> List[Dict[str, Any]]:
 
 def _get_available_vram() -> float:
     return sum(gpu["free_gb"] for gpu in _get_gpu_info())
+
+
+def _clamp_float(value: float, *, min_value: float, max_value: float) -> float:
+    return max(min_value, min(max_value, value))
+
+
+def _resolve_runtime_profile() -> str:
+    raw = str(os.getenv("UMS_RUNTIME_PROFILE", "adaptive")).strip().lower()
+    if raw in {"default", "adaptive", "manual"}:
+        return raw
+    return "adaptive"
+
+
+def _read_runtime_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _read_runtime_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _get_runtime_ctx_size() -> int:
+    active_model = state.get("active_model") or "qwen-14b-llm"
+    config = get_model_config(active_model) or STATIC_MODELS_CONFIG.get("qwen-14b-llm", {})
+    ctx_size = int(config.get("ctx_size") or STATIC_MODELS_CONFIG["qwen-14b-llm"]["ctx_size"])
+    return max(ctx_size, 1024)
+
+
+def resolve_runtime_budget(
+    *,
+    ctx_size: Optional[int] = None,
+    runtime_profile: Optional[str] = None,
+    default_effective_context_tokens: Optional[int] = None,
+    manual_effective_context_tokens: Optional[int] = None,
+    context_budget_ratio: Optional[float] = None,
+    generation_tokens_reserve: Optional[int] = None,
+    adaptive_min_context_tokens: Optional[int] = None,
+    adaptive_context_utilization: Optional[float] = None,
+) -> Dict[str, Any]:
+    profile = runtime_profile or _resolve_runtime_profile()
+    if profile not in {"default", "adaptive", "manual"}:
+        profile = "adaptive"
+    llm_ctx_size = int(ctx_size or _get_runtime_ctx_size())
+    default_ctx = (
+        int(default_effective_context_tokens)
+        if default_effective_context_tokens is not None
+        else _read_runtime_int("UMS_DEFAULT_EFFECTIVE_CONTEXT_TOKENS", min(llm_ctx_size, 8192))
+    )
+    adaptive_floor = (
+        int(adaptive_min_context_tokens)
+        if adaptive_min_context_tokens is not None
+        else _read_runtime_int("UMS_ADAPTIVE_MIN_CONTEXT_TOKENS", 4096)
+    )
+    adaptive_util = _clamp_float(
+        float(adaptive_context_utilization)
+        if adaptive_context_utilization is not None
+        else _read_runtime_float("UMS_ADAPTIVE_CONTEXT_UTILIZATION", 0.85),
+        min_value=0.50,
+        max_value=1.0,
+    )
+    manual_ctx = (
+        int(manual_effective_context_tokens)
+        if manual_effective_context_tokens is not None
+        else _read_runtime_int("UMS_MANUAL_EFFECTIVE_CONTEXT_TOKENS", default_ctx)
+    )
+    context_budget_ratio = _clamp_float(
+        float(context_budget_ratio)
+        if context_budget_ratio is not None
+        else _read_runtime_float("UMS_RETRIEVED_CONTEXT_RATIO", 0.60),
+        min_value=0.55,
+        max_value=0.65,
+    )
+    generation_reserve = max(
+        256,
+        int(generation_tokens_reserve)
+        if generation_tokens_reserve is not None
+        else _read_runtime_int("UMS_GENERATION_TOKENS_RESERVE", 1024),
+    )
+
+    if profile == "manual":
+        effective_context_tokens = manual_ctx
+    elif profile == "default":
+        effective_context_tokens = default_ctx
+    else:
+        effective_context_tokens = max(adaptive_floor, int(llm_ctx_size * adaptive_util))
+
+    effective_context_tokens = max(1024, min(effective_context_tokens, llm_ctx_size))
+    generation_tokens_reserve = min(generation_reserve, max(256, effective_context_tokens // 2))
+    retrieved_context_tokens_budget = min(
+        max(512, int(effective_context_tokens * context_budget_ratio)),
+        max(512, effective_context_tokens - generation_tokens_reserve),
+    )
+
+    return {
+        "runtime_profile": profile,
+        "llm_ctx_size": llm_ctx_size,
+        "effective_context_tokens": effective_context_tokens,
+        "retrieved_context_tokens_budget": retrieved_context_tokens_budget,
+        "generation_tokens_reserve": generation_tokens_reserve,
+        "context_budget_ratio": context_budget_ratio,
+    }
 
 def resolve_model_path(path_str: str) -> str:
     path = Path(os.path.expanduser(path_str))
@@ -363,8 +477,10 @@ async def lifespan(app: FastAPI):
         tier_config = selector.select(profile)
         state["system_profile"] = profile
         state["tier_config"] = tier_config
+        state["runtime_budget"] = resolve_runtime_budget(ctx_size=tier_config.llm_ctx_size)
         logger.info(f"Hardware detected:\n{profile}")
         logger.info(f"Selected: {tier_config}")
+        logger.info(f"Runtime budget: {state['runtime_budget']}")
 
         # Обновляем конфиг модели из tier_config
         if "qwen-14b-llm" in STATIC_MODELS_CONFIG:
@@ -376,6 +492,7 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Hardware profiling failed, using defaults: {e}")
         state["system_profile"] = None
         state["tier_config"] = None
+        state["runtime_budget"] = resolve_runtime_budget()
 
     # Предзагрузка Qwen LLM — убирает задержку перед первым запросом
     try:
@@ -472,11 +589,17 @@ async def get_status():
     if state.get("tier_config"):
         tc = state["tier_config"]
         tier_info = {"tier": tc.tier, "rag_mode": tc.rag_mode, "embedding_backend": tc.embedding_backend}
+    runtime_budget = resolve_runtime_budget()
     return {
         "active_heavy_model": state["active_model"],
         "running": list(state["processes"].keys()),
         "vram_free_gb": _get_available_vram(),
         "tier": tier_info,
+        "runtime_profile": runtime_budget["runtime_profile"],
+        "effective_context_tokens": runtime_budget["effective_context_tokens"],
+        "retrieved_context_tokens_budget": runtime_budget["retrieved_context_tokens_budget"],
+        "generation_tokens_reserve": runtime_budget["generation_tokens_reserve"],
+        "context_budget_ratio": runtime_budget["context_budget_ratio"],
     }
 
 @app.post("/v1/embeddings")

@@ -90,13 +90,12 @@
 
 ### Отдельное уточнение по persistence ownership
 
-Для текущего stabilization-step допустим intentional pragmatic compromise:
+Для текущего stabilization-step pragmatic compromise уже заменён отдельной завершённой фазой
+[B3.31a](../../TASKS.md):
 
-- `Chainlit SQLite` / existing Chainlit data layer временно остаётся authoritative
-  для `resume`, `pending action`, `state_ref` и связанного recovery-state;
-- это не считается конечной архитектурой ownership;
-- dedicated backend-owned state store вынесен в отдельную future phase
-  [B3.31a](../../TASKS.md).
+- backend-owned `orchestrator_runs` стал source of truth для `run_id/state_ref/pending_action_id/resume_state_blob/checkpoint_blob`;
+- `Chainlit` session state теперь UI-mirror/cache;
+- resume сначала восстанавливает backend snapshot и только при его отсутствии падает в legacy bootstrap.
 
 Целевая модель после `B3.31a`:
 
@@ -216,6 +215,10 @@
 
 - Появился документ с explicit trade-offs.
 - Есть один pilot area для LangChain без смены публичного API-контракта.
+
+### Статус
+
+Закрыто через [2026-03-12-b332-langchain-adoption-strategy.md](./2026-03-12-b332-langchain-adoption-strategy.md).
 
 ## Фаза 4. Улучшить quality routing только после стабилизации orchestration
 

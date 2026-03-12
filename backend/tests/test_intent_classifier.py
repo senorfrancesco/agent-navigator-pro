@@ -4,6 +4,7 @@
 
 import os
 import sys
+import hashlib
 
 import numpy as np
 import pytest
@@ -13,6 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from orchestrator.rag.classifier import (
     EmbeddingIntentClassifier,
     LLMIntentClassifier,
+    UNSURE_INTENT,
     select_classifier_result,
 )
 
@@ -22,7 +24,9 @@ def _mock_embed_fn(texts):
     results = []
     for text in texts:
         # Создаём детерминированный вектор из текста
-        np.random.seed(hash(text.lower().strip()) % (2**31))
+        digest = hashlib.sha256(text.lower().strip().encode("utf-8")).digest()
+        seed = int.from_bytes(digest[:4], "big") % (2**31)
+        np.random.seed(seed)
         vec = np.random.randn(768).astype(np.float32)
         vec /= np.linalg.norm(vec)
         results.append(vec)
@@ -171,3 +175,52 @@ def test_select_classifier_result_hybrid_falls_back_to_embedder():
     assert result["intent"] == "equipment_analysis"
     assert result["source"] == "embedder_fallback"
     assert result["llm_fallback"]["intent"] == "general_chat"
+
+
+def test_select_classifier_result_embedder_abstains_when_below_thresholds():
+    result = select_classifier_result(
+        "embedder",
+        embedder_result={"intent": "document_question", "confidence": 0.42, "margin": 0.03, "needs_rag": True},
+        llm_result=None,
+        embedder_confidence_threshold=0.6,
+        embedder_margin_threshold=0.1,
+    )
+
+    assert result["intent"] == UNSURE_INTENT
+    assert result["predicted_intent"] == "document_question"
+    assert result["abstained"] is True
+    assert result["abstain_reason"] == "embedder_low_confidence"
+    assert result["source"] == "embedder_abstain"
+    assert result["thresholds"] == {"confidence": 0.6, "margin": 0.1}
+
+
+def test_select_classifier_result_hybrid_can_end_unsure():
+    result = select_classifier_result(
+        "hybrid",
+        embedder_result={"intent": "compare_documents", "confidence": 0.48, "margin": 0.02, "needs_rag": True},
+        llm_result={"intent": "general_chat", "confidence": 0.41, "needs_rag": False},
+        llm_confidence_threshold=0.75,
+        embedder_confidence_threshold=0.6,
+        embedder_margin_threshold=0.1,
+    )
+
+    assert result["intent"] == UNSURE_INTENT
+    assert result["predicted_intent"] == "compare_documents"
+    assert result["abstained"] is True
+    assert result["source"] == "hybrid_unsure"
+
+
+def test_select_classifier_result_llm_fallback_still_respects_embedder_abstain():
+    result = select_classifier_result(
+        "llm",
+        embedder_result={"intent": "document_question", "confidence": 0.42, "margin": 0.03, "needs_rag": True},
+        llm_result=None,
+        embedder_confidence_threshold=0.6,
+        embedder_margin_threshold=0.1,
+    )
+
+    assert result["intent"] == UNSURE_INTENT
+    assert result["predicted_intent"] == "document_question"
+    assert result["abstained"] is True
+    assert result["abstain_reason"] == "llm_fallback_embedder_low_confidence"
+    assert result["source"] == "embedder_abstain"

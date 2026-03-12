@@ -178,3 +178,14 @@ cd backend && python evals/intent_embedder_eval.py \
    - JSON parser
    - abstain policy
    - threshold calibration
+
+## Runtime note
+
+После benchmark runtime синхронизирован с выводами отчёта:
+- `embedder` остаётся production default;
+- low-confidence embedder-result теперь не запускает workflow напрямую, а возвращает `intent="__unsure__"` с `abstained=True`;
+- `hybrid` и `llm -> embedder fallback` тоже уважают threshold-based abstain policy;
+- текущие runtime thresholds:
+  - `INTENT_CLASSIFIER_EMBEDDER_CONFIDENCE_THRESHOLD = 0.60`
+  - `INTENT_CLASSIFIER_EMBEDDER_MARGIN_THRESHOLD = 0.10`
+  - `INTENT_CLASSIFIER_LLM_CONFIDENCE_THRESHOLD = 0.75`

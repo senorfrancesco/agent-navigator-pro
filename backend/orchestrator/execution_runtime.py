@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from orchestrator.orchestration_runtime import decide_orchestration, is_social_query
+from orchestrator.state_store import get_orchestration_state_store
 from orchestrator.ui_control_plane import get_prompt_profile_system_message, resolve_effective_settings
 from orchestrator.workflows.equipment import detect_equipment_mode
 
@@ -105,7 +106,15 @@ def build_control_plane_metadata(
     }
 
 
-def _build_state_ref(*, thread_id: Optional[str], session_id: Optional[str], trace_id: str) -> str:
+def _build_state_ref(
+    *,
+    request_state_ref: Optional[str],
+    thread_id: Optional[str],
+    session_id: Optional[str],
+    trace_id: str,
+) -> str:
+    if request_state_ref:
+        return str(request_state_ref)
     if thread_id:
         return f"thread:{thread_id}"
     if session_id:
@@ -156,13 +165,93 @@ def _with_execution_metadata(
     enriched["effective_settings"] = copy.deepcopy(effective_settings)
     enriched.update(build_control_plane_metadata(request, effective_settings))
     enriched["state_ref"] = _build_state_ref(
+        request_state_ref=request.get("state_ref"),
         thread_id=request.get("thread_id"),
         session_id=request.get("session_id"),
         trace_id=trace_id,
     )
+    if request.get("run_id"):
+        enriched["run_id"] = request.get("run_id")
+    if request.get("state_version") is not None:
+        enriched["state_version"] = request.get("state_version")
     enriched["pending_action_id"] = pending_action_id
     enriched["ui_effects"] = _build_ui_effects(enriched, pending_action_id=pending_action_id)
     return enriched
+
+
+def _resolve_workflow_type(request: Dict[str, Any]) -> str:
+    workflow_type = request.get("workflow_type")
+    if workflow_type:
+        return str(workflow_type)
+    assistant_mode = str(request.get("assistant_mode") or "")
+    if assistant_mode:
+        return assistant_mode
+    if request.get("thread_id") or request.get("ui_state") is not None:
+        return "chainlit"
+    return "api"
+
+
+def _merge_resume_state_blob(request: Dict[str, Any], response: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    base = request.get("ui_state")
+    snapshot: Dict[str, Any] = copy.deepcopy(base) if isinstance(base, dict) else {}
+    patch = response.get("session_state_patch") or {}
+
+    if "pending_action" in patch:
+        snapshot["pending_action"] = copy.deepcopy(patch.get("pending_action"))
+    elif "action_required" in response:
+        snapshot["pending_action"] = copy.deepcopy(response.get("action_required"))
+
+    if patch.get("preserve_active_mode"):
+        pass
+    elif "active_mode" in patch:
+        snapshot["active_mode"] = patch.get("active_mode")
+
+    for key in ("last_route", "last_executor", "last_trace_id", "runtime_mode"):
+        if key in patch:
+            snapshot[key] = copy.deepcopy(patch.get(key))
+
+    if response.get("route") is not None:
+        snapshot["last_route"] = response.get("route")
+    if response.get("executor") is not None:
+        snapshot["last_executor"] = response.get("executor")
+    if request.get("trace_id") is not None:
+        snapshot["last_trace_id"] = request.get("trace_id")
+
+    if request.get("active_doc_ids") is not None and "active_doc_ids" not in snapshot:
+        snapshot["active_doc_ids"] = list(request.get("active_doc_ids") or [])
+    if request.get("control_plane_state") is not None and "control_plane_state" not in snapshot:
+        snapshot["control_plane_state"] = copy.deepcopy(request.get("control_plane_state"))
+    if response.get("effective_settings") is not None:
+        snapshot["effective_settings"] = copy.deepcopy(response.get("effective_settings"))
+    if request.get("session_docs") is not None and "session_docs" not in snapshot:
+        snapshot["session_docs"] = copy.deepcopy(request.get("session_docs"))
+
+    return snapshot or None
+
+
+def _build_checkpoint_blob(request: Dict[str, Any], response: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "route": response.get("route"),
+        "executor": response.get("executor"),
+        "trace_id": request.get("trace_id"),
+        "runtime_mode": response.get("mode"),
+        "assistant_mode": response.get("assistant_mode"),
+        "rag_scope": response.get("rag_scope"),
+        "knowledge_collection_id": response.get("knowledge_collection_id"),
+        "pending_action_id": response.get("pending_action_id"),
+        "action_required": copy.deepcopy(response.get("action_required")),
+    }
+
+
+def _derive_run_status(response: Dict[str, Any]) -> str:
+    assistant_message = str(response.get("assistant_message") or "")
+    if response.get("action_required"):
+        return "waiting_action"
+    if assistant_message.lower().startswith("ошибка выполнения сценария:"):
+        return "failed"
+    if assistant_message:
+        return "completed"
+    return "decision_ready"
 
 
 async def _run_graph(workflow: Any, initial_state: Dict[str, Any]) -> Dict[str, Any]:
@@ -580,12 +669,22 @@ async def execute_orchestration(
     *,
     deps: Optional[ExecutionDependencies] = None,
 ) -> Dict[str, Any]:
+    request = copy.deepcopy(request)
     session_docs = request.get("session_docs") or {}
     attachments_meta = request.get("attachments_meta") or []
     history = request.get("history") or []
 
     effective_settings = copy.deepcopy(request.get("effective_settings") or resolve_effective_settings(_collect_raw_control_plane(request)))
     runtime_mode = resolve_request_runtime_mode(request, effective_settings)
+    state_store = get_orchestration_state_store()
+    run_record = await state_store.get_or_create_run(
+        thread_id=request.get("thread_id"),
+        session_id=request.get("session_id"),
+        workflow_type=_resolve_workflow_type(request),
+    )
+    request["run_id"] = run_record.run_id
+    request["state_ref"] = run_record.state_ref
+    request["state_version"] = run_record.version
 
     decision = decide_orchestration(
         query=request.get("message", ""),
@@ -602,9 +701,27 @@ async def execute_orchestration(
     response = _with_execution_metadata(decision, request=request, effective_settings=effective_settings)
 
     if response.get("action_required"):
+        updated = await state_store.save_run(
+            run_id=run_record.run_id,
+            status=_derive_run_status(response),
+            pending_action_id=response.get("pending_action_id"),
+            resume_state_blob=_merge_resume_state_blob(request, response),
+            checkpoint_blob=_build_checkpoint_blob(request, response),
+            expected_version=run_record.version,
+        )
+        response["state_version"] = updated.version
         return response
 
     if deps is None:
+        updated = await state_store.save_run(
+            run_id=run_record.run_id,
+            status=_derive_run_status(response),
+            pending_action_id=response.get("pending_action_id"),
+            resume_state_blob=_merge_resume_state_blob(request, response),
+            checkpoint_blob=_build_checkpoint_blob(request, response),
+            expected_version=run_record.version,
+        )
+        response["state_version"] = updated.version
         return response
 
     executor = response.get("executor") or "chat"
@@ -648,4 +765,15 @@ async def execute_orchestration(
         response["ui_effects"]["generated_report"] = result["generated_report"]
     response["assistant_message"] = result.get("assistant_message") or response.get("assistant_message")
     response["sources"] = result.get("sources", response.get("sources", []))
+    status = _derive_run_status(response)
+    updated = await state_store.save_run(
+        run_id=run_record.run_id,
+        status=status,
+        pending_action_id=response.get("pending_action_id"),
+        resume_state_blob=_merge_resume_state_blob(request, response),
+        checkpoint_blob=_build_checkpoint_blob(request, response),
+        last_error=response.get("assistant_message") if status == "failed" else None,
+        expected_version=run_record.version,
+    )
+    response["state_version"] = updated.version
     return response

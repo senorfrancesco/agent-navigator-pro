@@ -53,6 +53,7 @@ INTENT_NEEDS_RAG = {
     "general_chat": False,
 }
 INTENT_LABELS = tuple(INTENT_NEEDS_RAG.keys())
+UNSURE_INTENT = "__unsure__"
 
 
 class EmbeddingIntentClassifier:
@@ -238,37 +239,148 @@ class LLMIntentClassifier:
         return normalized
 
 
+def _build_unsure_result(
+    predicted_result: Optional[Dict[str, Any]],
+    *,
+    source: str,
+    reason: str,
+    confidence_threshold: float,
+    margin_threshold: float,
+) -> Dict[str, Any]:
+    predicted_result = dict(predicted_result or {})
+    predicted_intent = predicted_result.get("intent") or "general_chat"
+    return {
+        "intent": UNSURE_INTENT,
+        "predicted_intent": predicted_intent,
+        "confidence": float(predicted_result.get("confidence", 0.0) or 0.0),
+        "margin": float(predicted_result.get("margin", 0.0) or 0.0),
+        "needs_rag": False,
+        "scores": predicted_result.get("scores", {}),
+        "abstained": True,
+        "abstain_reason": reason,
+        "thresholds": {
+            "confidence": confidence_threshold,
+            "margin": margin_threshold,
+        },
+        "source": source,
+    }
+
+
+def _passes_embedder_thresholds(
+    embedder_result: Optional[Dict[str, Any]],
+    *,
+    confidence_threshold: float,
+    margin_threshold: float,
+) -> bool:
+    if not embedder_result:
+        return False
+    confidence = float(embedder_result.get("confidence", 0.0) or 0.0)
+    margin = embedder_result.get("margin")
+    margin_value = confidence if margin is None else float(margin or 0.0)
+    return (
+        confidence >= confidence_threshold
+        and margin_value >= margin_threshold
+    )
+
+
+def _resolve_embedder_result(
+    embedder_result: Optional[Dict[str, Any]],
+    *,
+    confidence_threshold: float,
+    margin_threshold: float,
+    source: str,
+    reason: str,
+) -> Optional[Dict[str, Any]]:
+    if _passes_embedder_thresholds(
+        embedder_result,
+        confidence_threshold=confidence_threshold,
+        margin_threshold=margin_threshold,
+    ):
+        merged = dict(embedder_result or {})
+        merged["source"] = source
+        return merged
+    if embedder_result:
+        return _build_unsure_result(
+            embedder_result,
+            source=f"{source}_abstain" if source == "embedder" else source,
+            reason=reason,
+            confidence_threshold=confidence_threshold,
+            margin_threshold=margin_threshold,
+        )
+    return None
+
+
 def select_classifier_result(
     mode: str,
     *,
     embedder_result: Optional[Dict[str, Any]],
     llm_result: Optional[Dict[str, Any]],
     llm_confidence_threshold: float = 0.75,
+    embedder_confidence_threshold: float = 0.60,
+    embedder_margin_threshold: float = 0.10,
 ) -> Optional[Dict[str, Any]]:
     """Selects the final classifier result based on env-driven mode."""
     normalized_mode = (mode or "embedder").strip().lower()
 
     if normalized_mode == "embedder":
-        return embedder_result
+        return _resolve_embedder_result(
+            embedder_result,
+            confidence_threshold=embedder_confidence_threshold,
+            margin_threshold=embedder_margin_threshold,
+            source="embedder",
+            reason="embedder_low_confidence",
+        )
 
     if normalized_mode == "llm":
-        return llm_result or embedder_result
+        return llm_result or _resolve_embedder_result(
+            embedder_result,
+            confidence_threshold=embedder_confidence_threshold,
+            margin_threshold=embedder_margin_threshold,
+            source="embedder",
+            reason="llm_fallback_embedder_low_confidence",
+        )
 
     if normalized_mode == "hybrid":
         if llm_result and llm_result.get("confidence", 0.0) >= llm_confidence_threshold:
             merged = dict(llm_result)
             merged["source"] = "llm"
             return merged
-        if embedder_result:
-            merged = dict(embedder_result)
-            merged["source"] = "embedder_fallback"
+        embedder_fallback = _resolve_embedder_result(
+            embedder_result,
+            confidence_threshold=embedder_confidence_threshold,
+            margin_threshold=embedder_margin_threshold,
+            source="embedder_fallback",
+            reason="hybrid_low_confidence",
+        )
+        if embedder_fallback and embedder_fallback.get("intent") != UNSURE_INTENT:
+            merged = dict(embedder_fallback)
             if llm_result:
                 merged["llm_fallback"] = {
                     "intent": llm_result.get("intent"),
                     "confidence": llm_result.get("confidence"),
                 }
             return merged
+        if embedder_result:
+            result = _build_unsure_result(
+                embedder_result,
+                source="hybrid_unsure",
+                reason="hybrid_low_confidence",
+                confidence_threshold=embedder_confidence_threshold,
+                margin_threshold=embedder_margin_threshold,
+            )
+            if llm_result:
+                result["llm_fallback"] = {
+                    "intent": llm_result.get("intent"),
+                    "confidence": llm_result.get("confidence"),
+                }
+            return result
         return llm_result
 
     logger.warning("Unknown INTENT_CLASSIFIER_MODE=%s, falling back to embedder", mode)
-    return embedder_result or llm_result
+    return _resolve_embedder_result(
+        embedder_result,
+        confidence_threshold=embedder_confidence_threshold,
+        margin_threshold=embedder_margin_threshold,
+        source="embedder",
+        reason="embedder_low_confidence",
+    ) or llm_result
