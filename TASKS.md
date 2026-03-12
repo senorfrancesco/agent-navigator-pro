@@ -363,7 +363,27 @@
     - `cd backend && pytest tests/ -q -m "not integration"` -> `397 passed, 4 deselected`
   Follow-up:
   - per-request hot-switching уже загруженных UMS моделей/embedders остаётся отдельным runtime API follow-up, не смешивается с текущим control-plane resolver
-- [ ] B3.23 — Multi-GPU placement policy для LLM и embeddings
+- [x] B3.23 — Multi-GPU placement policy для LLM и embeddings
+  Реализовано через backend-owned placement policy в `backend/services/model_manager/unified_model_server.py`.
+  Что закрыто:
+  - weighted `tensor-split` для multi-GPU GGUF startup вместо равного деления по всем GPU
+  - admission/filtering GPU по `UMS_LLM_MIN_FREE_VRAM_GB` и `UMS_LLM_MIN_BALANCE_RATIO`
+  - explicit embedding placement через `cuda:<idx>` или CPU fallback вместо implicit `cuda`
+  - preference на GPU, не занятый активным heavy LLM placement; fallback в CPU при конфликте
+  - operational placement metadata в `UMS /status` для backend/operators
+  - targeted startup tests покрывают:
+    - weighted multi-GPU GGUF split
+    - CPU GGUF path
+    - tier-forced CPU embeddings
+    - explicit non-LLM GPU selection for embeddings
+    - `/status` placements payload
+  - full verification:
+    - `pytest backend/tests/test_unified_model_server_startup.py backend/tests/test_runtime_preflight.py -q`
+    - `cd backend && pytest tests/ -q -m "not integration"`
+  Follow-up:
+  - hot migration уже запущенных моделей между GPU остаётся отдельным runtime follow-up
+  - полноценный multi-process scheduler и GPU reservations не входят в `B3.23`
+  - raw placement selector в UI не добавляется; placement остаётся backend-owned operational policy
 
 ### Benchmark & Performance Profiling
 - [x] **T4.15 — Unified benchmark script**

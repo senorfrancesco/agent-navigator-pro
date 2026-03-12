@@ -95,6 +95,7 @@ STATIC_MODELS_CONFIG = {
 state = {
     "active_model": None, # Последняя запрошенная "тяжелая" модель
     "processes": {},      # model_id -> process
+    "placements": {},     # model_id -> placement metadata
     "device_mode": DeviceMode.HYBRID,
     "runtime_budget": {},
     "dynamic_ports": 8100 # Начальный порт для динамических моделей
@@ -124,6 +125,122 @@ def _get_gpu_info() -> List[Dict[str, Any]]:
 
 def _get_available_vram() -> float:
     return sum(gpu["free_gb"] for gpu in _get_gpu_info())
+
+
+def _parse_gpu_indices_env(name: str, available_gpus: List[Dict[str, Any]]) -> Optional[List[int]]:
+    raw = os.getenv(name)
+    if not raw:
+        return None
+    available = {int(gpu["index"]) for gpu in available_gpus}
+    selected: List[int] = []
+    for part in raw.split(","):
+        token = part.strip()
+        if not token:
+            continue
+        try:
+            idx = int(token)
+        except ValueError:
+            continue
+        if idx in available and idx not in selected:
+            selected.append(idx)
+    return selected or None
+
+
+def _normalize_tensor_split(weights: List[float]) -> List[float]:
+    total = sum(max(weight, 0.0) for weight in weights)
+    if total <= 0:
+        if not weights:
+            return []
+        return [round(1.0 / len(weights), 4) for _ in weights]
+    return [round(max(weight, 0.0) / total, 4) for weight in weights]
+
+
+def _select_llm_gpus(available_gpus: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    selected_gpu_indices = _parse_gpu_indices_env("UMS_LLM_GPU_INDICES", available_gpus)
+    selected = [
+        gpu for gpu in available_gpus
+        if selected_gpu_indices is None or int(gpu["index"]) in set(selected_gpu_indices)
+    ]
+    min_free_gb = _read_runtime_float("UMS_LLM_MIN_FREE_VRAM_GB", 0.0)
+    selected = [gpu for gpu in selected if float(gpu.get("free_gb", 0.0)) >= min_free_gb]
+    if len(selected) <= 1:
+        return selected
+    max_free = max(float(gpu.get("free_gb", 0.0)) for gpu in selected)
+    min_balance_ratio = _clamp_float(_read_runtime_float("UMS_LLM_MIN_BALANCE_RATIO", 0.5), min_value=0.1, max_value=1.0)
+    balanced = [
+        gpu for gpu in selected
+        if max_free <= 0 or float(gpu.get("free_gb", 0.0)) / max_free >= min_balance_ratio
+    ]
+    if not balanced:
+        return [max(selected, key=lambda gpu: float(gpu.get("free_gb", 0.0)))]
+    if len(balanced) == 1:
+        return balanced
+    return balanced
+
+
+def _resolve_embedding_tier_preference() -> str:
+    tier_config = state.get("tier_config")
+    preferred = str(getattr(tier_config, "embedding_device", "cuda") or "cuda").strip().lower()
+    return preferred if preferred in {"cpu", "cuda"} else "cuda"
+
+
+def _build_model_placement_plan(
+    *,
+    model_id: str,
+    config: Dict[str, Any],
+    device_mode: DeviceMode,
+    available_gpus: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    if config["type"] == "st":
+        if device_mode == DeviceMode.CPU or not available_gpus or _resolve_embedding_tier_preference() == "cpu":
+            return {"placement_mode": "cpu", "device_arg": "cpu", "gpu_indices": []}
+        selected_gpu = _parse_gpu_indices_env("UMS_EMBEDDING_GPU_INDEX", available_gpus)
+        if selected_gpu:
+            gpu_index = selected_gpu[0]
+        else:
+            llm_gpu_indices = set()
+            active_heavy_model = state.get("active_model")
+            if active_heavy_model:
+                llm_gpu_indices = set((state.get("placements", {}).get(active_heavy_model) or {}).get("gpu_indices") or [])
+            candidate_gpus = [gpu for gpu in available_gpus if int(gpu["index"]) not in llm_gpu_indices]
+            if not candidate_gpus and llm_gpu_indices:
+                return {"placement_mode": "cpu", "device_arg": "cpu", "gpu_indices": []}
+            if not candidate_gpus:
+                candidate_gpus = available_gpus
+            gpu_index = max(candidate_gpus, key=lambda gpu: float(gpu.get("free_gb", 0.0)))["index"]
+        return {
+            "placement_mode": "single-gpu",
+            "device_arg": f"cuda:{gpu_index}",
+            "gpu_indices": [int(gpu_index)],
+        }
+
+    if device_mode == DeviceMode.CPU or not available_gpus:
+        return {"placement_mode": "cpu", "gpu_indices": [], "tensor_split": []}
+
+    selected_gpus = _select_llm_gpus(available_gpus)
+    if not selected_gpus:
+        return {"placement_mode": "cpu", "gpu_indices": [], "tensor_split": []}
+    if len(selected_gpus) == 1:
+        return {
+            "placement_mode": "single-gpu",
+            "gpu_indices": [int(selected_gpus[0]["index"])],
+            "tensor_split": [1.0],
+        }
+    tensor_split = _normalize_tensor_split([float(gpu.get("free_gb", 0.0)) for gpu in selected_gpus])
+    return {
+        "placement_mode": "multi-gpu",
+        "gpu_indices": [int(gpu["index"]) for gpu in selected_gpus],
+        "tensor_split": tensor_split,
+    }
+
+
+def _placement_with_device_arg(placement: Dict[str, Any], device_arg: str) -> Dict[str, Any]:
+    resolved = dict(placement)
+    resolved["device_arg"] = device_arg
+    if device_arg == "cpu":
+        resolved["placement_mode"] = "cpu"
+        resolved["gpu_indices"] = []
+    return resolved
 
 
 def _clamp_float(value: float, *, min_value: float, max_value: float) -> float:
@@ -324,6 +441,7 @@ def get_model_config(model_id: str) -> Optional[Dict[str, Any]]:
 def _stop_model(model_id: str):
     if model_id in state["processes"]:
         proc = state["processes"].pop(model_id)
+        state["placements"].pop(model_id, None)
         logger.info(f"Stopping server for {model_id}...")
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
@@ -396,15 +514,23 @@ def _start_server(model_id: str, device_mode: DeviceMode):
             if existing_proc.poll() is None:
                 return  # Уже работает
             state["processes"].pop(model_id, None)
+            state["placements"].pop(model_id, None)
 
         _reap_stale_listener_on_port(config["port"], tracked_proc=existing_proc)
 
-        n_gpu = len(_get_gpu_info())
-        
+        available_gpus = _get_gpu_info()
+        n_gpu = len(available_gpus)
+        placement = _build_model_placement_plan(
+            model_id=model_id,
+            config=config,
+            device_mode=device_mode,
+            available_gpus=available_gpus,
+        )
+
         if config["type"] == "st":
-            preferred_device = "cuda" if (device_mode != DeviceMode.CPU and n_gpu > 0) else "cpu"
+            preferred_device = str(placement.get("device_arg") or "cpu")
             device_candidates = [preferred_device]
-            if preferred_device == "cuda":
+            if preferred_device.startswith("cuda"):
                 device_candidates.append("cpu")
 
             last_error = None
@@ -420,6 +546,7 @@ def _start_server(model_id: str, device_mode: DeviceMode):
                 try:
                     process = _launch_server_process(cmd, config["port"])
                     state["processes"][model_id] = process
+                    state["placements"][model_id] = _placement_with_device_arg(placement, device_arg)
                     return
                 except Exception as e:
                     last_error = e
@@ -435,8 +562,9 @@ def _start_server(model_id: str, device_mode: DeviceMode):
             cmd = ["llama-server", "-m", model_path, "--port", str(config["port"]),
                    "--host", "0.0.0.0", "-c", str(config["ctx_size"]),
                    "-ngl", str(config["gpu_layers"] if device_mode != DeviceMode.CPU else 0)]
-            if n_gpu > 1 and device_mode != DeviceMode.CPU:
-                cmd.extend(["--tensor-split", ",".join(["1"] * n_gpu)])
+            if placement.get("placement_mode") == "multi-gpu":
+                tensor_split = placement.get("tensor_split") or []
+                cmd.extend(["--tensor-split", ",".join(str(weight) for weight in tensor_split)])
             if config["type"] == "gguf-vl" and "mmproj" in config:
                 cmd.extend(["--mmproj", resolve_model_path(config["mmproj"])])
 
@@ -444,6 +572,7 @@ def _start_server(model_id: str, device_mode: DeviceMode):
         try:
             process = _launch_server_process(cmd, config["port"])
             state["processes"][model_id] = process
+            state["placements"][model_id] = placement
             if is_heavy:
                 state["active_model"] = model_id
             return
@@ -600,6 +729,7 @@ async def get_status():
     return {
         "active_heavy_model": state["active_model"],
         "running": list(state["processes"].keys()),
+        "placements": dict(state.get("placements") or {}),
         "vram_free_gb": _get_available_vram(),
         "tier": tier_info,
         "runtime_profile": runtime_budget["runtime_profile"],

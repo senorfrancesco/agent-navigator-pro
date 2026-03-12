@@ -60,6 +60,25 @@ Embedder routing тоже backend-owned и сейчас резолвится б�
 
 `Chainlit` не даёт пользователю raw `model_id` selector и не принимает route/policy decisions локально. Он только рендерит effective values, которые резолвит backend control-plane.
 
+## Multi-GPU placement policy
+
+Placement policy для LLM и embeddings тоже backend-owned и применяется внутри `UMS`, а не в UI.
+
+- GGUF/LLM startup:
+  - `UMS` выбирает GPU по free VRAM
+  - multi-GPU admission фильтруется по `UMS_LLM_MIN_FREE_VRAM_GB`
+  - плохо сбалансированные GPU отбрасываются через `UMS_LLM_MIN_BALANCE_RATIO`
+  - если остаётся несколько GPU, `--tensor-split` считается как weighted split от free VRAM, а не как равные доли
+  - если корректный multi-GPU набор не собран, `UMS` падает в best single GPU
+
+- SentenceTransformer/embedding startup:
+  - можно явно задать `UMS_EMBEDDING_GPU_INDEX`
+  - tier-level `embedding_device=cpu` принудительно оставляет embeddings на CPU
+  - если уже есть активное тяжёлое LLM placement, embeddings стараются уйти на другой GPU
+  - если свободного GPU без конфликта нет, embedding server падает в CPU, а не в implicit `cuda:0`
+
+Operational status публикуется в `UMS /status` через `placements`, но raw placement не поднимается в `Chainlit` effective settings и не даётся пользователю как selector.
+
 ## Applied output
 
 Launcher и preflight не должны быть вторым decision engine.  
@@ -72,6 +91,10 @@ Launcher и preflight не должны быть вторым decision engine.
 - `UMS_RETRIEVED_CONTEXT_RATIO`
 - `UMS_GENERATION_TOKENS_RESERVE`
 - `DEVICE_MODE`
+- `UMS_LLM_GPU_INDICES`
+- `UMS_LLM_MIN_FREE_VRAM_GB`
+- `UMS_LLM_MIN_BALANCE_RATIO`
+- `UMS_EMBEDDING_GPU_INDEX`
 
 ## Canonical flow
 
