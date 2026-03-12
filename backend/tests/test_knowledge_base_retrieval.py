@@ -101,3 +101,41 @@ def test_retrieve_merged_chunks_session_rag_only_uses_active_session_docs(tmp_pa
 
     assert result["source_scope_summary"] == "session"
     assert all(chunk["source_origin"] == "session" for chunk in result["chunks"])
+
+
+def test_retrieve_merged_chunks_prefers_session_overlay_for_duplicate_text(tmp_path):
+    store = SQLiteKnowledgeBaseStore(db_url=f"sqlite:///{tmp_path}/kb_retrieval.db")
+    duplicate_text = "За просрочку поставки применяется штраф 3 процента."
+    ingest_text_source_sync(
+        collection_id="legal",
+        display_name="kb_policy.txt",
+        text=duplicate_text,
+        store=store,
+        mime_type="text/plain",
+        index_version="v1",
+        embedding_model_id="labse",
+        chunking_version="legal_v1",
+    )
+    session_docs = {
+        "contract.txt": {
+            "document_id": "session-contract",
+            "text": duplicate_text,
+            "path": "/tmp/contract.txt",
+        }
+    }
+
+    result = retrieve_merged_chunks(
+        query="Какой штраф за просрочку поставки?",
+        rag_scope="knowledge_base_rag",
+        knowledge_collection_id="legal",
+        session_docs=session_docs,
+        active_doc_ids=["session-contract"],
+        embed_fn=_stub_embed_fn,
+        kb_store=store,
+        top_k=3,
+        candidate_budget_per_scope=3,
+    )
+
+    assert result["source_scope_summary"] == "knowledge_base+session_overlay"
+    assert len(result["chunks"]) == 1
+    assert result["chunks"][0]["source_origin"] == "session"

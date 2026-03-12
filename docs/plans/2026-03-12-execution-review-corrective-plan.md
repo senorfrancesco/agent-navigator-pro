@@ -186,6 +186,10 @@ Execution verdict:
 
 - эти задачи надо делать до широких UI/Ops улучшений;
 - иначе UI начнёт красиво упаковывать неправильно названные режимы и не до конца grounded answers.
+- выполнено:
+  - public-facing tiers переведены на honest wording без смены runtime keys;
+  - evidence UX v2 теперь показывает `source_scope_summary`, `source_origin`, `collection_id`, `section/page` там, где они доступны;
+  - verification: `cd backend && pytest tests/ -q -m "not integration"` -> `388 passed, 4 deselected`.
 
 ### Block F — Runtime budgeting и hardware adaptation
 

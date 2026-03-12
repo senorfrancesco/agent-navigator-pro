@@ -513,9 +513,12 @@ Status on 2026-03-13:
   - `knowledge_base_rag` интегрирован в unified backend execution core;
   - merged retrieval `knowledge_base + session overlay` работает без отдельного UI/API contour;
   - provenance `source_origin | collection_id | display_name` проходит в doc-QA sources.
+- `B3.35/B3.36` выполнены:
+  - public-facing tiers переведены на honest wording (`iterative retrieval`, `planned multi-agent`) без смены machine-readable keys;
+  - evidence UX v2 показывает `retrieval_scope`, provenance и `section/page` там, где metadata доступны.
 - Follow-up оставлен отдельно:
   - persisted embeddings / vector index / reranker;
-  - более богатый evidence UX поверх уже возвращаемой provenance metadata.
+  - более глубокий KB retrieval hardening и richer citation cards поверх текущего evidence UX.
 
 ### Что считать правильным UX для document QA
 

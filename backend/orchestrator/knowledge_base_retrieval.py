@@ -83,32 +83,65 @@ def _search_entries(
     retriever.index([entry["text"] for entry in entries])
     results = retriever.search(query, top_k=min(top_k, len(entries)), mode=mode)
     ranked: List[Dict[str, Any]] = []
-    for result in results:
+    for rank, result in enumerate(results, start=1):
         entry = dict(entries[result.index])
         entry["raw_score"] = float(result.score)
+        entry["scope_rank"] = rank
         ranked.append(entry)
     return ranked
+
+
+def _annotate_scope_merge_scores(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not chunks:
+        return []
+    scores = [float(chunk.get("raw_score", 0.0)) for chunk in chunks]
+    min_score = min(scores)
+    max_score = max(scores)
+    spread = max_score - min_score
+    annotated: List[Dict[str, Any]] = []
+    for chunk in chunks:
+        raw_score = float(chunk.get("raw_score", 0.0))
+        rank = int(chunk.get("scope_rank", 1) or 1)
+        norm_score = 0.5 if spread <= 1e-9 else max(0.0, min(1.0, (raw_score - min_score) / spread))
+        rank_bonus = 1.0 / rank
+        merged = 0.80 * norm_score + 0.20 * rank_bonus
+        annotated.append({**chunk, "scope_score": norm_score, "merge_score": merged})
+    return annotated
+
+
+def _prefer_chunk(existing: Dict[str, Any], candidate: Dict[str, Any]) -> Dict[str, Any]:
+    existing_merge = float(existing.get("merge_score", 0.0))
+    candidate_merge = float(candidate.get("merge_score", 0.0))
+    if abs(candidate_merge - existing_merge) <= 0.05:
+        existing_origin = str(existing.get("source_origin") or "")
+        candidate_origin = str(candidate.get("source_origin") or "")
+        if existing_origin != candidate_origin:
+            if candidate_origin == "session":
+                return candidate
+            if existing_origin == "session":
+                return existing
+    if candidate_merge > existing_merge:
+        return candidate
+    return existing
 
 
 def _dedup_and_normalize(chunks: List[Dict[str, Any]], top_k: int) -> List[Dict[str, Any]]:
     if not chunks:
         return []
-    seen_hashes = set()
-    deduped: List[Dict[str, Any]] = []
-    for chunk in sorted(chunks, key=lambda item: float(item.get("raw_score", 0.0)), reverse=True):
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for chunk in sorted(chunks, key=lambda item: float(item.get("merge_score", 0.0)), reverse=True):
         text_hash = _normalize_text_hash(chunk.get("text", ""))
-        if text_hash in seen_hashes:
-            continue
-        seen_hashes.add(text_hash)
-        deduped.append(chunk)
-        if len(deduped) >= top_k:
-            break
-    scores = [float(chunk.get("raw_score", 0.0)) for chunk in deduped] or [0.0]
+        existing = grouped.get(text_hash)
+        grouped[text_hash] = chunk if existing is None else _prefer_chunk(existing, chunk)
+    deduped = sorted(grouped.values(), key=lambda item: float(item.get("merge_score", 0.0)), reverse=True)[:top_k]
+    if not deduped:
+        return []
+    scores = [float(chunk.get("merge_score", 0.0)) for chunk in deduped] or [0.0]
     min_score = min(scores)
     max_score = max(scores)
     spread = max_score - min_score
     for chunk in deduped:
-        raw_score = float(chunk.get("raw_score", 0.0))
+        raw_score = float(chunk.get("merge_score", 0.0))
         normalized = 0.5 if spread <= 1e-9 else max(0.0, min(1.0, (raw_score - min_score) / spread))
         chunk["normalized_score"] = normalized
     return deduped
@@ -134,33 +167,33 @@ def retrieve_merged_chunks(
     kb_entries = _build_kb_entries(kb_store, knowledge_collection_id) if kb_store is not None else []
 
     if rag_scope == "session_rag":
-        session_ranked = _search_entries(
+        session_ranked = _annotate_scope_merge_scores(_search_entries(
             entries=session_entries,
             query=query,
             embed_fn=embed_fn,
             mode=mode,
             top_k=candidate_budget_per_scope,
-        )
+        ))
         return {
             "chunks": _dedup_and_normalize(session_ranked, top_k),
             "source_scope_summary": "session",
         }
 
     if rag_scope == "knowledge_base_rag":
-        kb_ranked = _search_entries(
+        kb_ranked = _annotate_scope_merge_scores(_search_entries(
             entries=kb_entries,
             query=query,
             embed_fn=embed_fn,
             mode=mode,
             top_k=candidate_budget_per_scope,
-        )
-        session_ranked = _search_entries(
+        ))
+        session_ranked = _annotate_scope_merge_scores(_search_entries(
             entries=session_entries,
             query=query,
             embed_fn=embed_fn,
             mode=mode,
             top_k=candidate_budget_per_scope,
-        )
+        ))
         merged = _dedup_and_normalize(kb_ranked + session_ranked, top_k)
         return {
             "chunks": merged,

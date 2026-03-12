@@ -211,16 +211,41 @@
   - Persisted embeddings или vector index для KB collection
   - Retrieval embedder profile / rerank stage после merge shortlist
   - Более явный score fusion/tie-break для дубликатов `session` vs `knowledge_base`
+  - Progress 2026-03-13:
+    - shortlist hardening и duplicate policy начаты;
+    - `session` overlay теперь детерминированно побеждает KB duplicate при близком score;
+    - full completion остаётся за persisted embeddings / rerank / broader fusion policy
 
 ### Блок D — Honest Tiers & Citations (B3.35, B3.36)
 
-- [ ] **B3.35 — Honest tiers: выравнивание терминов с реальным runtime**
-  - `Tier 1` = basic retrieval, `Tier 2` = corrective, `Tier 3` = iterative, `Tier 4` = planned multi-agent
-  - Привести документацию и UI-labels в соответствие
+- [x] **B3.35 — Honest tiers: выравнивание терминов с реальным runtime**
+  - Выполнено без смены machine-readable runtime keys:
+    - `simple` -> basic retrieval
+    - `corrective` -> corrective retrieval
+    - `agentic` -> iterative retrieval
+    - `multi-agent` -> planned multi-agent
+  - Обновлены public-facing surfaces:
+    - `tier_selector` docstrings и `TierConfig.__str__`
+    - `AdaptiveRAGPipeline` docstrings и `mode_label` metadata
+    - `Chainlit` control-plane labels (`Agentic (iterative)`)
+    - `UMS /status` и runtime preflight report теперь публикуют `rag_mode_label`
+  - Внутренние runtime keys сохранены для совместимости
 
-- [ ] **B3.36 — Citations/evidence UX v2**
-  - document_name, chunk_id, source_origin, page/section, excerpt, relevance
-  - source_scope_summary для merged retrieval
+- [x] **B3.36 — Citations/evidence UX v2**
+  - Evidence block теперь явно показывает:
+    - `display_name`
+    - `chunk_id`
+    - `source_origin`
+    - `collection_id`
+    - `section/page` при наличии
+    - `quote/excerpt`
+    - `relevance`
+  - Добавлена summary line:
+    - `source_scope_summary` / `retrieval_scope`
+  - `session` и `knowledge_base` provenance проходят через unified doc-QA surface
+  - Verification:
+    - targeted tiers/evidence suite зелёный
+    - `cd backend && pytest tests/ -q -m "not integration"` -> `389 passed, 4 deselected`
 
 ### Блок E — Runtime Budgeting (T4.13)
 
