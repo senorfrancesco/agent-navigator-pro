@@ -189,6 +189,7 @@ def test_status_exposes_adaptive_runtime_budget(monkeypatch):
     assert payload["retrieved_context_tokens_budget"] == 7372
     assert payload["generation_tokens_reserve"] == 1024
     assert payload["context_budget_ratio"] == 0.6
+    assert payload["tier"]["rag_mode_label"] == "corrective retrieval"
 
 
 def test_status_respects_manual_runtime_budget(monkeypatch):

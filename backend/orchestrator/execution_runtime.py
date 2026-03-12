@@ -525,9 +525,10 @@ async def _execute_doc_question(
     rag_mode = "simple"
     retrieval_available = bool(deps.has_retrieval_adapter())
     kb_sources: Optional[List[Dict[str, Any]]] = None
+    source_scope_summary = "session" if rag_scope == "session_rag" else "knowledge_base"
 
     if rag_scope in {"session_rag", "knowledge_base_rag"}:
-        kb_sources = retrieve_merged_chunks(
+        merged = retrieve_merged_chunks(
             query=query,
             rag_scope=rag_scope,
             knowledge_collection_id=knowledge_collection_id,
@@ -537,7 +538,9 @@ async def _execute_doc_question(
             kb_store=deps.get_knowledge_base_store(),
             top_k=max(20, int(getattr(deps.get_rag_pipeline() or object(), "top_k", 5)) * 4) if target_doc_name else 20,
             candidate_budget_per_scope=12,
-        ).get("chunks")
+        )
+        kb_sources = merged.get("chunks")
+        source_scope_summary = str(merged.get("source_scope_summary") or source_scope_summary)
 
     if kb_sources:
         sources = []
@@ -551,6 +554,7 @@ async def _execute_doc_question(
                     "chunk_id": str(chunk.get("chunk_id")),
                     "collection_id": chunk.get("collection_id"),
                     "source_origin": chunk.get("source_origin"),
+                    "section": meta.get("section"),
                     "char_span": {
                         "start_char": meta.get("start_char"),
                         "end_char": meta.get("end_char"),
@@ -585,6 +589,7 @@ async def _execute_doc_question(
                 "Execution выполняется через unified core, но session-document retrieval "
                 "для данного adapter ещё не реализован."
             ),
+            source_scope_summary=source_scope_summary,
         )
         return {
             "assistant_message": deps.render_doc_question_markdown(payload),
@@ -622,6 +627,7 @@ async def _execute_doc_question(
             sources=[],
             fallback_type="insufficient_evidence",
             fallback_reason=fallback_reason,
+            source_scope_summary=source_scope_summary,
         )
         return {
             "assistant_message": deps.render_doc_question_markdown(payload),
@@ -645,6 +651,7 @@ async def _execute_doc_question(
             query=query,
             sources=sources,
             fallback_type="citation_validation_failed",
+            source_scope_summary=source_scope_summary,
         )
         return {
             "assistant_message": deps.render_doc_question_markdown(payload),
@@ -663,12 +670,14 @@ async def _execute_doc_question(
             query=query,
             sources=sources,
             fallback_type="insufficient_evidence",
+            source_scope_summary=source_scope_summary,
         )
     else:
         confidence, label = deps.compute_confidence_v1(sources, cited_ids, "grounded_answer")
         payload = {
             "answer_text": deps.strip_model_source_sections(response_text),
             "sources": sources,
+            "source_scope_summary": source_scope_summary,
             "answer_mode": "grounded_answer",
             "fallback_type": "none",
             "fallback_reason": None,

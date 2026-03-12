@@ -267,7 +267,7 @@ class TestChainlitControlPlaneSettings:
         assert [starter["label"] for starter in starters] == [
             "General Chat",
             "Coding Assistant",
-            "Agentic",
+            "Agentic (iterative)",
             "Specific Tasks",
             "RAG Q&A",
         ]
@@ -404,7 +404,7 @@ class TestChainlitControlPlaneSettings:
             "retrieved_context_tokens_budget": 7372,
             "generation_tokens_reserve": 1024,
             "context_budget_ratio": 0.6,
-            "tier": {"rag_mode": "corrective"},
+            "tier": {"rag_mode": "corrective", "rag_mode_label": "corrective retrieval"},
         }
         client = MagicMock()
         client.get = AsyncMock(return_value=response)
@@ -416,7 +416,72 @@ class TestChainlitControlPlaneSettings:
         assert metadata["effective_context_tokens"] == 12288
         assert metadata["retrieved_context_tokens_budget"] == 7372
         assert metadata["rag_mode"] == "corrective"
+        assert metadata["rag_mode_label"] == "corrective retrieval"
         assert self._store["runtime_budget_metadata"]["runtime_profile"] == "adaptive"
+
+    def test_render_doc_question_markdown_includes_scope_and_provenance(self):
+        markdown = self._module._render_doc_question_markdown(
+            {
+                "answer_text": "Штраф составляет 3 процента [1]",
+                "sources": [
+                    {
+                        "source_id": 1,
+                        "document_id": "kb-doc",
+                        "display_name": "kb_policy.txt",
+                        "chunk_id": "kb-doc:0",
+                        "collection_id": "legal",
+                        "source_origin": "knowledge_base",
+                        "section": "Статья 5",
+                        "char_span": {"start_char": 0, "end_char": 42},
+                        "page": 2,
+                        "quote": "За просрочку поставки применяется штраф 3 процента.",
+                        "raw_score": 0.91,
+                        "normalized_score": 0.88,
+                        "grade": None,
+                        "z_score": None,
+                    }
+                ],
+                "source_scope_summary": "knowledge_base+session_overlay",
+                "answer_mode": "grounded_answer",
+                "fallback_type": "none",
+                "fallback_reason": None,
+                "confidence": 0.9,
+                "confidence_label": "high",
+                "confidence_method": "heuristic_v1",
+                "confidence_version": "1",
+            }
+        )
+
+        assert "retrieval_scope: `knowledge_base+session_overlay`" in markdown
+        assert "origin=knowledge_base:legal" in markdown
+        assert "section=Статья 5" in markdown
+        assert "page=2" in markdown
+
+    def test_build_sources_from_rag_result_lifts_section_metadata(self):
+        rag_result = SimpleNamespace(
+            chunks=[
+                SimpleNamespace(
+                    index=0,
+                    text="Уведомление направляется за 10 дней.",
+                    score=0.75,
+                    metadata={},
+                )
+            ]
+        )
+        rag_pipeline = SimpleNamespace(
+            _chunks=[
+                SimpleNamespace(
+                    metadata={"doc_name": "contract.pdf", "section": "Статья 3"},
+                    start_char=10,
+                    end_char=42,
+                )
+            ]
+        )
+
+        sources = self._module._build_sources_from_rag_result(rag_result, rag_pipeline, max_sources=5)
+
+        assert sources[0]["display_name"] == "contract.pdf"
+        assert sources[0]["section"] == "Статья 3"
 
     def test_build_thread_metadata_includes_active_context_and_pending_action(self):
         self._store["control_plane_state"] = {

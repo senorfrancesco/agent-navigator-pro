@@ -1,0 +1,122 @@
+- id: session_notice_deadline
+  scenario: session_only
+  query: "За сколько дней нужно направить уведомление?"
+  answerable: true
+  reference_answer: "Уведомление направляется не позднее чем за 10 календарных дней."
+  expected_chunk_ids:
+    - session_contract_notice
+  expected_source_origins:
+    - session
+  chunks:
+    - chunk_id: session_contract_notice
+      document_id: contract_v2
+      source_origin: session
+      text: "Сторона обязана направить уведомление не позднее чем за 10 календарных дней до даты поставки."
+    - chunk_id: session_contract_penalty
+      document_id: contract_v2
+      source_origin: session
+      text: "За просрочку поставки применяется штраф в размере 3 процентов от стоимости партии."
+    - chunk_id: session_contract_payment
+      document_id: contract_v2
+      source_origin: session
+      text: "Оплата производится в течение 15 банковских дней после подписания акта."
+
+- id: kb_equipment_warranty
+  scenario: knowledge_base_only
+  query: "Какой гарантийный срок указан для оборудования?"
+  answerable: true
+  reference_answer: "Гарантийный срок оборудования составляет 24 месяца."
+  expected_chunk_ids:
+    - kb_warranty_term
+  expected_source_origins:
+    - knowledge_base
+  chunks:
+    - chunk_id: kb_warranty_term
+      document_id: kb_equipment_policy
+      source_origin: knowledge_base
+      text: "Гарантийный срок оборудования составляет 24 месяца с даты ввода в эксплуатацию."
+    - chunk_id: kb_warranty_service
+      document_id: kb_equipment_policy
+      source_origin: knowledge_base
+      text: "Сервисное обслуживание осуществляется на площадке заказчика."
+    - chunk_id: kb_payment_terms
+      document_id: kb_procurement_policy
+      source_origin: knowledge_base
+      text: "Авансирование по умолчанию не предусмотрено."
+
+- id: mixed_penalty_and_service
+  scenario: mixed
+  query: "Какая ответственность за просрочку и где описано сервисное обслуживание?"
+  answerable: true
+  reference_answer: "За просрочку поставки применяется штраф 3 процента. Сервисное обслуживание выполняется на площадке заказчика."
+  expected_chunk_ids:
+    - mixed_session_penalty
+    - mixed_kb_service
+  expected_source_origins:
+    - session
+    - knowledge_base
+  chunks:
+    - chunk_id: mixed_session_penalty
+      document_id: contract_v2
+      source_origin: session
+      text: "За просрочку поставки применяется штраф в размере 3 процентов от стоимости партии."
+    - chunk_id: mixed_kb_service
+      document_id: kb_equipment_policy
+      source_origin: knowledge_base
+      text: "Сервисное обслуживание осуществляется на площадке заказчика."
+    - chunk_id: mixed_session_notice
+      document_id: contract_v2
+      source_origin: session
+      text: "Уведомление направляется не позднее чем за 10 календарных дней."
+    - chunk_id: mixed_kb_storage
+      document_id: kb_equipment_policy
+      source_origin: knowledge_base
+      text: "Поставка выполняется партиями по согласованному графику."
+
+- id: unanswerable_advance_payment
+  scenario: unanswerable
+  query: "Какой размер аванса предусмотрен в источниках?"
+  answerable: false
+  reference_answer: ""
+  expected_chunk_ids: []
+  expected_source_origins: []
+  chunks:
+    - chunk_id: unanswerable_notice
+      document_id: contract_v2
+      source_origin: session
+      text: "Уведомление направляется не позднее чем за 10 календарных дней."
+    - chunk_id: unanswerable_service
+      document_id: kb_equipment_policy
+      source_origin: knowledge_base
+      text: "Сервисное обслуживание осуществляется на площадке заказчика."
+    - chunk_id: unanswerable_penalty
+      document_id: contract_v2
+      source_origin: session
+      text: "За просрочку поставки применяется штраф 3 процента."
+
+- id: duplicate_heavy_warranty
+  scenario: duplicate-heavy
+  query: "Какой гарантийный срок оборудования?"
+  answerable: true
+  reference_answer: "Гарантийный срок оборудования составляет 24 месяца."
+  expected_chunk_ids:
+    - duplicate_kb_warranty
+  expected_source_origins:
+    - knowledge_base
+  chunks:
+    - chunk_id: duplicate_session_summary
+      document_id: quote_summary
+      source_origin: session
+      text: "В коммерческом предложении упоминается гарантия и сервисное обслуживание оборудования."
+    - chunk_id: duplicate_kb_warranty
+      document_id: kb_equipment_policy
+      source_origin: knowledge_base
+      text: "Гарантийный срок оборудования составляет 24 месяца с даты ввода в эксплуатацию."
+    - chunk_id: duplicate_kb_warranty_copy
+      document_id: kb_equipment_policy_copy
+      source_origin: knowledge_base
+      text: "Гарантийный срок оборудования составляет 24 месяца с даты ввода в эксплуатацию."
+    - chunk_id: duplicate_session_note
+      document_id: meeting_notes
+      source_origin: session
+      text: "Стороны обсуждали срок поставки и размер штрафа за просрочку."

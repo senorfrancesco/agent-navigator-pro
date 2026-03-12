@@ -31,6 +31,7 @@ def test_build_runtime_plan_returns_stable_payload():
     assert plan["effective_context_tokens"] > 0
     assert plan["retrieved_context_tokens_budget"] > 0
     assert plan["rag_mode"] == "corrective"
+    assert plan["rag_mode_label"] == "corrective retrieval"
     assert plan["embedding_backend"] == "qwen3"
 
 
