@@ -170,3 +170,42 @@ def test_specialized_tasks_non_task_query_falls_back_to_chat_reason():
     assert response["executor"] == "chat"
     assert response["mode"] == "specialized_tasks"
     assert response["reason"] == "specialized_fallback_chat"
+
+
+def test_two_fresh_uploads_detect_equipment_mode_without_session_docs():
+    response = decide_orchestration(
+        query="Проверь соответствие сметы и ТЗ",
+        trace_id="trace666",
+        runtime_mode="auto",
+        file_count=2,
+        has_session_docs=False,
+        session_docs={},
+        active_doc_ids=[],
+        new_files=[
+            {"name": "tz_requirements.pdf", "path": "/tmp/tz_requirements.pdf"},
+            {"name": "offer_smeta.xlsx", "path": "/tmp/offer_smeta.xlsx"},
+        ],
+        classifier_result={"intent": "general_chat", "confidence": 0.41, "margin": 0.01, "needs_rag": False},
+    )
+
+    assert response["route"] == "equipment_analysis"
+    assert response["reason"] == "tz_vs_smeta_ambiguous"
+    assert response["action_required"]["type"] == "choose_route"
+
+
+def test_invalid_forced_route_falls_back_to_normal_routing():
+    response = decide_orchestration(
+        query="Привет",
+        trace_id="trace777",
+        runtime_mode="auto",
+        file_count=0,
+        has_session_docs=False,
+        session_docs={},
+        active_doc_ids=[],
+        classifier_result={"intent": "general_chat", "confidence": 0.9, "margin": 0.8, "needs_rag": False},
+        forced_route="broken_route",
+    )
+
+    assert response["route"] == "general_chat"
+    assert response["executor"] == "chat"
+    assert response["reason"] == "semantic_router"

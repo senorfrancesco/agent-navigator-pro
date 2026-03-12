@@ -1,4 +1,3 @@
-import asyncio
 import os
 import sys
 
@@ -10,7 +9,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from orchestrator.agent_api import OrchestrationRequest, execute_orchestration_api, orchestrate
 
 
-def test_orchestrate_request_accepts_specialized_tasks_runtime_mode():
+@pytest.mark.asyncio
+async def test_orchestrate_request_accepts_specialized_tasks_runtime_mode():
     request = OrchestrationRequest(
         message="Сравни эти два документа",
         runtime_mode="specialized_tasks",
@@ -29,7 +29,7 @@ def test_orchestrate_request_accepts_specialized_tasks_runtime_mode():
         },
     )
 
-    response = asyncio.run(orchestrate(request))
+    response = await orchestrate(request)
 
     assert response["mode"] == "specialized_tasks"
 
@@ -42,7 +42,8 @@ def test_orchestration_request_rejects_unknown_runtime_mode():
         )
 
 
-def test_orchestrate_response_includes_effective_settings():
+@pytest.mark.asyncio
+async def test_orchestrate_response_includes_effective_settings():
     request = OrchestrationRequest(
         message="Что написано в базе знаний про штрафы?",
         assistant_mode="rag_qa",
@@ -57,7 +58,7 @@ def test_orchestrate_response_includes_effective_settings():
         has_session_docs=False,
     )
 
-    response = asyncio.run(orchestrate(request))
+    response = await orchestrate(request)
 
     assert response["effective_settings"]["assistant_mode"] == "rag_qa"
     assert response["effective_settings"]["rag_scope"] == "knowledge_base_rag"
@@ -82,7 +83,8 @@ def test_orchestration_request_rejects_unknown_assistant_mode():
         )
 
 
-def test_execute_orchestration_api_returns_execution_metadata():
+@pytest.mark.asyncio
+async def test_execute_orchestration_api_returns_execution_metadata():
     request = OrchestrationRequest(
         message="Сравни эти два документа",
         session_id="session-api",
@@ -106,9 +108,212 @@ def test_execute_orchestration_api_returns_execution_metadata():
         },
     )
 
-    response = asyncio.run(execute_orchestration_api(request))
+    response = await execute_orchestration_api(request)
 
     assert response["state_ref"] == "session:session-api"
     assert response["pending_action_id"]
     assert response["action_required"]["type"] == "choose_route"
     assert response["ui_effects"]["set_pending_action"]["type"] == "choose_route"
+
+
+@pytest.mark.asyncio
+async def test_execute_orchestration_api_returns_top_level_control_plane_fields():
+    request = OrchestrationRequest(
+        message="Что в базе знаний про штрафы?",
+        assistant_mode="rag_qa",
+        rag_scope="knowledge_base_rag",
+        knowledge_collection_id="legal",
+        session_docs={
+            "session-note.txt": {"text": "штраф составляет 10 процентов"},
+        },
+        has_session_docs=True,
+        active_doc_ids=["session-note.txt"],
+        classifier_result={
+            "intent": "document_question",
+            "confidence": 0.95,
+            "margin": 0.5,
+            "needs_rag": True,
+        },
+    )
+
+    response = await execute_orchestration_api(request)
+
+    assert response["rag_scope"] == "knowledge_base_rag"
+    assert response["knowledge_collection_id"] == "legal"
+    assert response["source_scope_summary"] == "knowledge_base+session_overlay"
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_uses_effective_runtime_mode_from_assistant_mode():
+    request = OrchestrationRequest(
+        message="Сравни эти два документа",
+        assistant_mode="specific_tasks",
+        file_count=2,
+        has_session_docs=True,
+        session_docs={
+            "old.pdf": {"text": "v1"},
+            "new.pdf": {"text": "v2"},
+        },
+        attachments_meta=[
+            {"name": "old.pdf", "path": "/tmp/old.pdf"},
+            {"name": "new.pdf", "path": "/tmp/new.pdf"},
+        ],
+        active_doc_ids=["old", "new"],
+        classifier_result={
+            "intent": "compare_documents",
+            "confidence": 0.91,
+            "margin": 0.55,
+            "needs_rag": True,
+        },
+    )
+
+    response = await orchestrate(request)
+
+    assert response["mode"] == "specialized_tasks"
+    assert response["route"] == "compare_documents"
+    assert response["rag_scope"] == "session_rag"
+    assert response["source_scope_summary"] == "session"
+
+
+@pytest.mark.asyncio
+async def test_execute_orchestration_returns_top_level_control_plane_fields(monkeypatch):
+    async def fake_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "orchestrator.agent_api.ums_client.infer",
+        lambda model_id, payload: {"content": "stubbed response"},
+    )
+    monkeypatch.setattr("orchestrator.agent_api.asyncio.to_thread", fake_to_thread)
+
+    request = OrchestrationRequest(
+        message="Что написано в базе знаний про штрафы?",
+        assistant_mode="rag_qa",
+        rag_scope="knowledge_base_rag",
+        knowledge_collection_id="legal",
+        model_profile="analyst",
+        file_count=0,
+        has_session_docs=False,
+    )
+
+    response = await execute_orchestration_api(request)
+
+    assert response["mode"] == "specialized_tasks"
+    assert response["rag_scope"] == "knowledge_base_rag"
+    assert response["knowledge_collection_id"] == "legal"
+    assert response["source_scope_summary"] == "knowledge_base"
+    assert response["model_profile"] == "analyst"
+
+
+@pytest.mark.asyncio
+async def test_execute_orchestration_api_doc_question_reports_missing_rag_adapter_honestly():
+    request = OrchestrationRequest(
+        message="Что указано в документе про штраф?",
+        assistant_mode="specific_tasks",
+        session_docs={
+            "doc.txt": {"text": "штраф 10 процентов"},
+        },
+        has_session_docs=True,
+        active_doc_ids=["doc.txt"],
+        classifier_result={
+            "intent": "document_question",
+            "confidence": 0.95,
+            "margin": 0.5,
+            "needs_rag": True,
+        },
+    )
+
+    response = await execute_orchestration_api(request)
+
+    assert response["route"] == "document_question"
+    assert "retrieval adapter" in response["assistant_message"].lower()
+    assert "не реализован" in response["assistant_message"].lower()
+    assert response["sources"] == []
+
+
+@pytest.mark.asyncio
+async def test_execute_orchestration_api_doc_question_reports_retrieval_unavailable_for_api_adapter():
+    request = OrchestrationRequest(
+        message="Что написано в документе про штраф?",
+        assistant_mode="specific_tasks",
+        rag_scope="session_rag",
+        file_count=1,
+        has_session_docs=True,
+        session_docs={
+            "contract.pdf": {
+                "document_id": "contract.pdf",
+                "text": "Штраф составляет 10 процентов от суммы договора.",
+                "path": "/tmp/contract.pdf",
+            }
+        },
+        active_doc_ids=["contract.pdf"],
+        classifier_result={
+            "intent": "document_question",
+            "confidence": 0.92,
+            "margin": 0.51,
+            "needs_rag": True,
+        },
+    )
+
+    response = await execute_orchestration_api(request)
+
+    assert response["route"] == "document_question"
+    assert "retrieval" in response["assistant_message"].lower()
+    assert "adapter" in response["assistant_message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_infer_with_effective_settings_calls_ums_client(monkeypatch):
+    called = {}
+
+    def fake_infer(model_id, payload):
+        called["model_id"] = model_id
+        called["payload"] = payload
+        return {"content": "test response"}
+
+    async def fake_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr("orchestrator.agent_api.ums_client.infer", fake_infer)
+    monkeypatch.setattr("orchestrator.agent_api.asyncio.to_thread", fake_to_thread)
+
+    from orchestrator.agent_api import _infer_with_effective_settings
+
+    result = await _infer_with_effective_settings(
+        {"resolved_model_id": "test-model", "generation": {"temperature": 0.5}},
+        "test prompt",
+    )
+
+    assert called["model_id"] == "test-model"
+    assert called["payload"]["temperature"] == 0.5
+    assert result == "test response"
+
+
+def test_build_api_execution_dependencies_returns_session_docs_via_shared_shape():
+    from orchestrator.agent_api import _build_api_execution_dependencies
+    from orchestrator.ui_control_plane import resolve_effective_settings
+
+    request = OrchestrationRequest(
+        message="Сводка по документам",
+        session_docs={
+            "contract.pdf": {
+                "document_id": "doc-1",
+                "path": "/tmp/contract.pdf",
+                "text": "Штраф 10 процентов",
+                "report_generated": True,
+            }
+        },
+        has_session_docs=True,
+    )
+    deps = _build_api_execution_dependencies(request, resolve_effective_settings({}))
+
+    assert deps.get_all_docs() == [
+        {
+            "document_id": "doc-1",
+            "display_name": "contract.pdf",
+            "path": "/tmp/contract.pdf",
+            "text": "Штраф 10 процентов",
+            "report_generated": True,
+            "order_index": 1,
+        }
+    ]

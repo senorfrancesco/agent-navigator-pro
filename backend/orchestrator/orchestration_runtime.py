@@ -8,6 +8,7 @@ contract that UI layers can render without re-implementing business routing.
 from __future__ import annotations
 
 import copy
+import logging
 import re
 import time
 import uuid
@@ -80,6 +81,7 @@ _EXECUTOR_BY_ROUTE = {
     "general_chat": "chat",
     "greeting": "chat",
 }
+logger = logging.getLogger(__name__)
 
 
 def _has_any_keyword(query_lower: str, keywords: List[str]) -> bool:
@@ -376,22 +378,28 @@ def decide_orchestration(
 
     if forced_route:
         executor = _EXECUTOR_BY_ROUTE.get(forced_route)
-        active_mode = _ACTIVE_MODE_BY_ROUTE.get(forced_route)
-        return _response(
-            trace_id=trace_id,
-            mode=runtime_mode,
-            route=forced_route,
-            executor=executor,
-            confidence=1.0,
-            margin=1.0,
-            reason="forced_route",
-            session_state_patch=_build_session_state_patch(
+        if executor is None:
+            logger.warning(
+                "forced_route=%r is not a valid route, falling through to normal routing",
+                forced_route,
+            )
+        else:
+            active_mode = _ACTIVE_MODE_BY_ROUTE.get(forced_route)
+            return _response(
                 trace_id=trace_id,
+                mode=runtime_mode,
                 route=forced_route,
                 executor=executor,
-                active_mode=active_mode,
-            ),
-        )
+                confidence=1.0,
+                margin=1.0,
+                reason="forced_route",
+                session_state_patch=_build_session_state_patch(
+                    trace_id=trace_id,
+                    route=forced_route,
+                    executor=executor,
+                    active_mode=active_mode,
+                ),
+            )
 
     query_lower = (query or "").lower().strip()
     has_session_docs = has_session_docs or bool(session_docs)
@@ -417,6 +425,12 @@ def decide_orchestration(
                 text_1=docs[0].get("text", "")[:1000],
                 text_2=docs[1].get("text", "")[:1000],
             )
+    elif two_docs and len(new_files) >= 2:
+        mode_hint = detect_equipment_mode(
+            new_files[0].get("name", ""),
+            new_files[1].get("name", ""),
+            query,
+        )
 
     if runtime_mode == "chat_only":
         route = "greeting" if social_query else "general_chat"

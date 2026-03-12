@@ -195,6 +195,11 @@ UI должен:
 - Один и тот же запрос при одинаковом `runtime_mode` даёт одинаковый backend-route.
 - Все route-choice prompt’ы строятся из backend decision, а не из локальных if-веток UI.
 - Workflow-узлы не требуют живого `Chainlit` context для unit-тестов и headless execution.
+- Legacy `/v1/chat/completions` не живёт отдельным runtime-миром:
+  endpoint остаётся только compatibility surface и делегирует execution в unified backend core.
+- Legacy upload discovery для `/v1/chat/completions` не должен быть implicit default:
+  recent uploads из `open_webui_uploads` допустимы только как явный compatibility opt-in.
+- `backend/tests/test_chainlit_streaming.py` завершается cleanly без hanging pytest-process.
 
 ## Фаза 2. Ввести runtime modes как backend policy
 

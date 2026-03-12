@@ -16,6 +16,7 @@ import sys
 import pytest
 import tempfile
 import time
+from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Пути для импорта
@@ -605,13 +606,10 @@ class TestDocumentAnalysisIntent:
             importlib.reload(sys.modules["orchestrator.chainlit_app"])
         else:
             import orchestrator.chainlit_app
+        chainlit_app = sys.modules["orchestrator.chainlit_app"]
 
         from orchestrator.chainlit_app import (
-            _detect_intent,
             _get_intent_decision,
-            _resolve_pending_route_choice,
-            _is_social_query,
-            _is_docs_summary_query,
             _needs_doc_question_regen,
             _resolve_target_doc_name,
             _extract_citation_ids,
@@ -623,15 +621,55 @@ class TestDocumentAnalysisIntent:
             _strip_model_source_sections,
             _register_loaded_document,
             _get_active_docs,
+            _get_active_doc_ids,
             _set_active_doc_ids,
             _get_session_docs,
-            _build_route_choice_state,
         )
-        self._detect_intent = _detect_intent
+        from orchestrator.orchestration_runtime import (
+            build_route_choice_state,
+            detect_intent,
+            is_docs_summary_query,
+            is_social_query,
+            resolve_pending_action_selection,
+        )
+
+        def _detect_intent_wrapper(
+            query: str,
+            *,
+            file_count: int = 0,
+            has_session_docs: bool = False,
+            classifier_result: Optional[dict] = None,
+        ) -> str:
+            session_docs = chainlit_app._get_session_docs() if has_session_docs else {}
+            return detect_intent(
+                query,
+                file_count=file_count,
+                has_session_docs=has_session_docs,
+                active_docs_count=len(session_docs),
+                classifier_result=classifier_result,
+            )
+
+        def _build_route_choice_state_wrapper(
+            *,
+            query: str,
+            recommended_route: str,
+            new_files: list,
+            mode: str,
+        ) -> dict:
+            return build_route_choice_state(
+                query=query,
+                recommended_route=recommended_route,
+                new_files=new_files,
+                mode=mode,
+                trace_id=mock_session.get("request_trace_id"),
+                active_doc_ids=chainlit_app._get_active_doc_ids(),
+            )
+
+        self._detect_intent = _detect_intent_wrapper
         self._get_intent_decision = _get_intent_decision
-        self._resolve_pending_route_choice = _resolve_pending_route_choice
-        self._is_social_query = _is_social_query
-        self._is_docs_summary_query = _is_docs_summary_query
+        self._resolve_pending_route_choice = resolve_pending_action_selection
+        self._is_social_query = is_social_query
+        self._is_docs_summary_query = is_docs_summary_query
         self._needs_doc_question_regen = _needs_doc_question_regen
         self._resolve_target_doc_name = _resolve_target_doc_name
         self._extract_citation_ids = _extract_citation_ids
@@ -645,7 +683,7 @@ class TestDocumentAnalysisIntent:
         self._get_active_docs = _get_active_docs
         self._set_active_doc_ids = _set_active_doc_ids
         self._get_session_docs = _get_session_docs
-        self._build_route_choice_state = _build_route_choice_state
+        self._build_route_choice_state = _build_route_choice_state_wrapper
         self._mock_session = mock_session
         self._mock_cl = mock_cl
 

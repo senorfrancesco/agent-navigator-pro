@@ -36,14 +36,8 @@ from services.model_manager.ums_client import ums_client
 from orchestrator.rag.classifier import LLMIntentClassifier, select_classifier_result
 from orchestrator.shared.http_client import get_shared_client
 from orchestrator.orchestration_runtime import (
-    build_route_choice_prompt as _backend_build_route_choice_prompt,
-    build_route_choice_state as _backend_build_route_choice_state,
+    ROUTE_CHOICE_TIMEOUT_S,
     decide_orchestration as _backend_decide_orchestration,
-    detect_intent as _backend_detect_intent,
-    get_last_session_docs as _backend_get_last_session_docs,
-    is_docs_summary_query as _backend_is_docs_summary_query,
-    is_low_confidence as _backend_is_low_confidence,
-    is_social_query as _backend_is_social_query,
     normalize_runtime_mode as _backend_normalize_runtime_mode,
     resolve_pending_action_selection as _backend_resolve_pending_action_selection,
 )
@@ -78,40 +72,6 @@ INTENT_CLASSIFIER_LLM_CONFIDENCE_THRESHOLD = float(
     os.getenv("INTENT_CLASSIFIER_LLM_CONFIDENCE_THRESHOLD", "0.75")
 )
 
-INTENT_LOW_MARGIN_THRESHOLD = 0.12
-INTENT_LOW_CONFIDENCE_THRESHOLD = 0.55
-ROUTE_CHOICE_TIMEOUT_S = 90
-_COMPARE_QUERY_KEYWORDS = [
-    "сравни", "сравнение", "различия", "отличия", "изменения",
-    "что изменилось", "что поменялось", "покажи разницу",
-]
-_EQUIPMENT_QUERY_KEYWORDS = [
-    "тз", "техническое задание", "коммерческое предложение", "кп", "смета",
-    "оборудование", "подходит", "что подходит", "что нам подходит",
-    "соответствует", "соответствие", "подходит ли",
-]
-_DOC_QUESTION_KEYWORDS = [
-    "что", "какой", "какая", "какие", "сколько", "найди", "покажи", "указано",
-    "написано", "содержится", "есть ли",
-]
-_SUMMARY_QUERY_KEYWORDS = [
-    "о чем документ",
-    "о чём документ",
-    "о чем документы",
-    "о чём документы",
-    "о чем эти документы",
-    "о чём эти документы",
-    "суть документа",
-    "суть документов",
-    "кратко по документ",
-    "суммариз",
-    "сводк",
-    "проанализируй эти документы",
-    "проанализируй документы",
-    "анализируй эти документы",
-    "анализируй документы",
-    "анализ документов",
-]
 _DOC_QUESTION_UPLOAD_REQUEST_PHRASES = [
     "предоставьте тексты",
     "предоставьте текст",
@@ -123,16 +83,6 @@ _DOC_QUESTION_UPLOAD_REQUEST_PHRASES = [
     "предоставьте содержание",
     "нужно содержание",
 ]
-_SOCIAL_ONLY_RE = re.compile(
-    r"^(?:"
-    r"спасибо(?:\s+большое)?|благодарю|спс|"
-    r"ок(?:ей)?|понятно|ясно|понял(?:а)?|хорошо|"
-    r"привет|здравствуй(?:те)?|добрый день|добрый вечер|доброе утро|"
-    r"hi|hello|thanks|thank you"
-    r")$",
-    re.IGNORECASE,
-)
-
 DOC_QA_MIN_CHUNKS_SIMPLE = int(os.getenv("DOC_QA_MIN_CHUNKS_SIMPLE", "1"))
 DOC_QA_MIN_CHUNKS_MULTIHOP = int(os.getenv("DOC_QA_MIN_CHUNKS_MULTIHOP", "2"))
 DOC_QA_MIN_RAW_SCORE_SIMPLE = float(os.getenv("DOC_QA_MIN_RAW_SCORE_SIMPLE", "0.01"))
@@ -332,6 +282,8 @@ def _ensure_session_state() -> None:
         cl.user_session.set("documents", {})
     if cl.user_session.get("pending_action") is None:
         cl.user_session.set("pending_action", None)
+    if cl.user_session.get("pending_route_choice") is None:
+        cl.user_session.set("pending_route_choice", None)
     if cl.user_session.get("runtime_mode") is None:
         cl.user_session.set("runtime_mode", "auto")
     if cl.user_session.get("control_plane_state") is None:
@@ -578,7 +530,7 @@ def _apply_session_state_patch(patch: Optional[Dict[str, Any]]) -> None:
     if "pending_action" in patch:
         _set_pending_route_choice(patch.get("pending_action"))
     if patch.get("preserve_active_mode"):
-        pass
+        pass  # intentionally empty — handled by backend orchestration decision
     elif "active_mode" in patch:
         cl.user_session.set("active_mode", patch.get("active_mode"))
     for key in ("last_route", "last_executor", "last_trace_id", "runtime_mode"):
@@ -598,6 +550,7 @@ def _build_execution_dependencies() -> ExecutionDependencies:
         infer_assistant_text=_infer_assistant_text,
         build_prompt=_build_prompt,
         get_profile_system_prompt=_get_profile_system_prompt,
+        has_retrieval_adapter=lambda: True,
         get_active_doc_ids=_get_active_doc_ids,
         get_all_docs=_get_all_docs,
         get_active_docs=_get_active_docs,
@@ -874,67 +827,6 @@ async def _send_control_plane_settings() -> None:
         ]
     )
     await settings.send()
-
-
-# === Intent Detection ===
-
-def _detect_intent(query: str, file_count: int = 0, has_session_docs: bool = False) -> str:
-    classifier_result = _get_classifier_result(query)
-    active_docs_count = len(_get_active_doc_ids()) if has_session_docs else 0
-    if has_session_docs and active_docs_count == 0:
-        active_docs_count = len(_get_session_docs())
-    return _backend_detect_intent(
-        query,
-        file_count=file_count,
-        has_session_docs=has_session_docs,
-        active_docs_count=active_docs_count,
-        classifier_result=classifier_result,
-    )
-
-
-def _has_any_keyword(query_lower: str, keywords: List[str]) -> bool:
-    return any(kw in query_lower for kw in keywords)
-
-
-def _is_social_query(query: str) -> bool:
-    return _backend_is_social_query(query)
-
-
-def _is_low_confidence(classifier_result: Optional[Dict[str, Any]]) -> bool:
-    return _backend_is_low_confidence(classifier_result)
-
-
-def _get_last_session_docs(session_docs: Dict[str, Any], count: int = 2) -> List[Dict[str, Any]]:
-    return _backend_get_last_session_docs(session_docs, count=count)
-
-
-def _build_route_choice_prompt(recommended_route: str, mode: str) -> str:
-    return _backend_build_route_choice_prompt(recommended_route, mode)
-
-
-def _build_route_choice_state(
-    query: str,
-    recommended_route: str,
-    new_files: List[Dict[str, Any]],
-    mode: str,
-) -> Dict[str, Any]:
-    return _backend_build_route_choice_state(
-        query,
-        recommended_route,
-        new_files,
-        mode,
-        trace_id=cl.user_session.get("request_trace_id"),
-        active_doc_ids=_get_active_doc_ids(),
-    )
-
-
-def _resolve_pending_route_choice(query: str, pending_choice: Optional[Dict[str, Any]]) -> Optional[str]:
-    return _backend_resolve_pending_action_selection(query, pending_choice)
-
-
-def _is_docs_summary_query(query: str) -> bool:
-    return _backend_is_docs_summary_query(query)
-
 
 def _is_report_query(query: str) -> bool:
     q = (query or "").lower()
@@ -1889,7 +1781,7 @@ async def on_message(message: cl.Message):
 
     pending_choice = _get_pending_route_choice()
     if pending_choice:
-        selected_route = _resolve_pending_route_choice(query, pending_choice)
+        selected_route = _backend_resolve_pending_action_selection(query, pending_choice)
         if pending_choice.get("expires_at", 0) < time.time():
             _set_pending_route_choice(None)
         elif selected_route:

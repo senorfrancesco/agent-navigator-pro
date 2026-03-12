@@ -30,78 +30,87 @@ class FakeMessage:
         self.sent = True
 
 
-class TestStreamResponse:
-    @pytest.fixture(autouse=True)
-    def _setup_chainlit_mock(self):
-        mock_cl = MagicMock()
-        mock_session = MagicMock()
-        mock_session.get.return_value = None
-        mock_cl.user_session = mock_session
-        mock_cl.Message = MagicMock()
-        mock_cl.Step = MagicMock()
-        mock_cl.User = MagicMock()
-        mock_cl.on_chat_start = lambda f: f
-        mock_cl.on_chat_resume = lambda f: f
-        mock_cl.on_message = lambda f: f
-        mock_cl.password_auth_callback = lambda f: f
-        mock_cl.data_layer = lambda f: f
+@pytest.fixture
+def chainlit_stream_module():
+    mock_cl = MagicMock()
+    mock_session = MagicMock()
+    mock_session.get.return_value = None
+    mock_cl.user_session = mock_session
+    mock_cl.Message = MagicMock()
+    mock_cl.Step = MagicMock()
+    mock_cl.User = MagicMock()
+    mock_cl.on_chat_start = lambda f: f
+    mock_cl.on_chat_resume = lambda f: f
+    mock_cl.on_message = lambda f: f
+    mock_cl.password_auth_callback = lambda f: f
+    mock_cl.data_layer = lambda f: f
 
-        sys.modules["chainlit"] = mock_cl
-        sys.modules["chainlit.data"] = MagicMock()
-        sys.modules["chainlit.data.sql_alchemy"] = MagicMock()
+    sys.modules["chainlit"] = mock_cl
+    sys.modules["chainlit.data"] = MagicMock()
+    sys.modules["chainlit.data.sql_alchemy"] = MagicMock()
 
-        if "orchestrator.chainlit_app" in sys.modules:
-            importlib.reload(sys.modules["orchestrator.chainlit_app"])
-        else:
-            import orchestrator.chainlit_app
+    if "orchestrator.chainlit_app" in sys.modules:
+        importlib.reload(sys.modules["orchestrator.chainlit_app"])
+    else:
+        import orchestrator.chainlit_app
 
-        from orchestrator.chainlit_app import _stream_response
+    from orchestrator.chainlit_app import _stream_response
 
-        self._stream_response = _stream_response
-        self._module = sys.modules["orchestrator.chainlit_app"]
-        yield
+    module = sys.modules["orchestrator.chainlit_app"]
+    yield module, _stream_response
 
-        for mod_name in ["chainlit", "chainlit.data", "chainlit.data.sql_alchemy"]:
-            sys.modules.pop(mod_name, None)
-        sys.modules.pop("orchestrator.chainlit_app", None)
+    for mod_name in ["chainlit", "chainlit.data", "chainlit.data.sql_alchemy"]:
+        sys.modules.pop(mod_name, None)
+    sys.modules.pop("orchestrator.chainlit_app", None)
 
-    @pytest.mark.asyncio
-    async def test_stream_response_uses_direct_infer(self):
-        msg = FakeMessage()
-        history = []
 
-        with patch.object(
-                 self._module.ums_client,
-                 "infer",
-                 return_value={"choices": [{"text": "direct infer response"}]},
-             ) as mock_infer:
-            await self._stream_response("prompt", msg, history)
+@pytest.mark.asyncio
+async def test_stream_response_uses_direct_infer(chainlit_stream_module):
+    module, stream_response = chainlit_stream_module
+    msg = FakeMessage()
+    history = []
 
-        mock_infer.assert_called_once()
-        assert msg.sent is True
-        assert msg.content == "direct infer response"
-        assert history[-1]["content"] == "direct infer response"
+    async def fake_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
 
-    @pytest.mark.asyncio
-    async def test_stream_response_retries_sync_on_threaded_infer_failure(self):
-        msg = FakeMessage()
-        history = []
+    with patch.object(
+             module.asyncio,
+             "to_thread",
+             new=AsyncMock(side_effect=fake_to_thread),
+         ), patch.object(
+             module.ums_client,
+             "infer",
+             return_value={"choices": [{"text": "direct infer response"}]},
+         ) as mock_infer:
+        await stream_response("prompt", msg, history)
 
-        with patch.object(
-            self._module.asyncio,
-            "to_thread",
-            new=AsyncMock(side_effect=RuntimeError("threaded infer failed")),
-        ), patch.object(
-            self._module.ums_client,
-            "infer",
-            return_value={"choices": [{"text": "sync retry response"}]},
-        ) as mock_infer:
-            await self._stream_response("prompt", msg, history)
+    mock_infer.assert_called_once()
+    assert msg.sent is True
+    assert msg.content == "direct infer response"
+    assert history[-1]["content"] == "direct infer response"
 
-        mock_infer.assert_called_once()
-        assert msg.sent is True
-        assert msg.content == "sync retry response"
-        assert history[-1]["content"] == "sync retry response"
+
+@pytest.mark.asyncio
+async def test_stream_response_retries_sync_on_threaded_infer_failure(chainlit_stream_module):
+    module, stream_response = chainlit_stream_module
+    msg = FakeMessage()
+    history = []
+
+    with patch.object(
+        module.asyncio,
+        "to_thread",
+        new=AsyncMock(side_effect=RuntimeError("threaded infer failed")),
+    ), patch.object(
+        module.ums_client,
+        "infer",
+        return_value={"choices": [{"text": "sync retry response"}]},
+    ) as mock_infer:
+        await stream_response("prompt", msg, history)
+
+    mock_infer.assert_called_once()
+    assert msg.sent is True
+    assert msg.content == "sync retry response"
+    assert history[-1]["content"] == "sync retry response"
 
 
 class TestAsyncInferStream:

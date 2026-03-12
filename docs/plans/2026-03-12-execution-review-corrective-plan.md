@@ -77,6 +77,12 @@
 - этот блок уже начат и частично реализован;
 - его нельзя считать “закрытым концептуально и забытым”, пока не убраны оставшиеся UI-local
   routing/presentation leakage и не закрыт progress adapter path.
+- legacy `/v1/chat/completions` должен быть доведён до compatibility adapter над unified backend core,
+  без отдельного `sessions/run_workflow_stream/session-RAG` мира;
+- hanging `test_chainlit_streaming.py` должен быть либо исправлен, либо иметь доказанный root cause
+  и зафиксированный workaround.
+- legacy upload discovery через `open_webui_uploads` не должен silently влиять на любой
+  внешний `/v1/chat/completions` client; допустим только явный compatibility opt-in.
 
 ### Block B — Зафиксировать classifier contour
 

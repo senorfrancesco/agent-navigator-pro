@@ -71,6 +71,15 @@ class TestChainlitControlPlaneSettings:
 
         assert self._module._get_runtime_mode() == "auto"
 
+    def test_chainlit_app_uses_backend_routing_helpers_directly(self):
+        assert not hasattr(self._module, "_detect_intent")
+        assert not hasattr(self._module, "_is_social_query")
+        assert not hasattr(self._module, "_is_low_confidence")
+        assert not hasattr(self._module, "_build_route_choice_prompt")
+        assert not hasattr(self._module, "_build_route_choice_state")
+        assert not hasattr(self._module, "_resolve_pending_route_choice")
+        assert not hasattr(self._module, "_is_docs_summary_query")
+
     def test_apply_control_plane_preset_updates_session_state(self):
         effective = self._module._apply_control_plane_preset("preset:rag_qa")
 
@@ -155,6 +164,23 @@ class TestChainlitControlPlaneSettings:
         assert effective["prompt_profile"] == "coding-assistant"
         assert effective["custom_system_prompt"] == "Пиши точные ответы."
         assert self._store["runtime_mode"] == "chat_only"
+
+    def test_set_pending_route_choice_writes_both_session_keys(self):
+        payload = {"type": "choose_route", "route_choice_id": "rc-1"}
+
+        self._module._set_pending_route_choice(payload)
+
+        assert self._store["pending_action"] == payload
+        assert self._store["pending_route_choice"] == payload
+
+    def test_apply_session_state_patch_clears_both_pending_keys(self):
+        self._store["pending_action"] = {"type": "choose_route"}
+        self._store["pending_route_choice"] = {"type": "choose_route"}
+
+        self._module._apply_session_state_patch({"pending_action": None})
+
+        assert self._store["pending_action"] is None
+        assert self._store["pending_route_choice"] is None
 
     def test_default_starters_expose_use_case_presets(self):
         starters = self._module._default_starters()

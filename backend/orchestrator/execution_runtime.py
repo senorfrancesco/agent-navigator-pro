@@ -22,6 +22,7 @@ class ExecutionDependencies:
     infer_assistant_text: AsyncStrFn
     build_prompt: SyncAnyFn
     get_profile_system_prompt: SyncAnyFn
+    has_retrieval_adapter: SyncAnyFn
     get_active_doc_ids: SyncAnyFn
     get_all_docs: SyncAnyFn
     get_active_docs: SyncAnyFn
@@ -65,6 +66,43 @@ def _collect_raw_control_plane(request: Dict[str, Any]) -> Dict[str, Any]:
     if generation_overrides:
         raw["generation_overrides"] = dict(generation_overrides)
     return raw
+
+
+def resolve_request_runtime_mode(
+    request: Dict[str, Any],
+    effective_settings: Optional[Dict[str, Any]] = None,
+) -> str:
+    settings = effective_settings or resolve_effective_settings(_collect_raw_control_plane(request))
+    runtime_mode = settings.get("runtime_mode")
+    if isinstance(runtime_mode, str) and runtime_mode:
+        return runtime_mode
+    return str(request.get("runtime_mode") or "auto")
+
+
+def build_control_plane_metadata(
+    request: Dict[str, Any],
+    effective_settings: Dict[str, Any],
+) -> Dict[str, Any]:
+    rag_scope = str(effective_settings.get("rag_scope") or "off")
+    knowledge_collection_id = effective_settings.get("knowledge_collection_id")
+    session_docs = request.get("session_docs") or {}
+    active_doc_ids = request.get("active_doc_ids") or []
+    attachments_meta = request.get("attachments_meta") or []
+    has_overlay_inputs = bool(session_docs or active_doc_ids or attachments_meta)
+
+    if rag_scope == "knowledge_base_rag":
+        source_scope_summary = "knowledge_base+session_overlay" if has_overlay_inputs else "knowledge_base"
+    elif rag_scope == "session_rag":
+        source_scope_summary = "session"
+    else:
+        source_scope_summary = "off"
+
+    return {
+        "rag_scope": rag_scope,
+        "knowledge_collection_id": knowledge_collection_id,
+        "source_scope_summary": source_scope_summary,
+        "model_profile": str(effective_settings.get("model_profile") or "default-chat"),
+    }
 
 
 def _build_state_ref(*, thread_id: Optional[str], session_id: Optional[str], trace_id: str) -> str:
@@ -116,6 +154,7 @@ def _with_execution_metadata(
     trace_id = str(enriched.get("trace_id") or request.get("trace_id") or "")
     pending_action_id = _extract_pending_action_id(enriched.get("action_required"), trace_id)
     enriched["effective_settings"] = copy.deepcopy(effective_settings)
+    enriched.update(build_control_plane_metadata(request, effective_settings))
     enriched["state_ref"] = _build_state_ref(
         thread_id=request.get("thread_id"),
         session_id=request.get("session_id"),
@@ -130,6 +169,12 @@ async def _run_graph(workflow: Any, initial_state: Dict[str, Any]) -> Dict[str, 
     final_state: Dict[str, Any] = {}
     async for event in workflow.astream(initial_state):
         for _, output in event.items():
+            if "errors" in output and "errors" in final_state:
+                existing = final_state["errors"]
+                new = output["errors"]
+                if isinstance(existing, list) and isinstance(new, list):
+                    output = dict(output)
+                    output["errors"] = existing + new
             final_state.update(output)
     return final_state
 
@@ -383,15 +428,32 @@ async def _execute_doc_question(
     rag_result = None
     rag_meta: Dict[str, Any] = {}
     rag_mode = "simple"
+    retrieval_available = bool(deps.has_retrieval_adapter())
 
     if rag is not None and getattr(rag, "_indexed", False):
         try:
             retrieve_top_k = max(20, int(getattr(rag, "top_k", 5)) * 4) if target_doc_name else None
             rag_result = await asyncio.to_thread(rag.retrieve, query, retrieve_top_k)
-            rag_meta = rag_result.metadata or {}
+            rag_meta = getattr(rag_result, "metadata", None) or {}
             rag_mode = str(rag_meta.get("mode", "simple"))
         except Exception:
             rag_result = None
+
+    if rag_result is None and not retrieval_available:
+        payload = deps.build_doc_question_deterministic_fallback(
+            query=query,
+            sources=[],
+            fallback_type="retrieval_unavailable",
+            fallback_reason=(
+                "Для этого execution path backend retrieval adapter пока не подключён. "
+                "Execution выполняется через unified core, но session-document retrieval "
+                "для данного adapter ещё не реализован."
+            ),
+        )
+        return {
+            "assistant_message": deps.render_doc_question_markdown(payload),
+            "sources": payload.get("sources", []),
+        }
 
     if rag_result is None:
         return {
@@ -403,7 +465,12 @@ async def _execute_doc_question(
 
     sources = deps.build_sources_from_rag_result(rag_result, rag, max_sources=20)
     if target_doc_name:
-        sources = [s for s in sources if str(s.get("document_id")) == target_doc_name]
+        sources = [
+            s
+            for s in sources
+            if str(s.get("document_id")) == target_doc_name
+            or str(s.get("display_name", "")) == target_doc_name
+        ]
         sources = deps.reindex_sources(sources)
 
     if not sources:
@@ -499,7 +566,7 @@ async def _execute_general_chat(
             "Ответь как обычный чат-ассистент, без предложений загрузить документы, "
             "если пользователь сам не просит анализ документов."
         )
-    if social_query and session_docs:
+    elif social_query and session_docs:
         prompt += (
             "\n\nКонтекст: у пользователя уже есть загруженные документы. "
             "Отвечай как в обычном чате, без шаблонных фраз и без просьбы перезагрузить файлы."
@@ -518,11 +585,12 @@ async def execute_orchestration(
     history = request.get("history") or []
 
     effective_settings = copy.deepcopy(request.get("effective_settings") or resolve_effective_settings(_collect_raw_control_plane(request)))
+    runtime_mode = resolve_request_runtime_mode(request, effective_settings)
 
     decision = decide_orchestration(
         query=request.get("message", ""),
         trace_id=request.get("trace_id"),
-        runtime_mode=request.get("runtime_mode", "auto"),
+        runtime_mode=runtime_mode,
         file_count=int(request.get("file_count", 0)),
         has_session_docs=bool(request.get("has_session_docs", False)),
         session_docs=session_docs,
