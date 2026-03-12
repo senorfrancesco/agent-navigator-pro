@@ -278,9 +278,13 @@ python scripts/benchmark.py --output results/gpu.json
 
 # 2. CPU-режим: задать N_GPU_LAYERS_QWEN14B=0 в .env → перезапустить → запустить
 python scripts/benchmark.py --output results/cpu.json
+
+# 3. Сравнить два прогона и сохранить сводный diff
+python scripts/benchmark_compare.py results/cpu.json results/gpu.json --json-output results/compare.json
 ```
 
 Скрипт автоматически фиксирует параметры `.env` и UMS runtime profile в JSON-результат.
+`benchmark_compare.py` сравнивает latency/status/runtime metadata по shared/add/remove scenarios и даёт operator-friendly сводку.
 
 ## Полезные команды
 

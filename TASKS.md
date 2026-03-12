@@ -391,8 +391,23 @@
   Отправляет реальные запросы + файлы к запущенной системе, измеряет latency.
   Поддерживает `--repeats` для усреднения, `--output` для JSON-результатов, `--scenarios` для выбора.
   Workflow: изменить `.env` (N_GPU_LAYERS, CONTEXT_SIZE) → перезапустить → `python scripts/benchmark.py --output results/gpu.json`
-- [ ] **T4.16 — Benchmark comparison tool**
-  Скрипт для сравнения двух JSON-результатов benchmark (CPU vs GPU vs Hybrid).
+- [x] **T4.16 — Benchmark comparison tool**
+  Реализовано: `scripts/benchmark_compare.py` — канонический compare-tool для двух JSON-отчётов из `scripts/benchmark.py`.
+  Что закрыто:
+  - deterministic compare по `scenario`
+  - status change semantics: `same_ok`, `regressed_status`, `improved_status`, `changed_non_ok`
+  - latency delta / delta_pct / speedup
+  - added/removed scenario detection
+  - runtime metadata diff по `UMS /status`
+  - human-readable console summary
+  - machine-readable JSON output через `--json-output`
+  - focused coverage в `backend/tests/test_benchmark_compare.py`
+  Verification:
+  - `pytest backend/tests/test_benchmark_compare.py -q`
+  - `cd backend && pytest tests/ -q -m "not integration"`
+  Follow-up:
+  - statistical significance / variance analysis остаются отдельным benchmark follow-up
+  - CI gating по benchmark regression не входит в `T4.16`
   Таблица delta по каждому сценарию + рекомендации.
 
 ### Agentic Orchestrator (исследование)
