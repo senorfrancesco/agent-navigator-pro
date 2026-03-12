@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 from typing import Any, Callable, Dict, List, Optional
 
+import numpy as np
+
 from orchestrator.knowledge_base_store import SQLiteKnowledgeBaseStore
 from orchestrator.rag.chunker import LegalDocumentChunker
 from orchestrator.rag.retriever import HybridRetriever
@@ -54,7 +56,7 @@ def _build_kb_entries(
     if not collection_id:
         return []
     entries: List[Dict[str, Any]] = []
-    for chunk in kb_store.list_chunks_sync(collection_id):
+    for chunk in kb_store.list_chunks_sync(collection_id, include_embeddings=True):
         entries.append(
             {
                 "chunk_id": chunk.chunk_id,
@@ -64,6 +66,8 @@ def _build_kb_entries(
                 "source_origin": chunk.source_origin,
                 "text": chunk.text,
                 "metadata_json": dict(chunk.metadata_json or {}),
+                "embedding": chunk.embedding,
+                "embedding_model_id": chunk.embedding_model_id,
             }
         )
     return entries
@@ -80,7 +84,19 @@ def _search_entries(
     if not entries:
         return []
     retriever = HybridRetriever(embed_fn=embed_fn, use_bm25=True)
-    retriever.index([entry["text"] for entry in entries])
+    documents = [entry["text"] for entry in entries]
+    embeddings: List[np.ndarray] = []
+    has_precomputed = True
+    for entry in entries:
+        embedding = entry.get("embedding")
+        if embedding is None:
+            has_precomputed = False
+            break
+        embeddings.append(np.asarray(embedding, dtype=np.float32))
+    if has_precomputed and embeddings:
+        retriever.index_with_embeddings(documents, np.vstack(embeddings))
+    else:
+        retriever.index(documents)
     results = retriever.search(query, top_k=min(top_k, len(entries)), mode=mode)
     ranked: List[Dict[str, Any]] = []
     for rank, result in enumerate(results, start=1):
@@ -147,6 +163,36 @@ def _dedup_and_normalize(chunks: List[Dict[str, Any]], top_k: int) -> List[Dict[
     return deduped
 
 
+def _apply_optional_rerank(
+    *,
+    query: str,
+    chunks: List[Dict[str, Any]],
+    rerank_fn: Optional[Callable[[str, List[Dict[str, Any]]], List[float]]],
+) -> List[Dict[str, Any]]:
+    if not chunks or rerank_fn is None:
+        return chunks
+    rerank_scores = list(rerank_fn(query, chunks))
+    if len(rerank_scores) != len(chunks):
+        raise ValueError("rerank_fn must return one score per chunk")
+    min_score = min(rerank_scores)
+    max_score = max(rerank_scores)
+    spread = max_score - min_score
+    reranked: List[Dict[str, Any]] = []
+    for chunk, rerank_score in zip(chunks, rerank_scores):
+        normalized = 0.5 if spread <= 1e-9 else max(0.0, min(1.0, (float(rerank_score) - min_score) / spread))
+        final_score = 0.70 * float(chunk.get("normalized_score", 0.0)) + 0.30 * normalized
+        reranked.append(
+            {
+                **chunk,
+                "rerank_score": float(rerank_score),
+                "rerank_normalized_score": normalized,
+                "final_score": final_score,
+            }
+        )
+    reranked.sort(key=lambda item: float(item.get("final_score", 0.0)), reverse=True)
+    return reranked
+
+
 def retrieve_merged_chunks(
     *,
     query: str,
@@ -159,6 +205,7 @@ def retrieve_merged_chunks(
     top_k: int = 5,
     candidate_budget_per_scope: int = 12,
     mode: str = "hybrid",
+    rerank_fn: Optional[Callable[[str, List[Dict[str, Any]]], List[float]]] = None,
 ) -> Dict[str, Any]:
     if embed_fn is None:
         return {"chunks": [], "source_scope_summary": "off"}
@@ -174,8 +221,9 @@ def retrieve_merged_chunks(
             mode=mode,
             top_k=candidate_budget_per_scope,
         ))
+        deduped = _dedup_and_normalize(session_ranked, top_k)
         return {
-            "chunks": _dedup_and_normalize(session_ranked, top_k),
+            "chunks": _apply_optional_rerank(query=query, chunks=deduped, rerank_fn=rerank_fn),
             "source_scope_summary": "session",
         }
 
@@ -196,7 +244,7 @@ def retrieve_merged_chunks(
         ))
         merged = _dedup_and_normalize(kb_ranked + session_ranked, top_k)
         return {
-            "chunks": merged,
+            "chunks": _apply_optional_rerank(query=query, chunks=merged, rerank_fn=rerank_fn),
             "source_scope_summary": "knowledge_base+session_overlay" if session_entries else "knowledge_base",
         }
 

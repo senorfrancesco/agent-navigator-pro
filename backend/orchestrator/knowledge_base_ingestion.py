@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Callable, List, Optional
+
+import numpy as np
 
 from orchestrator.knowledge_base_store import (
     KnowledgeBaseChunkRecord,
@@ -34,6 +36,7 @@ def ingest_text_source_sync(
     embedding_model_id: str = "labse",
     chunking_version: str = "legal_v1",
     chunker: Optional[LegalDocumentChunker] = None,
+    embed_fn: Optional[Callable] = None,
 ) -> IngestedKnowledgeBaseSource:
     if not text or not text.strip():
         raise ValueError("Knowledge base source text must be non-empty")
@@ -52,8 +55,13 @@ def ingest_text_source_sync(
     )
 
     chunk_objects = chunker.chunk(text, doc_name=display_name)
+    chunk_embeddings = None
+    if embed_fn is not None and chunk_objects:
+        chunk_embeddings = np.asarray(embed_fn([chunk.text for chunk in chunk_objects]), dtype=np.float32)
+        if chunk_embeddings.ndim != 2 or chunk_embeddings.shape[0] != len(chunk_objects):
+            raise ValueError("Knowledge base embed_fn must return a 2D array aligned with chunks")
     chunk_rows = []
-    for chunk in chunk_objects:
+    for idx, chunk in enumerate(chunk_objects):
         metadata = dict(chunk.metadata or {})
         metadata.update(
             {
@@ -71,6 +79,8 @@ def ingest_text_source_sync(
                 "text": chunk.text,
                 "metadata_json": metadata,
                 "source_origin": "knowledge_base",
+                "embedding": chunk_embeddings[idx] if chunk_embeddings is not None else None,
+                "embedding_model_id": embedding_model_id if chunk_embeddings is not None else None,
             }
         )
 

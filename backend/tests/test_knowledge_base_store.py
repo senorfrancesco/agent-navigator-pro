@@ -1,6 +1,8 @@
 import os
 import sys
 
+import numpy as np
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from orchestrator.knowledge_base_store import SQLiteKnowledgeBaseStore
@@ -77,3 +79,37 @@ def test_kb_store_replaces_chunks_for_source(tmp_path):
 
     assert [chunk.chunk_id for chunk in chunks] == ["chunk-3"]
     assert chunks[0].metadata_json["section"] == "2.1"
+
+
+def test_kb_store_persists_chunk_embeddings_when_requested(tmp_path):
+    store = SQLiteKnowledgeBaseStore(db_url=f"sqlite:///{tmp_path}/kb_store.db")
+    source = store.register_source_sync(
+        collection_id="legal",
+        display_name="policy.txt",
+        content_hash="hash-emb",
+        mime_type="text/plain",
+        index_version="v1",
+        embedding_model_id="labse",
+        chunking_version="legal_v1",
+    )
+
+    store.replace_chunks_sync(
+        source_id=source.source_id,
+        chunks=[
+            {
+                "chunk_id": "chunk-1",
+                "chunk_index": 0,
+                "text": "Первый фрагмент",
+                "metadata_json": {"section": "1.1"},
+                "embedding": np.array([0.1, 0.2, 0.3], dtype=np.float32),
+                "embedding_model_id": "labse",
+            }
+        ],
+    )
+
+    chunks = store.list_chunks_sync(collection_id="legal", include_embeddings=True)
+
+    assert chunks[0].embedding_model_id == "labse"
+    assert chunks[0].embedding_dim == 3
+    assert chunks[0].embedding is not None
+    np.testing.assert_allclose(chunks[0].embedding, np.array([0.1, 0.2, 0.3], dtype=np.float32))

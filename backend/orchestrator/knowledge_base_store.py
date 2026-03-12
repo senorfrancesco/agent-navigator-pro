@@ -9,6 +9,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+import numpy as np
+
 
 DEFAULT_KB_DB_URL = os.getenv("ORCHESTRATOR_KB_DB_URL", "sqlite:///.data/orchestrator_kb.db")
 _STORE_LOCK = threading.Lock()
@@ -40,6 +42,9 @@ class KnowledgeBaseChunkRecord:
     text: str
     metadata_json: Dict[str, Any]
     source_origin: str
+    embedding: Optional[np.ndarray] = None
+    embedding_dim: Optional[int] = None
+    embedding_model_id: Optional[str] = None
 
 
 def _sqlite_db_path_from_url(db_url: str) -> str:
@@ -62,6 +67,24 @@ def _json_load(value: str) -> Dict[str, Any]:
     return json.loads(value) if value else {}
 
 
+def _serialize_embedding(value: Any) -> Optional[bytes]:
+    if value is None:
+        return None
+    array = np.asarray(value, dtype=np.float32)
+    if array.ndim != 1:
+        raise ValueError("Chunk embedding must be a 1D vector")
+    return array.tobytes()
+
+
+def _deserialize_embedding(blob: Optional[bytes], dim: Optional[int]) -> Optional[np.ndarray]:
+    if blob is None or dim is None:
+        return None
+    array = np.frombuffer(blob, dtype=np.float32)
+    if array.size != dim:
+        return None
+    return array.copy()
+
+
 class SQLiteKnowledgeBaseStore:
     def __init__(self, db_url: str = DEFAULT_KB_DB_URL):
         self.db_url = db_url
@@ -71,6 +94,7 @@ class SQLiteKnowledgeBaseStore:
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
     def _bootstrap(self) -> None:
@@ -105,6 +129,17 @@ class SQLiteKnowledgeBaseStore:
             ON kb_sources(collection_id);
         CREATE INDEX IF NOT EXISTS idx_kb_chunks_source_id
             ON kb_chunks(source_id);
+
+        CREATE TABLE IF NOT EXISTS kb_chunk_embeddings (
+            chunk_id TEXT PRIMARY KEY,
+            embedding_blob BLOB NOT NULL,
+            embedding_dim INTEGER NOT NULL,
+            embedding_model_id TEXT NOT NULL,
+            FOREIGN KEY(chunk_id) REFERENCES kb_chunks(chunk_id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_kb_chunk_embeddings_model
+            ON kb_chunk_embeddings(embedding_model_id);
         """
         with self._connect() as conn:
             conn.executescript(schema)
@@ -135,6 +170,11 @@ class SQLiteKnowledgeBaseStore:
             text=str(row["text"]),
             metadata_json=_json_load(str(row["metadata_json"])),
             source_origin=str(row["source_origin"]),
+            embedding=_deserialize_embedding(row["embedding_blob"], row["embedding_dim"])
+            if "embedding_blob" in row.keys()
+            else None,
+            embedding_dim=int(row["embedding_dim"]) if "embedding_dim" in row.keys() and row["embedding_dim"] is not None else None,
+            embedding_model_id=str(row["embedding_model_id"]) if "embedding_model_id" in row.keys() and row["embedding_model_id"] is not None else None,
         )
 
     def register_source_sync(
@@ -209,8 +249,13 @@ class SQLiteKnowledgeBaseStore:
 
     def replace_chunks_sync(self, *, source_id: str, chunks: List[Dict[str, Any]]) -> None:
         with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM kb_chunk_embeddings WHERE chunk_id IN (SELECT chunk_id FROM kb_chunks WHERE source_id = ?)",
+                (source_id,),
+            )
             conn.execute("DELETE FROM kb_chunks WHERE source_id = ?", (source_id,))
             for chunk in chunks:
+                chunk_id = str(chunk["chunk_id"])
                 conn.execute(
                     """
                     INSERT INTO kb_chunks (
@@ -218,7 +263,7 @@ class SQLiteKnowledgeBaseStore:
                     ) VALUES (?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        str(chunk["chunk_id"]),
+                        chunk_id,
                         source_id,
                         int(chunk["chunk_index"]),
                         str(chunk["text"]),
@@ -226,6 +271,21 @@ class SQLiteKnowledgeBaseStore:
                         str(chunk.get("source_origin") or "knowledge_base"),
                     ),
                 )
+                embedding_blob = _serialize_embedding(chunk.get("embedding"))
+                if embedding_blob is not None:
+                    conn.execute(
+                        """
+                        INSERT INTO kb_chunk_embeddings (
+                            chunk_id, embedding_blob, embedding_dim, embedding_model_id
+                        ) VALUES (?, ?, ?, ?)
+                        """,
+                        (
+                            chunk_id,
+                            embedding_blob,
+                            int(np.asarray(chunk["embedding"], dtype=np.float32).shape[0]),
+                            str(chunk.get("embedding_model_id") or ""),
+                        ),
+                    )
             conn.commit()
 
     def list_sources_sync(self, collection_id: str) -> List[KnowledgeBaseSourceRecord]:
@@ -240,11 +300,18 @@ class SQLiteKnowledgeBaseStore:
         self,
         collection_id: str,
         source_ids: Optional[List[str]] = None,
+        include_embeddings: bool = False,
     ) -> List[KnowledgeBaseChunkRecord]:
-        query = """
-            SELECT c.*, s.collection_id, s.display_name
+        select_columns = "c.*, s.collection_id, s.display_name"
+        join_clause = ""
+        if include_embeddings:
+            select_columns += ", e.embedding_blob, e.embedding_dim, e.embedding_model_id"
+            join_clause = " LEFT JOIN kb_chunk_embeddings e ON e.chunk_id = c.chunk_id"
+        query = f"""
+            SELECT {select_columns}
             FROM kb_chunks c
             JOIN kb_sources s ON s.source_id = c.source_id
+            {join_clause}
             WHERE s.collection_id = ?
         """
         params: List[Any] = [collection_id]
@@ -270,8 +337,9 @@ class SQLiteKnowledgeBaseStore:
         self,
         collection_id: str,
         source_ids: Optional[List[str]] = None,
+        include_embeddings: bool = False,
     ) -> List[KnowledgeBaseChunkRecord]:
-        return self.list_chunks_sync(collection_id, source_ids=source_ids)
+        return self.list_chunks_sync(collection_id, source_ids=source_ids, include_embeddings=include_embeddings)
 
 
 def get_knowledge_base_store() -> SQLiteKnowledgeBaseStore:

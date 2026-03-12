@@ -90,16 +90,22 @@
 
 ## Status
 
-In progress on 2026-03-13.
+Completed on 2026-03-13.
 
-### Delivered first slice
-- deterministic shortlist hardening added in `knowledge_base_retrieval.py`
-- duplicate policy now prefers `session` overlay over KB duplicate when scores are near
-- targeted verification:
-  - `pytest backend/tests/test_knowledge_base_retrieval.py backend/tests/test_execution_runtime.py backend/tests/test_agent_api_orchestrate.py -q`
-  - `cd backend && pytest tests/ -q -m "not integration"` -> `389 passed, 4 deselected`
+### Delivered
+- deterministic shortlist hardening in `knowledge_base_retrieval.py`
+- duplicate policy prefers `session` overlay over KB duplicate when scores are near
+- persisted KB chunk embeddings scaffold in:
+  - `knowledge_base_store.py`
+  - `knowledge_base_ingestion.py`
+  - `rag/retriever.py`
+- retrieval reuses precomputed KB dense vectors on query-time instead of re-embedding KB chunks
+- optional backend-owned rerank hook added after merged shortlist
 
-### Remaining
-- persisted embeddings / vector index for KB collections
-- optional rerank hook
-- broader score fusion policy beyond duplicate tie-break
+### Verification
+- `pytest backend/tests/test_knowledge_base_store.py backend/tests/test_knowledge_base_ingestion.py backend/tests/test_knowledge_base_retrieval.py backend/tests/test_execution_runtime.py backend/tests/test_agent_api_orchestrate.py -q`
+- `cd backend && pytest tests/ -q -m "not integration"` -> `393 passed, 4 deselected`
+
+### Deferred follow-up
+- full vector DB / ANN index rollout remains a separate phase
+- if rerank graduates from hook to production scorer, it should be wired through backend config instead of UI semantics

@@ -203,18 +203,22 @@
     - `display_name`
   - Verification:
     - targeted KB/runtime suite зелёный
-    - `cd backend && pytest tests/ -q -m "not integration"` -> `386 passed, 4 deselected`
+    - `cd backend && pytest tests/ -q -m "not integration"` -> `393 passed, 4 deselected`
   Pragmatic V1 follow-up:
-  - persisted embeddings / vector index / reranker остаются отдельным follow-up, сейчас KB retrieval строится transient over persisted chunks
+  - full vector DB migration остаётся отдельным follow-up; текущий KB contour использует persisted chunk embeddings + transient hybrid shortlist
 
-- [ ] **B3.33a — Knowledge Base retrieval hardening**
-  - Persisted embeddings или vector index для KB collection
-  - Retrieval embedder profile / rerank stage после merge shortlist
-  - Более явный score fusion/tie-break для дубликатов `session` vs `knowledge_base`
-  - Progress 2026-03-13:
-    - shortlist hardening и duplicate policy начаты;
-    - `session` overlay теперь детерминированно побеждает KB duplicate при близком score;
-    - full completion остаётся за persisted embeddings / rerank / broader fusion policy
+- [x] **B3.33a — Knowledge Base retrieval hardening**
+  - Выполнено как production-oriented hardening без rewrite RAG stack:
+    - shortlist hardening и duplicate policy закреплены;
+    - `session` overlay детерминированно побеждает KB duplicate при близком score;
+    - persisted KB chunk embeddings добавлены в store/ingestion scaffold;
+    - retrieval использует precomputed dense vectors для KB chunks, не переэмбеддит их на query-time;
+    - optional backend-owned rerank hook добавлен после merged shortlist.
+  - Verification:
+    - `pytest backend/tests/test_knowledge_base_store.py backend/tests/test_knowledge_base_ingestion.py backend/tests/test_knowledge_base_retrieval.py backend/tests/test_execution_runtime.py backend/tests/test_agent_api_orchestrate.py -q`
+    - `cd backend && pytest tests/ -q -m "not integration"` -> `393 passed, 4 deselected`
+  Follow-up:
+  - отдельный vector DB / ANN index rollout остаётся самостоятельной фазой и не смешивается с текущим persisted-embeddings scaffold
 
 ### Блок D — Honest Tiers & Citations (B3.35, B3.36)
 

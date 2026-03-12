@@ -30,6 +30,15 @@ def _stub_embed_fn(texts):
     return np.array(vectors)
 
 
+class CountingEmbedFn:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, texts):
+        self.calls.append(list(texts))
+        return _stub_embed_fn(texts)
+
+
 def test_retrieve_merged_chunks_combines_kb_and_session_with_provenance(tmp_path):
     store = SQLiteKnowledgeBaseStore(db_url=f"sqlite:///{tmp_path}/kb_retrieval.db")
     ingest_text_source_sync(
@@ -139,3 +148,77 @@ def test_retrieve_merged_chunks_prefers_session_overlay_for_duplicate_text(tmp_p
     assert result["source_scope_summary"] == "knowledge_base+session_overlay"
     assert len(result["chunks"]) == 1
     assert result["chunks"][0]["source_origin"] == "session"
+
+
+def test_retrieve_merged_chunks_uses_persisted_kb_embeddings_without_reembedding_docs(tmp_path):
+    store = SQLiteKnowledgeBaseStore(db_url=f"sqlite:///{tmp_path}/kb_retrieval.db")
+    embed_fn = CountingEmbedFn()
+    ingest_text_source_sync(
+        collection_id="legal",
+        display_name="kb_policy.txt",
+        text="Гарантийный срок оборудования составляет 24 месяца.",
+        store=store,
+        mime_type="text/plain",
+        index_version="v1",
+        embedding_model_id="labse",
+        chunking_version="legal_v1",
+        embed_fn=embed_fn,
+    )
+    embed_fn.calls.clear()
+
+    result = retrieve_merged_chunks(
+        query="Какой гарантийный срок оборудования?",
+        rag_scope="knowledge_base_rag",
+        knowledge_collection_id="legal",
+        session_docs={},
+        active_doc_ids=[],
+        embed_fn=embed_fn,
+        kb_store=store,
+        top_k=2,
+        candidate_budget_per_scope=2,
+    )
+
+    assert result["source_scope_summary"] == "knowledge_base"
+    assert len(result["chunks"]) >= 1
+    assert embed_fn.calls == [["Какой гарантийный срок оборудования?"]]
+
+
+def test_retrieve_merged_chunks_applies_optional_rerank_hook_to_shortlist(tmp_path):
+    store = SQLiteKnowledgeBaseStore(db_url=f"sqlite:///{tmp_path}/kb_retrieval.db")
+    ingest_text_source_sync(
+        collection_id="legal",
+        display_name="kb_policy.txt",
+        text="За просрочку поставки применяется штраф 3 процента.",
+        store=store,
+        mime_type="text/plain",
+        index_version="v1",
+        embedding_model_id="labse",
+        chunking_version="legal_v1",
+        embed_fn=_stub_embed_fn,
+    )
+    session_docs = {
+        "service.txt": {
+            "document_id": "session-service",
+            "text": "Сервисное обслуживание осуществляется на площадке заказчика.",
+            "path": "/tmp/service.txt",
+        }
+    }
+
+    def rerank_fn(query, chunks):
+        return [1.0 if "сервис" in chunk["text"].lower() else 0.0 for chunk in chunks]
+
+    result = retrieve_merged_chunks(
+        query="Что сказано про штраф и обслуживание?",
+        rag_scope="knowledge_base_rag",
+        knowledge_collection_id="legal",
+        session_docs=session_docs,
+        active_doc_ids=["session-service"],
+        embed_fn=_stub_embed_fn,
+        kb_store=store,
+        top_k=2,
+        candidate_budget_per_scope=4,
+        rerank_fn=rerank_fn,
+    )
+
+    assert result["chunks"][0]["text"].lower().startswith("сервисное обслуживание")
+    assert result["chunks"][0]["rerank_score"] == 1.0
