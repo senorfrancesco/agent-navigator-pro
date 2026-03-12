@@ -23,12 +23,16 @@ def test_resolve_effective_settings_defaults(monkeypatch):
     assert effective["custom_system_prompt"] is None
     assert effective["device_mode"] == "auto"
     assert effective["context_budget_profile"] == "standard"
+    assert effective["intent_embedder_profile"] == "intent-default"
+    assert effective["retrieval_embedder_profile"] == "legal-default"
     assert effective["generation"] == {
         "temperature": 0.7,
         "top_p": 0.9,
         "max_tokens": 2048,
     }
     assert effective["resolved_model_id"] == "qwen-14b-llm"
+    assert effective["resolved_intent_embedder_model_id"] == "qwen3-embedding-0.6b"
+    assert effective["resolved_retrieval_embedder_model_id"] == "labse-embedding"
 
 
 def test_specific_tasks_preset_defaults_to_session_rag():
@@ -42,6 +46,7 @@ def test_specific_tasks_preset_defaults_to_session_rag():
     assert effective["tool_scope"] == "domain_tasks"
     assert effective["device_mode"] == "prefer-gpu"
     assert effective["context_budget_profile"] == "legal-compare"
+    assert effective["resolved_retrieval_embedder_model_id"] == "labse-embedding"
 
 
 def test_rag_qa_preset_defaults_to_knowledge_base_rag():
@@ -54,6 +59,7 @@ def test_rag_qa_preset_defaults_to_knowledge_base_rag():
     assert effective["prompt_profile"] == "strict-grounded-doc-qa"
     assert effective["tool_scope"] == "document_qa"
     assert effective["device_mode"] == "prefer-gpu"
+    assert effective["resolved_retrieval_embedder_model_id"] == "labse-embedding"
 
 
 def test_explicit_overrides_win_over_preset_defaults():
@@ -83,6 +89,7 @@ def test_explicit_overrides_win_over_preset_defaults():
     assert effective["knowledge_collection_id"] == "legal"
     assert effective["device_mode"] == "low-vram"
     assert effective["context_budget_profile"] == "compact"
+    assert effective["retrieval_embedder_profile"] == "low-vram"
     assert effective["generation"] == {
         "temperature": 0.15,
         "top_p": 0.42,
@@ -129,6 +136,9 @@ def test_effective_settings_include_env_resolved_model_and_generation_defaults(m
     monkeypatch.setenv("CHAINLIT_DEFAULT_TOP_P", "0.73")
     monkeypatch.setenv("CHAINLIT_DEFAULT_MAX_TOKENS", "3072")
     monkeypatch.setenv("CHAINLIT_MODEL_PROFILE_LONG_CONTEXT_MODEL", "qwen-coder-32b")
+    monkeypatch.setenv("CHAINLIT_INTENT_EMBEDDER_PROFILE_DEFAULT_MODEL", "qwen3-embedding-0.6b-custom")
+    monkeypatch.setenv("CHAINLIT_RETRIEVAL_EMBEDDER_PROFILE_LEGAL_DEFAULT_MODEL", "labse-custom")
+    monkeypatch.setenv("CHAINLIT_RETRIEVAL_EMBEDDER_PROFILE_LOW_VRAM_MODEL", "qwen3-embedding-low-vram")
 
     default_effective = resolve_effective_settings({})
     long_context_effective = resolve_effective_settings({"model_profile": "long-context"})
@@ -139,9 +149,14 @@ def test_effective_settings_include_env_resolved_model_and_generation_defaults(m
         "max_tokens": 3072,
     }
     assert default_effective["resolved_model_id"] == "qwen-14b-llm"
+    assert default_effective["resolved_intent_embedder_model_id"] == "qwen3-embedding-0.6b-custom"
+    assert default_effective["resolved_retrieval_embedder_model_id"] == "labse-custom"
     assert long_context_effective["resolved_model_id"] == "qwen-coder-32b"
     assert long_context_effective["device_mode"] == "prefer-gpu"
     assert long_context_effective["context_budget_profile"] == "long-context"
+
+    low_vram_effective = resolve_effective_settings({"model_profile": "low-vram"})
+    assert low_vram_effective["resolved_retrieval_embedder_model_id"] == "qwen3-embedding-low-vram"
 
 
 def test_legacy_model_profile_aliases_resolve_to_canonical_profiles():

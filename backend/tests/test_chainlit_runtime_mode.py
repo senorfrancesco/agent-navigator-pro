@@ -154,11 +154,27 @@ class TestChainlitControlPlaneSettings:
         )
 
         assert "model_profile: `legal-compare`" in summary
+        assert "intent_embedder: `qwen3-embedding-0.6b`" in summary
+        assert "retrieval_embedder: `labse-embedding`" in summary
         assert "device_mode: `prefer-gpu`" in summary
         assert "context_budget_profile: `legal-compare`" in summary
         assert "runtime_profile: `adaptive`" in summary
         assert "effective_context_tokens: `12288`" in summary
         assert "retrieved_context_tokens_budget: `7372`" in summary
+
+    def test_build_execution_dependencies_uses_resolved_retrieval_embedder(self):
+        self._store["effective_settings"] = self._module.resolve_effective_settings({"model_profile": "low-vram"})
+        called = {}
+
+        def fake_create_ums_embed_fn(**kwargs):
+            called["model_id"] = kwargs.get("model_id")
+            return "embed-fn"
+
+        with patch("services.model_manager.ums_client.create_ums_embed_fn", side_effect=fake_create_ums_embed_fn):
+            deps = self._module._build_execution_dependencies()
+            assert deps.get_retrieval_embed_fn() == "embed-fn"
+
+        assert called["model_id"] == self._store["effective_settings"]["resolved_retrieval_embedder_model_id"]
 
     @pytest.mark.asyncio
     async def test_send_control_plane_settings_renders_multitab_panel(self):

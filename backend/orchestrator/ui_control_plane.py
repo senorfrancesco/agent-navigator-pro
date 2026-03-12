@@ -78,6 +78,24 @@ MODEL_PROFILE_ENV_PREFIXES: Dict[str, str] = {
     "low-vram": "CHAINLIT_MODEL_PROFILE_LOW_VRAM",
 }
 
+INTENT_EMBEDDER_PROFILE_DEFINITIONS: Dict[str, Dict[str, Any]] = {
+    "intent-default": {
+        "env_var": "CHAINLIT_INTENT_EMBEDDER_PROFILE_DEFAULT_MODEL",
+        "fallback_model_id": "qwen3-embedding-0.6b",
+    },
+}
+
+RETRIEVAL_EMBEDDER_PROFILE_DEFINITIONS: Dict[str, Dict[str, Any]] = {
+    "legal-default": {
+        "env_var": "CHAINLIT_RETRIEVAL_EMBEDDER_PROFILE_LEGAL_DEFAULT_MODEL",
+        "fallback_model_id": "labse-embedding",
+    },
+    "low-vram": {
+        "env_var": "CHAINLIT_RETRIEVAL_EMBEDDER_PROFILE_LOW_VRAM_MODEL",
+        "fallback_model_id": "labse-embedding",
+    },
+}
+
 PROMPT_PROFILE_ITEMS: Dict[str, str] = {
     "default-assistant": "Default Assistant",
     "coding-assistant": "Coding Assistant",
@@ -149,6 +167,8 @@ CONTROL_PLANE_HARD_DEFAULTS: Dict[str, Any] = {
     "device_mode": "auto",
     "context_budget_profile": "standard",
     "profile_generation_defaults": copy.deepcopy(DEFAULT_GENERATION),
+    "intent_embedder_profile": "intent-default",
+    "retrieval_embedder_profile": "legal-default",
 }
 
 ASSISTANT_MODE_PRESETS: Dict[str, Dict[str, Any]] = {
@@ -447,6 +467,8 @@ def resolve_effective_settings(
     effective["device_mode"] = profile_definition["device_mode"]
     effective["context_budget_profile"] = profile_definition["context_budget_profile"]
     effective["profile_generation_defaults"] = get_model_profile_generation_defaults(effective["model_profile"])
+    effective["intent_embedder_profile"] = "intent-default"
+    effective["retrieval_embedder_profile"] = "low-vram" if effective["model_profile"] == "low-vram" else "legal-default"
 
     knowledge_collection_id = _normalize_text(raw_state.get("knowledge_collection_id"))
     if knowledge_collection_id is not None:
@@ -495,6 +517,12 @@ def resolve_effective_settings(
     effective["context_budget_profile"] = profile_definition["context_budget_profile"]
     effective["profile_generation_defaults"] = get_model_profile_generation_defaults(effective["model_profile"])
     effective["resolved_model_id"] = resolve_model_id(effective.get("model_profile"))
+    effective["resolved_intent_embedder_model_id"] = resolve_intent_embedder_model_id(
+        effective.get("intent_embedder_profile")
+    )
+    effective["resolved_retrieval_embedder_model_id"] = resolve_retrieval_embedder_model_id(
+        effective.get("retrieval_embedder_profile")
+    )
     return effective
 
 
@@ -506,4 +534,22 @@ def get_prompt_profile_system_message(prompt_profile: Optional[str]) -> str:
 def resolve_model_id(model_profile: Optional[str]) -> str:
     normalized = _normalize_model_profile(model_profile) or CONTROL_PLANE_HARD_DEFAULTS["model_profile"]
     definition = MODEL_PROFILE_DEFINITIONS[normalized]
+    return os.getenv(definition["env_var"], definition["fallback_model_id"])
+
+
+def resolve_intent_embedder_model_id(intent_embedder_profile: Optional[str]) -> str:
+    normalized = str(intent_embedder_profile or CONTROL_PLANE_HARD_DEFAULTS["intent_embedder_profile"]).strip()
+    definition = INTENT_EMBEDDER_PROFILE_DEFINITIONS.get(
+        normalized,
+        INTENT_EMBEDDER_PROFILE_DEFINITIONS[CONTROL_PLANE_HARD_DEFAULTS["intent_embedder_profile"]],
+    )
+    return os.getenv(definition["env_var"], definition["fallback_model_id"])
+
+
+def resolve_retrieval_embedder_model_id(retrieval_embedder_profile: Optional[str]) -> str:
+    normalized = str(retrieval_embedder_profile or CONTROL_PLANE_HARD_DEFAULTS["retrieval_embedder_profile"]).strip()
+    definition = RETRIEVAL_EMBEDDER_PROFILE_DEFINITIONS.get(
+        normalized,
+        RETRIEVAL_EMBEDDER_PROFILE_DEFINITIONS[CONTROL_PLANE_HARD_DEFAULTS["retrieval_embedder_profile"]],
+    )
     return os.getenv(definition["env_var"], definition["fallback_model_id"])

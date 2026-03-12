@@ -37,6 +37,21 @@ UI отправляет только `model_profile`, а backend резолви�
 - `CHAINLIT_MODEL_PROFILE_LEGAL_COMPARE_MODEL`
 - `CHAINLIT_MODEL_PROFILE_LOW_VRAM_MODEL`
 
+Embedder routing тоже backend-owned и сейчас резолвится без raw selector в UI:
+
+- intent embedder:
+  - `CHAINLIT_INTENT_EMBEDDER_PROFILE_DEFAULT_MODEL`
+  - default -> `qwen3-embedding-0.6b`
+- retrieval/legal embedder:
+  - `CHAINLIT_RETRIEVAL_EMBEDDER_PROFILE_LEGAL_DEFAULT_MODEL`
+  - `CHAINLIT_RETRIEVAL_EMBEDDER_PROFILE_LOW_VRAM_MODEL`
+  - current baseline stays `labse-embedding` until retrieval verdict changes
+
+Итоговый effective config публикует:
+- `resolved_model_id`
+- `resolved_intent_embedder_model_id`
+- `resolved_retrieval_embedder_model_id`
+
 При необходимости можно задать profile-specific generation defaults через:
 
 - `CHAINLIT_MODEL_PROFILE_<PROFILE>_TEMPERATURE`

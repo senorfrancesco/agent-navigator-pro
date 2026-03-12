@@ -731,6 +731,8 @@ def _build_context_status_markdown(title: str = "Текущий контекст
         f"- rag_scope: `{effective.get('rag_scope')}`",
         f"- model_profile: `{effective.get('model_profile')}`",
         f"- resolved_model_id: `{effective.get('resolved_model_id')}`",
+        f"- intent_embedder: `{effective.get('resolved_intent_embedder_model_id')}`",
+        f"- retrieval_embedder: `{effective.get('resolved_retrieval_embedder_model_id')}`",
         f"- device_mode: `{effective.get('device_mode')}`",
         f"- context_budget_profile: `{effective.get('context_budget_profile')}`",
         f"- Active docs: `{len(active_labels)}`",
@@ -835,23 +837,34 @@ async def _persist_current_backend_state(*, status: str = "active", last_error: 
 
 def _build_execution_dependencies() -> ExecutionDependencies:
     def _get_retrieval_embed_fn():
+        effective = _get_effective_settings()
+        retrieval_embedder_model_id = str(
+            effective.get("resolved_retrieval_embedder_model_id") or LEGAL_EMBEDDER_MODEL
+        )
         rag_pipeline = cl.user_session.get("rag_pipeline")
         retriever = getattr(rag_pipeline, "retriever", None)
         embed_fn = getattr(retriever, "embed_fn", None)
         if embed_fn is not None:
             return embed_fn
 
-        cached = cl.user_session.get("retrieval_embed_fn")
-        if cached is not None:
-            return cached
+        cache_entry = cl.user_session.get("retrieval_embed_fn")
+        if isinstance(cache_entry, dict) and cache_entry.get("model_id") == retrieval_embedder_model_id:
+            cached = cache_entry.get("embed_fn")
+            if cached is not None:
+                return cached
+        elif cache_entry is not None and retrieval_embedder_model_id == LEGAL_EMBEDDER_MODEL:
+            return cache_entry
 
         try:
             from services.model_manager.ums_client import create_ums_embed_fn
 
-            embed_fn = create_ums_embed_fn(model_id=LEGAL_EMBEDDER_MODEL)
+            embed_fn = create_ums_embed_fn(model_id=retrieval_embedder_model_id)
         except Exception:
             embed_fn = None
-        cl.user_session.set("retrieval_embed_fn", embed_fn)
+        cl.user_session.set(
+            "retrieval_embed_fn",
+            {"model_id": retrieval_embedder_model_id, "embed_fn": embed_fn},
+        )
         return embed_fn
 
     return ExecutionDependencies(
@@ -1034,6 +1047,8 @@ def _format_effective_settings_summary(effective: Optional[Dict[str, Any]] = Non
         f"- rag_scope: `{effective.get('rag_scope')}`",
         f"- model_profile: `{effective.get('model_profile')}`",
         f"- resolved_model_id: `{effective.get('resolved_model_id')}`",
+        f"- intent_embedder: `{effective.get('resolved_intent_embedder_model_id')}`",
+        f"- retrieval_embedder: `{effective.get('resolved_retrieval_embedder_model_id')}`",
         f"- device_mode: `{effective.get('device_mode')}`",
         f"- context_budget_profile: `{effective.get('context_budget_profile')}`",
         f"- prompt_profile: `{effective.get('prompt_profile')}`",
@@ -1930,11 +1945,15 @@ async def _init_classifier():
         retries = int(os.getenv("CHAINLIT_CLASSIFIER_PREINIT_RETRIES", "6"))
         delay_s = float(os.getenv("CHAINLIT_CLASSIFIER_PREINIT_DELAY_S", "2.0"))
         embed_fn = None
+        effective = _get_effective_settings()
+        intent_embedder_model_id = str(
+            effective.get("resolved_intent_embedder_model_id") or INTENT_CLASSIFIER_EMBEDDER_MODEL
+        )
 
         for attempt in range(1, retries + 1):
             embed_fn = await asyncio.to_thread(
                 create_ums_embed_fn,
-                model_id=INTENT_CLASSIFIER_EMBEDDER_MODEL,
+                model_id=intent_embedder_model_id,
             )
             if embed_fn:
                 break

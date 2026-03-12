@@ -345,7 +345,24 @@
   - ввести explicit optimistic locking / idempotency semantics поверх `state_version` и `idempotency_key`
 
 ### Динамическая конфигурация
-- [ ] B3.22 — Dynamic selection of models and embedders
+- [x] **B3.22 — Dynamic selection of models and embedders**
+  - Dynamic selection централизован в backend control-plane:
+    - `resolved_model_id`
+    - `resolved_intent_embedder_model_id`
+    - `resolved_retrieval_embedder_model_id`
+  - `Chainlit` classifier pre-init использует resolved intent embedder, а retrieval adapter в `Chainlit` и API adapter используют resolved retrieval embedder вместо локальных hardcoded source-of-truth констант.
+  - Defaults сохранены согласно текущему verdict:
+    - intent embedder -> `qwen3-embedding-0.6b`
+    - retrieval/legal embedder -> `labse-embedding`
+  - Env-backed mapping:
+    - `CHAINLIT_INTENT_EMBEDDER_PROFILE_DEFAULT_MODEL`
+    - `CHAINLIT_RETRIEVAL_EMBEDDER_PROFILE_LEGAL_DEFAULT_MODEL`
+    - `CHAINLIT_RETRIEVAL_EMBEDDER_PROFILE_LOW_VRAM_MODEL`
+  - Verification:
+    - `pytest backend/tests/test_ui_control_plane.py backend/tests/test_chainlit_runtime_mode.py backend/tests/test_agent_api_orchestrate.py -q`
+    - `cd backend && pytest tests/ -q -m "not integration"` -> `397 passed, 4 deselected`
+  Follow-up:
+  - per-request hot-switching уже загруженных UMS моделей/embedders остаётся отдельным runtime API follow-up, не смешивается с текущим control-plane resolver
 - [ ] B3.23 — Multi-GPU placement policy для LLM и embeddings
 
 ### Benchmark & Performance Profiling

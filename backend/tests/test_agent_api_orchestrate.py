@@ -93,6 +93,8 @@ async def test_orchestrate_response_includes_effective_settings():
     assert response["effective_settings"]["custom_system_prompt"] == "Отвечай с явными ссылками на источники."
     assert response["effective_settings"]["tool_scope"] == "document_qa"
     assert response["effective_settings"]["resolved_model_id"] == "qwen-14b-llm"
+    assert response["effective_settings"]["resolved_intent_embedder_model_id"] == "qwen3-embedding-0.6b"
+    assert response["effective_settings"]["resolved_retrieval_embedder_model_id"] == "labse-embedding"
     assert response["effective_settings"]["generation"] == {
         "temperature": 0.15,
         "top_p": 0.5,
@@ -380,3 +382,24 @@ def test_build_api_execution_dependencies_returns_session_docs_via_shared_shape(
             "order_index": 1,
         }
     ]
+
+
+def test_build_api_execution_dependencies_uses_resolved_retrieval_embedder(monkeypatch):
+    from orchestrator.agent_api import _build_api_execution_dependencies
+    from orchestrator.ui_control_plane import resolve_effective_settings
+
+    called = {}
+
+    def fake_create_ums_embed_fn(**kwargs):
+        called["model_id"] = kwargs.get("model_id")
+        return _stub_embed_fn
+
+    monkeypatch.setattr("services.model_manager.ums_client.create_ums_embed_fn", fake_create_ums_embed_fn)
+
+    request = OrchestrationRequest(message="Что написано про штраф?", has_session_docs=False)
+    effective = resolve_effective_settings({"model_profile": "low-vram"})
+
+    deps = _build_api_execution_dependencies(request, effective)
+
+    assert deps.get_retrieval_embed_fn() is _stub_embed_fn
+    assert called["model_id"] == effective["resolved_retrieval_embedder_model_id"]

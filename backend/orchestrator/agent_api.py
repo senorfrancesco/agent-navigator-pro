@@ -43,7 +43,6 @@ except ImportError:
     def get_system_resources(): return {"error": "Resource monitor not found"}
 
 app = FastAPI(title="Agent Navigator Pro Orchestrator", version="2.3.0")
-LEGAL_EMBEDDER_MODEL = os.getenv("LEGAL_EMBEDDER_MODEL", "labse-embedding")
 
 app.add_middleware(
     CORSMiddleware,
@@ -201,10 +200,13 @@ def _build_api_execution_dependencies(request: OrchestrationRequest, effective_s
         nonlocal retrieval_embed_fn
         if retrieval_embed_fn is not None:
             return retrieval_embed_fn
+        retrieval_embedder_model_id = str(
+            effective_settings.get("resolved_retrieval_embedder_model_id") or "labse-embedding"
+        )
         try:
             from services.model_manager.ums_client import create_ums_embed_fn
 
-            retrieval_embed_fn = create_ums_embed_fn(model_id=LEGAL_EMBEDDER_MODEL)
+            retrieval_embed_fn = create_ums_embed_fn(model_id=retrieval_embedder_model_id)
         except Exception:
             retrieval_embed_fn = None
         return retrieval_embed_fn
