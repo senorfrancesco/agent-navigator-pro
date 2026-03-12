@@ -17,7 +17,7 @@
 
 **Tech Stack:** Python, pytest, YAML dataset, `sentence-transformers`, existing `HybridRetriever`.
 
-Current verdict: curated dataset shows parity, so retrieval embedder is **not** unified yet; `LaBSE` remains the dense retrieval/legal baseline until dataset expansion.
+Current verdict: initial curated dataset and expanded `B3.34a` dataset both show parity, so retrieval embedder is **not** unified yet; `LaBSE` remains the dense retrieval/legal baseline.
 
 ## Definition of Done
 

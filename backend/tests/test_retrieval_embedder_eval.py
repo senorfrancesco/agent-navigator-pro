@@ -29,11 +29,15 @@ def _stub_embed_fn(texts):
                 1.0 if "сервис" in q or "обслуж" in q else 0.0,
                 1.0 if "аванс" in q or "оплат" in q else 0.0,
                 1.0 if "оборудован" in q else 0.0,
+                1.0 if "претенз" in q or "качеств" in q else 0.0,
+                1.0 if "расторж" in q or "существен" in q or "нарушен" in q else 0.0,
+                1.0 if "ответствен" in q or "огранич" in q or "10 процент" in q else 0.0,
+                1.0 if "валют" in q or "курс" in q or "рубл" in q else 0.0,
             ],
             dtype=np.float32,
         )
         if not np.any(vec):
-            vec = np.ones(6, dtype=np.float32)
+            vec = np.ones(10, dtype=np.float32)
         vec /= np.linalg.norm(vec)
         vectors.append(vec)
     return np.array(vectors)
@@ -52,7 +56,7 @@ def _dataset_path():
 def test_load_retrieval_eval_cases_reads_curated_dataset():
     cases = load_retrieval_eval_cases(_dataset_path())
 
-    assert len(cases) == 5
+    assert len(cases) == 9
     assert {case.scenario for case in cases} == set(SCENARIOS)
     assert all(case.chunks for case in cases)
 
@@ -166,7 +170,7 @@ def test_evaluate_retrieval_cases_reports_core_metrics():
         top_k=3,
     )
 
-    assert metrics["total_cases"] == 5
+    assert metrics["total_cases"] == 9
     assert metrics["recall_at_k"] >= 0.75
     assert metrics["evidence_hit_rate"] >= 0.75
     assert metrics["source_origin_accuracy"] >= 0.5
@@ -187,6 +191,25 @@ def test_evaluate_retrieval_cases_dense_mode_keeps_mixed_source_accuracy():
 
     assert metrics["source_origin_accuracy"] >= 0.5
     assert metrics["per_scenario"]["mixed"]["source_origin_accuracy"] == 1.0
+
+
+def test_expanded_dataset_contains_hard_negative_and_legal_wording_cases():
+    cases = {case.case_id: case for case in load_retrieval_eval_cases(_dataset_path())}
+
+    assert "session_claim_deadline" in cases
+    assert "kb_unilateral_termination_material_breach" in cases
+    assert "mixed_service_and_liability_cap" in cases
+    assert "unanswerable_currency_rate" in cases
+
+
+def test_hard_negative_claim_deadline_prefers_claim_chunk_over_generic_day_distractors():
+    cases = load_retrieval_eval_cases(_dataset_path())
+    case = next(item for item in cases if item.case_id == "session_claim_deadline")
+
+    metrics = evaluate_retrieval_cases([case], embed_fn=_stub_embed_fn, mode="dense", top_k=2)
+
+    assert metrics["recall_at_k"] == 1.0
+    assert metrics["mrr"] == 1.0
 
 
 def test_answer_faithfulness_uses_retrieved_hits_not_all_gold_evidence():

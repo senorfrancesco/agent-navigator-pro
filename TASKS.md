@@ -139,8 +139,8 @@
   Закрыто через набор harness-фиксов: `backend/tests/test_document_analysis.py` переведён на канонические helper’ы из backend runtime, `backend/tests/test_equipment_workflow.py::TestDocumentServerEndpoints` переведён на `httpx.ASGITransport` вместо подвисающего `TestClient`, hanging graph-runtime assertion заменён на structural graph assertion, а `backend/tests/test_intent_classifier.py` переведён со встроенного process-randomized `hash(...)` на стабильный `sha256`-seed для synthetic embeddings. Подтверждение: `cd backend && pytest tests/ -q -m "not integration"` → `331 passed, 4 deselected`.
   Доп. стабилизация: `backend/tests/test_onnx_embeddings.py::TestBenchmark::test_benchmark_speed` переведён с жёсткого `speedup_50 > 1.0` на competitive smoke-check (`mean_speedup >= 0.95` + хотя бы один batch c `speedup >= 1.0`), потому что в полном suite CPU/joblib jitter делал точную mid-batch performance assertion flaky.
 
-- [ ] **B3.31-commit — Закоммитить текущие uncommitted changes**
-  Harness и manifest-фиксы уже готовы к фиксации, но рабочее дерево всё ещё содержит product/runtime/tests/docs изменения поверх ранее сделанного snapshot-коммита. Перед финальным commit нужно ещё раз отделить их от локальных артефактов (`.chainlit`, `.env.native`, `.files`, backup-файлы) и собрать один чистый scoped commit.
+- [x] **B3.31-commit — Закоммитить текущие uncommitted changes**
+  Scoped commit pack для backend-first orchestration фаз уже собран отдельными commits поверх рабочего snapshot, без локальных артефактов (`.chainlit`, `.env.native`, `.files`, backup-файлы). Дополнительного “финального мегакоммита” по `B3.31` больше не требуется.
 
 ---
 
@@ -174,9 +174,23 @@
     - `answer_faithfulness` в этом harness — deterministic lexical proxy, а не LLM judge
     - `bm25` mode оставлен как baseline/debug path, но решение `LaBSE vs Qwen3` принимается только по dense/hybrid runs
 
-- [ ] **B3.34a — Retrieval eval dataset expansion**
-  - Расширить curated retrieval eval dataset hard negatives / ambiguity-cases / более тяжёлым legal wording
-  - Повторить `LaBSE vs Qwen3-Embedding-0.6B` после расширения набора
+- [x] **B3.34a — Retrieval eval dataset expansion**
+  - Curated retrieval eval dataset расширен с 5 до 9 cases:
+    - hard negative `session_only`
+    - legal wording `knowledge_base_only`
+    - ambiguity `mixed`
+    - более жёсткий `unanswerable`
+  - Повторный CPU-прогон на expanded dataset:
+    - `LaBSE`: `recall_at_k=1.0`, `mrr=1.0`, `ndcg_at_k=1.0`, `evidence_hit_rate=1.0`, `source_origin_accuracy=1.0`, `answer_faithfulness=0.951`
+    - `Qwen3-Embedding-0.6B`: те же значения
+  - Updated verdict:
+    - curated dataset стал сильнее, но verdict не изменился;
+    - dense retrieval baseline по-прежнему не переносим с `LaBSE` на `Qwen3`
+  - Verification:
+    - `pytest backend/tests/test_retrieval_embedder_eval.py -q`
+    - `cd backend && pytest tests/ -q -m "not integration"` -> `393 passed, 4 deselected`
+  Follow-up:
+  - `unanswerable_rejection_rate` в текущем harness остаётся optimistic proxy и требует отдельного tightening, если будем использовать его как decision metric
 
 ### Блок C — Knowledge Base RAG (B3.33)
 
