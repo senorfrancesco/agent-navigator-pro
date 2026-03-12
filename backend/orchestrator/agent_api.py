@@ -115,6 +115,7 @@ class OrchestrationRequest(BaseModel):
     session_docs: Optional[Dict[str, Any]] = None
     classifier_result: Optional[Dict[str, Any]] = None
     trace_id: Optional[str] = None
+    idempotency_key: Optional[str] = None
     forced_route: Optional[str] = None
 
 
@@ -644,6 +645,7 @@ async def openai_completions(request: Request):
             if target_model != "agent-navigator":
                 effective_settings["resolved_model_id"] = target_model
             payload = compat_request.model_dump(exclude_none=True)
+            payload["idempotency_key"] = dedup_key
             payload["runtime_mode"] = resolve_request_runtime_mode(payload, effective_settings)
             payload["effective_settings"] = effective_settings
             response = await execute_orchestration(
@@ -670,6 +672,7 @@ async def openai_completions(request: Request):
             if target_model != "agent-navigator":
                 effective_settings["resolved_model_id"] = target_model
             payload = compat_request.model_dump(exclude_none=True)
+            payload["idempotency_key"] = dedup_key
             payload["runtime_mode"] = resolve_request_runtime_mode(payload, effective_settings)
             payload["effective_settings"] = effective_settings
             response = await execute_orchestration(

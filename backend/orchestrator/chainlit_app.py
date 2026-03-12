@@ -625,7 +625,20 @@ def _build_backend_resume_snapshot() -> Dict[str, Any]:
     _ensure_session_state()
     return {
         "history": copy.deepcopy(_get_session_history()),
-        "documents_by_id": copy.deepcopy(_get_documents_by_id()),
+        "document_refs": [
+            {
+                "document_id": str(doc.get("document_id")),
+                "display_name": str(doc.get("display_name")),
+                "version": int(doc.get("version", 1)),
+                "path": doc.get("path"),
+                "uploaded_at": doc.get("uploaded_at"),
+                "source_message_id": doc.get("source_message_id"),
+                "source_origin": doc.get("source_origin"),
+                "collection_id": doc.get("collection_id"),
+            }
+            for doc in _get_all_docs()
+            if doc.get("document_id") and doc.get("display_name")
+        ],
         "active_doc_ids": list(_get_active_doc_ids()),
         "pending_action": copy.deepcopy(_get_pending_route_choice()),
         "runtime_mode": _get_runtime_mode(),
@@ -644,6 +657,23 @@ def _build_backend_resume_snapshot() -> Dict[str, Any]:
 def _restore_backend_resume_snapshot(snapshot: Dict[str, Any]) -> None:
     _ensure_session_state()
     docs_by_id = copy.deepcopy(snapshot.get("documents_by_id") or {})
+    if not docs_by_id:
+        for ref in snapshot.get("document_refs") or []:
+            document_id = str(ref.get("document_id") or "").strip()
+            display_name = str(ref.get("display_name") or "").strip()
+            if not document_id or not display_name:
+                continue
+            docs_by_id[document_id] = {
+                "document_id": document_id,
+                "display_name": display_name,
+                "version": int(ref.get("version", 1)),
+                "path": ref.get("path", ""),
+                "text": "",
+                "uploaded_at": float(ref.get("uploaded_at", 0.0) or 0.0),
+                "source_message_id": ref.get("source_message_id"),
+                "source_origin": ref.get("source_origin"),
+                "collection_id": ref.get("collection_id"),
+            }
     cl.user_session.set("history", copy.deepcopy(snapshot.get("history") or []))
     cl.user_session.set("documents_by_id", docs_by_id)
     cl.user_session.set("documents_by_name", {})

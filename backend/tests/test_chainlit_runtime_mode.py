@@ -370,17 +370,18 @@ class TestChainlitControlPlaneSettings:
             pending_action_id="route-choice-1",
             resume_state_blob={
                 "history": [{"role": "assistant", "content": "restored"}],
-                "documents_by_id": {
-                    "doc-1": {
+                "document_refs": [
+                    {
                         "document_id": "doc-1",
                         "display_name": "contract.pdf",
                         "version": 1,
                         "path": "/tmp/contract.pdf",
-                        "text": "Штраф 10 процентов",
                         "uploaded_at": 1.0,
                         "source_message_id": None,
+                        "source_origin": "session",
+                        "collection_id": None,
                     }
-                },
+                ],
                 "active_doc_ids": ["doc-1"],
                 "pending_action": {"type": "choose_route", "route_choice_id": "route-choice-1"},
                 "runtime_mode": "specialized_tasks",
@@ -410,6 +411,8 @@ class TestChainlitControlPlaneSettings:
         assert self._store["state_ref"] == "run:run-test"
         assert self._store["active_doc_ids"] == ["doc-1"]
         assert self._store["pending_action"]["route_choice_id"] == "route-choice-1"
+        assert self._store["documents_by_id"]["doc-1"]["display_name"] == "contract.pdf"
+        assert self._store["documents_by_id"]["doc-1"]["text"] == ""
 
     @pytest.mark.asyncio
     async def test_get_runtime_budget_metadata_reads_ums_status(self):
@@ -532,6 +535,36 @@ class TestChainlitControlPlaneSettings:
         assert metadata["has_pending_action"] is True
         assert metadata["last_route"] == "document_question"
         assert metadata["last_executor"] == "doc_question"
+
+    def test_build_backend_resume_snapshot_uses_document_refs(self):
+        self._store["documents_by_id"] = {
+            "doc-1": {
+                "document_id": "doc-1",
+                "display_name": "contract.pdf",
+                "version": 1,
+                "path": "/tmp/contract.pdf",
+                "text": "secret text",
+                "uploaded_at": 1.0,
+                "source_message_id": None,
+            }
+        }
+        self._store["active_doc_ids"] = ["doc-1"]
+
+        snapshot = self._module._build_backend_resume_snapshot()
+
+        assert "documents_by_id" not in snapshot
+        assert snapshot["document_refs"] == [
+            {
+                "document_id": "doc-1",
+                "display_name": "contract.pdf",
+                "version": 1,
+                "path": "/tmp/contract.pdf",
+                "uploaded_at": 1.0,
+                "source_message_id": None,
+                "source_origin": None,
+                "collection_id": None,
+            }
+        ]
 
     @pytest.mark.asyncio
     async def test_sync_thread_presentation_updates_data_layer_with_name_and_metadata(self):

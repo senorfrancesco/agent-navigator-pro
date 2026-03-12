@@ -149,3 +149,25 @@ Do not persist:
 - `idempotency_key` has tested reuse semantics
 - persisted resume blob uses `document_refs` instead of document-heavy inline payload
 - Chainlit restore remains functional on backend snapshot roundtrip
+
+## Completed
+
+- Added explicit store selection:
+  - `sqlite://...` -> `SQLiteOrchestrationStateStore`
+  - `postgres://...` / `postgresql://...` -> `PostgresOrchestrationStateStore`
+  - unsupported scheme -> `StateStoreConfigurationError`
+- Added atomic optimistic locking for run updates via `WHERE version = ...`
+- Added tested idempotency-key run reuse semantics
+- Slimmed persisted resume payload from inline document blobs to `document_refs`
+- Kept restore backward-compatible for legacy persisted `documents_by_id` snapshots
+
+## Verification
+
+- `pytest backend/tests/test_state_store.py backend/tests/test_execution_runtime.py backend/tests/test_chainlit_runtime_mode.py backend/tests/test_agent_api_orchestrate.py -q`
+- `cd backend && pytest tests/ -q -m "not integration"` -> `416 passed, 4 deselected`
+- `python -m py_compile backend/orchestrator/state_store.py backend/orchestrator/execution_runtime.py backend/orchestrator/chainlit_app.py backend/orchestrator/agent_api.py backend/tests/test_state_store.py backend/tests/test_execution_runtime.py backend/tests/test_chainlit_runtime_mode.py`
+- `git diff --check`
+
+## Completed status
+
+Completed as the intended safe slice.

@@ -337,12 +337,29 @@
   Pragmatic workaround / follow-up:
   - dev/prod fallback сейчас `SQLite` через `ORCHESTRATOR_STATE_DB_URL`; Postgres-backed implementation остаётся отдельным усилением, а не blocker'ом
   - в `resume_state_blob` пока хранится `documents_by_id` snapshot для практичного resume document workflows; это осознанный компромисс до более строгого document-ref layer
-- [ ] **B3.31b — Harden backend orchestration store for production**
-  Follow-up к `B3.31a`.
-  Что сделать:
-  - добавить Postgres-backed implementation для `orchestrator_runs`
-  - вынести document-heavy resume payload из inline `documents_by_id` в более строгий document-ref layer
-  - ввести explicit optimistic locking / idempotency semantics поверх `state_version` и `idempotency_key`
+- [x] **B3.31b — Harden backend orchestration store for production**
+  Follow-up к `B3.31a` закрыт safe slice без full rewrite orchestration platform.
+  Что реализовано:
+  - `backend/orchestrator/state_store.py` теперь поддерживает:
+    - `sqlite://...` -> `SQLiteOrchestrationStateStore`
+    - `postgres://...` / `postgresql://...` -> `PostgresOrchestrationStateStore`
+    - unsupported scheme -> explicit configuration error вместо silent fallback
+  - write path переведён на atomic optimistic locking:
+    - `UPDATE ... WHERE run_id = ? AND version = ?`
+    - deterministic version-conflict error вместо read-then-overwrite semantics
+  - `idempotency_key` теперь участвует в run reuse semantics по `(workflow_type, idempotency_key)`
+  - persisted backend snapshot slimmed from inline document-heavy payload to `document_refs`
+  - `Chainlit` restore path принимает и новый `document_refs` shape, и legacy `documents_by_id`
+  - targeted coverage:
+    - `backend/tests/test_state_store.py`
+    - `backend/tests/test_execution_runtime.py`
+    - `backend/tests/test_chainlit_runtime_mode.py`
+  Verification:
+  - `pytest backend/tests/test_state_store.py backend/tests/test_execution_runtime.py backend/tests/test_chainlit_runtime_mode.py backend/tests/test_agent_api_orchestrate.py -q`
+  - `cd backend && pytest tests/ -q -m "not integration"` -> `416 passed, 4 deselected`
+  Follow-up:
+  - richer document-ref hydration/resolution beyond current minimal `path/display_name/version` shape remains an incremental follow-up, not a blocker for backend-owned store semantics
+  - production deployment of Postgres store still requires `psycopg` to be present in runtime environment
 
 ### Динамическая конфигурация
 - [x] **B3.22 — Dynamic selection of models and embedders**

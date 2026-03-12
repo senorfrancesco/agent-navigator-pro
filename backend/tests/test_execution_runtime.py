@@ -11,6 +11,7 @@ from orchestrator.execution_runtime import (
     _run_graph,
     execute_orchestration,
 )
+from orchestrator.state_store import get_orchestration_state_store
 
 
 def _build_minimal_deps() -> ExecutionDependencies:
@@ -295,6 +296,103 @@ def test_execute_orchestration_reuses_same_run_for_same_thread_and_persists_resu
     assert first["run_id"] == second["run_id"]
     assert first["state_ref"] == second["state_ref"]
     assert second["state_version"] > first["state_version"]
+
+    stored = asyncio.run(get_orchestration_state_store().load_run(run_id=second["run_id"]))
+    assert stored is not None
+    assert "document_refs" not in (stored.resume_state_blob or {})
+
+
+def test_execute_orchestration_reuses_same_run_for_same_idempotency_key():
+    deps = _build_minimal_deps()
+
+    first = asyncio.run(
+        execute_orchestration(
+            {
+                "message": "Привет",
+                "session_id": "session-idem-1",
+                "idempotency_key": "same-key",
+                "history": [],
+                "ui_state": {"control_plane_state": {"assistant_mode": "general_chat"}},
+            },
+            deps=deps,
+        )
+    )
+    second = asyncio.run(
+        execute_orchestration(
+            {
+                "message": "Повтор",
+                "session_id": "session-idem-2",
+                "idempotency_key": "same-key",
+                "history": [],
+                "ui_state": {"control_plane_state": {"assistant_mode": "general_chat"}},
+            },
+            deps=deps,
+        )
+    )
+
+    assert first["run_id"] == second["run_id"]
+    stored = asyncio.run(get_orchestration_state_store().load_run(run_id=second["run_id"]))
+    assert stored is not None
+    assert stored.idempotency_key == "same-key"
+
+
+def test_execute_orchestration_persists_document_refs_not_inline_documents():
+    deps = _build_minimal_deps()
+
+    response = asyncio.run(
+        execute_orchestration(
+            {
+                "message": "Что в документе?",
+                "thread_id": "thread-doc-refs",
+                "runtime_mode": "chat_only",
+                "history": [],
+                "ui_state": {
+                    "documents_by_id": {
+                        "doc-1": {
+                            "document_id": "doc-1",
+                            "display_name": "contract.pdf",
+                            "version": 1,
+                            "path": "/tmp/contract.pdf",
+                            "text": "Штраф 10 процентов",
+                            "uploaded_at": 1.0,
+                            "source_message_id": None,
+                        }
+                    },
+                    "active_doc_ids": ["doc-1"],
+                    "control_plane_state": {"assistant_mode": "specific_tasks"},
+                },
+                "session_docs": {
+                    "contract.pdf": {
+                        "document_id": "doc-1",
+                        "display_name": "contract.pdf",
+                        "path": "/tmp/contract.pdf",
+                        "text": "Штраф 10 процентов",
+                        "version": 1,
+                    }
+                },
+                "active_doc_ids": ["doc-1"],
+            },
+            deps=deps,
+        )
+    )
+
+    stored = asyncio.run(get_orchestration_state_store().load_run(run_id=response["run_id"]))
+
+    assert stored is not None
+    assert "documents_by_id" not in (stored.resume_state_blob or {})
+    assert "session_docs" not in (stored.resume_state_blob or {})
+    assert stored.resume_state_blob["document_refs"] == [
+        {
+            "document_id": "doc-1",
+            "display_name": "contract.pdf",
+            "version": 1,
+            "path": "/tmp/contract.pdf",
+            "uploaded_at": 1.0,
+            "source_message_id": None,
+            "source_origin": None,
+            "collection_id": None,
+        }
+    ]
 
 
 def test_execute_orchestration_routes_kb_doc_question_through_unified_backend_core(monkeypatch):

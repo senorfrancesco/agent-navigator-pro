@@ -197,6 +197,9 @@ def _resolve_workflow_type(request: Dict[str, Any]) -> str:
 def _merge_resume_state_blob(request: Dict[str, Any], response: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     base = request.get("ui_state")
     snapshot: Dict[str, Any] = copy.deepcopy(base) if isinstance(base, dict) else {}
+    snapshot.pop("documents_by_id", None)
+    snapshot.pop("documents_by_name", None)
+    snapshot.pop("session_docs", None)
     patch = response.get("session_state_patch") or {}
 
     if "pending_action" in patch:
@@ -222,14 +225,75 @@ def _merge_resume_state_blob(request: Dict[str, Any], response: Dict[str, Any]) 
 
     if request.get("active_doc_ids") is not None and "active_doc_ids" not in snapshot:
         snapshot["active_doc_ids"] = list(request.get("active_doc_ids") or [])
+    document_refs = _build_document_refs(
+        ui_state=request.get("ui_state"),
+        session_docs=request.get("session_docs") or {},
+        active_doc_ids=snapshot.get("active_doc_ids") or request.get("active_doc_ids") or [],
+    )
+    if document_refs:
+        snapshot["document_refs"] = document_refs
     if request.get("control_plane_state") is not None and "control_plane_state" not in snapshot:
         snapshot["control_plane_state"] = copy.deepcopy(request.get("control_plane_state"))
     if response.get("effective_settings") is not None:
         snapshot["effective_settings"] = copy.deepcopy(response.get("effective_settings"))
-    if request.get("session_docs") is not None and "session_docs" not in snapshot:
-        snapshot["session_docs"] = copy.deepcopy(request.get("session_docs"))
 
     return snapshot or None
+
+
+def _build_document_refs(
+    *,
+    ui_state: Any,
+    session_docs: Dict[str, Any],
+    active_doc_ids: List[str],
+) -> List[Dict[str, Any]]:
+    if isinstance(ui_state, dict):
+        existing = ui_state.get("document_refs")
+        if isinstance(existing, list) and existing:
+            return copy.deepcopy(existing)
+
+    refs: List[Dict[str, Any]] = []
+    seen = set()
+    docs_by_id = {}
+    if isinstance(ui_state, dict):
+        docs_by_id = ui_state.get("documents_by_id") or {}
+    if isinstance(docs_by_id, dict):
+        ordered = [docs_by_id[doc_id] for doc_id in active_doc_ids if doc_id in docs_by_id]
+        ordered.extend(doc for doc_id, doc in docs_by_id.items() if doc_id not in set(active_doc_ids))
+        for doc in ordered:
+            document_id = str(doc.get("document_id") or "").strip()
+            display_name = str(doc.get("display_name") or "").strip()
+            if not document_id or not display_name or document_id in seen:
+                continue
+            seen.add(document_id)
+            refs.append(
+                {
+                    "document_id": document_id,
+                    "display_name": display_name,
+                    "version": int(doc.get("version", 1)),
+                    "path": doc.get("path"),
+                    "uploaded_at": doc.get("uploaded_at"),
+                    "source_message_id": doc.get("source_message_id"),
+                    "source_origin": doc.get("source_origin"),
+                    "collection_id": doc.get("collection_id"),
+                }
+            )
+    for key, doc in (session_docs or {}).items():
+        document_id = str(doc.get("document_id") or key or "").strip()
+        display_name = str(doc.get("display_name") or key or "").strip()
+        if not document_id or not display_name or document_id in seen:
+            continue
+        seen.add(document_id)
+        refs.append(
+            {
+                "document_id": document_id,
+                "display_name": display_name,
+                "version": int(doc.get("version", 1)),
+                "path": doc.get("path"),
+                "source_origin": doc.get("source_origin"),
+                "collection_id": doc.get("collection_id"),
+            }
+        )
+    return refs
 
 
 def _build_checkpoint_blob(request: Dict[str, Any], response: Dict[str, Any]) -> Dict[str, Any]:
@@ -738,6 +802,7 @@ async def execute_orchestration(
         thread_id=request.get("thread_id"),
         session_id=request.get("session_id"),
         workflow_type=_resolve_workflow_type(request),
+        idempotency_key=request.get("idempotency_key"),
     )
     request["run_id"] = run_record.run_id
     request["state_ref"] = run_record.state_ref
