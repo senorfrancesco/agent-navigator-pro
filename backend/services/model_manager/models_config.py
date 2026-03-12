@@ -33,6 +33,13 @@ MODEL_CONFIG: Dict[str, Dict[str, Any]] = {
         "n_gpu_layers": int(os.getenv("N_GPU_LAYERS_LABSE", "10")),
         "context_size": int(os.getenv("CONTEXT_SIZE_LABSE", "512")),
         "api_endpoint": "/v1/embeddings"
+    },
+    "qwen3-embedding-0.6b": {
+        "type": "embedding",
+        "path": os.getenv("MODEL_PATH_QWEN3_EMBEDDING_06B", "./models/st/Qwen3-Embedding-0.6B"),
+        "n_gpu_layers": int(os.getenv("N_GPU_LAYERS_QWEN3_EMBEDDING_06B", "0")),
+        "context_size": int(os.getenv("CONTEXT_SIZE_QWEN3_EMBEDDING_06B", "512")),
+        "api_endpoint": "/v1/embeddings"
     }
 }
 

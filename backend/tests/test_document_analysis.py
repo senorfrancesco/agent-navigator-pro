@@ -819,7 +819,7 @@ class TestDocumentAnalysisIntent:
         assert result["intent"] == "documents_summary"
         assert result["requires_choice"] is False
 
-    def test_classifier_doc_question_without_docs_falls_back_to_general_chat(self):
+    def test_classifier_doc_question_without_docs_requests_upload(self):
         classifier_result = {
             "intent": "document_question",
             "confidence": 0.70,
@@ -833,8 +833,10 @@ class TestDocumentAnalysisIntent:
             session_docs={},
             classifier_result=classifier_result,
         )
-        assert result["intent"] == "general_chat"
+        assert result["intent"] == "document_question"
         assert result["requires_choice"] is False
+        assert result["reason"] == "missing_documents"
+        assert result["action_required"]["type"] == "upload_required"
 
     def test_document_analysis_with_two_docs_requires_choice(self):
         session_docs = {

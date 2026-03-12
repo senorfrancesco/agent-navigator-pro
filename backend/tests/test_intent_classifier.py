@@ -2,9 +2,19 @@
 Тесты для EmbeddingIntentClassifier — классификация интентов без LLM.
 """
 
+import os
+import sys
+
 import numpy as np
 import pytest
-from orchestrator.rag.classifier import EmbeddingIntentClassifier
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from orchestrator.rag.classifier import (
+    EmbeddingIntentClassifier,
+    LLMIntentClassifier,
+    select_classifier_result,
+)
 
 
 def _mock_embed_fn(texts):
@@ -114,3 +124,50 @@ class TestEmbeddingIntentClassifier:
         for q, _, _ in TEST_QUERIES:
             result = self.classifier.classify(q)
             assert result["margin"] >= 0
+
+
+def test_llm_intent_classifier_parses_json():
+    classifier = LLMIntentClassifier(
+        infer_text_fn=lambda prompt: '{"intent":"compare_documents","confidence":0.93,"needs_rag":true}'
+    )
+
+    result = classifier.classify("Сравни документы")
+
+    assert result is not None
+    assert result["intent"] == "compare_documents"
+    assert result["confidence"] == pytest.approx(0.93)
+    assert result["needs_rag"] is True
+    assert result["source"] == "llm"
+
+
+def test_llm_intent_classifier_rejects_unknown_intent():
+    classifier = LLMIntentClassifier(
+        infer_text_fn=lambda prompt: '{"intent":"unknown_category","confidence":0.99}'
+    )
+
+    assert classifier.classify("какой-то запрос") is None
+
+
+def test_select_classifier_result_hybrid_prefers_confident_llm():
+    result = select_classifier_result(
+        "hybrid",
+        embedder_result={"intent": "general_chat", "confidence": 0.61, "needs_rag": False},
+        llm_result={"intent": "document_question", "confidence": 0.88, "needs_rag": True},
+        llm_confidence_threshold=0.75,
+    )
+
+    assert result["intent"] == "document_question"
+    assert result["source"] == "llm"
+
+
+def test_select_classifier_result_hybrid_falls_back_to_embedder():
+    result = select_classifier_result(
+        "hybrid",
+        embedder_result={"intent": "equipment_analysis", "confidence": 0.67, "needs_rag": True},
+        llm_result={"intent": "general_chat", "confidence": 0.41, "needs_rag": False},
+        llm_confidence_threshold=0.75,
+    )
+
+    assert result["intent"] == "equipment_analysis"
+    assert result["source"] == "embedder_fallback"
+    assert result["llm_fallback"]["intent"] == "general_chat"

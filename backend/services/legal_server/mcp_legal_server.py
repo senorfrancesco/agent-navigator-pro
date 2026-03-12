@@ -25,6 +25,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'model_manager'
 
 from ums_client import get_embeddings_via_ums, generate_text_via_ums, ums_client
 
+LEGAL_EMBEDDER_MODEL = os.getenv("LEGAL_EMBEDDER_MODEL", "labse-embedding")
+
 app = FastAPI(title="MCP Legal Server", version="1.0.0")
 
 # ============================================================================
@@ -161,7 +163,7 @@ async def _match_batches_impl(request: MatchBatchesRequest) -> MatchBatchesRespo
                 payload = {"input": batch, "normalize": True}
                 try:
                     # Используем cpu для эмбеддингов, чтобы не занимать VRAM LLM-модели
-                    emb_res = ums_client.infer("labse-embedding", payload, device_mode="cpu")
+                    emb_res = ums_client.infer(LEGAL_EMBEDDER_MODEL, payload, device_mode="cpu")
                     
                     if "data" in emb_res:
                         batch_embs = [item["embedding"] for item in emb_res["data"]]

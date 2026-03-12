@@ -13,6 +13,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BACKEND_DIR="$PROJECT_ROOT/backend"
 ENV_FILE="$BACKEND_DIR/.env"
+ATTACH_TMUX=true
+
+for arg in "$@"; do
+    case "$arg" in
+        --no-attach)
+            ATTACH_TMUX=false
+            ;;
+        *)
+            echo "Неизвестный аргумент: $arg" >&2
+            echo "Поддерживается: --no-attach" >&2
+            exit 1
+            ;;
+    esac
+done
 
 # Цвета для вывода
 RED='\033[0;31m'
@@ -183,61 +197,70 @@ wait_for_model() {
     return 0
 }
 
+start_tmux_window() {
+    local window_name="$1"
+    local command="$2"
+    local first_window_target=""
+
+    if tmux list-windows -t "$SESSION_NAME" | grep -q "${window_name}"; then
+        tmux kill-window -t "$SESSION_NAME:$window_name"
+    fi
+
+    first_window_target=$(tmux list-windows -t "$SESSION_NAME" -F "#{session_name}:#{window_index}" | head -n 1)
+
+    if [ "$(tmux list-windows -t "$SESSION_NAME" | wc -l)" -eq 1 ] && [ -n "$first_window_target" ] && tmux display-message -p -t "$first_window_target" '#W' | grep -q '^bash$'; then
+        tmux rename-window -t "$first_window_target" "$window_name"
+        tmux send-keys -t "$SESSION_NAME:$window_name" "$command" Enter
+    else
+        tmux new-window -t "$SESSION_NAME" -n "$window_name"
+        tmux send-keys -t "$SESSION_NAME:$window_name" "$command" Enter
+    fi
+}
+
 # -------------------------------------------
 # Запуск сервисов
 # -------------------------------------------
-
-# Окно 1: Chainlit UI (Docker)
-tmux rename-window -t "$SESSION_NAME" "chainlit"
-echo -e "${GREEN}Запуск Chainlit UI (Docker) на порту $CHAINLIT_PORT...${NC}"
-tmux send-keys -t "$SESSION_NAME:chainlit" "cd $PROJECT_ROOT && docker compose up -d chainlit && docker compose logs -f chainlit" Enter
-
-# Окно 2: Agent API (Main)
-echo -e "${GREEN}Запуск Agent API на порту $AGENT_PORT...${NC}"
-tmux new-window -t "$SESSION_NAME" -n "agent-api"
-tmux send-keys -t "$SESSION_NAME:agent-api" "cd $BACKEND_DIR/orchestrator && $ACTIVATE_CMD && python agent_api.py 2>&1 | tee agent-api.log" Enter
-sleep 2
-
-# Окно 3: Document Server
-echo -e "${GREEN}Запуск Document Server на порту $DOC_PORT...${NC}"
-tmux new-window -t "$SESSION_NAME" -n "doc-server"
-tmux send-keys -t "$SESSION_NAME:doc-server" "cd $BACKEND_DIR/services/document_server && $ACTIVATE_CMD && uvicorn mcp_document_server:app --host 0.0.0.0 --port $DOC_PORT 2>&1 | tee doc-server.log" Enter
-sleep 2
-
-# Окно 4: Legal Server
-echo -e "${GREEN}Запуск Legal Server на порту $LEGAL_PORT...${NC}"
-tmux new-window -t "$SESSION_NAME" -n "legal-server"
-tmux send-keys -t "$SESSION_NAME:legal-server" "cd $BACKEND_DIR/services/legal_server && $ACTIVATE_CMD && uvicorn mcp_legal_server:app --host 0.0.0.0 --port $LEGAL_PORT 2>&1 | tee legal-server.log" Enter
-sleep 2
-
-# Окно 5: UMS (Unified Model Server)
-echo -e "${GREEN}Запуск Unified Model Server на порту $UMS_PORT...${NC}"
-tmux new-window -t "$SESSION_NAME" -n "ums"
-tmux send-keys -t "$SESSION_NAME:ums" "cd $BACKEND_DIR/services/model_manager && $ACTIVATE_CMD && python unified_model_server.py 2>&1 | tee ums.log" Enter
-
-# Окно 6: Monitor/Logs
-echo -e "${GREEN}Открытие окна мониторинга...${NC}"
-tmux new-window -t "$SESSION_NAME" -n "monitor"
-tmux send-keys -t "$SESSION_NAME:monitor" "cd $BACKEND_DIR && echo -e '${GREEN}Система запущена.${NC}\nДля выхода нажмите ${YELLOW}Ctrl+B${NC} затем ${YELLOW}:kill-session${NC} (это остановит все сервисы, включая Docker).'
-" Enter
-tmux send-keys -t "$SESSION_NAME:monitor" "htop 2>/dev/null || top" Enter
 
 # -------------------------------------------
 # Ожидание готовности сервисов
 # -------------------------------------------
 echo ""
-echo -e "${YELLOW}Ожидание готовности сервисов...${NC}"
+echo -e "${YELLOW}Проверка и запуск сервисов...${NC}"
 
 SERVICES_OK=true
-wait_for_service "Agent API"       "$AGENT_PORT"   "/health" 30 || SERVICES_OK=false
-wait_for_service "Document Server" "$DOC_PORT"     "/health" 30 || SERVICES_OK=false
-wait_for_service "Legal Server"    "$LEGAL_PORT"   "/health" 30 || SERVICES_OK=false
-wait_for_service "UMS"             "$UMS_PORT"     "/health" 60 || SERVICES_OK=false
-wait_for_service "Chainlit UI"     "$CHAINLIT_PORT" "/"      60 || SERVICES_OK=false
+
+# 1) Document Server
+echo -e "${GREEN}Запуск Document Server на порту $DOC_PORT...${NC}"
+start_tmux_window "doc-server" "cd $BACKEND_DIR/services/document_server && $ACTIVATE_CMD && uvicorn mcp_document_server:app --host 0.0.0.0 --port $DOC_PORT 2>&1 | tee doc-server.log"
+wait_for_service "Document Server" "$DOC_PORT" "/health" 30 || SERVICES_OK=false
+
+# 2) Legal Server
+echo -e "${GREEN}Запуск Legal Server на порту $LEGAL_PORT...${NC}"
+start_tmux_window "legal-server" "cd $BACKEND_DIR/services/legal_server && $ACTIVATE_CMD && uvicorn mcp_legal_server:app --host 0.0.0.0 --port $LEGAL_PORT 2>&1 | tee legal-server.log"
+wait_for_service "Legal Server" "$LEGAL_PORT" "/health" 30 || SERVICES_OK=false
+
+# 3) UMS
+echo -e "${GREEN}Запуск Unified Model Server на порту $UMS_PORT...${NC}"
+start_tmux_window "ums" "cd $BACKEND_DIR/services/model_manager && $ACTIVATE_CMD && python unified_model_server.py 2>&1 | tee ums.log"
+wait_for_service "UMS" "$UMS_PORT" "/health" 90 || SERVICES_OK=false
 
 echo ""
 echo -e "${YELLOW}Ожидание загрузки модели Qwen LLM (до 3 мин)...${NC}"
-wait_for_model 180
+wait_for_model 180 || SERVICES_OK=false
+
+# 4) Agent API
+echo -e "${GREEN}Запуск Agent API на порту $AGENT_PORT...${NC}"
+start_tmux_window "agent-api" "cd $BACKEND_DIR/orchestrator && $ACTIVATE_CMD && python agent_api.py 2>&1 | tee agent-api.log"
+wait_for_service "Agent API" "$AGENT_PORT" "/health" 30 || SERVICES_OK=false
+
+# 5) Chainlit UI (Docker)
+echo -e "${GREEN}Запуск Chainlit UI (Docker) на порту $CHAINLIT_PORT...${NC}"
+start_tmux_window "chainlit" "cd $PROJECT_ROOT && docker compose up -d chainlit && docker compose logs -f chainlit"
+wait_for_service "Chainlit UI" "$CHAINLIT_PORT" "/" 60 || SERVICES_OK=false
+
+# 6) Monitor/Logs
+echo -e "${GREEN}Открытие окна мониторинга...${NC}"
+start_tmux_window "monitor" "cd $BACKEND_DIR && echo -e '${GREEN}Система запущена.${NC}\nДля выхода нажмите ${YELLOW}Ctrl+B${NC} затем ${YELLOW}:kill-session${NC} (это остановит все сервисы, включая Docker).' && (htop 2>/dev/null || top)"
 
 if [ "$SERVICES_OK" = true ]; then
     SYSTEM_STATUS="${GREEN}ГОТОВА К РАБОТЕ${NC}"
@@ -266,3 +289,7 @@ echo -e "${GREEN}║${NC} Подключение: ${BLUE}tmux attach-session -t 
 echo -e "${GREEN}║${NC} Завершение:  ${BLUE}./scripts/stop_all.sh${NC}"
 echo -e "${GREEN}╚════════════════════════════════════════════════════════════╝${NC}"
 echo ""
+
+if [ "$ATTACH_TMUX" = false ]; then
+    echo -e "${YELLOW}tmux attach пропущен (--no-attach).${NC}"
+fi

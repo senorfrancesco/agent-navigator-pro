@@ -18,7 +18,9 @@ import yaml
 import logging
 import numpy as np
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
+
+from orchestrator.utils import parse_json_garbage
 
 logger = logging.getLogger("classifier")
 
@@ -50,6 +52,7 @@ INTENT_NEEDS_RAG = {
     "document_question": True,
     "general_chat": False,
 }
+INTENT_LABELS = tuple(INTENT_NEEDS_RAG.keys())
 
 
 class EmbeddingIntentClassifier:
@@ -164,3 +167,108 @@ class EmbeddingIntentClassifier:
     def classify_batch(self, queries: List[str]) -> List[Dict[str, any]]:
         """Классифицирует список запросов."""
         return [self.classify(q) for q in queries]
+
+
+class LLMIntentClassifier:
+    """LLM-based intent classifier with strict JSON contract."""
+
+    def __init__(
+        self,
+        infer_text_fn: Callable[[str], str],
+        *,
+        confidence_floor: float = 0.0,
+    ):
+        self.infer_text_fn = infer_text_fn
+        self.confidence_floor = confidence_floor
+
+    def _build_prompt(self, query: str) -> str:
+        categories = "\n".join(f"- {intent}" for intent in INTENT_LABELS)
+        return (
+            "Ты классификатор интентов для оркестратора документов.\n"
+            "Выбери ровно одну категорию из списка.\n\n"
+            f"Категории:\n{categories}\n\n"
+            "Правила:\n"
+            "- greeting: приветствие, благодарность, короткий social reply\n"
+            "- compare_documents: сравнение двух документов, различия, версии\n"
+            "- equipment_analysis: соответствие ТЗ и КП, смета, оборудование\n"
+            "- document_analysis: обзор/суммарный анализ одного документа\n"
+            "- document_question: вопрос по содержимому документа(ов)\n"
+            "- general_chat: общий разговор без document workflow\n\n"
+            "Верни ТОЛЬКО JSON без markdown:\n"
+            "{\"intent\":\"...\",\"confidence\":0.0-1.0,\"needs_rag\":true|false}\n\n"
+            f"Запрос пользователя: {query}"
+        )
+
+    def _normalize_result(self, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        intent = payload.get("intent")
+        if intent not in INTENT_LABELS:
+            return None
+
+        try:
+            confidence = float(payload.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        confidence = max(self.confidence_floor, min(confidence, 1.0))
+
+        needs_rag_raw = payload.get("needs_rag")
+        if isinstance(needs_rag_raw, bool):
+            needs_rag = needs_rag_raw
+        else:
+            needs_rag = INTENT_NEEDS_RAG.get(intent, False)
+
+        return {
+            "intent": intent,
+            "confidence": confidence,
+            "margin": payload.get("margin", confidence),
+            "needs_rag": needs_rag,
+            "scores": payload.get("scores", {}),
+            "source": "llm",
+            "raw_response": payload,
+        }
+
+    def classify(self, query: str) -> Optional[Dict[str, Any]]:
+        raw_text = self.infer_text_fn(self._build_prompt(query))
+        parsed = parse_json_garbage(raw_text)
+        if not isinstance(parsed, dict):
+            logger.warning("LLM intent classifier returned non-JSON payload: %s", raw_text)
+            return None
+        normalized = self._normalize_result(parsed)
+        if normalized is None:
+            logger.warning("LLM intent classifier returned unsupported intent: %s", parsed)
+        return normalized
+
+
+def select_classifier_result(
+    mode: str,
+    *,
+    embedder_result: Optional[Dict[str, Any]],
+    llm_result: Optional[Dict[str, Any]],
+    llm_confidence_threshold: float = 0.75,
+) -> Optional[Dict[str, Any]]:
+    """Selects the final classifier result based on env-driven mode."""
+    normalized_mode = (mode or "embedder").strip().lower()
+
+    if normalized_mode == "embedder":
+        return embedder_result
+
+    if normalized_mode == "llm":
+        return llm_result or embedder_result
+
+    if normalized_mode == "hybrid":
+        if llm_result and llm_result.get("confidence", 0.0) >= llm_confidence_threshold:
+            merged = dict(llm_result)
+            merged["source"] = "llm"
+            return merged
+        if embedder_result:
+            merged = dict(embedder_result)
+            merged["source"] = "embedder_fallback"
+            if llm_result:
+                merged["llm_fallback"] = {
+                    "intent": llm_result.get("intent"),
+                    "confidence": llm_result.get("confidence"),
+                }
+            return merged
+        return llm_result
+
+    logger.warning("Unknown INTENT_CLASSIFIER_MODE=%s, falling back to embedder", mode)
+    return embedder_result or llm_result

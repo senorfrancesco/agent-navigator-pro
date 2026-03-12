@@ -953,7 +953,7 @@ class TestGenerateEquipmentReportNode:
 
         # Файл должен быть сохранён в tmpdir
         import glob
-        reports = glob.glob(os.path.join(tmpdir, "Report_Equipment_*.md"))
+        reports = glob.glob(os.path.join(tmpdir, "Report_Equipment_*.pdf"))
         assert len(reports) == 1
 
     @pytest.mark.asyncio
@@ -973,7 +973,7 @@ class TestGenerateEquipmentReportNode:
         assert "уже сохранен" in result2["final_report"]
 
         import glob
-        reports = glob.glob(os.path.join(tmpdir, "Report_Equipment_*.md"))
+        reports = glob.glob(os.path.join(tmpdir, "Report_Equipment_*.pdf"))
         assert len(reports) == 1  # Только один файл
 
     @pytest.mark.asyncio

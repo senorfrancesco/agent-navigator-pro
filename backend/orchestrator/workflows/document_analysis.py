@@ -10,13 +10,14 @@ Map-reduce суммаризация с адаптивным промптом п�
 """
 
 import asyncio
+from contextlib import asynccontextmanager
 import glob as glob_mod
 import json
 import os
 import re
 import time
 import httpx
-from typing import TypedDict, List, Dict, Any, Annotated, Optional
+from typing import TypedDict, List, Dict, Any, Annotated, Optional, AsyncIterator
 import operator
 from langgraph.graph import StateGraph, END
 
@@ -100,6 +101,35 @@ def classify_doc_type(text: str) -> str:
     if not scores:
         return "other"
     return max(scores, key=scores.get)
+
+
+@asynccontextmanager
+async def _optional_chainlit_step(name: str, step_type: str) -> AsyncIterator[Any]:
+    """Открывает Chainlit step только при активном UI context."""
+    try:
+        import chainlit as cl
+        from chainlit.context import get_context
+
+        get_context()
+    except Exception:
+        yield None
+        return
+
+    async with cl.Step(name=name, type=step_type) as step:
+        yield step
+
+
+def _build_summary_chunk_prompt(type_prompt: str, chunk: str, index: int, total: int) -> str:
+    return f"""<|im_start|>system
+Ты аналитик документов. Извлекай структурированную информацию из текстов.<|im_end|>
+<|im_start|>user
+{type_prompt}
+Отвечай кратко, по пунктам. Если информация отсутствует — пропусти пункт.
+
+Текст (фрагмент {index} из {total}):
+{truncate_text(chunk, MAX_TEXT_FOR_LLM)}<|im_end|>
+<|im_start|>assistant
+"""
 
 
 # === Node 1: Classify and Load ===
@@ -284,64 +314,25 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
 
     chunk_summaries = []
     for idx, chunk in enumerate(chunks):
-        # Визуализация прогресса в Chainlit (если запущено через него)
+        prompt = _build_summary_chunk_prompt(type_prompt, chunk, idx + 1, len(chunks))
+        step_name = f"Суммаризация чанка {idx+1}/{len(chunks)}"
+        print(f"    [DocAnalysis] Processing chunk {idx+1}/{len(chunks)}...")
         try:
-            import chainlit as cl
-            step_name = f"Суммаризация чанка {idx+1}/{len(chunks)}"
-            async with cl.Step(name=step_name, type="tool") as step:
-                print(f"    [DocAnalysis] Processing chunk {idx+1}/{len(chunks)}...")
-                prompt = f"""<|im_start|>system
-Ты аналитик документов. Извлекай структурированную информацию из текстов.<|im_end|>
-<|im_start|>user
-{type_prompt}
-Отвечай кратко, по пунктам. Если информация отсутствует — пропусти пункт.
-
-Текст (фрагмент {idx + 1} из {len(chunks)}):
-{truncate_text(chunk, MAX_TEXT_FOR_LLM)}<|im_end|>
-<|im_start|>assistant
-"""
+            async with _optional_chainlit_step(step_name, "tool") as step:
                 response = await ums_client.async_infer("qwen-14b-llm", {
                     "prompt": prompt, "temperature": 0.1, "max_tokens": 1500
                 })
-                
-                content = ""
-                if "choices" in response:
-                    choice = response["choices"][0]
-                    content = choice.get("text", "") or choice.get("message", {}).get("content", "")
-                elif "content" in response:
-                    content = response["content"]
-                else:
-                    content = str(response)
-                    
-                if content.strip():
-                    chunk_summaries.append(content.strip())
-                    step.output = f"Успешно: {len(content)} симв."
-                
-                await asyncio.sleep(1.0)
-        except (ImportError, RuntimeError):
-            # Fallback если запуск не через Chainlit (например, в тестах)
-            print(f"    [DocAnalysis] Processing chunk {idx+1}/{len(chunks)}...")
-            prompt = f"""<|im_start|>system
-Ты аналитик документов. Извлекай структурированную информацию из текстов.<|im_end|>
-<|im_start|>user
-{type_prompt}
-Отвечай кратко, по пунктам. Если информация отсутствует — пропусти пункт.
 
-Текст (фрагмент {idx + 1} из {len(chunks)}):
-{truncate_text(chunk, MAX_TEXT_FOR_LLM)}<|im_end|>
-<|im_start|>assistant
-"""
-            try:
-                response = await ums_client.async_infer("qwen-14b-llm", {
-                    "prompt": prompt, "temperature": 0.1, "max_tokens": 1500
-                })
                 content = _extract_llm_content(response)
                 if content.strip():
                     chunk_summaries.append(content.strip())
+                    if step is not None:
+                        step.output = f"Успешно: {len(content)} симв."
+
                 await asyncio.sleep(1.0)
-            except Exception as e:
-                print(f"    [DocAnalysis] Chunk {idx+1} failed: {e}")
-                errors.append(f"Summarize chunk {idx+1} failed: {e}")
+        except Exception as e:
+            print(f"    [DocAnalysis] Chunk {idx+1} failed: {e}")
+            errors.append(f"Summarize chunk {idx+1} failed: {e}")
 
     if not chunk_summaries:
         return {"summary": "Не удалось выполнить суммаризацию.", "errors": errors}

@@ -507,7 +507,7 @@
     - LLM agents
     - Agent Navigator Pro: Hybrid Routing + Multi-GPU Research
 
-- [ ] **B3.31 — API Orchestration Layer + Runtime Mode Switch (`auto | chat | specialized`)**
+- [x] **B3.31 — API Orchestration Layer + Runtime Mode Switch (`auto | chat | specialized`)**
   Контекст:
   - при смешении диалога и графовых workflow в одном потоке растёт риск ложного роутинга;
   - нужен единый прод-контур, где API/оркестратор является слоем принятия решений между UI и наборами исполнителей
@@ -522,19 +522,136 @@
   - в `specialized_tasks` вести только task-роутинг с явным подтверждением при ambiguity;
   - в `auto` использовать policy по confidence/margin + ask-choice вместо автозапуска;
   - ввести capability-router: `intent -> executor -> model_profile` (а не “одна модель на всё”);
+  - вынести retrieval scope в отдельную ось backend-контракта:
+    `rag_scope`, `knowledge_collection_id`, `source_scope_summary`;
+  - не кодировать `session_rag` / `knowledge_base_rag` внутри `runtime_mode`:
+    `runtime_mode` отвечает только за chat/task policy, а не за область retrieval;
+  - для текущей фазы зафиксировать pragmatic persistence ownership:
+    `Chainlit SQLite` / current Chainlit data layer временно остаётся authoritative для
+    `resume`, `action_required`, `state_ref`, `pending_action_id`, чтобы не раздувать scope;
+  - dedicated backend-owned state store/checkpointer вынести в отдельную follow-up фазу
+    `B3.31a`, а не пытаться закрыть внутри текущего execution-boundary refactor;
+  - добавить в backend contract идентификаторы состояния:
+    `state_ref`, `pending_action_id`;
+  - убрать прямую зависимость workflow/backend-узлов от `Chainlit` runtime API
+    (`cl.Step`, `chainlit.context`) через progress adapter / callback / no-op abstraction,
+    чтобы headless execution и unit-тесты не падали с `ChainlitContextException`;
   - унифицировать API-контракт ответа для UI:
-    `mode`, `route`, `model_profile`, `sources`, `confidence`, `trace_id`, `action_required`.
+    `mode`, `route`, `rag_scope`, `knowledge_collection_id`, `source_scope_summary`,
+    `model_profile`, `sources`, `confidence`, `trace_id`, `state_ref`,
+    `pending_action_id`, `action_required`.
   Критерии готовности:
   - одинаковые запросы в одном режиме дают предсказуемый маршрут;
   - в `chat_only` workflow не стартуют;
   - в `specialized_tasks` social/greeting не ломают active scope и не сбрасывают контекст;
   - UI получает единый ответный контракт вне зависимости от выбранного исполнителя;
   - в UI отсутствуют локальные ветки бизнес-роутинга (только рендер backend-решений).
+  - workflow-слой исполняется и тестируется без обязательного живого `Chainlit` context.
+  Реализационное решение:
+  - mutable selector для `runtime_mode` держать в `Chainlit ChatSettings`,
+    а не в `ChatProfile`; `ChatProfile` остаётся coarse entrypoint.
+  Follow-up / tech debt:
+  - legacy `_execute_intent` / `_handle_*` path удалён из `backend/orchestrator/chainlit_app.py`;
+    compatibility helper `_detect_equipment_mode` оставлен как тонкая обёртка над backend workflow helper,
+    потому что на него всё ещё завязаны существующие unit-тесты и часть intent-эвристик;
+  - `backend/tests/test_document_analysis.py::TestSummarizeNode` больше не зависит от живого
+    `Chainlit` context: `summarize_node` переведён на optional progress step / no-op path;
+  - разобраться, почему `pytest backend/tests/test_chainlit_streaming.py -q` в текущей среде
+    печатает passing test output, но не завершает процесс pytest; вероятный источник —
+    lingering async/task cleanup при import/reload `orchestrator.chainlit_app`.
+
+- [ ] **B3.31a — Backend-authoritative orchestration state store**
+  Контекст:
+  - в `B3.31` допустимо использовать `Chainlit SQLite` как temporary authoritative persistence,
+    чтобы быстро закрыть execution boundary без full rewrite persistence layer;
+  - но целевая архитектура не должна считать UI/framework storage источником истины
+    для execution-critical state;
+  - `Chainlit` является presentation/control surface, а не владельцем workflow state;
+  - нужен frontend-replaceable orchestration boundary: замена UI не должна требовать
+    переписывания core execution logic.
+  Проблема:
+  - если `state_ref`, `pending_action_id`, `resume_state` и pending-action semantics
+    живут в UI-adjacent persistence, backend orchestration остаётся привязан к storage model
+    текущего фронтенда;
+  - это ухудшает recoverability, усложняет смену UI и смешивает chat/thread state
+    с execution state.
+  Архитектурное правило:
+  - всё, что нужно для resume/recovery после reconnect, UI outage, backend restart
+    или замены фронтенда, должно жить в backend-owned persistence;
+  - UI может инициировать и отображать workflow state, но не должен владеть им.
+  Что внедрить:
+  - ввести dedicated backend persistence/checkpointer как authoritative source of truth для:
+    `state_ref`, `pending_action_id`, `resume_state`, execution status, checkpoint metadata,
+    idempotency/correlation metadata, workflow/run identity;
+  Research note (2026-03-12, Chainlit custom data layer docs):
+  - `Chainlit BaseDataLayer` покрывает persistence для `users`, `feedback`, `elements`,
+    `steps`, `threads`, `thread metadata/tags` и delete/list/get/update операции по ним;
+  - это делает custom data layer хорошим кандидатом для replaceable chat-history/presentation store
+    и для controlled Postgres migration вместо framework-default SQLite;
+  - но сам по себе custom data layer не задаёт backend execution semantics для
+    `pending_action_id`, workflow checkpointing, idempotent resume и orchestration recovery;
+  - поэтому `Chainlit` custom data layer можно использовать как bridge или UI persistence layer,
+    но не считать автоматической заменой отдельного backend-owned orchestration state store
+    без явной адаптации и domain contract поверх него;
+  - определить минимальную backend-owned модель состояния:
+    `run_id`, `workflow_type`, `thread_id`/`conversation_id` mapping, `status`, `state_ref`,
+    `pending_action_id`, `resume_state_blob`, `checkpoint_blob`, `version`,
+    `created_at`, `updated_at`, `last_error`, `idempotency_key`;
+  - при необходимости выделить `pending_actions` и/или `orchestration_events`
+    как отдельные сущности, но не раздувать фазу до event-sourcing platform;
+  - ввести repository/store abstraction (`OrchestrationStateStore` / `ExecutionStateRepository`),
+    чтобы orchestration code зависел от интерфейса, а не от конкретной DB schema;
+  - перевести resume/recovery logic на backend store:
+    start workflow, submit user action, fetch current execution state, fetch pending action,
+    resume/reconnect current run;
+  - обеспечить stable mapping между UI thread/session и backend run world,
+    не делая UI-thread источником истины;
+  - добавить consistency protections:
+    optimistic locking via `version`, idempotency for repeated action submissions,
+    protection from double resume и duplicate action completion,
+    atomic transition around `pending_action_id` changes.
+  Storage guidance:
+  - production target: Postgres-backed state store;
+  - SQLite допустим только как local/dev backend store;
+  - Redis не использовать как единственный authoritative resumable store без durability model.
+  Что НЕ входит:
+  - полная замена chat history storage;
+  - перенос всех UI metadata в backend;
+  - event sourcing / saga engine / distributed worker platform;
+  - полный redesign orchestration domain model;
+  - замена `Chainlit` на другой frontend в рамках этой же фазы.
+  Migration strategy:
+  - Stage 1: текущая фаза `B3.31` остаётся на `Chainlit SQLite` как pragmatic temporary authority;
+  - Stage 2: backend store вводится рядом с текущим storage;
+  - Stage 3: backend начинает authoritative write/read для execution-critical state;
+  - Stage 4: resume/recovery переключаются на backend store;
+  - Stage 5: orchestration layer перестаёт читать execution-critical state из Chainlit storage,
+    а `Chainlit` остаётся presentation layer и optional chat/history layer.
+  Критерии готовности:
+  - backend store является authoritative для `state_ref`, `pending_action_id`, `resume_state`;
+  - backend может восстановить execution без чтения Chainlit persistence;
+  - UI reconnect / disconnect не приводит к потере execution-critical state;
+  - workflow resume работает через backend persistence;
+  - orchestration layer не зависит от Chainlit storage schema;
+  - замена frontend не требует изменения core orchestration logic.
+  Риски и ограничения:
+  - не превращать фазу в “full orchestration platform rewrite”;
+  - не переносить chat history и presentation metadata в тот же scope;
+  - не переобобщать storage abstraction раньше времени;
+  - временно может понадобиться compatibility mapping между Chainlit thread world
+    и backend run world.
 
 - [ ] **B3.32 — LangChain adoption strategy (точечно, без full rewrite core)**
   Контекст:
   - текущая архитектура уже держит продовый контур через `LangGraph + AdaptiveRAGPipeline + Chainlit`;
   - Open WebUI использовался как legacy UI-клиент к нашему API (`/v1/chat/completions`), а не как источник оркестрации.
+  Архитектурное уточнение (2026-03-12):
+  - не делать rewrite в generic `LLM + MCP tools` как замену текущему orchestration core до закрытия `B3.31`;
+  - проблема проекта сейчас не в отсутствии tool protocol, а в split-brain между UI и backend decision layer;
+  - `MCP` рассматривать как потенциальный adapter/protocol boundary для внешних инструментов и replaceable tool integration,
+    а не как замену backend-owned routing/state/execution contract;
+  - после стабилизации `B3.31/B3.31a` можно отдельно оценить selective MCP-adoption для document/legal/knowledge tools,
+    если это уменьшит coupling и упростит смену UI/clients без деградации deterministic workflows.
   Решение:
   - не делать полную миграцию core-логики на “чистый LangChain”;
   - использовать LangChain точечно там, где есть измеримая выгода (retriever/reranker/evals/observability adapters);
@@ -552,10 +669,132 @@
   - включить coverage как дополнительный сигнал в policy/ confidence v2;
   - валидировать на eval-наборе и обновить пороги без ломки UI-контракта.
 
+- [ ] **B3.33 — Session RAG vs Knowledge-Base RAG: явная продуктовая модель**
+  Контекст:
+  - сейчас основной RAG в проекте session-scoped и завязан на `active_doc_ids`;
+  - следующий продуктовый шаг требует отдельного режима “подготовленная база знаний”,
+    а не только поиска по файлам текущего чата.
+  Что нужно сделать:
+  - формально разделить два режима:
+    - `session_rag` — ingestion и retrieval только по документам текущей сессии;
+    - `knowledge_base_rag` — retrieval по постоянной подготовленной базе
+      с session-overlay, если в текущем чате уже есть активные документы;
+  - отразить эти режимы в UX как отдельные вкладки / chat profiles / workspace modes;
+  - не смешивать их с `general_chat` и workflow-only режимами;
+  - не делать для них отдельные route-ветки:
+    `route=document_question` остаётся общим, меняется только retrieval contour через `rag_scope`;
+  - для `knowledge_base_rag` спроектировать source registry:
+    - `sources`
+    - `chunks`
+    - `embeddings`
+    - `content_hash`
+    - `index_version`
+    - `embedding_model_id`
+    - `retrieval_embedder_profile`
+    - `chunking_version`
+    - `workspace/collection scope`
+  - для merged retrieval добавить provenance на уровне источника:
+    - `source_origin = session | knowledge_base`
+    - `source_scope_summary = session | knowledge_base | mixed`
+  - явно зафиксировать merged retrieval policy:
+    - отдельный candidate budget для `session` и `knowledge_base`;
+    - dedup до final prompt;
+    - score normalization между контурами;
+    - общий rerank/quality gate после merge shortlist;
+    - citation tie-break rule для дубликатов (`session` как primary, `knowledge_base` как supporting);
+  - определить upload policy:
+    - когда документ индексируется только в сессию;
+    - когда документ попадает в постоянную базу.
+  - уточнить UX-выражение режима:
+    - использовать `ChatProfile` только как coarse entrypoint;
+    - `session_rag` / `knowledge_base_rag` выражать через tabs / workspace mode / `rag_scope` selector,
+      а не через mutable `ChatProfile`.
+
+- [ ] **B3.34 — Retrieval eval для `LaBSE` vs `Qwen3-Embedding-0.6B`**
+  Контекст:
+  - `Qwen3-Embedding-0.6B` уже выиграл intent-routing eval;
+  - этого недостаточно, чтобы автоматически переводить dense retrieval/RAG с `LaBSE`.
+  Что нужно сделать:
+  - собрать retrieval eval dataset по document QA и legal/document similarity кейсам;
+  - покрыть минимум сценарии:
+    - `session_only`
+    - `knowledge_base_only`
+    - `mixed`
+    - `unanswerable`
+    - `duplicate-heavy`
+  - прогнать минимум:
+    - `LaBSE`
+    - `Qwen3-Embedding-0.6B`
+  - считать:
+    - `Recall@k`
+    - `MRR`
+    - `nDCG@k`
+    - evidence hit-rate / citation usefulness
+    - `source_origin` accuracy для mixed retrieval
+    - answer faithfulness / groundedness
+    - grounded answer quality на контрольном наборе вопросов;
+  - отдельно сравнить latency / VRAM / CPU-safe поведение;
+  - только после этого решать, унифицировать ли dense embedder для intent и retrieval.
+
+- [ ] **B3.35 — Honest tiers: выравнивание терминов с реальным runtime**
+  Контекст:
+  - текущие названия `simple/corrective/agentic/multi-agent` сильнее, чем фактическая реализация;
+  - `multi-agent` сейчас не отдельный runtime, а fallback в `agentic`;
+  - `agentic` по факту ближе к iterative retrieval loop.
+  Что нужно сделать:
+  - зафиксировать честную интерпретацию tiers:
+    - `Tier 1` — basic retrieval
+    - `Tier 2` — corrective retrieval
+    - `Tier 3` — iterative retrieval
+    - `Tier 4` — planned multi-agent
+  - привести документацию, UI-labels и внутренние описания в соответствие этому факту;
+  - отдельно решить, нужен ли вообще отдельный `Tier 4` до появления реального multi-agent runtime.
+
+- [ ] **B3.36 — Citations/evidence UX v2 для document QA**
+  Контекст:
+  - базовый citation-контракт уже есть, но UX должен стать ближе к grounded document answer,
+    а не к “просто список источников”.
+  Что нужно сделать:
+  - показывать в UI:
+    - `document_name`
+    - `chunk_id`
+    - `source_origin`
+    - `page/section`, если доступны
+    - excerpt
+    - relevance/confidence
+  - не вводить псевдоточную метрику вида “процент использованного текста”;
+  - вместо этого поддержать:
+    - основной источник ответа
+    - supporting sources
+    - `source_scope_summary` для merged retrieval
+    - число использованных фрагментов;
+  - подготовить path для page-aware citations при улучшении PDF metadata extraction.
+
 - [ ] **B3.21 — Quality upgrade: отдельная embedding-модель для intent classification**
   Intent routing не обязан использовать тот же embedder, что и retrieval. Следующий этап
   качества — выделить intent classifier в отдельный контур и сравнить модели на реальном
   routing eval-наборе.
+  Update 2026-03-11:
+  - после boundary stabilization это становится следующим приоритетом перед UI/Ops задачами;
+  - поддержать runtime mode выбора classifier через env/backend config:
+    - `embedder`
+    - `llm`
+    - `hybrid` (`LLM + embedder fallback`);
+  - до завершения eval production default временно держать как `hybrid`, а `pure llm`
+    оставить как optional profile / high-accuracy experiment;
+  - добавить `abstain / unsure / needs_confirmation` state для ambiguity-paths, а не forcing top-1 label;
+  - для `llm`/`hybrid` использовать короткий deterministic JSON-router на той же Qwen,
+    а не переносить routing назад в UI;
+  - eval делать отдельно для pure-LLM и hybrid policy, с метрикой ложных срабатываний
+    на дорогих workflow.
+  Benchmark 2026-03-12 on local eval harness:
+  - pure embedder сейчас выигрывает у pure `llm` и текущего `hybrid` policy;
+  - лучший результат на текущем dataset дал `Qwen3-Embedding-0.6B`;
+  - pure `qwen-14b-llm` как JSON-router дал высокий `unsure_rate` и плохую cost-weighted quality;
+  - текущий `hybrid` ухудшил quality относительно лучшего pure embedder и сильно увеличил latency;
+  - поэтому repo default для intent routing переводим на `embedder` + `Qwen3-Embedding-0.6B`;
+  - `LaBSE` остаётся embedding-моделью для юридических документов и semantic matching;
+  - значит ближайший default нельзя переключать на `llm` или `hybrid` без доработки prompt/parser/policy.
   Что нужно сделать:
   - подготовить eval harness для интентов `compare_documents`, `equipment_analysis`,
     `document_question`, `document_analysis`, `general_chat`;
@@ -564,8 +803,14 @@
     - `intfloat/multilingual-e5-large-instruct`,
     - `BAAI/bge-m3`,
     - семейство `Qwen3-Embedding-*`;
+    - `joeddav/xlm-roberta-large-xnli` только как optional zero-shot audit baseline
+      (не как основной production router; требует отдельной зависимости `sentencepiece`);
   - мерить не только accuracy, но и false positives на дорогих workflow;
-  - по результатам решить, нужен ли отдельный `intent_embedder` помимо retrieval embedder.
+  - ввести cost-weighted routing score и per-intent FP (`compare`, `equipment`, `document_question`);
+  - считать отдельно `% llm`, `% embedder_fallback`, `% unsure`, если включён hybrid policy;
+  - по результатам разделить intent embedder и legal/retrieval embedder:
+    - `Qwen3-Embedding-0.6B` для intent classification;
+    - `LaBSE` для юридических документов и semantic matching.
 
 - [ ] **B3.22 — Dynamic selection of models and embedders**
   Следствие будущего quality-upgrade: система должна уметь выбирать не только LLM profile,
@@ -611,11 +856,61 @@
   - Явная кнопка/действие «Новый чат».
   - Видимый список тредов и восстановление контекста документов при resume.
   - Отдельный smoke-test для сценария: загрузка файлов → logout/login → resume.
+  - добавить welcome screen / starter cards для ключевых сценариев:
+    - `General Chat`
+    - `Coding Assistant`
+    - `Agentic`
+    - `Specific Tasks`
+    - `RAG Q&A`
+  - starter cards не должны запускать local-routing;
+    они только предзаполняют backend-facing state:
+    `assistant_mode`, `runtime_mode`, `rag_scope`, `model_profile`, `prompt_profile`.
+  - подготовить явное разделение пользовательских режимов:
+    - `Session RAG`
+    - `Knowledge Base`
+    - `General Chat`
 
 - [ ] **T4.3 — LLM Profile Selector в Chainlit (без raw model-id в UI)**
   Добавить выбор профиля инференса (например: `default-chat`, `long-context`, `legal-compare`).
   Профиль маппится на backend-конфиг (модель, ctx, temperature, device_mode).
   Убрать жёсткую привязку к `qwen-14b-llm` в пользовательском потоке.
+  Уточнение по UX/архитектуре:
+  - selector профиля должен быть thin UI-control над backend policy, а не вторым local-router;
+  - рядом потребуется selector runtime-mode (`chat_only | auto | specialized_tasks`) и prompt-profile
+    (`default-assistant | strict-grounded-doc-qa | legal-analyst | equipment-compliance`);
+  - нужен отдельный `Chainlit UX control-plane` слой через `ChatSettings` tabs:
+    - `Use Case`
+    - `RAG`
+    - `Model`
+    - `Prompt`
+    - `Generation`
+  - в backend contract должны жить отдельные поля:
+    `assistant_mode`, `runtime_mode`, `rag_scope`, `model_profile`,
+    `prompt_profile`, `generation_overrides`, `custom_system_prompt`, `tool_scope`;
+  - `system_prompt`, `temperature`, `top_p`, `max_tokens` должны поддерживаться
+    и через код/backend profile defaults, и через UX overrides;
+  - raw `system_prompt` разрешать через UX как override, но применять только через backend validation/policy,
+    а не напрямую из UI state;
+  - зафиксировать precedence effective config:
+    1. backend hard defaults
+    2. profile defaults
+    3. UX overrides
+    4. executor/workflow enforced overrides
+    5. backend safety validation / clamping
+  - UI должен показывать effective config, а не просто локально выбранное значение;
+  - см. unified plan: `docs/plans/2026-03-11-unified-recovery-and-ui-plan.md`.
+  Правило реализации:
+  - основные правки и отладка должны идти в нативном запуске `Chainlit` на хосте;
+  - Docker/compose path использовать как финальный production-validation и packaging stage,
+    а не как основной цикл UI-разработки.
+  Follow-up после foundation-среза:
+  - текущий `knowledge_base_rag` уже доступен в UX/control-plane schema, но ещё не подключён к реальному retrieval contour;
+    до завершения `B3.33` это только policy/state vocabulary, не production-ready KB search.
+  - `assistant_mode` / `model_profile` уже влияют на effective config и prompt/model resolution,
+    но физический model-routing пока может fallback'иться на один и тот же `qwen-14b-llm`,
+    если профильные env mapping'и не заданы.
+  - raw/effective control-plane state пока живёт в `user_session`; для честного resume/history UX
+    нужно отдельно сохранить его в thread metadata / persistence layer и восстановление при `on_chat_resume`.
 
 - [ ] **T4.4 — UMS Model Control API (операции для Ops UI)**
   Добавить эндпоинты:
@@ -688,6 +983,26 @@
     https://github.com/ggml-org/llama.cpp
   - vLLM OpenAI server (`--max-model-len` берётся из model config, если не задан):
     https://docs.vllm.ai/en/v0.7.0/serving/openai_compatible_server.html
+  Дополнение по delivery / scripts:
+  - реализация должна прийти к единому runtime/preflight script и единому launcher API;
+  - основной dev-path: native `Chainlit` на хосте;
+  - container path использовать как финальный production-validation слой;
+  - при анализе открытых GitHub PR использовать `#7` как основной источник идей по budgeting,
+    а `#4/#5/#6` считать кандидатами на закрытие как superseded после финальной реализации.
+
+- [ ] **T4.14 — Unified runtime launcher + PR cleanup for hardware adaptation**
+  Контекст:
+  - вокруг preflight/runtime budgeting уже есть несколько конкурирующих GitHub PR (`#3`, `#4`, `#5`, `#6`, `#7`);
+  - текущая стратегия разработки изменилась: dev должен быть native-first для Chainlit, а не Docker-first;
+  - нужен единый поддерживаемый контур для hardware adaptation и запуска.
+  Что сделать:
+  - собрать единый launcher API для `native | container` path;
+  - объединить hardware detect / profile planning / `.env.runtime` generation в одном поддерживаемом entrypoint;
+  - совместить это с `effective_context_tokens` и UMS `/status`;
+  - после внедрения пройтись по открытым PR и закрыть дублирующие как superseded;
+  - в каждом закрытом PR оставить комментарий, что именно реализовано и где теперь находится финальная версия.
+  Артефакты:
+  - unified plan: `docs/plans/2026-03-11-unified-recovery-and-ui-plan.md`
   - vLLM arg docs (long context, OOM/perf риски):
     https://docs.vllm.ai/en/v0.9.1/api/vllm/engine/arg_utils.html
 
@@ -735,6 +1050,19 @@
   `DEBUG-POLISH` и extraction отработали корректно, включая одиночный тяжёлый batch для `R760`
   с `Тип устройства: Сервер`, но matching сломался на `404 /batch_match`, поэтому итоговый
   `Report_Equipment_1772620860.md` содержит только предупреждение без оценки соответствия.
+
+#### 2026-03-11 — NotebookLM auth vs MCP operational note
+
+- Локальная аутентификация NotebookLM валидна:
+  - `nlm doctor` видит cookies / CSRF / account;
+  - `nlm login --check` подтверждает рабочий профиль и наличие notebooks.
+- При этом MCP-интеграция в текущей среде ведёт себя нестабильно:
+  - `server_info` и `refresh_auth` работают;
+  - `notebook_list` через MCP может возвращать пустой список;
+  - `research_start` через MCP может падать с `Failed to start research — no confirmation from API`.
+- Временное правило:
+  - для research/query использовать CLI fallback `nlm ...`, если MCP даёт inconsistent state;
+  - не считать это проблемой самих auth tokens без дополнительной проверки через CLI.
 
 #### 2026-03-04 — Повторная E2E-валидация после фиксов `legal label`, `match_batches` и non-stream chat
 

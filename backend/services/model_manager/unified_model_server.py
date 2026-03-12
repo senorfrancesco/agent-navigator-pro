@@ -84,6 +84,11 @@ STATIC_MODELS_CONFIG = {
         "type": "st",
         "path": os.getenv("MODEL_PATH_LABSE", "./models/st/LaBSE"),
         "port": 8093
+    },
+    "qwen3-embedding-0.6b": {
+        "type": "st",
+        "path": os.getenv("MODEL_PATH_QWEN3_EMBEDDING_06B", "./models/st/Qwen3-Embedding-0.6B"),
+        "port": 8094
     }
 }
 

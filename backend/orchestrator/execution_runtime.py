@@ -1,0 +1,583 @@
+from __future__ import annotations
+
+import asyncio
+import copy
+import os
+import time
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable, Dict, List, Optional
+
+from orchestrator.orchestration_runtime import decide_orchestration, is_social_query
+from orchestrator.ui_control_plane import get_prompt_profile_system_message, resolve_effective_settings
+from orchestrator.workflows.equipment import detect_equipment_mode
+
+
+AsyncStrFn = Callable[..., Awaitable[str]]
+AsyncAnyFn = Callable[..., Awaitable[Any]]
+SyncAnyFn = Callable[..., Any]
+
+
+@dataclass
+class ExecutionDependencies:
+    infer_assistant_text: AsyncStrFn
+    build_prompt: SyncAnyFn
+    get_profile_system_prompt: SyncAnyFn
+    get_active_doc_ids: SyncAnyFn
+    get_all_docs: SyncAnyFn
+    get_active_docs: SyncAnyFn
+    get_report_docs: SyncAnyFn
+    resolve_target_doc_name: SyncAnyFn
+    is_report_query: SyncAnyFn
+    ensure_rag_index_for_doc_ids: AsyncAnyFn
+    get_rag_pipeline: SyncAnyFn
+    build_sources_from_rag_result: SyncAnyFn
+    reindex_sources: SyncAnyFn
+    build_doc_question_deterministic_fallback: SyncAnyFn
+    render_doc_question_markdown: SyncAnyFn
+    build_doc_question_prompt_with_sources: SyncAnyFn
+    citations_are_valid: SyncAnyFn
+    needs_doc_question_regen: SyncAnyFn
+    extract_citation_ids: SyncAnyFn
+    has_sufficient_evidence: SyncAnyFn
+    compute_confidence_v1: SyncAnyFn
+    strip_model_source_sections: SyncAnyFn
+    to_host_path: SyncAnyFn
+    active_set_status_line: SyncAnyFn
+    attach_and_register_report: AsyncAnyFn
+
+
+def _collect_raw_control_plane(request: Dict[str, Any]) -> Dict[str, Any]:
+    raw: Dict[str, Any] = {}
+    for field in (
+        "assistant_mode",
+        "runtime_mode",
+        "rag_scope",
+        "knowledge_collection_id",
+        "model_profile",
+        "prompt_profile",
+        "custom_system_prompt",
+        "tool_scope",
+    ):
+        if field in request:
+            raw[field] = request.get(field)
+
+    generation_overrides = request.get("generation_overrides")
+    if generation_overrides:
+        raw["generation_overrides"] = dict(generation_overrides)
+    return raw
+
+
+def _build_state_ref(*, thread_id: Optional[str], session_id: Optional[str], trace_id: str) -> str:
+    if thread_id:
+        return f"thread:{thread_id}"
+    if session_id:
+        return f"session:{session_id}"
+    return f"trace:{trace_id}"
+
+
+def _extract_pending_action_id(action_required: Optional[Dict[str, Any]], trace_id: str) -> Optional[str]:
+    if not action_required:
+        return None
+    return (
+        action_required.get("pending_action_id")
+        or action_required.get("route_choice_id")
+        or f"{trace_id}:{action_required.get('type', 'action_required')}"
+    )
+
+
+def _build_ui_effects(
+    response: Dict[str, Any],
+    *,
+    pending_action_id: Optional[str],
+) -> Dict[str, Any]:
+    patch = copy.deepcopy(response.get("session_state_patch") or {})
+    action_required = copy.deepcopy(response.get("action_required"))
+    ui_hints = copy.deepcopy(response.get("ui_hints") or {})
+    effects: Dict[str, Any] = {
+        "clear_pending_action": action_required is None,
+        "preserve_active_docs": bool(ui_hints.get("preserve_active_docs")),
+        "preserve_active_mode": bool(ui_hints.get("preserve_active_mode") or patch.get("preserve_active_mode")),
+    }
+    if "active_mode" in patch:
+        effects["set_active_mode"] = patch.get("active_mode")
+    if action_required is not None:
+        effects["set_pending_action"] = action_required
+        effects["pending_action_id"] = pending_action_id
+    return effects
+
+
+def _with_execution_metadata(
+    response: Dict[str, Any],
+    *,
+    request: Dict[str, Any],
+    effective_settings: Dict[str, Any],
+) -> Dict[str, Any]:
+    enriched = copy.deepcopy(response)
+    trace_id = str(enriched.get("trace_id") or request.get("trace_id") or "")
+    pending_action_id = _extract_pending_action_id(enriched.get("action_required"), trace_id)
+    enriched["effective_settings"] = copy.deepcopy(effective_settings)
+    enriched["state_ref"] = _build_state_ref(
+        thread_id=request.get("thread_id"),
+        session_id=request.get("session_id"),
+        trace_id=trace_id,
+    )
+    enriched["pending_action_id"] = pending_action_id
+    enriched["ui_effects"] = _build_ui_effects(enriched, pending_action_id=pending_action_id)
+    return enriched
+
+
+async def _run_graph(workflow: Any, initial_state: Dict[str, Any]) -> Dict[str, Any]:
+    final_state: Dict[str, Any] = {}
+    async for event in workflow.astream(initial_state):
+        for _, output in event.items():
+            final_state.update(output)
+    return final_state
+
+
+def _build_session_doc_list(session_docs: Dict[str, Any]) -> List[Dict[str, Any]]:
+    docs: List[Dict[str, Any]] = []
+    for index, (name, info) in enumerate((session_docs or {}).items(), start=1):
+        docs.append(
+            {
+                "document_id": str(info.get("document_id") or name),
+                "display_name": name,
+                "path": info.get("path"),
+                "text": info.get("text", ""),
+                "report_generated": bool(info.get("report_generated")),
+                "order_index": index,
+            }
+        )
+    return docs
+
+
+def _select_pair_files(new_files: List[Dict[str, Any]], session_docs: Dict[str, Any]) -> tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+    files = list(new_files or [])[:2]
+    if len(files) < 2:
+        file_names = list((session_docs or {}).keys())
+        if len(file_names) < 2:
+            return None, "Нужно минимум 2 документа для выполнения этого сценария."
+        if len(file_names) > 2:
+            labels = "\n".join(f"- {name}" for name in file_names)
+            return None, (
+                "В активном наборе больше 2 документов. Уточните целевую пару "
+                f"или оставьте только нужные файлы.\n{labels}"
+            )
+        files = [{"name": name, "path": session_docs[name].get("path")} for name in file_names]
+
+    if len(files) < 2 or any(not f.get("path") for f in files):
+        return None, "Недостаточно валидных файлов для выполнения этого сценария."
+    return files, None
+
+
+def _select_single_file(new_files: List[Dict[str, Any]], session_docs: Dict[str, Any], active_status_line: str) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+    if new_files:
+        return new_files[0], None
+    if session_docs:
+        if len(session_docs) > 1:
+            labels = "\n".join(f"- {name}" for name in session_docs.keys())
+            return None, (
+                "Для анализа нужен один целевой документ. "
+                f"Уточните, какой файл анализировать.\n{active_status_line}\n{labels}"
+            )
+        only_name = next(iter(session_docs))
+        return {"name": only_name, "path": session_docs[only_name].get("path")}, None
+    return None, "Нужно загрузить документ для анализа."
+
+
+async def _execute_compare(
+    *,
+    new_files: List[Dict[str, Any]],
+    session_docs: Dict[str, Any],
+    deps: ExecutionDependencies,
+) -> Dict[str, Any]:
+    from orchestrator.workflows.compare import create_compare_graph
+
+    files, error_message = _select_pair_files(new_files, session_docs)
+    if error_message:
+        return {"assistant_message": error_message}
+
+    workflow = create_compare_graph()
+    final_state = await _run_graph(
+        workflow,
+        {
+            "input_1": deps.to_host_path(files[0]["path"]),
+            "input_2": deps.to_host_path(files[1]["path"]),
+            "name_1": files[0]["name"],
+            "name_2": files[1]["name"],
+            "chunks_old": [],
+            "chunks_new": [],
+            "matches": [],
+            "analysis_results": [],
+            "final_report": "",
+            "errors": [],
+        },
+    )
+    report = final_state.get("final_report", "")
+    errors = final_state.get("errors", [])
+    if report:
+        await deps.attach_and_register_report(report)
+        return {"assistant_message": report, "generated_report": report}
+    if errors:
+        return {"assistant_message": "Ошибки:\n" + "\n".join(f"- {e}" for e in errors)}
+    return {"assistant_message": "Не удалось создать отчёт."}
+
+
+async def _execute_equipment(
+    *,
+    query: str,
+    new_files: List[Dict[str, Any]],
+    session_docs: Dict[str, Any],
+    deps: ExecutionDependencies,
+) -> Dict[str, Any]:
+    from orchestrator.workflows.equipment import create_equipment_graph
+
+    files, error_message = _select_pair_files(new_files, session_docs)
+    if error_message:
+        return {"assistant_message": error_message}
+
+    mode = detect_equipment_mode(
+        files[0]["name"],
+        files[1]["name"],
+        query,
+        text_1=(session_docs.get(files[0]["name"], {}) or {}).get("text", "")[:1000],
+        text_2=(session_docs.get(files[1]["name"], {}) or {}).get("text", "")[:1000],
+    )
+
+    workflow = create_equipment_graph()
+    final_state = await _run_graph(
+        workflow,
+        {
+            "input_1": deps.to_host_path(files[0]["path"]),
+            "input_2": deps.to_host_path(files[1]["path"]),
+            "name_1": files[0]["name"],
+            "name_2": files[1]["name"],
+            "mode": mode,
+            "items_1": [],
+            "items_2": [],
+            "matches": [],
+            "analysis_results": [],
+            "final_report": "",
+            "errors": [],
+            "session_id": "",
+        },
+    )
+    report = final_state.get("final_report", "")
+    errors = final_state.get("errors", [])
+    if report:
+        await deps.attach_and_register_report(report)
+        return {"assistant_message": report, "generated_report": report}
+    if errors:
+        return {"assistant_message": "Ошибки:\n" + "\n".join(f"- {e}" for e in errors)}
+    return {"assistant_message": "Не удалось создать отчёт."}
+
+
+async def _execute_document_analysis(
+    *,
+    new_files: List[Dict[str, Any]],
+    session_docs: Dict[str, Any],
+    deps: ExecutionDependencies,
+) -> Dict[str, Any]:
+    from orchestrator.workflows.document_analysis import create_analysis_graph
+
+    file_entry, error_message = _select_single_file(new_files, session_docs, deps.active_set_status_line())
+    if error_message:
+        return {"assistant_message": error_message}
+
+    workflow = create_analysis_graph()
+    final_state = await _run_graph(
+        workflow,
+        {
+            "input_path": deps.to_host_path(file_entry["path"]),
+            "doc_name": file_entry["name"],
+            "doc_type": "",
+            "doc_metadata": {},
+            "items": [],
+            "full_text": "",
+            "summary": "",
+            "final_report": "",
+            "errors": [],
+        },
+    )
+    report = final_state.get("final_report", "")
+    errors = final_state.get("errors", [])
+    if report:
+        await deps.attach_and_register_report(report)
+        return {"assistant_message": report, "generated_report": report}
+    if errors:
+        return {"assistant_message": "Ошибки:\n" + "\n".join(f"- {e}" for e in errors)}
+    return {"assistant_message": "Не удалось создать отчёт."}
+
+
+async def _execute_documents_summary(
+    *,
+    query: str,
+    history: List[Dict[str, Any]],
+    deps: ExecutionDependencies,
+) -> Dict[str, Any]:
+    docs = deps.get_all_docs() or []
+    if not docs:
+        return {"assistant_message": "Нет загруженных документов для суммаризации."}
+
+    per_doc: List[Dict[str, str]] = []
+    for doc in docs:
+        doc_name = str(doc.get("display_name", "document"))
+        text = str(doc.get("text", ""))[:10000]
+        if not text.strip():
+            per_doc.append({"name": doc_name, "summary": "Документ пуст или текст не извлечён."})
+            continue
+        prompt = deps.build_prompt(
+            (
+                "Кратко суммаризируй документ в 4-6 пунктов: тема, цель, ключевые требования/положения, "
+                "сроки/ограничения (если есть), важные риски/последствия."
+            ),
+            [],
+            (
+                "Ты аналитик документов. Пиши строго по тексту, без домыслов. "
+                f"Документ: {doc_name}\n\nТЕКСТ:\n{text}"
+            ),
+        )
+        summary = await deps.infer_assistant_text(prompt, enforced_overrides={"temperature": 0.2})
+        per_doc.append({"name": doc_name, "summary": summary.strip()})
+
+    combined_input = "\n\n".join(f"[{idx + 1}] {item['name']}\n{item['summary']}" for idx, item in enumerate(per_doc))
+    global_prompt = deps.build_prompt(
+        query,
+        history,
+        (
+            "Ты аналитик. На основе сводок по документам сформируй:\n"
+            "1) ОБЩАЯ СВОДКА (5-8 предложений)\n"
+            "2) КЛЮЧЕВЫЕ РАЗЛИЧИЯ/АКЦЕНТЫ (если документов больше одного) списком\n"
+            "Пиши только на основе входных сводок.\n\n"
+            f"СВОДКИ:\n{combined_input}"
+        ),
+    )
+    global_summary = await deps.infer_assistant_text(global_prompt, enforced_overrides={"temperature": 0.2})
+    lines = ["## Сводка по документам", "", "### По каждому документу"]
+    for item in per_doc:
+        lines.extend([f"#### {item['name']}", item["summary"], ""])
+    lines.extend(["### Общая сводка", global_summary.strip()])
+    return {"assistant_message": "\n".join(lines).strip()}
+
+
+async def _execute_doc_question(
+    *,
+    query: str,
+    history: List[Dict[str, Any]],
+    session_docs: Dict[str, Any],
+    deps: ExecutionDependencies,
+) -> Dict[str, Any]:
+    all_docs = deps.get_all_docs() or _build_session_doc_list(session_docs)
+    active_docs = deps.get_active_docs() or _build_session_doc_list(session_docs)
+    target_doc_name = deps.resolve_target_doc_name(query, all_docs)
+
+    scope_docs = active_docs
+    if target_doc_name:
+        scope_docs = [doc for doc in all_docs if str(doc.get("display_name")) == target_doc_name]
+    elif deps.is_report_query(query):
+        report_docs = deps.get_report_docs() or []
+        if report_docs:
+            scope_docs = [report_docs[-1]]
+
+    await deps.ensure_rag_index_for_doc_ids([str(doc["document_id"]) for doc in scope_docs])
+    rag = deps.get_rag_pipeline()
+    rag_result = None
+    rag_meta: Dict[str, Any] = {}
+    rag_mode = "simple"
+
+    if rag is not None and getattr(rag, "_indexed", False):
+        try:
+            retrieve_top_k = max(20, int(getattr(rag, "top_k", 5)) * 4) if target_doc_name else None
+            rag_result = await asyncio.to_thread(rag.retrieve, query, retrieve_top_k)
+            rag_meta = rag_result.metadata or {}
+            rag_mode = str(rag_meta.get("mode", "simple"))
+        except Exception:
+            rag_result = None
+
+    if rag_result is None:
+        return {
+            "assistant_message": (
+                "По текущему запросу не удалось получить проверяемые источники из RAG. "
+                "Уточните формулировку или вопрос к конкретной позиции."
+            )
+        }
+
+    sources = deps.build_sources_from_rag_result(rag_result, rag, max_sources=20)
+    if target_doc_name:
+        sources = [s for s in sources if str(s.get("document_id")) == target_doc_name]
+        sources = deps.reindex_sources(sources)
+
+    if not sources:
+        fallback_reason = None
+        if target_doc_name:
+            fallback_reason = (
+                f"Для документа `{target_doc_name}` не найдено подтверждённых релевантных фрагментов "
+                "в активном наборе."
+            )
+        payload = deps.build_doc_question_deterministic_fallback(
+            query=query,
+            sources=[],
+            fallback_type="insufficient_evidence",
+            fallback_reason=fallback_reason,
+        )
+        return {
+            "assistant_message": deps.render_doc_question_markdown(payload),
+            "sources": payload.get("sources", []),
+        }
+
+    prompt = deps.build_doc_question_prompt_with_sources(query, history, sources)
+    response_text = await deps.infer_assistant_text(prompt, enforced_overrides={"temperature": 0.3})
+    citations_valid = deps.citations_are_valid(response_text, source_count=len(sources))
+
+    if not citations_valid or deps.needs_doc_question_regen(response_text, has_session_docs=bool(session_docs)):
+        strict_prompt = (
+            deps.build_doc_question_prompt_with_sources(query, history, sources)
+            + "\n\nЖЕСТКОЕ ПРАВИЛО: обязательно используй только валидные ссылки [n] из каталога."
+        )
+        response_text = await deps.infer_assistant_text(strict_prompt, enforced_overrides={"temperature": 0.2})
+        citations_valid = deps.citations_are_valid(response_text, source_count=len(sources))
+
+    if not citations_valid:
+        payload = deps.build_doc_question_deterministic_fallback(
+            query=query,
+            sources=sources,
+            fallback_type="citation_validation_failed",
+        )
+        return {
+            "assistant_message": deps.render_doc_question_markdown(payload),
+            "sources": payload.get("sources", []),
+        }
+
+    cited_ids = deps.extract_citation_ids(response_text)
+    has_evidence = deps.has_sufficient_evidence(
+        sources=sources,
+        mode=rag_mode,
+        query=query,
+        citations_valid=True,
+    )
+    if not has_evidence:
+        payload = deps.build_doc_question_deterministic_fallback(
+            query=query,
+            sources=sources,
+            fallback_type="insufficient_evidence",
+        )
+    else:
+        confidence, label = deps.compute_confidence_v1(sources, cited_ids, "grounded_answer")
+        payload = {
+            "answer_text": deps.strip_model_source_sections(response_text),
+            "sources": sources,
+            "answer_mode": "grounded_answer",
+            "fallback_type": "none",
+            "fallback_reason": None,
+            "confidence": confidence,
+            "confidence_label": label,
+            "confidence_method": "heuristic_v1",
+            "confidence_version": "1",
+        }
+    return {
+        "assistant_message": deps.render_doc_question_markdown(payload),
+        "sources": payload.get("sources", []),
+    }
+
+
+async def _execute_general_chat(
+    *,
+    query: str,
+    history: List[Dict[str, Any]],
+    session_docs: Dict[str, Any],
+    effective_settings: Dict[str, Any],
+    deps: ExecutionDependencies,
+) -> Dict[str, Any]:
+    custom_system_prompt = (effective_settings.get("custom_system_prompt") or "").strip()
+    system_prompt = custom_system_prompt or deps.get_profile_system_prompt() or get_prompt_profile_system_message(
+        effective_settings.get("prompt_profile")
+    )
+    prompt = deps.build_prompt(query, history, system_prompt)
+    social_query = is_social_query(query)
+    if social_query and not session_docs:
+        prompt += (
+            "\n\nКонтекст: документов в сессии нет. "
+            "Ответь как обычный чат-ассистент, без предложений загрузить документы, "
+            "если пользователь сам не просит анализ документов."
+        )
+    if social_query and session_docs:
+        prompt += (
+            "\n\nКонтекст: у пользователя уже есть загруженные документы. "
+            "Отвечай как в обычном чате, без шаблонных фраз и без просьбы перезагрузить файлы."
+        )
+    answer = await deps.infer_assistant_text(prompt)
+    return {"assistant_message": answer}
+
+
+async def execute_orchestration(
+    request: Dict[str, Any],
+    *,
+    deps: Optional[ExecutionDependencies] = None,
+) -> Dict[str, Any]:
+    session_docs = request.get("session_docs") or {}
+    attachments_meta = request.get("attachments_meta") or []
+    history = request.get("history") or []
+
+    effective_settings = copy.deepcopy(request.get("effective_settings") or resolve_effective_settings(_collect_raw_control_plane(request)))
+
+    decision = decide_orchestration(
+        query=request.get("message", ""),
+        trace_id=request.get("trace_id"),
+        runtime_mode=request.get("runtime_mode", "auto"),
+        file_count=int(request.get("file_count", 0)),
+        has_session_docs=bool(request.get("has_session_docs", False)),
+        session_docs=session_docs,
+        classifier_result=request.get("classifier_result"),
+        new_files=attachments_meta,
+        active_doc_ids=request.get("active_doc_ids") or [],
+        forced_route=request.get("forced_route"),
+    )
+    response = _with_execution_metadata(decision, request=request, effective_settings=effective_settings)
+
+    if response.get("action_required"):
+        return response
+
+    if deps is None:
+        return response
+
+    executor = response.get("executor") or "chat"
+    try:
+        if executor == "compare_documents":
+            result = await _execute_compare(new_files=attachments_meta, session_docs=session_docs, deps=deps)
+        elif executor == "equipment_analysis":
+            result = await _execute_equipment(
+                query=request.get("message", ""),
+                new_files=attachments_meta,
+                session_docs=session_docs,
+                deps=deps,
+            )
+        elif executor == "document_analysis":
+            result = await _execute_document_analysis(new_files=attachments_meta, session_docs=session_docs, deps=deps)
+        elif executor == "document_question":
+            result = await _execute_doc_question(
+                query=request.get("message", ""),
+                history=history,
+                session_docs=session_docs,
+                deps=deps,
+            )
+        elif executor == "documents_summary":
+            result = await _execute_documents_summary(
+                query=request.get("message", ""),
+                history=history,
+                deps=deps,
+            )
+        else:
+            result = await _execute_general_chat(
+                query=request.get("message", ""),
+                history=history,
+                session_docs=session_docs,
+                effective_settings=effective_settings,
+                deps=deps,
+            )
+    except Exception as exc:
+        result = {"assistant_message": f"Ошибка выполнения сценария: {exc}"}
+
+    if result.get("generated_report"):
+        response["ui_effects"]["generated_report"] = result["generated_report"]
+    response["assistant_message"] = result.get("assistant_message") or response.get("assistant_message")
+    response["sources"] = result.get("sources", response.get("sources", []))
+    return response

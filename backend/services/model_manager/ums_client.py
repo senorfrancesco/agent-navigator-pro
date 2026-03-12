@@ -292,11 +292,17 @@ def generate_text_via_ums(prompt: str, max_tokens: int = 512, temperature: float
         print(f"[UMS_CLIENT] Error generating text: {e}")
         raise
 
-def get_embeddings_via_ums(text: str, normalize: bool = True) -> List[float]:
+def get_embeddings_via_ums(
+    text: str,
+    normalize: bool = True,
+    *,
+    model_id: str = "labse-embedding",
+) -> List[float]:
     """
-    Получает эмбеддинги текста через UMS, используя Embedding-модель (LaBSE).
+    Получает эмбеддинги текста через UMS.
     
-    Используется MCP Legal Server для сравнения текстов.
+    По умолчанию используется `labse-embedding`, что важно для
+    Legal Server и сценариев сравнения юридических документов.
     """
     payload = {
         "input": text,
@@ -304,7 +310,7 @@ def get_embeddings_via_ums(text: str, normalize: bool = True) -> List[float]:
     }
     
     try:
-        response = ums_client.infer("labse-embedding", payload, device_mode="cpu")
+        response = ums_client.infer(model_id, payload, device_mode="cpu")
         
         # Парсим ответ от llama-server
         if "data" in response:
@@ -318,7 +324,11 @@ def get_embeddings_via_ums(text: str, normalize: bool = True) -> List[float]:
         print(f"[UMS_CLIENT] Error getting embeddings: {e}")
         raise
 
-def create_ums_embed_fn(base_url: str = None) -> Optional[Callable]:
+def create_ums_embed_fn(
+    base_url: str = None,
+    *,
+    model_id: str = "labse-embedding",
+) -> Optional[Callable]:
     """
     Фабрика embed_fn для AdaptiveRAGPipeline.
 
@@ -328,9 +338,9 @@ def create_ums_embed_fn(base_url: str = None) -> Optional[Callable]:
     """
     url = (base_url or UMS_URL).rstrip("/") + "/v1/embeddings"
 
-    # Probe: проверяем доступность UMS и LaBSE
+    # Probe: проверяем доступность UMS и конкретной embedding-модели
     try:
-        resp = requests.post(url, json={"input": ["test"], "model": "labse-embedding"}, timeout=10)
+        resp = requests.post(url, json={"input": ["test"], "model": model_id}, timeout=10)
         resp.raise_for_status()
     except Exception:
         return None
@@ -351,7 +361,7 @@ def create_ums_embed_fn(base_url: str = None) -> Optional[Callable]:
                     # Ретраи для каждого батча
                     for attempt in range(3):
                         try:
-                            resp = client.post(url, json={"input": batch, "model": "labse-embedding"})
+                            resp = client.post(url, json={"input": batch, "model": model_id})
                             resp.raise_for_status()
                             data = resp.json().get("data", [])
                             data.sort(key=lambda x: x.get("index", i))

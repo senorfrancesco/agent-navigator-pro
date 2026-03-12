@@ -12,7 +12,7 @@ import sys
 import os
 import re
 import warnings
-from typing import Dict, Any, Optional, List, AsyncGenerator, Tuple
+from typing import Dict, Any, Optional, List, AsyncGenerator, Tuple, Literal
 from dotenv import load_dotenv
 
 # Подавление предупреждений pynvml
@@ -31,6 +31,9 @@ import httpx
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from orchestrator.workflows.compare import create_compare_graph
 from orchestrator.workflows.equipment import create_equipment_graph
+from orchestrator.execution_runtime import ExecutionDependencies, execute_orchestration
+from orchestrator.orchestration_runtime import decide_orchestration
+from orchestrator.ui_control_plane import get_prompt_profile_system_message, resolve_effective_settings
 
 try:
     from services.resource_monitor import get_system_resources
@@ -68,6 +71,178 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None
     attachments: Optional[List[FileAttachment]] = None
     model_settings: Optional[Dict[str, Any]] = None
+
+
+class GenerationOverrides(BaseModel):
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    max_tokens: Optional[int] = None
+
+
+class OrchestrationRequest(BaseModel):
+    message: str
+    session_id: Optional[str] = None
+    thread_id: Optional[str] = None
+    history: Optional[List[Dict[str, Any]]] = None
+    pending_action: Optional[Dict[str, Any]] = None
+    active_doc_ids: Optional[List[str]] = None
+    attachments_meta: Optional[List[Dict[str, Any]]] = None
+    runtime_mode: Literal["auto", "chat_only", "specialized_tasks"] = "auto"
+    assistant_mode: Optional[Literal["general_chat", "coding", "agentic", "specific_tasks", "rag_qa"]] = None
+    rag_scope: Optional[Literal["off", "session_rag", "knowledge_base_rag"]] = None
+    knowledge_collection_id: Optional[str] = None
+    model_profile: Optional[Literal["default-chat", "coder", "agentic", "analyst"]] = None
+    prompt_profile: Optional[
+        Literal[
+            "default-assistant",
+            "coding-assistant",
+            "tool-using-agent",
+            "task-router",
+            "strict-grounded-doc-qa",
+        ]
+    ] = None
+    generation_overrides: Optional[GenerationOverrides] = None
+    custom_system_prompt: Optional[str] = None
+    tool_scope: Optional[Literal["chat", "coding", "agentic", "domain_tasks", "document_qa"]] = None
+    ui_state: Optional[Dict[str, Any]] = None
+    file_count: int = 0
+    has_session_docs: bool = False
+    session_docs: Optional[Dict[str, Any]] = None
+    classifier_result: Optional[Dict[str, Any]] = None
+    trace_id: Optional[str] = None
+    forced_route: Optional[str] = None
+
+
+def _collect_request_control_plane(request: OrchestrationRequest) -> Dict[str, Any]:
+    raw_control_plane: Dict[str, Any] = {}
+    if "assistant_mode" in request.model_fields_set:
+        raw_control_plane["assistant_mode"] = request.assistant_mode
+    if "runtime_mode" in request.model_fields_set:
+        raw_control_plane["runtime_mode"] = request.runtime_mode
+    if "rag_scope" in request.model_fields_set:
+        raw_control_plane["rag_scope"] = request.rag_scope
+    if "knowledge_collection_id" in request.model_fields_set:
+        raw_control_plane["knowledge_collection_id"] = request.knowledge_collection_id
+    if "model_profile" in request.model_fields_set:
+        raw_control_plane["model_profile"] = request.model_profile
+    if "prompt_profile" in request.model_fields_set:
+        raw_control_plane["prompt_profile"] = request.prompt_profile
+    if "generation_overrides" in request.model_fields_set and request.generation_overrides is not None:
+        raw_control_plane["generation_overrides"] = request.generation_overrides.model_dump(exclude_none=True)
+    if "custom_system_prompt" in request.model_fields_set:
+        raw_control_plane["custom_system_prompt"] = request.custom_system_prompt
+    if "tool_scope" in request.model_fields_set:
+        raw_control_plane["tool_scope"] = request.tool_scope
+    return raw_control_plane
+
+
+def _build_api_prompt(query: str, history: List[Dict[str, Any]], system_msg: str = "") -> str:
+    if not system_msg:
+        system_msg = "Ты помощник Agent Navigator. Помогай пользователю."
+    prompt = f"<|im_start|>system\n{system_msg}<|im_end|>\n"
+    for msg in history[-10:]:
+        role = str(msg.get("role", "user"))
+        content = str(msg.get("content", ""))
+        prompt += f"<|im_start|>{role}\n{content}<|im_end|>\n"
+    prompt += f"<|im_start|>user\n{query}<|im_end|>\n<|im_start|>assistant\n"
+    return prompt
+
+
+async def _infer_with_effective_settings(
+    effective_settings: Dict[str, Any],
+    prompt: str,
+    *,
+    enforced_overrides: Optional[Dict[str, Any]] = None,
+) -> str:
+    generation = dict((effective_settings.get("generation") or {}))
+    if enforced_overrides:
+        generation.update({k: v for k, v in enforced_overrides.items() if v is not None})
+    payload = {
+        "prompt": prompt,
+        "temperature": generation.get("temperature", 0.7),
+        "top_p": generation.get("top_p", 0.9),
+        "max_tokens": generation.get("max_tokens", 2048),
+    }
+    model_id = effective_settings.get("resolved_model_id") or "qwen-14b-llm"
+    response = await asyncio.to_thread(ums_client.infer, model_id, payload)
+    return _extract_content(response)
+
+
+def _build_api_execution_dependencies(request: OrchestrationRequest, effective_settings: Dict[str, Any]) -> ExecutionDependencies:
+    session_docs = request.session_docs or {}
+
+    def _docs_list() -> List[Dict[str, Any]]:
+        docs: List[Dict[str, Any]] = []
+        for idx, (name, info) in enumerate(session_docs.items(), start=1):
+            docs.append(
+                {
+                    "document_id": str(info.get("document_id") or name),
+                    "display_name": name,
+                    "path": info.get("path"),
+                    "text": info.get("text", ""),
+                    "report_generated": bool(info.get("report_generated")),
+                    "order_index": idx,
+                }
+            )
+        return docs
+
+    def _profile_prompt() -> str:
+        custom = (effective_settings.get("custom_system_prompt") or "").strip()
+        if custom:
+            return custom
+        return get_prompt_profile_system_message(effective_settings.get("prompt_profile"))
+
+    async def _infer(prompt: str, **kwargs: Any) -> str:
+        return await _infer_with_effective_settings(
+            effective_settings,
+            prompt,
+            enforced_overrides=kwargs.get("enforced_overrides"),
+        )
+
+    async def _noop_async(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    return ExecutionDependencies(
+        infer_assistant_text=_infer,
+        build_prompt=_build_api_prompt,
+        get_profile_system_prompt=_profile_prompt,
+        get_active_doc_ids=lambda: list(request.active_doc_ids or []),
+        get_all_docs=_docs_list,
+        get_active_docs=_docs_list,
+        get_report_docs=lambda: [doc for doc in _docs_list() if doc.get("report_generated")],
+        resolve_target_doc_name=lambda query, docs: None,
+        is_report_query=lambda query: False,
+        ensure_rag_index_for_doc_ids=_noop_async,
+        get_rag_pipeline=lambda: None,
+        build_sources_from_rag_result=lambda rag_result, rag_pipeline, max_sources=5: [],
+        reindex_sources=lambda sources: sources,
+        build_doc_question_deterministic_fallback=lambda **kwargs: {
+            "answer_text": kwargs.get("fallback_reason") or "Недостаточно проверяемых данных.",
+            "sources": kwargs.get("sources", []),
+            "answer_mode": "insufficient_evidence",
+            "fallback_type": kwargs.get("fallback_type", "insufficient_evidence"),
+            "fallback_reason": kwargs.get("fallback_reason"),
+            "confidence": 0.1,
+            "confidence_label": "low",
+            "confidence_method": "heuristic_v1",
+            "confidence_version": "1",
+        },
+        render_doc_question_markdown=lambda payload: payload["answer_text"],
+        build_doc_question_prompt_with_sources=lambda query, history, sources: _build_api_prompt(
+            query,
+            history,
+            "Ты grounded document QA ассистент. Отвечай только по источникам.",
+        ),
+        citations_are_valid=lambda answer_text, source_count: True,
+        needs_doc_question_regen=lambda answer_text, has_session_docs: False,
+        extract_citation_ids=lambda answer_text: [],
+        has_sufficient_evidence=lambda **kwargs: False,
+        compute_confidence_v1=lambda sources, cited_ids, answer_mode: (0.1, "low"),
+        strip_model_source_sections=lambda answer_text: answer_text,
+        to_host_path=lambda path: path,
+        active_set_status_line=lambda: "",
+        attach_and_register_report=_noop_async,
+    )
 
 # === Document Order Detection (Задача 1) ===
 
@@ -572,6 +747,33 @@ def _extract_content(response):
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.post("/orchestrate")
+async def orchestrate(request: OrchestrationRequest):
+    response = decide_orchestration(
+        query=request.message,
+        trace_id=request.trace_id,
+        runtime_mode=request.runtime_mode,
+        file_count=request.file_count,
+        has_session_docs=request.has_session_docs,
+        session_docs=request.session_docs or {},
+        classifier_result=request.classifier_result,
+        new_files=request.attachments_meta or [],
+        active_doc_ids=request.active_doc_ids or [],
+        forced_route=request.forced_route,
+    )
+    response["effective_settings"] = resolve_effective_settings(_collect_request_control_plane(request))
+    return response
+
+
+@app.post("/execute_orchestration")
+async def execute_orchestration_api(request: OrchestrationRequest):
+    effective_settings = resolve_effective_settings(_collect_request_control_plane(request))
+    deps = _build_api_execution_dependencies(request, effective_settings)
+    payload = request.model_dump(exclude_none=True)
+    payload["effective_settings"] = effective_settings
+    return await execute_orchestration(payload, deps=deps)
 
 
 # === OpenAI Compatible API ===
