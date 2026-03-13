@@ -36,10 +36,11 @@ def detect_hardware_snapshot() -> Dict[str, Any]:
         from services.hardware import HardwareProfiler
 
         profile = HardwareProfiler().detect()
+        has_gpu = bool(getattr(profile, "has_gpu", False) or getattr(profile, "gpu_count", 0))
         return {
             "ram_gb": getattr(profile, "ram_gb", None),
             "cpu_cores": getattr(profile, "cpu_cores", None),
-            "has_cuda": getattr(profile, "has_cuda", None),
+            "has_cuda": has_gpu,
             "gpus": getattr(profile, "gpus", None),
             "repr": str(profile),
         }
@@ -83,7 +84,8 @@ def build_runtime_plan(
             "embedding_backend": getattr(tier_config, "embedding_backend", "labse"),
         }
         if selected_device_mode is None:
-            selected_device_mode = DeviceMode.HYBRID.value if getattr(profile, "has_cuda", False) else DeviceMode.CPU.value
+            has_gpu = bool(getattr(profile, "has_gpu", False) or getattr(profile, "gpu_count", 0))
+            selected_device_mode = DeviceMode.HYBRID.value if has_gpu else DeviceMode.CPU.value
     except Exception:
         tier_info = {"tier": None, "rag_mode": "simple", "embedding_backend": "labse"}
         if selected_device_mode is None:
@@ -138,7 +140,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         subparser.add_argument("--manual-effective-context-tokens", type=int, default=None)
         subparser.add_argument("--retrieved-context-ratio", type=float, default=None)
         subparser.add_argument("--generation-tokens-reserve", type=int, default=None)
-        subparser.add_argument("--device-mode", choices=["cpu", "gpu", "hybrid"], default=None)
+        subparser.add_argument(
+            "--device-mode",
+            choices=["cpu", "gpu", "hybrid"],
+            default=(os.getenv("DEVICE_MODE") or None),
+        )
 
     detect_parser = subparsers.add_parser("detect", help="Report detected hardware snapshot.")
     detect_parser.add_argument("--json", action="store_true", default=True)

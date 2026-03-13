@@ -612,6 +612,40 @@ def test_status_exposes_concurrency_policy(monkeypatch):
     assert payload["concurrency_policy"]["embedding_inflight"] == 0
 
 
+def test_lifespan_honors_device_mode_override_for_cpu_tier(monkeypatch):
+    monkeypatch.setenv("DEVICE_MODE", "gpu")
+    previous_device_mode = ums_server.state.get("device_mode")
+    previous_ctx = ums_server.STATIC_MODELS_CONFIG["qwen-14b-llm"]["ctx_size"]
+    previous_gpu_layers = ums_server.STATIC_MODELS_CONFIG["qwen-14b-llm"]["gpu_layers"]
+
+    class _DummyContext:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    with patch("services.hardware.HardwareProfiler.detect", return_value=SimpleNamespace(has_gpu=False, gpu_count=0)), patch(
+        "services.hardware.TierSelector.select",
+        return_value=SimpleNamespace(tier=1, rag_mode="simple", embedding_backend="onnx", llm_ctx_size=4096, llm_gpu_layers=0),
+    ), patch.object(
+        ums_server,
+        "_start_server",
+    ), patch.object(
+        ums_server,
+        "_stop_all_servers",
+    ):
+        asyncio.run(ums_server.lifespan(ums_server.app).__aenter__())
+
+    try:
+        assert ums_server.state["device_mode"] == ums_server.DeviceMode.GPU
+        assert ums_server.STATIC_MODELS_CONFIG["qwen-14b-llm"]["gpu_layers"] == -1
+    finally:
+        ums_server.state["device_mode"] = previous_device_mode
+        ums_server.STATIC_MODELS_CONFIG["qwen-14b-llm"]["ctx_size"] = previous_ctx
+        ums_server.STATIC_MODELS_CONFIG["qwen-14b-llm"]["gpu_layers"] = previous_gpu_layers
+
+
 def test_status_exposes_backend_mode_for_vllm(monkeypatch):
     monkeypatch.setenv("BACKEND_MODE", "vllm")
     ums_server.state["processes"]["qwen-14b-llm"] = ums_server._RemoteProcess()

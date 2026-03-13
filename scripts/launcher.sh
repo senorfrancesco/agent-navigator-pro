@@ -5,6 +5,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BACKEND_DIR="$PROJECT_ROOT/backend"
+ENV_FILE="$BACKEND_DIR/.env"
+NATIVE_ENV_FILE="$BACKEND_DIR/.env.native"
 RUNTIME_ENV_FILE="${AGENT_NAVIGATOR_RUNTIME_ENV_FILE:-$BACKEND_DIR/.env.runtime}"
 TARGET="native"
 PROFILE="${UMS_RUNTIME_PROFILE:-adaptive}"
@@ -52,6 +54,18 @@ done
 if [ "$INSTALL" = true ]; then
   bash "$SCRIPT_DIR/bootstrap_env.sh" --install "--target=$TARGET"
   exit $?
+fi
+
+if [ -f "$ENV_FILE" ]; then
+  set -a
+  source "$ENV_FILE"
+  set +a
+fi
+
+if [ -f "$NATIVE_ENV_FILE" ]; then
+  set -a
+  source "$NATIVE_ENV_FILE"
+  set +a
 fi
 
 bash "$SCRIPT_DIR/bootstrap_env.sh" --check "--target=$TARGET"

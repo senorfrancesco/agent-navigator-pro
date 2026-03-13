@@ -62,6 +62,35 @@ def test_launcher_test_mode_writes_env_runtime_and_reports_target(tmp_path):
     assert "UMS_RUNTIME_PROFILE=adaptive" in runtime_env.read_text(encoding="utf-8")
 
 
+def test_launcher_sources_native_overrides_before_runtime_preflight(tmp_path):
+    runtime_env = tmp_path / ".env.runtime"
+    native_env = PROJECT_ROOT / "backend" / ".env.native"
+    original = native_env.read_text(encoding="utf-8") if native_env.exists() else None
+    try:
+        native_env.write_text('DEVICE_MODE="gpu"\n', encoding="utf-8")
+        env = os.environ.copy()
+        env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
+        env["AGENT_NAVIGATOR_RUNTIME_ENV_FILE"] = str(runtime_env)
+
+        result = _run_script(
+            "launcher.sh",
+            "--target",
+            "native",
+            "--profile",
+            "adaptive",
+            env=env,
+        )
+    finally:
+        if original is None:
+            native_env.unlink(missing_ok=True)
+        else:
+            native_env.write_text(original, encoding="utf-8")
+
+    assert result.returncode == 0
+    assert runtime_env.exists()
+    assert "DEVICE_MODE=gpu" in runtime_env.read_text(encoding="utf-8")
+
+
 def test_run_native_is_wrapper_to_launcher(tmp_path):
     runtime_env = tmp_path / ".env.runtime"
     env = os.environ.copy()

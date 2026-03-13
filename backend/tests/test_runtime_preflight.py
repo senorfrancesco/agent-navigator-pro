@@ -19,7 +19,7 @@ SPEC.loader.exec_module(runtime_preflight)
 def test_build_runtime_plan_returns_stable_payload():
     with patch(
         "services.hardware.HardwareProfiler.detect",
-        return_value=SimpleNamespace(has_cuda=True),
+        return_value=SimpleNamespace(has_gpu=True, gpu_count=1),
     ), patch(
         "services.hardware.TierSelector.select",
         return_value=SimpleNamespace(tier=2, rag_mode="corrective", embedding_backend="qwen3", llm_ctx_size=16384),
@@ -34,6 +34,33 @@ def test_build_runtime_plan_returns_stable_payload():
     assert plan["rag_mode_label"] == "corrective retrieval"
     assert plan["embedding_backend"] == "qwen3"
     assert plan["backend_mode"] == "llama-cpp-python"
+
+
+def test_build_runtime_plan_uses_has_gpu_property_for_default_device_mode():
+    with patch(
+        "services.hardware.HardwareProfiler.detect",
+        return_value=SimpleNamespace(has_gpu=True, gpu_count=1),
+    ), patch(
+        "services.hardware.TierSelector.select",
+        return_value=SimpleNamespace(tier=3, rag_mode="agentic", embedding_backend="pytorch", llm_ctx_size=16384),
+    ):
+        plan = runtime_preflight.build_runtime_plan(runtime_profile="adaptive")
+
+    assert plan["device_mode"] == "hybrid"
+
+
+def test_build_runtime_plan_respects_env_device_mode_override(monkeypatch):
+    monkeypatch.setenv("DEVICE_MODE", "gpu")
+    with patch(
+        "services.hardware.HardwareProfiler.detect",
+        return_value=SimpleNamespace(has_gpu=False, gpu_count=0),
+    ), patch(
+        "services.hardware.TierSelector.select",
+        return_value=SimpleNamespace(tier=1, rag_mode="simple", embedding_backend="onnx", llm_ctx_size=4096),
+    ):
+        exit_code = runtime_preflight.main(["plan"])
+
+    assert exit_code == 0
 
 
 def test_manual_profile_respects_explicit_overrides():
@@ -126,3 +153,14 @@ def test_apply_report_only_does_not_write_env_runtime(tmp_path):
 
     assert exit_code == 0
     assert not path.exists()
+
+
+def test_detect_hardware_snapshot_reports_has_cuda_from_has_gpu():
+    with patch(
+        "services.hardware.HardwareProfiler.detect",
+        return_value=SimpleNamespace(has_gpu=True, gpu_count=2, gpus=["gpu0", "gpu1"], ram_gb=64, cpu_cores=16),
+    ):
+        snapshot = runtime_preflight.detect_hardware_snapshot()
+
+    assert snapshot["has_cuda"] is True
+    assert snapshot["gpus"] == ["gpu0", "gpu1"]

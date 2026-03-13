@@ -211,6 +211,17 @@ def _resolve_embedding_tier_preference() -> str:
     return preferred if preferred in {"cpu", "cuda"} else "cuda"
 
 
+def _resolve_runtime_device_mode() -> DeviceMode:
+    raw = str(os.getenv("DEVICE_MODE", "")).strip().lower()
+    if raw == "gpu":
+        return DeviceMode.GPU
+    if raw == "cpu":
+        return DeviceMode.CPU
+    if raw == "hybrid":
+        return DeviceMode.HYBRID
+    return state.get("device_mode", DeviceMode.HYBRID)
+
+
 def _build_model_placement_plan(
     *,
     model_id: str,
@@ -1006,6 +1017,7 @@ async def lifespan(app: FastAPI):
     # T3.7: Hardware profiling при старте
     state["dynamic_models"] = _load_dynamic_models_registry()
     _align_dynamic_port_counter()
+    state["device_mode"] = _resolve_runtime_device_mode()
     try:
         sys.path.insert(0, str(BACKEND_ROOT))
         from services.hardware import HardwareProfiler, TierSelector
@@ -1025,6 +1037,12 @@ async def lifespan(app: FastAPI):
             STATIC_MODELS_CONFIG["qwen-14b-llm"]["ctx_size"] = tier_config.llm_ctx_size
             if tier_config.llm_gpu_layers != -1:
                 STATIC_MODELS_CONFIG["qwen-14b-llm"]["gpu_layers"] = tier_config.llm_gpu_layers
+            if state["device_mode"] != DeviceMode.CPU and STATIC_MODELS_CONFIG["qwen-14b-llm"]["gpu_layers"] == 0:
+                logger.warning(
+                    "DEVICE_MODE=%s overrides tier-selected cpu-only gpu_layers=0; forcing qwen-14b-llm gpu_layers=-1",
+                    state["device_mode"].value,
+                )
+                STATIC_MODELS_CONFIG["qwen-14b-llm"]["gpu_layers"] = -1
             logger.info(f"Updated qwen-14b-llm: ctx={tier_config.llm_ctx_size}, gpu_layers={tier_config.llm_gpu_layers}")
     except Exception as e:
         logger.warning(f"Hardware profiling failed, using defaults: {e}")
