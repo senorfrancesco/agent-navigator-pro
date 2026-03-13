@@ -725,6 +725,7 @@ async def _execute_doc_question(
     cited_ids = deps.extract_citation_ids(response_text)
     has_evidence = deps.has_sufficient_evidence(
         sources=sources,
+        cited_ids=cited_ids,
         mode=rag_mode,
         query=query,
         citations_valid=True,
@@ -737,7 +738,12 @@ async def _execute_doc_question(
             source_scope_summary=source_scope_summary,
         )
     else:
-        confidence, label = deps.compute_confidence_v1(sources, cited_ids, "grounded_answer")
+        confidence, label = deps.compute_confidence_v1(
+            sources,
+            cited_ids,
+            "grounded_answer",
+            query=query,
+        )
         payload = {
             "answer_text": deps.strip_model_source_sections(response_text),
             "sources": sources,

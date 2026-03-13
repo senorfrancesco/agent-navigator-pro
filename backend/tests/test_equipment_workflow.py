@@ -33,7 +33,7 @@ from orchestrator.workflows.equipment import (
     _normalize_spec_for_polish,
     _build_polish_source_specs,
     _build_polish_batches,
-    _parse_polish_xml_results,
+    _parse_polish_results_json,
     _polish_items_specs_llm,
     _item_to_text,
     _route_after_extract,
@@ -349,22 +349,17 @@ class TestPolishItemsSpecsLlm:
         ordered = [entry["item"]["name"] for batch in batches for entry in batch]
         assert ordered == ["A", "B", "C", "D"]
 
-    def test_parse_polish_xml_results_maps_by_id(self):
-        content = (
-            "<results>"
-            "<item id='1'>Второй</item>"
-            "<item id='0'>Первый</item>"
-            "</results>"
-        )
-        assert _parse_polish_xml_results(content, expected_ids=[0, 1]) == {0: "Первый", 1: "Второй"}
+    def test_parse_polish_results_json_maps_by_id(self):
+        content = '{"schema_version":"b3.11.v1","ok":true,"data":{"results":[{"id":1,"text":"Второй"},{"id":0,"text":"Первый"}]},"error":null}'
+        assert _parse_polish_results_json(content, expected_ids=[0, 1]) == {0: "Первый", 1: "Второй"}
 
-    def test_parse_polish_xml_results_rejects_missing_expected_id(self):
-        content = "<results><item id='0'>Первый</item></results>"
-        assert _parse_polish_xml_results(content, expected_ids=[0, 1]) is None
+    def test_parse_polish_results_json_rejects_missing_expected_id(self):
+        content = '{"schema_version":"b3.11.v1","ok":true,"data":{"results":[{"id":0,"text":"Первый"}]},"error":null}'
+        assert _parse_polish_results_json(content, expected_ids=[0, 1]) is None
 
-    def test_parse_polish_xml_results_accepts_code_fence_wrapped_xml(self):
-        content = "```xml\n<results><item id='0'>Первый:</item></results>\n```"
-        assert _parse_polish_xml_results(content, expected_ids=[0]) == {0: "Первый"}
+    def test_parse_polish_results_json_rejects_code_fence_wrapped_payload(self):
+        content = '```json\n{"schema_version":"b3.11.v1","ok":true,"data":{"results":[{"id":0,"text":"Первый"}]},"error":null}\n```'
+        assert _parse_polish_results_json(content, expected_ids=[0]) is None
 
     @pytest.mark.asyncio
     async def test_polish_items_specs_llm_uses_id_mapping_not_position_only(self):
@@ -383,10 +378,10 @@ class TestPolishItemsSpecsLlm:
 
         response = {
             "content": (
-                "<results>"
-                "<item id='1'>Тип корпуса - Rack 19\"</item>"
-                "<item id='0'>Тип устройства - Сервер</item>"
-                "</results>"
+                '{"schema_version":"b3.11.v1","ok":true,"data":{"results":['
+                '{"id":1,"text":"Тип корпуса - Rack 19\\""},'
+                '{"id":0,"text":"Тип устройства - Сервер"}'
+                ']},"error":null}'
             )
         }
 
@@ -414,7 +409,7 @@ class TestPolishItemsSpecsLlm:
         ]
 
         malformed_response = {
-            "content": "<results><item id='0'>Тип устройства - Сервер</item><item>Тип корпуса - Rack 19</item></results>"
+            "content": '{"schema_version":"b3.11.v1","ok":true,"data":{"results":[{"id":0,"text":"Тип устройства - Сервер"},{"text":"Тип корпуса - Rack 19"}]},"error":null}'
         }
 
         with patch("orchestrator.workflows.equipment.ums_client") as mock_ums:
@@ -440,8 +435,8 @@ class TestPolishItemsSpecsLlm:
         items = [large_item, small_item]
 
         responses = [
-            {"content": "<results><item id='0'>Тяжелая спецификация</item></results>"},
-            {"content": "<results><item id='0'>Короткая спецификация</item></results>"},
+            {"content": '{"schema_version":"b3.11.v1","ok":true,"data":{"results":[{"id":0,"text":"Тяжелая спецификация"}]},"error":null}'},
+            {"content": '{"schema_version":"b3.11.v1","ok":true,"data":{"results":[{"id":0,"text":"Короткая спецификация"}]},"error":null}'},
         ]
 
         with patch("orchestrator.workflows.equipment.ums_client") as mock_ums:
@@ -465,13 +460,7 @@ class TestPolishItemsSpecsLlm:
         ]
 
         response = {
-            "content": (
-                "<results>"
-                "<item id='0'>Spec A</item>"
-                "<item id='1'>Spec B</item>"
-                "<item id='2'>Spec C</item>"
-                "</results>"
-            )
+            "content": '{"schema_version":"b3.11.v1","ok":true,"data":{"results":[{"id":0,"text":"Spec A"},{"id":1,"text":"Spec B"},{"id":2,"text":"Spec C"}]},"error":null}'
         }
 
         with patch("orchestrator.workflows.equipment.ums_client") as mock_ums:

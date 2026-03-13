@@ -6,7 +6,12 @@ from pydantic import ValidationError
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from orchestrator.agent_api import OrchestrationRequest, execute_orchestration_api, orchestrate
+from orchestrator.agent_api import (
+    OrchestrationRequest,
+    _build_api_execution_dependencies,
+    execute_orchestration_api,
+    orchestrate,
+)
 from orchestrator.knowledge_base_ingestion import ingest_text_source_sync
 from orchestrator.knowledge_base_store import get_knowledge_base_store
 
@@ -258,6 +263,47 @@ async def test_execute_orchestration_api_doc_question_reports_missing_rag_adapte
     assert "retrieval adapter" in response["assistant_message"].lower()
     assert "не реализован" in response["assistant_message"].lower()
     assert response["sources"] == []
+
+
+def test_api_execution_dependencies_use_shared_doc_question_heuristic():
+    request = OrchestrationRequest(message="Сравни штраф и уведомление между документами")
+    effective_settings = {
+        "resolved_retrieval_embedder_model_id": "labse-embedding",
+        "prompt_profile": "strict-grounded-doc-qa",
+    }
+    deps = _build_api_execution_dependencies(request, effective_settings)
+    sources = [
+        {
+            "source_id": 1,
+            "document_id": "a.pdf",
+            "display_name": "a.pdf",
+            "raw_score": 0.7,
+            "normalized_score": 0.95,
+            "quote": "Уведомление за 10 дней",
+        },
+        {
+            "source_id": 2,
+            "document_id": "b.pdf",
+            "display_name": "b.pdf",
+            "raw_score": 0.68,
+            "normalized_score": 0.91,
+            "quote": "Штраф 10 процентов",
+        },
+    ]
+
+    assert (
+        deps.has_sufficient_evidence(
+            sources=sources,
+            cited_ids=[1],
+            mode="simple",
+            query=request.message,
+            citations_valid=True,
+        )
+        is False
+    )
+    confidence, _ = deps.compute_confidence_v1(sources, [1, 2], "grounded_answer")
+    lower_confidence, _ = deps.compute_confidence_v1(sources, [1], "grounded_answer")
+    assert confidence > lower_confidence
 
 
 @pytest.mark.asyncio

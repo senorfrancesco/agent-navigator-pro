@@ -14,6 +14,8 @@
 
 Для operator rollout отдельного upstream runtime используется `docker compose --profile vllm up -d vllm`; это отдельный deployment path поверх backend mode switch, а не замена runtime profiles.
 
+Для локального `llama-server` prompt-cache policy управляется отдельно через `UMS_LLAMA_CACHE_PROMPT=true|false`. Effective policy публикуется в `UMS /status -> prompt_cache_policy` и используется benchmark probe `prompt_cache_probe`.
+
 ## Профили
 
 - `default`

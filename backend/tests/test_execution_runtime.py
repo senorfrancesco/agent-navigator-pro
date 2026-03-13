@@ -11,6 +11,13 @@ from orchestrator.execution_runtime import (
     _run_graph,
     execute_orchestration,
 )
+from orchestrator.doc_question_heuristics import (
+    build_doc_question_deterministic_fallback,
+    citations_are_valid,
+    compute_confidence_v1,
+    extract_citation_ids,
+    has_sufficient_evidence_v1,
+)
 from orchestrator.state_store import get_orchestration_state_store
 
 
@@ -49,7 +56,7 @@ def _build_minimal_deps() -> ExecutionDependencies:
         needs_doc_question_regen=lambda answer_text, has_session_docs: False,
         extract_citation_ids=lambda answer_text: [],
         has_sufficient_evidence=lambda **kwargs: False,
-        compute_confidence_v1=lambda sources, cited_ids, answer_mode: (0.4, "medium"),
+        compute_confidence_v1=lambda sources, cited_ids, answer_mode, **kwargs: (0.4, "medium"),
         strip_model_source_sections=lambda answer_text: answer_text,
         to_host_path=lambda path: path,
         active_set_status_line=lambda: "Активный набор: 0 документов",
@@ -186,6 +193,89 @@ def test_execute_orchestration_marks_fresh_attachments_as_session_overlay():
     assert response["source_scope_summary"] == "knowledge_base+session_overlay"
 
 
+def test_execute_orchestration_doc_question_multihop_single_citation_falls_back(monkeypatch):
+    deps = _build_minimal_deps()
+    deps.get_all_docs = lambda: [
+        {"document_id": "doc-a", "display_name": "a.pdf", "text": "Уведомление за 10 дней"},
+        {"document_id": "doc-b", "display_name": "b.pdf", "text": "Штраф 10 процентов"},
+    ]
+    deps.get_active_docs = deps.get_all_docs
+    deps.resolve_target_doc_name = lambda query, docs: None
+    deps.get_rag_pipeline = lambda: SimpleNamespace(
+        _indexed=True,
+        top_k=5,
+        retrieve=lambda query, top_k=None: SimpleNamespace(chunks=["chunk-a", "chunk-b"], metadata={"mode": "simple"}),
+    )
+    deps.build_sources_from_rag_result = lambda rag_result, rag_pipeline, max_sources=20: [
+        {
+            "source_id": 1,
+            "document_id": "doc-a",
+            "display_name": "a.pdf",
+            "chunk_id": 0,
+            "char_span": {"start_char": 0, "end_char": 100},
+            "page": None,
+            "quote": "Уведомление за 10 дней",
+            "raw_score": 0.72,
+            "normalized_score": 0.95,
+            "grade": "excellent",
+            "z_score": 0.8,
+        },
+        {
+            "source_id": 2,
+            "document_id": "doc-b",
+            "display_name": "b.pdf",
+            "chunk_id": 1,
+            "char_span": {"start_char": 101, "end_char": 200},
+            "page": None,
+            "quote": "Штраф 10 процентов",
+            "raw_score": 0.68,
+            "normalized_score": 0.91,
+            "grade": "excellent",
+            "z_score": 0.7,
+        },
+    ]
+    deps.infer_assistant_text = AsyncMock(return_value="Ответ [1]")
+    deps.citations_are_valid = citations_are_valid
+    deps.extract_citation_ids = extract_citation_ids
+    deps.has_sufficient_evidence = has_sufficient_evidence_v1
+    deps.compute_confidence_v1 = compute_confidence_v1
+    deps.build_doc_question_deterministic_fallback = build_doc_question_deterministic_fallback
+    deps.render_doc_question_markdown = lambda payload: payload["answer_text"]
+    deps.build_doc_question_prompt_with_sources = lambda query, history, sources: "prompt"
+
+    async def fake_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr("orchestrator.execution_runtime.asyncio.to_thread", fake_to_thread)
+
+    response = asyncio.run(
+        execute_orchestration(
+            {
+                "message": "Сравни условия уведомления и штрафа между документами",
+                "runtime_mode": "specialized_tasks",
+                "assistant_mode": "rag_qa",
+                "rag_scope": "session_rag",
+                "has_session_docs": True,
+                "session_docs": {
+                    "a.pdf": {"document_id": "doc-a", "text": "Уведомление за 10 дней"},
+                    "b.pdf": {"document_id": "doc-b", "text": "Штраф 10 процентов"},
+                },
+                "active_doc_ids": ["doc-a", "doc-b"],
+                "classifier_result": {
+                    "intent": "document_question",
+                    "confidence": 0.95,
+                    "margin": 0.5,
+                    "needs_rag": True,
+                },
+            },
+            deps=deps,
+        )
+    )
+
+    assert response["route"] == "document_question"
+    assert "данных недостаточно" in response["assistant_message"].lower()
+
+
 def test_run_graph_merges_errors_from_multiple_nodes():
     class _Workflow:
         async def astream(self, initial_state):
@@ -228,7 +318,7 @@ def test_execute_orchestration_doc_question_handles_rag_result_without_metadata_
     deps.infer_assistant_text = AsyncMock(return_value="Ответ [1]")
     deps.extract_citation_ids = lambda answer_text: [1]
     deps.has_sufficient_evidence = lambda **kwargs: True
-    deps.compute_confidence_v1 = lambda sources, cited_ids, answer_mode: (0.8, "high")
+    deps.compute_confidence_v1 = lambda sources, cited_ids, answer_mode, **kwargs: (0.8, "high")
     deps.render_doc_question_markdown = lambda payload: payload["answer_text"]
 
     async def fake_to_thread(func, *args, **kwargs):
@@ -404,7 +494,7 @@ def test_execute_orchestration_routes_kb_doc_question_through_unified_backend_co
     deps.citations_are_valid = lambda answer_text, source_count: True
     deps.extract_citation_ids = lambda answer_text: [1]
     deps.has_sufficient_evidence = lambda **kwargs: True
-    deps.compute_confidence_v1 = lambda sources, cited_ids, answer_mode: (0.9, "high")
+    deps.compute_confidence_v1 = lambda sources, cited_ids, answer_mode, **kwargs: (0.9, "high")
     deps.render_doc_question_markdown = lambda payload: payload["answer_text"]
 
     monkeypatch.setattr(

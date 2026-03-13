@@ -1142,6 +1142,56 @@ class TestDocumentAnalysisIntent:
         ]
         assert self._has_sufficient_evidence(sources, mode="corrective", query="Что написано?", citations_valid=True) is False
 
+    def test_has_sufficient_evidence_multihop_requires_multiple_citations(self):
+        sources = [
+            {
+                "source_id": 1,
+                "document_id": "a.pdf",
+                "display_name": "a.pdf",
+                "chunk_id": 0,
+                "char_span": {"start_char": 0, "end_char": 100},
+                "page": None,
+                "quote": "Уведомление за 10 дней",
+                "raw_score": 0.6,
+                "normalized_score": 0.9,
+                "grade": "good",
+                "z_score": 0.5,
+            },
+            {
+                "source_id": 2,
+                "document_id": "b.pdf",
+                "display_name": "b.pdf",
+                "chunk_id": 1,
+                "char_span": {"start_char": 101, "end_char": 200},
+                "page": None,
+                "quote": "Штраф 10 процентов",
+                "raw_score": 0.55,
+                "normalized_score": 0.88,
+                "grade": "good",
+                "z_score": 0.4,
+            },
+        ]
+        assert (
+            self._has_sufficient_evidence(
+                sources,
+                mode="simple",
+                query="Сравни условия уведомления и штрафа между документами",
+                citations_valid=True,
+                cited_ids=[1],
+            )
+            is False
+        )
+        assert (
+            self._has_sufficient_evidence(
+                sources,
+                mode="simple",
+                query="Сравни условия уведомления и штрафа между документами",
+                citations_valid=True,
+                cited_ids=[1, 2],
+            )
+            is True
+        )
+
     def test_deterministic_fallback_payload(self):
         sources = [
             {
@@ -1181,6 +1231,51 @@ class TestDocumentAnalysisIntent:
         confidence, label = self._compute_confidence_v1(sources, [1], "insufficient_evidence")
         assert confidence <= 0.35
         assert label == "low"
+
+    def test_confidence_v1_penalizes_multihop_single_citation(self):
+        sources = [
+            {
+                "source_id": 1,
+                "document_id": "a.pdf",
+                "display_name": "a.pdf",
+                "chunk_id": 0,
+                "char_span": {"start_char": 0, "end_char": 100},
+                "page": None,
+                "quote": "Уведомление за 10 дней",
+                "raw_score": 0.72,
+                "normalized_score": 0.95,
+                "grade": "excellent",
+                "z_score": 1.0,
+            },
+            {
+                "source_id": 2,
+                "document_id": "b.pdf",
+                "display_name": "b.pdf",
+                "chunk_id": 1,
+                "char_span": {"start_char": 101, "end_char": 200},
+                "page": None,
+                "quote": "Штраф 10 процентов",
+                "raw_score": 0.69,
+                "normalized_score": 0.92,
+                "grade": "excellent",
+                "z_score": 0.9,
+            },
+        ]
+        low_confidence, low_label = self._compute_confidence_v1(
+            sources,
+            [1],
+            "grounded_answer",
+            query="Сравни условия уведомления и штрафа между документами",
+        )
+        high_confidence, high_label = self._compute_confidence_v1(
+            sources,
+            [1, 2],
+            "grounded_answer",
+            query="Сравни условия уведомления и штрафа между документами",
+        )
+        assert high_confidence > low_confidence
+        assert low_label in {"low", "medium"}
+        assert high_label in {"medium", "high"}
 
     def test_build_sources_from_rag_result(self):
         class DummyRetrieval:

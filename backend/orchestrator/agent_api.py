@@ -41,6 +41,13 @@ from orchestrator.execution_runtime import (
     execute_orchestration,
     resolve_request_runtime_mode,
 )
+from orchestrator.doc_question_heuristics import (
+    build_doc_question_deterministic_fallback,
+    citations_are_valid,
+    compute_confidence_v1,
+    extract_citation_ids,
+    has_sufficient_evidence_v1,
+)
 from orchestrator.orchestration_runtime import decide_orchestration
 from orchestrator.ui_control_plane import get_prompt_profile_system_message, resolve_effective_settings
 
@@ -240,26 +247,17 @@ def _build_api_execution_dependencies(request: OrchestrationRequest, effective_s
             retrieval_embed_fn = None
         return retrieval_embed_fn
 
-    def _citations_are_valid(answer_text: str, source_count: int) -> bool:
-        cited = _extract_citation_ids(answer_text)
-        return bool(cited) and all(1 <= cid <= source_count for cid in cited)
-
-    def _extract_citation_ids(answer_text: str) -> List[int]:
-        return [int(match.group(1)) for match in re.finditer(r"\[(\d+)\]", answer_text or "")]
-
     def _has_sufficient_evidence(**kwargs: Any) -> bool:
-        return bool(kwargs.get("sources"))
+        return has_sufficient_evidence_v1(**kwargs)
 
-    def _compute_confidence_v1(sources: List[Dict[str, Any]], cited_ids: List[int], answer_mode: str) -> tuple[float, str]:
-        if not sources:
-            return 0.1, "low"
-        cited_sources = [s for s in sources if s.get("source_id") in cited_ids] if cited_ids else list(sources)
-        avg_norm = sum(float(s.get("normalized_score", 0.0)) for s in cited_sources) / len(cited_sources)
-        if avg_norm >= 0.75:
-            return 0.8, "high"
-        if avg_norm >= 0.45:
-            return 0.6, "medium"
-        return 0.35, "low"
+    def _compute_confidence_v1(
+        sources: List[Dict[str, Any]],
+        cited_ids: List[int],
+        answer_mode: str,
+        **kwargs: Any,
+    ) -> tuple[float, str]:
+        query = str(kwargs.get("query") or request.message)
+        return compute_confidence_v1(sources, cited_ids, answer_mode, query=query)
 
     def _doc_question_fallback(**kwargs: Any) -> Dict[str, Any]:
         fallback_type = kwargs.get("fallback_type", "insufficient_evidence")
@@ -280,17 +278,25 @@ def _build_api_execution_dependencies(request: OrchestrationRequest, effective_s
             confidence = 0.1
             confidence_label = "low"
 
-        return {
-            "answer_text": answer_text,
-            "sources": kwargs.get("sources", []),
-            "answer_mode": answer_mode,
-            "fallback_type": fallback_type,
-            "fallback_reason": fallback_reason,
-            "confidence": confidence,
-            "confidence_label": confidence_label,
-            "confidence_method": "heuristic_v1",
-            "confidence_version": "1",
-        }
+        if fallback_type == "retrieval_unavailable":
+            return {
+                "answer_text": answer_text,
+                "sources": kwargs.get("sources", []),
+                "answer_mode": answer_mode,
+                "fallback_type": fallback_type,
+                "fallback_reason": fallback_reason,
+                "confidence": confidence,
+                "confidence_label": confidence_label,
+                "confidence_method": "heuristic_v1",
+                "confidence_version": "1",
+            }
+        return build_doc_question_deterministic_fallback(
+            query=request.message,
+            sources=kwargs.get("sources", []),
+            fallback_type=fallback_type,
+            fallback_reason=fallback_reason or "Недостаточно проверяемых данных.",
+            source_scope_summary=kwargs.get("source_scope_summary", "off"),
+        )
 
     return ExecutionDependencies(
         infer_assistant_text=_infer,
@@ -316,9 +322,9 @@ def _build_api_execution_dependencies(request: OrchestrationRequest, effective_s
             history,
             "Ты grounded document QA ассистент. Отвечай только по источникам.",
         ),
-        citations_are_valid=_citations_are_valid,
+        citations_are_valid=citations_are_valid,
         needs_doc_question_regen=lambda answer_text, has_session_docs: False,
-        extract_citation_ids=_extract_citation_ids,
+        extract_citation_ids=extract_citation_ids,
         has_sufficient_evidence=_has_sufficient_evidence,
         compute_confidence_v1=_compute_confidence_v1,
         strip_model_source_sections=lambda answer_text: answer_text,

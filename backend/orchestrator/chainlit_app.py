@@ -22,7 +22,7 @@ import time
 import shutil
 import httpx
 import uuid
-from typing import Dict, List, Optional, Any, TypedDict, Literal
+from typing import Dict, List, Optional, Any
 
 # Добавляем пути (оставляем для обратной совместимости, но используем абсолютные)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -45,6 +45,15 @@ from orchestrator.orchestration_runtime import (
 from orchestrator.execution_runtime import (
     ExecutionDependencies,
     execute_orchestration as _backend_execute_orchestration,
+)
+from orchestrator.doc_question_heuristics import (
+    DocQuestionResponse,
+    SourceRef,
+    build_doc_question_deterministic_fallback as _build_doc_question_deterministic_fallback,
+    citations_are_valid as _citations_are_valid,
+    compute_confidence_v1 as _compute_confidence_v1,
+    extract_citation_ids as _extract_citation_ids,
+    has_sufficient_evidence_v1 as _has_sufficient_evidence,
 )
 from orchestrator.knowledge_base_store import get_knowledge_base_store
 from orchestrator.state_store import get_orchestration_state_store
@@ -93,42 +102,8 @@ _DOC_QUESTION_UPLOAD_REQUEST_PHRASES = [
     "предоставьте содержание",
     "нужно содержание",
 ]
-DOC_QA_MIN_CHUNKS_SIMPLE = int(os.getenv("DOC_QA_MIN_CHUNKS_SIMPLE", "1"))
-DOC_QA_MIN_CHUNKS_MULTIHOP = int(os.getenv("DOC_QA_MIN_CHUNKS_MULTIHOP", "2"))
-DOC_QA_MIN_RAW_SCORE_SIMPLE = float(os.getenv("DOC_QA_MIN_RAW_SCORE_SIMPLE", "0.01"))
-DOC_QA_MIN_ZSCORE_CORRECTIVE = float(os.getenv("DOC_QA_MIN_ZSCORE_CORRECTIVE", "-0.5"))
 RAG_INDEX_CACHE_MAX = int(os.getenv("RAG_INDEX_CACHE_MAX", "8"))
 RAG_INDEX_CACHE_TTL_S = int(os.getenv("RAG_INDEX_CACHE_TTL_S", "1800"))
-
-
-class SourceRef(TypedDict):
-    source_id: int
-    document_id: str
-    display_name: str
-    chunk_id: int
-    collection_id: Optional[str]
-    source_origin: Optional[str]
-    section: Optional[str]
-    char_span: Dict[str, Optional[int]]
-    page: Optional[int]
-    quote: str
-    raw_score: float
-    normalized_score: float
-    grade: Optional[str]
-    z_score: Optional[float]
-
-
-class DocQuestionResponse(TypedDict):
-    answer_text: str
-    sources: List[SourceRef]
-    source_scope_summary: str
-    answer_mode: Literal["grounded_answer", "insufficient_evidence"]
-    fallback_type: Literal["none", "citation_validation_failed", "insufficient_evidence"]
-    fallback_reason: Optional[str]
-    confidence: float
-    confidence_label: Literal["high", "medium", "low"]
-    confidence_method: Literal["heuristic_v1"]
-    confidence_version: Literal["1"]
 
 
 # === RAG Mode Helper ===
@@ -1597,112 +1572,6 @@ def _build_sources_from_rag_result(rag_result: Any, rag_pipeline: Any, max_sourc
             }
         )
     return sources
-
-
-def _extract_citation_ids(answer_text: str) -> List[int]:
-    return [int(m.group(1)) for m in re.finditer(r"\[(\d+)\]", answer_text or "")]
-
-
-def _citations_are_valid(answer_text: str, source_count: int) -> bool:
-    cited = _extract_citation_ids(answer_text)
-    if not cited:
-        return False
-    return all(1 <= cid <= source_count for cid in cited)
-
-
-def _is_multihop_query(query: str) -> bool:
-    query_lower = (query or "").lower()
-    markers = ["сравни", "сопостав", "что подходит", "какие отличия", "и ", " vs ", " между "]
-    return any(m in query_lower for m in markers)
-
-
-def _has_sufficient_evidence(
-    sources: List[SourceRef],
-    mode: str,
-    query: str,
-    citations_valid: bool,
-) -> bool:
-    if not citations_valid:
-        return False
-    min_chunks = DOC_QA_MIN_CHUNKS_MULTIHOP if _is_multihop_query(query) else DOC_QA_MIN_CHUNKS_SIMPLE
-    if len(sources) < min_chunks:
-        return False
-
-    top = sources[0]
-    raw_top = float(top.get("raw_score", 0.0))
-    z_top = top.get("z_score")
-    grade_top = (top.get("grade") or "").lower()
-    mode = (mode or "simple").lower()
-
-    if mode in ("corrective", "agentic"):
-        if z_top is not None:
-            return float(z_top) >= DOC_QA_MIN_ZSCORE_CORRECTIVE
-        return grade_top in ("excellent", "good") or raw_top >= DOC_QA_MIN_RAW_SCORE_SIMPLE
-    return raw_top >= DOC_QA_MIN_RAW_SCORE_SIMPLE
-
-
-def _confidence_label(value: float) -> Literal["high", "medium", "low"]:
-    if value >= 0.75:
-        return "high"
-    if value >= 0.5:
-        return "medium"
-    return "low"
-
-
-def _compute_confidence_v1(
-    sources: List[SourceRef],
-    cited_ids: List[int],
-    answer_mode: Literal["grounded_answer", "insufficient_evidence"],
-) -> tuple[float, Literal["high", "medium", "low"]]:
-    cited_sources = [s for s in sources if s["source_id"] in cited_ids] if cited_ids else []
-    if not cited_sources:
-        base = 0.2
-    else:
-        avg_raw = sum(float(s.get("raw_score", 0.0)) for s in cited_sources) / len(cited_sources)
-        avg_norm = sum(float(s.get("normalized_score", 0.0)) for s in cited_sources) / len(cited_sources)
-        good_bonus = 0.08 if any((s.get("grade") or "").lower() in ("good", "excellent") for s in cited_sources) else 0.0
-        base = max(0.0, min(1.0, 0.25 + 0.35 * avg_norm + 0.30 * avg_raw + good_bonus))
-
-    if answer_mode == "insufficient_evidence":
-        base = min(base, 0.35)
-    return base, _confidence_label(base)
-
-
-def _build_doc_question_deterministic_fallback(
-    query: str,
-    sources: List[SourceRef],
-    fallback_type: Literal["citation_validation_failed", "insufficient_evidence"],
-    fallback_reason: Optional[str] = None,
-    source_scope_summary: str = "off",
-) -> DocQuestionResponse:
-    top_sources = sources[:2]
-    if top_sources:
-        lines = [
-            f"По запросу «{query}» в найденных фрагментах есть только следующие подтверждённые данные:",
-        ]
-        for s in top_sources:
-            lines.append(f"- [{s['source_id']}] {s['quote']}")
-        lines.append("Данных недостаточно для точного вывода без дополнительных подтверждений.")
-        answer_text = "\n".join(lines)
-    else:
-        answer_text = (
-            f"По запросу «{query}» в текущем контексте загруженных документов "
-            "недостаточно подтверждённых данных для точного вывода."
-        )
-
-    confidence, label = _compute_confidence_v1(sources, [], "insufficient_evidence")
-    return {
-        "answer_text": answer_text,
-        "sources": sources,
-        "source_scope_summary": source_scope_summary,
-        "answer_mode": "insufficient_evidence",
-        "fallback_type": fallback_type,
-        "fallback_reason": fallback_reason or "Недостаточно подтверждённых данных или невалидный citation-ответ модели.",
-        "confidence": confidence,
-        "confidence_label": label,
-        "confidence_method": "heuristic_v1",
-        "confidence_version": "1",
-    }
 
 
 def _build_doc_question_prompt_with_sources(query: str, history: List, sources: List[SourceRef]) -> str:

@@ -23,6 +23,7 @@ from langgraph.graph import StateGraph, END
 
 # Абсолютные импорты пакета (TD-5 Fix)
 from services.model_manager.ums_client import ums_client
+from orchestrator.structured_output import extract_model_text, parse_strict_json
 from orchestrator.utils import parse_json_garbage
 from orchestrator.shared.http_client import get_shared_client
 
@@ -365,14 +366,11 @@ async def _polish_items_specs_llm(items: List[Dict[str, Any]]):
 Ты технический эксперт. Твоя задача — очистить "сырые" характеристики оборудования.
 Убери только явный мусор: пустые значения, nan, none, "-", ".", "..", "да", "есть", "соответствие", "соответствует".
 Не удаляй технически значимые параметры.
-Верни строго XML в формате:
-<results>
-  <item id="0">строка 1</item>
-  <item id="1">строка 2</item>
-</results>
-Для каждого source_item верни ровно один item с тем же id.
-Итоговая строка должна быть краткой, через запятую.
-Не добавляй markdown, code fences, комментарии или пояснения до и после XML.
+Верни строго JSON в формате:
+{{"schema_version":"b3.11.v1","ok":true,"data":{{"results":[{{"id":0,"text":"строка 1"}},{{"id":1,"text":"строка 2"}}]}},"error":null}}
+Для каждого source_item верни ровно один result с тем же id.
+Поле text должно быть краткой строкой через запятую.
+Не добавляй markdown, code fences, комментарии или пояснения до и после JSON.
 <|im_end|>
 <|im_start|>user
 Данные для очистки:
@@ -389,19 +387,9 @@ async def _polish_items_specs_llm(items: List[Dict[str, Any]]):
                 "prompt": prompt, "temperature": 0.1, "max_tokens": 2000
             })
             
-            # Извлекаем текст (совместимость с OpenAI/llama-server)
-            content = ""
-            if "choices" in resp:
-                choice = resp["choices"][0]
-                content = choice.get("text", "") or choice.get("message", {}).get("content", "")
-            elif "content" in resp:
-                content = resp["content"]
-            else:
-                content = str(resp)
-
-            content = content.replace('“', '"').replace('”', '"').replace('„', '"')
+            content = extract_model_text(resp)
             print(f"  [DEBUG-POLISH] LLM Response (200 chars): {content[:200]}...")
-            results = _parse_polish_xml_results(content, expected_ids=expected_ids)
+            results = _parse_polish_results_json(content, expected_ids=expected_ids)
 
             if results:
                 for entry_idx, entry in enumerate(batch):
@@ -433,38 +421,31 @@ def _clean_polished_spec(text: Any) -> str:
     return cleaned
 
 
-def _strip_xml_code_fences(content: str) -> str:
-    """Убирает markdown code fences вокруг XML, если модель всё же их вернула."""
-    stripped = str(content or "").strip()
-    stripped = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", stripped)
-    stripped = re.sub(r"\s*```$", "", stripped)
-    return stripped.strip()
-
-
-def _parse_polish_xml_results(content: str, expected_ids: List[int]) -> Optional[Dict[int, str]]:
-    """Извлекает результаты polisher-а из XML по обязательному id-mapping."""
-    normalized = _strip_xml_code_fences(content)
-    match = re.search(r"<results\b[^>]*>(.*?)</results>", normalized, flags=re.DOTALL | re.IGNORECASE)
-    if not match:
+def _parse_polish_results_json(content: str, expected_ids: List[int]) -> Optional[Dict[int, str]]:
+    """Строго парсит structured JSON ответ polisher-а по обязательному id-mapping."""
+    payload = parse_strict_json(content, expected_type=dict)
+    if not isinstance(payload, dict):
         return None
-
-    body = match.group(1)
+    if payload.get("schema_version") != "b3.11.v1":
+        return None
+    if payload.get("ok") is not True:
+        return None
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return None
+    items = data.get("results")
+    if not isinstance(items, list):
+        return None
     results: Dict[int, str] = {}
-
-    for item_match in re.finditer(r"<item\b([^>]*)>(.*?)</item>", body, flags=re.DOTALL | re.IGNORECASE):
-        attrs = item_match.group(1)
-        item_body = item_match.group(2)
-        id_match = re.search(r"""\bid\s*=\s*['"]?(\d+)['"]?""", attrs, flags=re.IGNORECASE)
-        if not id_match:
+    for item in items:
+        if not isinstance(item, dict):
             return None
-
-        item_id = int(id_match.group(1))
+        item_id = item.get("id")
+        if not isinstance(item_id, int):
+            return None
         if item_id in results:
             return None
-
-        text = re.sub(r"<[^>]+>", " ", item_body)
-        text = html.unescape(text)
-        text = _clean_polished_spec(text)
+        text = _clean_polished_spec(item.get("text"))
         if text:
             results[item_id] = text
         else:

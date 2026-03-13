@@ -33,9 +33,11 @@ Agent Navigator Pro — Benchmark / Stress-test скрипт.
     equipment    — анализ ТЗ + КП (LangGraph workflow)
     ums_status   — статус UMS (загруженные модели, runtime profile)
     embedding    — embedding одного текста (CPU embedder latency)
+    prompt_cache_probe — identical repeat probe для prompt-cache на прямом UMS LLM path
 """
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -147,6 +149,7 @@ def _build_runtime_metadata(ums_status: Dict[str, Any]) -> Dict[str, Any]:
         "effective_context_tokens": (ums_status or {}).get("effective_context_tokens"),
         "retrieved_context_tokens_budget": (ums_status or {}).get("retrieved_context_tokens_budget"),
         "generation_tokens_reserve": (ums_status or {}).get("generation_tokens_reserve"),
+        "prompt_cache_policy": (ums_status or {}).get("prompt_cache_policy"),
         "placements": placements if isinstance(placements, dict) else {},
         "agent_api_url": AGENT_API_URL,
         "ums_url": UMS_URL,
@@ -284,6 +287,108 @@ def scenario_chat(client: httpx.Client) -> BenchmarkResult:
             scenario="chat", description="Чат (LLM inference)",
             status="error", elapsed_sec=time.monotonic() - start, error=str(e)[:200],
         )
+
+
+def scenario_prompt_cache_probe(client: httpx.Client) -> BenchmarkResult:
+    """Повторяет один и тот же direct-LLM запрос через UMS и меряет cold/warm delta."""
+    prompt = "Кратко перечисли три ключевых пункта тендерной документации."
+    prompt_fingerprint = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:12]
+    payload = {
+        "model_id": "qwen-14b-llm",
+        "payload": {
+            "prompt": prompt,
+            "temperature": 0.1,
+        },
+        "stream": False,
+    }
+    try:
+        status_before_resp = client.get(f"{UMS_URL}/status", timeout=15.0)
+        status_before = status_before_resp.json() if status_before_resp.status_code == 200 else {}
+    except Exception:
+        status_before = {}
+
+    def _run_once() -> tuple[float, Optional[httpx.Response], Optional[str]]:
+        start = time.monotonic()
+        try:
+            resp = client.post(f"{UMS_URL}/infer", json=payload, timeout=REQUEST_TIMEOUT)
+            return time.monotonic() - start, resp, None
+        except Exception as exc:
+            return time.monotonic() - start, None, str(exc)[:200]
+
+    cold_elapsed, cold_resp, cold_error = _run_once()
+    if cold_resp is None:
+        return BenchmarkResult(
+            scenario="prompt_cache_probe",
+            description="Prompt-cache probe",
+            status="error",
+            elapsed_sec=cold_elapsed,
+            error=f"cold request failed: {cold_error}",
+            details={"prompt_prefix_fingerprint": prompt_fingerprint},
+        )
+    if cold_resp.status_code != 200:
+        return BenchmarkResult(
+            scenario="prompt_cache_probe",
+            description="Prompt-cache probe",
+            status="error",
+            elapsed_sec=cold_elapsed,
+            error=f"cold request HTTP {cold_resp.status_code}: {cold_resp.text[:200]}",
+            details={"prompt_prefix_fingerprint": prompt_fingerprint},
+        )
+
+    warm_elapsed, warm_resp, warm_error = _run_once()
+    if warm_resp is None:
+        return BenchmarkResult(
+            scenario="prompt_cache_probe",
+            description="Prompt-cache probe",
+            status="error",
+            elapsed_sec=cold_elapsed + warm_elapsed,
+            error=f"warm request failed: {warm_error}",
+            details={"prompt_prefix_fingerprint": prompt_fingerprint},
+        )
+    if warm_resp.status_code != 200:
+        return BenchmarkResult(
+            scenario="prompt_cache_probe",
+            description="Prompt-cache probe",
+            status="error",
+            elapsed_sec=cold_elapsed + warm_elapsed,
+            error=f"warm request HTTP {warm_resp.status_code}: {warm_resp.text[:200]}",
+            details={"prompt_prefix_fingerprint": prompt_fingerprint},
+        )
+
+    try:
+        status_after_resp = client.get(f"{UMS_URL}/status", timeout=15.0)
+        status_after = status_after_resp.json() if status_after_resp.status_code == 200 else {}
+    except Exception:
+        status_after = {}
+
+    speedup = cold_elapsed / warm_elapsed if warm_elapsed > 0 else None
+    delta_pct = ((cold_elapsed - warm_elapsed) / cold_elapsed * 100.0) if cold_elapsed > 0 else None
+    details = {
+        "prompt_prefix_fingerprint": prompt_fingerprint,
+        "cold_elapsed_sec": round(cold_elapsed, 4),
+        "warm_elapsed_sec": round(warm_elapsed, 4),
+        "speedup": round(speedup, 4) if speedup is not None else None,
+        "delta_pct": round(delta_pct, 2) if delta_pct is not None else None,
+        "same_process_expected": True,
+        "status_before": {
+            "active_heavy_model": status_before.get("active_heavy_model"),
+            "backend_mode": status_before.get("backend_mode"),
+            "prompt_cache_policy": status_before.get("prompt_cache_policy"),
+        },
+        "status_after": {
+            "active_heavy_model": status_after.get("active_heavy_model"),
+            "backend_mode": status_after.get("backend_mode"),
+            "prompt_cache_policy": status_after.get("prompt_cache_policy"),
+        },
+    }
+    return BenchmarkResult(
+        scenario="prompt_cache_probe",
+        description=f"Prompt-cache probe speedup={details['speedup'] or 0:.2f}x",
+        status="ok",
+        elapsed_sec=cold_elapsed + warm_elapsed,
+        response_size=len(cold_resp.content) + len(warm_resp.content),
+        details=details,
+    )
 
 
 def scenario_doc_question(client: httpx.Client) -> BenchmarkResult:
@@ -554,13 +659,14 @@ SCENARIOS = {
     "health": scenario_health,
     "ums_status": scenario_ums_status,
     "embedding": scenario_embedding,
+    "prompt_cache_probe": scenario_prompt_cache_probe,
     "chat": scenario_chat,
     "doc_question": scenario_doc_question,
     "compare": scenario_compare,
     "equipment": scenario_equipment,
 }
 
-DEFAULT_ORDER = ["health", "ums_status", "embedding", "chat", "doc_question", "compare", "equipment"]
+DEFAULT_ORDER = ["health", "ums_status", "embedding", "prompt_cache_probe", "chat", "doc_question", "compare", "equipment"]
 
 
 # ---------------------------------------------------------------------------

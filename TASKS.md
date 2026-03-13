@@ -624,10 +624,88 @@
   - Grafana secret injection из vault/secret manager не входит в текущий env-based slice
 
 ### Другие
-- [ ] B3.11 — Убрать JSON salvage из DEBUG-POLISH (structured output platform-level)
-- [ ] B3.16 — Проверить llama-server defunct / uptime после простоя
-- [ ] B3.17 — Проверить prompt-cache эффективность
-- [ ] B3.28 — Coverage heuristic v1.1 для document_question
+- [x] B3.11 — Убрать JSON salvage из DEBUG-POLISH (structured output platform-level)
+  Выполнено как узкий backend-safe slice для equipment `DEBUG-POLISH` path:
+  - добавлен reusable helper `backend/orchestrator/structured_output.py`:
+    - `extract_model_text(...)`
+    - `parse_strict_json(...)`
+  - `equipment._polish_items_specs_llm()` переведён с tolerant XML parsing на strict JSON contract:
+    - `schema_version = "b3.11.v1"`
+    - `ok`
+    - `data.results = [{"id": ..., "text": ...}]`
+    - `error`
+  - code-fence stripping / salvage / tolerant extraction в polisher path удалены; invalid structured output теперь fail-closed и уходит в уже существующий deterministic fallback
+  - batching, id mapping и fallback behavior сохранены
+  Проверки:
+  - `pytest backend/tests/test_equipment_workflow.py -q -k "polish"` -> `13 passed`
+  - `pytest backend/tests/test_equipment_workflow.py -q` -> `84 passed`
+  - `python -m py_compile backend/orchestrator/structured_output.py backend/orchestrator/workflows/equipment.py backend/tests/test_equipment_workflow.py`
+  - `git diff --check`
+  Follow-up:
+  - остальные `parse_json_garbage(...)` path в `compare`, equipment extract/eval и classifier остаются отдельным structured-output hardening block; текущая фаза закрывает именно `DEBUG-POLISH`
+  - широкий `cd backend && pytest tests/ -q -m "not integration"` probe по-прежнему иногда завершается старым pytest tail-hang после прохождения тестов; это не выглядит новым регрессом `B3.11`
+- [x] B3.16 — Проверить llama-server defunct / uptime после простоя
+  Выполнено как uptime-hardening для локально управляемых `llama-server` процессов в `UMS`, без добавления watchdog/auto-restart semantics:
+  - в `backend/services/model_manager/unified_model_server.py` добавлены:
+    - `_is_managed_process_alive(proc)` для отличия живых локальных процессов от stale state;
+    - `_prune_dead_processes()` для safe sweep мёртвых локальных процессов из `state["processes"]`, `state["placements"]` и `active_model`.
+  - dead-process pruning теперь выполняется перед:
+    - `_build_model_view(...)`
+    - `GET /models`
+    - `GET /models/running`
+    - `GET /status`
+  - `_RemoteProcess` не считается dead local process и не вычищается этим sweep helper'ом.
+  Проверки:
+  - `pytest backend/tests/test_unified_model_server_startup.py -q -k "dead_local_processes or status_prunes_dead_local_process_and_clears_active_model or status_keeps_remote_process_registered or models_running or status_exposes_current_placements"` -> `5 passed`
+  - `pytest backend/tests/test_unified_model_server_startup.py backend/tests/test_unified_model_server_streaming.py -q` -> тесты проходят по точкам и затем упираются в уже известный старый pytest tail-hang; это не выглядит новым регрессом `B3.16`
+  - `python -m py_compile backend/services/model_manager/unified_model_server.py backend/tests/test_unified_model_server_startup.py`
+  Follow-up:
+  - watchdog/auto-restart, idle unload policy и launcher/tmux cleanup остаются отдельными operational phases и не входят в текущий uptime-hardening slice
+- [x] B3.17 — Проверить prompt-cache эффективность
+  Выполнено как backend-owned prompt-cache policy + warm-repeat probe, без переписывания inference/concurrency path:
+  - в `backend/services/model_manager/unified_model_server.py` добавлен `prompt_cache_policy`:
+    - env `UMS_LLAMA_CACHE_PROMPT=true|false`
+    - local `llama-server` heavy text path теперь явно получает `cache_prompt=true|false`
+    - `vllm` path не получает `cache_prompt`
+    - `GET /status` публикует `prompt_cache_policy`
+  - в `scripts/benchmark.py` добавлен сценарий `prompt_cache_probe`:
+    - два одинаковых direct `UMS /infer` запроса подряд
+    - `cold_elapsed_sec`, `warm_elapsed_sec`, `speedup`, `delta_pct`
+    - `prompt_prefix_fingerprint`
+    - snapshot `prompt_cache_policy` из `UMS /status` до/после
+  - docs/env surface синхронизированы:
+    - `backend/.env.example`
+    - `README.md`
+    - `docs/runtime_profiles.md`
+    - `docs/deploy-guide.md`
+  Проверки:
+  - `pytest backend/tests/test_benchmark_runner.py -q` -> `4 passed`
+  - `pytest backend/tests/test_unified_model_server_startup.py::test_status_exposes_prompt_cache_policy_for_local_llama -q` -> `1 passed`
+  - `timeout 20s pytest backend/tests/test_unified_model_server_startup.py::test_non_stream_local_llama_infer_enables_cache_prompt_by_default -vv` -> тест проходит, затем воспроизводится известный старый pytest tail-hang на завершении процесса
+  - `timeout 20s pytest backend/tests/test_unified_model_server_startup.py::test_non_stream_infer_proxies_to_vllm_with_auth_headers -vv` -> тест проходит, затем воспроизводится тот же известный harness tail-hang
+  - `python -m py_compile backend/services/model_manager/unified_model_server.py backend/tests/test_unified_model_server_startup.py scripts/benchmark.py backend/tests/test_benchmark_runner.py`
+  - `git diff --check`
+  Follow-up:
+  - реальный integration benchmark `cold vs warm vs negative-control` на живом `llama-server` остаётся отдельным operational block, если понадобится подтверждать фактический cache hit-rate, а не только policy + probe contract
+- [x] B3.28 — Coverage heuristic v1.1 для document_question
+  Выполнено как backend-shared heuristic layer для `document_question`, без смены retrieval contour:
+  - добавлен `backend/orchestrator/doc_question_heuristics.py` как единый contract для:
+    - `extract_citation_ids`
+    - `citations_are_valid`
+    - `has_sufficient_evidence_v1`
+    - `compute_confidence_v1`
+    - deterministic fallback
+  - `Chainlit` и API-compatible execution path больше не живут на разных локальных эвристиках; оба wiring-path используют один backend module
+  - gating теперь учитывает citation coverage и multi-hop support, а не только `top-1 raw_score`
+  - confidence penalizes weak single-citation support for multi-hop / cross-document queries
+  Проверки:
+  - `pytest backend/tests/test_document_analysis.py -q` -> `65 passed`
+  - `pytest backend/tests/test_execution_runtime.py -q` -> `12 passed`
+  - `pytest backend/tests/test_agent_api_orchestrate.py -q` -> `15 passed`
+  - `python -m py_compile backend/orchestrator/doc_question_heuristics.py backend/orchestrator/chainlit_app.py backend/orchestrator/agent_api.py backend/orchestrator/execution_runtime.py backend/tests/test_document_analysis.py backend/tests/test_execution_runtime.py backend/tests/test_agent_api_orchestrate.py`
+  - `git diff --check`
+  Follow-up:
+  - общий pytest tail-hang в широком `cd backend && pytest tests/ -q -m "not integration"` probe по-прежнему иногда проявляется после прохождения тестов; для `B3.28` targeted suite зелёный и это не выглядит как новый регресс
 - [x] B3.32 — LangChain adoption strategy (точечно, без full rewrite)
   Зафиксировано через ADR: [docs/plans/2026-03-12-b332-langchain-adoption-strategy.md](docs/plans/2026-03-12-b332-langchain-adoption-strategy.md).
   Решение: не делать full rewrite orchestration core на LangChain; сохранять backend-first contract (`orchestration_runtime.py` + `execution_runtime.py`) каноническим; разрешать только точечные integration areas: workflow-level `LangGraph`, retriever/reranker adapters, eval harness, observability adapters и один изолированный pilot area без смены публичного API.

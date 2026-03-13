@@ -324,6 +324,14 @@ python scripts/benchmark_compare.py \
   --json-output results/vllm-migration-compare.json
 ```
 
+Для локального `llama-server` отдельно можно проверить warm-repeat эффект prompt-cache:
+
+```bash
+BACKEND_MODE=llama-server python scripts/benchmark.py --scenarios prompt_cache_probe --output results/prompt-cache.json
+```
+
+Probe идёт напрямую через `UMS /infer`, а в JSON-результате сохраняет `cold_elapsed_sec`, `warm_elapsed_sec`, `speedup`, `delta_pct` и snapshot `prompt_cache_policy` из `UMS /status`.
+
 Сравнение нужно читать вместе с:
 - `backend_mode`
 - `runtime_profile`

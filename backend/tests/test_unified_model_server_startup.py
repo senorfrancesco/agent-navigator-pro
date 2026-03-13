@@ -110,6 +110,7 @@ def _reset_ums_state(monkeypatch, tmp_path):
     original_locks = dict(ums_server._model_start_locks)
     for env_name in (
         "BACKEND_MODE",
+        "UMS_LLAMA_CACHE_PROMPT",
         "UMS_LLM_GPU_INDICES",
         "UMS_LLM_MIN_FREE_VRAM_GB",
         "UMS_LLM_MIN_BALANCE_RATIO",
@@ -549,6 +550,48 @@ def test_status_exposes_current_placements():
     assert payload["placements"]["labse-embedding"]["device_arg"] == "cuda:2"
 
 
+def test_status_prunes_dead_local_process_and_clears_active_model():
+    previous_active = ums_server.state.get("active_model")
+    previous_processes = dict(ums_server.state.get("processes") or {})
+    previous_placements = dict(ums_server.state.get("placements") or {})
+    ums_server.state["active_model"] = "qwen-14b-llm"
+    ums_server.state["processes"] = {"qwen-14b-llm": _FakeProcess(pid=111, returncode=1)}
+    ums_server.state["placements"] = {
+        "qwen-14b-llm": {"placement_mode": "single-gpu", "gpu_indices": [0]},
+    }
+    try:
+        payload = asyncio.run(ums_server.get_status())
+    finally:
+        ums_server.state["active_model"] = previous_active
+        ums_server.state["processes"] = previous_processes
+        ums_server.state["placements"] = previous_placements
+
+    assert payload["active_heavy_model"] is None
+    assert payload["running"] == []
+    assert payload["placements"] == {}
+
+
+def test_status_keeps_remote_process_registered():
+    previous_active = ums_server.state.get("active_model")
+    previous_processes = dict(ums_server.state.get("processes") or {})
+    previous_placements = dict(ums_server.state.get("placements") or {})
+    ums_server.state["active_model"] = "qwen-14b-llm"
+    ums_server.state["processes"] = {"qwen-14b-llm": ums_server._RemoteProcess()}
+    ums_server.state["placements"] = {
+        "qwen-14b-llm": {"placement_mode": "remote-vllm", "backend": "vllm"},
+    }
+    try:
+        payload = asyncio.run(ums_server.get_status())
+    finally:
+        ums_server.state["active_model"] = previous_active
+        ums_server.state["processes"] = previous_processes
+        ums_server.state["placements"] = previous_placements
+
+    assert payload["active_heavy_model"] == "qwen-14b-llm"
+    assert payload["running"] == ["qwen-14b-llm"]
+    assert payload["placements"]["qwen-14b-llm"]["placement_mode"] == "remote-vllm"
+
+
 def test_status_exposes_concurrency_policy(monkeypatch):
     monkeypatch.setenv("UMS_LLM_MAX_CONCURRENCY", "2")
     monkeypatch.setenv("UMS_EMBED_MAX_CONCURRENCY", "6")
@@ -583,6 +626,14 @@ def test_status_exposes_backend_mode_for_vllm(monkeypatch):
     assert payload["backend_mode"] == "vllm"
     assert payload["running"] == ["qwen-14b-llm"]
     assert payload["placements"]["qwen-14b-llm"]["placement_mode"] == "remote-vllm"
+    assert payload["prompt_cache_policy"] == {"enabled": False, "backend_mode": "vllm"}
+
+
+def test_status_exposes_prompt_cache_policy_for_local_llama():
+    payload = asyncio.run(ums_server.get_status())
+
+    assert payload["backend_mode"] == "llama-cpp-python"
+    assert payload["prompt_cache_policy"] == {"enabled": True, "backend_mode": "llama-cpp-python"}
 
 
 def test_status_reports_inflight_concurrency(monkeypatch):
@@ -672,6 +723,26 @@ def test_models_running_api_lists_running_models_and_placements():
     assert set(running_models) == {"qwen-14b-llm", "labse-embedding"}
     assert payload["placements"]["qwen-14b-llm"]["tensor_split"] == [0.6667, 0.3333]
     assert payload["placements"]["labse-embedding"]["device_arg"] == "cuda:2"
+
+
+def test_models_running_omits_dead_local_processes():
+    ums_server.state["active_model"] = "qwen-14b-llm"
+    ums_server.state["processes"] = {
+        "qwen-14b-llm": _FakeProcess(pid=111, returncode=1),
+        "labse-embedding": _FakeProcess(pid=222),
+    }
+    ums_server.state["placements"] = {
+        "qwen-14b-llm": {"placement_mode": "single-gpu", "gpu_indices": [0]},
+        "labse-embedding": {"placement_mode": "single-gpu", "gpu_indices": [2]},
+    }
+
+    response = asyncio.run(_api_request("GET", "/models/running"))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["active_heavy_model"] is None
+    assert payload["running_model_ids"] == ["labse-embedding"]
+    assert set(payload["placements"]) == {"labse-embedding"}
 
 
 def test_preload_endpoint_starts_model_with_requested_device_mode():
@@ -1161,6 +1232,55 @@ async def test_non_stream_infer_proxies_to_vllm_with_auth_headers(monkeypatch):
             "headers": {"Authorization": "Bearer secret-token"},
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_non_stream_local_llama_infer_enables_cache_prompt_by_default():
+    fake_client = _FakePostAsyncClient(_FakeJSONResponse({"id": "cmpl-1"}))
+
+    with patch.object(ums_server, "_start_server") as mock_start, patch(
+        "services.model_manager.unified_model_server.httpx.AsyncClient",
+        return_value=fake_client,
+    ):
+        response = await ums_server.infer(
+            ums_server.InferRequest(
+                model_id="qwen-14b-llm",
+                payload={"prompt": "hello"},
+                stream=False,
+            )
+        )
+
+    mock_start.assert_called_once()
+    assert response["status"] == "success"
+    assert fake_client.calls == [
+        {
+            "url": "http://localhost:8091/v1/completions",
+            "json": {"prompt": "hello", "cache_prompt": True},
+            "headers": {},
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_non_stream_local_llama_infer_can_disable_cache_prompt(monkeypatch):
+    monkeypatch.setenv("UMS_LLAMA_CACHE_PROMPT", "false")
+    fake_client = _FakePostAsyncClient(_FakeJSONResponse({"id": "cmpl-1"}))
+
+    with patch.object(ums_server, "_start_server") as mock_start, patch(
+        "services.model_manager.unified_model_server.httpx.AsyncClient",
+        return_value=fake_client,
+    ):
+        response = await ums_server.infer(
+            ums_server.InferRequest(
+                model_id="qwen-14b-llm",
+                payload={"prompt": "hello"},
+                stream=False,
+            )
+        )
+
+    mock_start.assert_called_once()
+    assert response["status"] == "success"
+    assert fake_client.calls[0]["json"]["cache_prompt"] is False
 
 
 @pytest.mark.asyncio

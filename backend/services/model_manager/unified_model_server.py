@@ -324,6 +324,18 @@ def _should_use_vllm_backend(config: Dict[str, Any]) -> bool:
     return _resolve_backend_mode() == "vllm" and str(config.get("type")) == "gguf"
 
 
+def _resolve_prompt_cache_policy(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    backend_mode = _resolve_backend_mode()
+    model_type = str((config or {}).get("type") or "")
+    enabled = backend_mode != "vllm" and model_type in {"gguf", "gguf-vl"} and _read_runtime_bool(
+        "UMS_LLAMA_CACHE_PROMPT", True
+    )
+    return {
+        "enabled": enabled,
+        "backend_mode": backend_mode,
+    }
+
+
 def _get_vllm_base_url() -> str:
     return str(os.getenv("VLLM_BASE_URL", "http://localhost:8101")).rstrip("/")
 
@@ -398,6 +410,12 @@ def _build_infer_payload(model_id: str, config: Dict[str, Any], payload: Dict[st
     enriched = payload.copy()
     if _should_use_vllm_backend(config):
         enriched.setdefault("model", _get_vllm_served_model_id(model_id))
+        return enriched
+    prompt_cache_policy = _resolve_prompt_cache_policy(config)
+    if prompt_cache_policy["enabled"]:
+        enriched["cache_prompt"] = True
+    elif str(config.get("type") or "") in {"gguf", "gguf-vl"}:
+        enriched["cache_prompt"] = False
     return enriched
 
 
@@ -652,6 +670,33 @@ def _reap_stale_listener_on_port(port: int, tracked_proc: Optional[subprocess.Po
             continue
         logger.warning(f"Reaping stale listener on port {port}: pid={pid}")
         _kill_process_tree(pid)
+
+
+def _is_managed_process_alive(proc: Any) -> bool:
+    if isinstance(proc, _RemoteProcess):
+        return True
+    poll = getattr(proc, "poll", None)
+    if not callable(poll):
+        return False
+    try:
+        return poll() is None
+    except Exception:
+        return False
+
+
+def _prune_dead_processes() -> List[str]:
+    removed: List[str] = []
+    processes = state.get("processes") or {}
+    for model_id, proc in list(processes.items()):
+        if _is_managed_process_alive(proc):
+            continue
+        logger.warning(f"Pruning dead managed process for {model_id}")
+        processes.pop(model_id, None)
+        state.setdefault("placements", {}).pop(model_id, None)
+        if state.get("active_model") == model_id:
+            state["active_model"] = None
+        removed.append(model_id)
+    return removed
 
 # === Dynamic Model Discovery ===
 
@@ -1125,6 +1170,7 @@ def _discover_available_model_ids() -> List[str]:
 
 
 def _build_model_view(model_id: str) -> Dict[str, Any]:
+    _prune_dead_processes()
     config = get_model_config(model_id)
     if not config:
         raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
@@ -1328,6 +1374,7 @@ async def infer(request: InferRequest):
 
 @app.get("/models")
 async def list_available_models():
+    _prune_dead_processes()
     return {
         "models": [_build_model_view(model_id) for model_id in _discover_available_model_ids()],
         "active_heavy_model": state.get("active_model"),
@@ -1336,6 +1383,7 @@ async def list_available_models():
 
 @app.get("/models/running")
 async def list_running_models():
+    _prune_dead_processes()
     running_ids = list(state.get("processes") or {})
     return {
         "active_heavy_model": state.get("active_model"),
@@ -1411,6 +1459,7 @@ async def metrics():
 
 @app.get("/status")
 async def get_status():
+    _prune_dead_processes()
     tier_info = None
     if state.get("tier_config"):
         from services.hardware.tier_selector import describe_rag_mode
@@ -1430,6 +1479,10 @@ async def get_status():
         "running": list(state["processes"].keys()),
         "placements": dict(state.get("placements") or {}),
         "backend_mode": _resolve_backend_mode(),
+        "prompt_cache_policy": _resolve_prompt_cache_policy(
+            get_model_config(state.get("active_model") or "qwen-14b-llm")
+            or STATIC_MODELS_CONFIG.get("qwen-14b-llm", {})
+        ),
         "vram_free_gb": _get_available_vram(),
         "tier": tier_info,
         "runtime_profile": runtime_budget["runtime_profile"],

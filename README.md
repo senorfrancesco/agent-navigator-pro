@@ -83,6 +83,7 @@ graph TD
 - `UMS` не поднимает `vLLM` сам, нужен отдельный внешний OpenAI-compatible `vLLM` endpoint;
 - embeddings (`st`) и `gguf-vl` остаются на локальном runtime path;
 - docker/compose profile для собственного `vLLM` deployment относится к отдельной фазе.
+- для локального `llama-server` prompt-cache policy управляется через `UMS_LLAMA_CACHE_PROMPT=true|false` и публикуется в `UMS /status -> prompt_cache_policy`.
 
 ## Установка
 
@@ -362,6 +363,14 @@ python scripts/benchmark_compare.py \
   --candidate-label vllm \
   --json-output results/vllm-migration-compare.json
 ```
+
+Для отдельной проверки **prompt-cache warm repeat** на локальном `llama-server` используй direct UMS probe:
+
+```bash
+BACKEND_MODE=llama-server python scripts/benchmark.py --scenarios prompt_cache_probe --output results/prompt-cache.json
+```
+
+В результате появятся `cold_elapsed_sec`, `warm_elapsed_sec`, `speedup`, `delta_pct` и snapshot `prompt_cache_policy` из `UMS /status`.
 
 В benchmark JSON теперь отдельно фиксируются:
 - `backend_mode`
