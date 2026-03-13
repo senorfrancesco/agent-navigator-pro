@@ -17,6 +17,11 @@ RUNTIME_ENV_FILE="${AGENT_NAVIGATOR_RUNTIME_ENV_FILE:-$BACKEND_DIR/.env.runtime}
 ATTACH_TMUX=true
 FROM_LAUNCHER=false
 
+EXTERNAL_BACKEND_MODE="${BACKEND_MODE:-}"
+EXTERNAL_VLLM_BASE_URL="${VLLM_BASE_URL:-}"
+EXTERNAL_VLLM_PORT="${VLLM_PORT:-}"
+EXTERNAL_VLLM_MODEL_ID_QWEN_14B_LLM="${VLLM_MODEL_ID_QWEN_14B_LLM:-}"
+
 for arg in "$@"; do
     case "$arg" in
         --from-launcher)
@@ -64,6 +69,41 @@ if [ -f "$RUNTIME_ENV_FILE" ]; then
     set -a
     source "$RUNTIME_ENV_FILE"
     set +a
+fi
+
+if [ -n "$EXTERNAL_BACKEND_MODE" ]; then
+    BACKEND_MODE="$EXTERNAL_BACKEND_MODE"
+fi
+if [ -n "$EXTERNAL_VLLM_BASE_URL" ]; then
+    VLLM_BASE_URL="$EXTERNAL_VLLM_BASE_URL"
+fi
+if [ -n "$EXTERNAL_VLLM_PORT" ]; then
+    VLLM_PORT="$EXTERNAL_VLLM_PORT"
+fi
+if [ -n "$EXTERNAL_VLLM_MODEL_ID_QWEN_14B_LLM" ]; then
+    VLLM_MODEL_ID_QWEN_14B_LLM="$EXTERNAL_VLLM_MODEL_ID_QWEN_14B_LLM"
+fi
+
+BACKEND_MODE_RESOLVED="${BACKEND_MODE:-llama-cpp-python}"
+VLLM_ENABLED=false
+COMPOSE_PROFILE_ARGS=()
+COMPOSE_LOG_TARGETS=("chainlit")
+COMPOSE_PROFILE_TEXT="none"
+COMPOSE_SERVICES_TEXT="chainlit"
+VLLM_PORT="${VLLM_PORT:-8101}"
+VLLM_SERVED_MODEL_ID="${VLLM_MODEL_ID_QWEN_14B_LLM:-qwen-14b-llm}"
+
+if [ "$BACKEND_MODE_RESOLVED" = "vllm" ]; then
+    VLLM_ENABLED=true
+    COMPOSE_PROFILE_ARGS=("--profile" "vllm")
+    COMPOSE_LOG_TARGETS=("chainlit" "vllm")
+    COMPOSE_PROFILE_TEXT="--profile vllm"
+    COMPOSE_SERVICES_TEXT="chainlit vllm"
+fi
+
+if [ "${AGENT_NAVIGATOR_TEST_MODE:-0}" = "1" ]; then
+    echo "run_all:test-mode backend_mode=$BACKEND_MODE_RESOLVED compose_profiles=$COMPOSE_PROFILE_TEXT compose_services=$COMPOSE_SERVICES_TEXT attach_tmux=$ATTACH_TMUX"
+    exit 0
 fi
 
 # -------------------------------------------
@@ -197,6 +237,21 @@ wait_for_model() {
     local timeout="${1:-180}"
     local elapsed=0
 
+    if [ "$VLLM_ENABLED" = true ]; then
+        printf "  %-20s " "vLLM runtime"
+        while [ $elapsed -lt $timeout ]; do
+            local models=$(curl -sf "http://localhost:$VLLM_PORT/v1/models" 2>/dev/null || true)
+            if [ -n "$models" ] && echo "$models" | grep -q "\"$VLLM_SERVED_MODEL_ID\""; then
+                echo -e "${GREEN}✓ upstream готов${NC}"
+                return 0
+            fi
+            sleep 3
+            elapsed=$((elapsed + 3))
+        done
+        echo -e "${YELLOW}⚠ upstream не подтвердил $VLLM_SERVED_MODEL_ID за ${timeout}с${NC}"
+        return 0
+    fi
+
     printf "  %-20s " "Qwen-14B LLM"
     while [ $elapsed -lt $timeout ]; do
         local status=$(curl -sf "http://localhost:$UMS_PORT/status" 2>/dev/null)
@@ -271,7 +326,11 @@ wait_for_service "Agent API" "$AGENT_PORT" "/health" 30 || SERVICES_OK=false
 
 # 5) Chainlit UI (Docker)
 echo -e "${GREEN}Запуск Chainlit UI (Docker) на порту $CHAINLIT_PORT...${NC}"
-start_tmux_window "chainlit" "cd $PROJECT_ROOT && docker compose up -d chainlit && docker compose logs -f chainlit"
+CHAINLIT_COMPOSE_CMD="cd $PROJECT_ROOT && docker compose ${COMPOSE_PROFILE_ARGS[*]} up -d ${COMPOSE_LOG_TARGETS[*]} && docker compose ${COMPOSE_PROFILE_ARGS[*]} logs -f ${COMPOSE_LOG_TARGETS[*]}"
+start_tmux_window "chainlit" "$CHAINLIT_COMPOSE_CMD"
+if [ "$VLLM_ENABLED" = true ]; then
+    wait_for_service "vLLM" "$VLLM_PORT" "/health" 180 || SERVICES_OK=false
+fi
 wait_for_service "Chainlit UI" "$CHAINLIT_PORT" "/" 60 || SERVICES_OK=false
 
 # 6) Monitor/Logs

@@ -24,6 +24,13 @@ def _safe_float(value: Optional[float], default: float) -> float:
     return float(value)
 
 
+def resolve_backend_mode() -> str:
+    raw = str(os.getenv("BACKEND_MODE", "llama-cpp-python")).strip().lower()
+    if raw in {"llama-cpp-python", "llama-server", "vllm"}:
+        return raw
+    return "llama-cpp-python"
+
+
 def detect_hardware_snapshot() -> Dict[str, Any]:
     try:
         from services.hardware import HardwareProfiler
@@ -95,6 +102,7 @@ def build_runtime_plan(
     budget["embedding_backend"] = tier_info["embedding_backend"]
     budget["tier"] = tier_info["tier"]
     budget["source"] = runtime_profile
+    budget["backend_mode"] = resolve_backend_mode()
     return budget
 
 

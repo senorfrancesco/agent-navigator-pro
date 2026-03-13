@@ -33,6 +33,7 @@ def test_build_runtime_plan_returns_stable_payload():
     assert plan["rag_mode"] == "corrective"
     assert plan["rag_mode_label"] == "corrective retrieval"
     assert plan["embedding_backend"] == "qwen3"
+    assert plan["backend_mode"] == "llama-cpp-python"
 
 
 def test_manual_profile_respects_explicit_overrides():
@@ -53,6 +54,17 @@ def test_manual_profile_respects_explicit_overrides():
     assert plan["retrieved_context_tokens_budget"] == 2252
     assert plan["generation_tokens_reserve"] == 768
     assert plan["device_mode"] == "cpu"
+
+
+def test_build_runtime_plan_reports_vllm_backend_mode(monkeypatch):
+    monkeypatch.setenv("BACKEND_MODE", "vllm")
+    with patch(
+        "services.hardware.TierSelector.select",
+        return_value=SimpleNamespace(tier=1, rag_mode="simple", embedding_backend="labse", llm_ctx_size=8192),
+    ):
+        plan = runtime_preflight.build_runtime_plan(runtime_profile="adaptive")
+
+    assert plan["backend_mode"] == "vllm"
 
 
 def test_render_env_runtime_is_deterministic():

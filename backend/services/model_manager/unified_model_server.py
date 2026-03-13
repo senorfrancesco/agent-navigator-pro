@@ -69,6 +69,18 @@ class DeviceMode(str, Enum):
     GPU = "gpu"
     HYBRID = "hybrid"
 
+
+class _RemoteProcess:
+    def __init__(self, pid: int = 0) -> None:
+        self.pid = pid
+        self.returncode = None
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        return self.returncode
+
 MODELS_DIR = BACKEND_ROOT / "models" / "gguf"
 
 # Хардкодные конфиги для системных моделей
@@ -299,6 +311,94 @@ def _read_runtime_bool(name: str, default: bool) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     return default
+
+
+def _resolve_backend_mode() -> str:
+    raw = str(os.getenv("BACKEND_MODE", "llama-cpp-python")).strip().lower()
+    if raw in {"llama-cpp-python", "llama-server", "vllm"}:
+        return raw
+    return "llama-cpp-python"
+
+
+def _should_use_vllm_backend(config: Dict[str, Any]) -> bool:
+    return _resolve_backend_mode() == "vllm" and str(config.get("type")) == "gguf"
+
+
+def _get_vllm_base_url() -> str:
+    return str(os.getenv("VLLM_BASE_URL", "http://localhost:8101")).rstrip("/")
+
+
+def _sanitize_env_model_suffix(model_id: str) -> str:
+    return "".join(ch if ch.isalnum() else "_" for ch in model_id.upper())
+
+
+def _get_vllm_served_model_id(model_id: str) -> str:
+    env_name = f"VLLM_MODEL_ID_{_sanitize_env_model_suffix(model_id)}"
+    return str(os.getenv(env_name, model_id)).strip() or model_id
+
+
+def _build_vllm_headers() -> Dict[str, str]:
+    api_key = str(os.getenv("VLLM_API_KEY", "")).strip()
+    if not api_key:
+        return {}
+    return {"Authorization": f"Bearer {api_key}"}
+
+
+def _build_upstream_headers(config: Dict[str, Any]) -> Dict[str, str]:
+    if _should_use_vllm_backend(config):
+        return _build_vllm_headers()
+    return {}
+
+
+def _build_vllm_url(*parts: str) -> str:
+    suffix = "/".join(part.strip("/") for part in parts if part)
+    return f"{_get_vllm_base_url()}/{suffix}" if suffix else _get_vllm_base_url()
+
+
+def _ensure_vllm_backend(model_id: str) -> None:
+    headers = _build_vllm_headers()
+    served_model_id = _get_vllm_served_model_id(model_id)
+    with httpx.Client(timeout=5.0, headers=headers) as client:
+        health = client.get(_build_vllm_url("health"))
+        if health.status_code != 200:
+            raise RuntimeError(f"vLLM health probe failed: status={health.status_code}")
+        models = client.get(_build_vllm_url("v1", "models"))
+        if models.status_code != 200:
+            raise RuntimeError(f"vLLM models probe failed: status={models.status_code}")
+        payload = models.json()
+        available_ids = {
+            str(item.get("id"))
+            for item in (payload.get("data") or [])
+            if isinstance(item, dict) and item.get("id") is not None
+        }
+        if served_model_id not in available_ids:
+            raise RuntimeError(f"vLLM model {served_model_id} not exposed by upstream")
+
+
+def _build_vllm_placement(model_id: str, config: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "placement_mode": "remote-vllm",
+        "backend": "vllm",
+        "upstream_url": _get_vllm_base_url(),
+        "served_model_id": _get_vllm_served_model_id(model_id),
+        "gpu_indices": [],
+        "device_arg": "remote",
+        "model_type": str(config.get("type") or ""),
+    }
+
+
+def _build_infer_url(config: Dict[str, Any], *, is_chat: bool) -> str:
+    if _should_use_vllm_backend(config):
+        return _build_vllm_url("v1", "chat/completions" if is_chat else "completions")
+    url_suffix = "v1/embeddings" if config["type"] == "st" else f"v1/{'chat/' if is_chat else ''}completions"
+    return f"http://localhost:{config['port']}/{url_suffix}"
+
+
+def _build_infer_payload(model_id: str, config: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+    enriched = payload.copy()
+    if _should_use_vllm_backend(config):
+        enriched.setdefault("model", _get_vllm_served_model_id(model_id))
+    return enriched
 
 
 def _get_runtime_ctx_size() -> int:
@@ -590,12 +690,17 @@ def _stop_model(model_id: str):
             proc = state["processes"].pop(model_id)
             state["placements"].pop(model_id, None)
             logger.info(f"Stopping server for {model_id}...")
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                proc.wait(timeout=5)
-            except:
-                try: os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                except: pass
+            if isinstance(proc, _RemoteProcess):
+                logger.info(f"Remote runtime detached for {model_id}")
+            else:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                    proc.wait(timeout=5)
+                except:
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    except:
+                        pass
             if state["active_model"] == model_id:
                 state["active_model"] = None
     if model_id in (state.get("discovered_model_ports") or {}):
@@ -663,6 +768,23 @@ def _start_server(model_id: str, device_mode: DeviceMode):
             device_mode=device_mode,
             available_gpus=available_gpus,
         )
+
+        if _should_use_vllm_backend(config):
+            with _heavy_model_lifecycle_lock:
+                active_heavy = None
+                for pid in state["processes"]:
+                    p_config = get_model_config(pid)
+                    if p_config and p_config["type"] in ["gguf", "gguf-vl"]:
+                        active_heavy = pid
+                        break
+                if active_heavy and active_heavy != model_id:
+                    logger.info(f"Detaching {active_heavy} before activating remote vLLM model {model_id}")
+                    _stop_model(active_heavy)
+                _ensure_vllm_backend(model_id)
+                state["processes"][model_id] = _RemoteProcess()
+                state["placements"][model_id] = _build_vllm_placement(model_id, config)
+                state["active_model"] = model_id
+                return
 
         if is_heavy:
             with _heavy_model_lifecycle_lock:
@@ -939,6 +1061,7 @@ async def _proxy_sse_stream(
     sem: asyncio.Semaphore,
     *,
     slot_pre_acquired: bool = False,
+    headers: Optional[Dict[str, str]] = None,
 ) -> AsyncGenerator[bytes, None]:
     """
     Проксирует upstream SSE через очередь и отдельную producer-task.
@@ -955,7 +1078,7 @@ async def _proxy_sse_stream(
             if not slot_pre_acquired:
                 await _reserve_runtime_slot(sem, "stream")
                 owns_slot = True
-            async with httpx.AsyncClient(timeout=300.0) as stream_client:
+            async with httpx.AsyncClient(timeout=300.0, headers=headers) as stream_client:
                 async with stream_client.stream("POST", url, json=payload) as resp:
                     resp.raise_for_status()
                     async for line in resp.aiter_lines():
@@ -1006,11 +1129,13 @@ def _build_model_view(model_id: str) -> Dict[str, Any]:
     if not config:
         raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
     resolved_path = resolve_model_path(config["path"])
+    backend = "vllm" if _should_use_vllm_backend(config) else "local"
     return {
         "model_id": model_id,
         "type": config["type"],
         "path": resolved_path,
         "resolved_path": resolved_path,
+        "backend": backend,
         "port": config["port"],
         "running": model_id in state["processes"],
         "active": state.get("active_model") == model_id,
@@ -1164,10 +1289,10 @@ async def infer(request: InferRequest):
         slot_kind = "embedding" if config["type"] == "st" else "llm"
 
         is_chat = "messages" in request.payload
-        url_suffix = "v1/embeddings" if config["type"] == "st" else f"v1/{'chat/' if is_chat else ''}completions"
-        url = f"http://localhost:{config['port']}/{url_suffix}"
+        url = _build_infer_url(config, is_chat=is_chat)
+        headers = _build_upstream_headers(config)
 
-        payload = request.payload.copy()
+        payload = _build_infer_payload(request.model_id, config, request.payload)
         if request.stream: payload["stream"] = True
 
         if request.stream:
@@ -1178,15 +1303,16 @@ async def infer(request: InferRequest):
                 _release_runtime_slot(sem)
                 raise
             return StreamingResponse(
-                _proxy_sse_stream(url, payload, sem, slot_pre_acquired=True),
+                _proxy_sse_stream(url, payload, sem, slot_pre_acquired=True, headers=headers),
                 media_type="text/event-stream",
                 headers={"X-UMS-Concurrency-Policy": json.dumps(policy, sort_keys=True)},
             )
         else:
             async with _acquire_runtime_slot(sem, slot_kind) as policy:
                 await asyncio.to_thread(_start_server, request.model_id, request.device_mode or state["device_mode"])
-                async with httpx.AsyncClient(timeout=300.0) as client:
+                async with httpx.AsyncClient(timeout=300.0, headers=headers) as client:
                     resp = await client.post(url, json=payload)
+                    resp.raise_for_status()
                     return {
                         "status": "success",
                         "model": request.model_id,
@@ -1303,6 +1429,7 @@ async def get_status():
         "active_heavy_model": state["active_model"],
         "running": list(state["processes"].keys()),
         "placements": dict(state.get("placements") or {}),
+        "backend_mode": _resolve_backend_mode(),
         "vram_free_gb": _get_available_vram(),
         "tier": tier_info,
         "runtime_profile": runtime_budget["runtime_profile"],

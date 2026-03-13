@@ -546,8 +546,41 @@
   Follow-up:
   - tmux window `monitor` пока остаётся legacy-именем для `htop/top`; отдельный rename в `syswatch` лучше делать как небольшой ops-cleanup, а не смешивать с observability stack rollout
   - health-monitoring для `document_server` / `legal_server` / `chainlit` лучше добавлять отдельным `blackbox-exporter`/synthetic probe block, а не через scrape JSON `/health` как Prometheus metrics
-- [ ] T4.9 — vLLM adapter в UMS
-- [ ] T4.10 — Production docker-compose profile для vLLM
+  - добавить явную auth-конфигурацию для Grafana (`GF_SECURITY_ADMIN_PASSWORD` и related envs), чтобы monitoring profile не публиковал дефолтные credentials
+  - нормализовать HTTP metrics route labels до route-template/low-cardinality form; сейчас dynamic `model_id` path fragments в `UMS` могут раздувать TSDB
+  - исключить `/metrics` из общих request-rate/latency панелей или метрик, чтобы self-scrape Prometheus не создавал постоянный шум на idle системе
+- [x] T4.9 — vLLM adapter в UMS
+  Реализован narrow adapter внутри `UMS` без смены orchestration core:
+  - `BACKEND_MODE=vllm` для heavy `gguf` text inference path
+  - remote sentinel/runtime placement `remote-vllm`
+  - upstream probes `/health` + `/v1/models`
+  - proxy для `completions` / `chat/completions` с `Authorization` header и injected served model id
+  - status/model views публикуют `backend_mode=vllm` и remote placement metadata
+  - non-stream path больше не маскирует upstream 4xx/5xx как `success`
+  Проверки:
+  - `pytest backend/tests/test_unified_model_server_startup.py -q -k 'test_activate_endpoint_uses_remote_vllm_backend or test_status_exposes_backend_mode_for_vllm or test_non_stream_infer_proxies_to_vllm_with_auth_headers or test_non_stream_chat_infer_uses_vllm_chat_completions or test_non_stream_infer_does_not_mask_vllm_upstream_http_error or test_ensure_vllm_backend_rejects_missing_served_model or test_stop_model_detaches_remote_vllm_without_killing_process'`
+  - `pytest backend/tests/test_unified_model_server_streaming.py -q -k 'passes_upstream_headers'`
+  - `python -m py_compile backend/services/model_manager/unified_model_server.py backend/tests/test_unified_model_server_startup.py backend/tests/test_unified_model_server_streaming.py`
+  - `git diff --check`
+  Follow-up:
+  - T4.10 остаётся обязательной отдельной фазой: production docker-compose/profile и operator rollout для самостоятельного `vLLM` deployment
+  - safe rollback semantics при failed switch с локального heavy runtime на remote `vLLM` стоит отдельно усилить, чтобы probe failure не влиял на уже активную heavy model
+- [x] T4.10 — Production docker-compose profile для vLLM
+  Добавлен самостоятельный compose/profile rollout для remote `vLLM` runtime:
+  - `docker-compose.yaml` получил сервис `vllm` под profile `vllm`
+  - `scripts/run_vllm_service.sh` собирает `vllm serve ...` из env surface
+  - `run_all.sh` умеет автоматически добавлять `vllm` service для container path при `BACKEND_MODE=vllm`
+  - `runtime_preflight.py` публикует `backend_mode` в runtime plan/report
+  - `.env.example`, `README.md`, `deploy-guide.md`, `runtime_profiles.md` синхронизированы под rollout/rollback flow
+  Проверки:
+  - `pytest backend/tests/test_runtime_launcher.py backend/tests/test_runtime_preflight.py -q -k 'vllm or launcher'`
+  - `bash -n scripts/launcher.sh scripts/run_all.sh scripts/run_container.sh scripts/bootstrap_env.sh scripts/run_vllm_service.sh`
+  - `docker compose --profile vllm config`
+  - `python -m py_compile scripts/runtime_preflight.py backend/tests/test_runtime_launcher.py backend/tests/test_runtime_preflight.py`
+  - `git diff --check`
+  Follow-up:
+  - end-to-end smoke с живым `vLLM` контейнером и реальной моделью остаётся отдельным benchmark/deployment блоком (`T4.11`)
+  - общий pytest tail-hang для более широкого `UMS`/runtime slice по-прежнему иногда проявляется после прохождения тестов; это известный harness residual, а не регрессия `T4.10`
 - [ ] T4.11 — E2E benchmark before/after migration
 - [ ] T4.12 — Security hardening для Ops UI
 

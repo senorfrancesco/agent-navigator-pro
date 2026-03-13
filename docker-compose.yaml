@@ -54,6 +54,38 @@ services:
     restart: unless-stopped
     depends_on: []
 
+  vllm:
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:latest}
+    container_name: agent-nav-vllm
+    profiles:
+      - vllm
+    ports:
+      - "${VLLM_PORT:-8101}:8000"
+    env_file:
+      - ./backend/.env
+    environment:
+      - VLLM_INTERNAL_PORT=8000
+      - HF_HOME=/root/.cache/huggingface
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
+    volumes:
+      - ./backend/models:/models
+      - ./scripts/run_vllm_service.sh:/opt/agent-navigator/run_vllm_service.sh:ro
+      - vllm-cache:/root/.cache/huggingface
+    entrypoint:
+      - /bin/bash
+      - /opt/agent-navigator/run_vllm_service.sh
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()"
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    gpus: all
+    ipc: host
+    restart: unless-stopped
+
   prometheus:
     image: prom/prometheus:latest
     container_name: agent-nav-prometheus
@@ -86,3 +118,4 @@ services:
 volumes:
   open-webui: {}
   chainlit-data: {}
+  vllm-cache: {}

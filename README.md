@@ -57,8 +57,8 @@ graph TD
 | `agent_api` | FastAPI | `8000` | OpenAI-compatible entrypoint, маршрутизация в workflow |
 | `document_server` | FastAPI | `8001` | Парсинг PDF/DOCX, OCR, таблицы, чанки |
 | `legal_server` | FastAPI | `8002` | Batch matching и сравнение юридических документов |
-| `UMS` | FastAPI | `8090` | Управление моделями, `/infer`, `/v1/embeddings`, startup/fallback |
-| `llama-server` | llama.cpp | dynamic | Генерация LLM-ответов |
+| `UMS` | FastAPI | `8090` | Управление моделями, `/infer`, `/v1/embeddings`, startup/fallback, optional remote `vLLM` adapter |
+| `llama-server` / `vLLM` | llama.cpp / OpenAI-compatible upstream | dynamic | Генерация LLM-ответов |
 | `st_server` | SentenceTransformers | `8093` | Embeddings для LaBSE |
 
 ## Что умеет система
@@ -69,6 +69,20 @@ graph TD
 - `compare_documents` для двух юридических документов
 - `equipment_analysis` для ТЗ, смет и коммерческих предложений
 - сохранение markdown-отчётов в [`backend/open_webui_uploads`](backend/open_webui_uploads)
+
+## Backend modes
+
+`UMS` поддерживает несколько backend modes через `BACKEND_MODE`:
+
+- `llama-cpp-python`
+- `llama-server`
+- `vllm`
+
+`BACKEND_MODE=vllm` в текущем safe slice влияет только на heavy text inference path для `gguf`-LLM. Важно:
+
+- `UMS` не поднимает `vLLM` сам, нужен отдельный внешний OpenAI-compatible `vLLM` endpoint;
+- embeddings (`st`) и `gguf-vl` остаются на локальном runtime path;
+- docker/compose profile для собственного `vLLM` deployment относится к отдельной фазе.
 
 ## Установка
 
@@ -235,6 +249,23 @@ docker compose --profile monitoring up -d prometheus grafana
 
 - `http://localhost:9090` — Prometheus
 - `http://localhost:3002` — Grafana
+
+Remote `vLLM` runtime для `BACKEND_MODE=vllm`:
+
+```bash
+docker compose --profile vllm up -d vllm
+docker compose logs --tail=200 -f vllm
+```
+
+При таком запуске `UMS` ожидает upstream на:
+
+- `http://localhost:8101` по умолчанию (`VLLM_PORT` можно переопределить)
+
+Важно:
+
+- `vLLM` profile не поднимается по умолчанию;
+- embeddings и `gguf-vl` остаются на локальном runtime path;
+- для container path `run_all.sh` автоматически добавит `vllm` service, если `BACKEND_MODE=vllm`.
 
 ## Типовые сценарии
 

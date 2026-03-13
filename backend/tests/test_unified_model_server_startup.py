@@ -29,6 +29,71 @@ class _FakeProcess:
         return self.returncode
 
 
+class _FakeJSONResponse:
+    def __init__(self, payload, status_code=200):
+        self._payload = payload
+        self.status_code = status_code
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"status={self.status_code}")
+
+    def json(self):
+        return self._payload
+
+
+class _FakeHTTPClient:
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def get(self, url):
+        self.calls.append(url)
+        if not self._responses:
+            raise AssertionError(f"Unexpected GET {url}")
+        return self._responses.pop(0)
+
+
+class _FakePostAsyncClient:
+    def __init__(self, response, *, headers=None):
+        self._response = response
+        self.headers = headers or {}
+        self.calls = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def post(self, url, json):
+        self.calls.append({"url": url, "json": json, "headers": dict(self.headers)})
+        return self._response
+
+
+class _FakeVLLMAsyncClient:
+    def __init__(self, response, *, headers=None):
+        self._response = response
+        self.headers = headers or {}
+        self.calls = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def post(self, url, json):
+        self.calls.append({"url": url, "json": json, "headers": dict(self.headers)})
+        return self._response
+
+
 async def _api_request(method: str, path: str, json=None) -> httpx.Response:
     transport = httpx.ASGITransport(app=ums_server.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -44,6 +109,7 @@ def _reset_ums_state(monkeypatch, tmp_path):
     }
     original_locks = dict(ums_server._model_start_locks)
     for env_name in (
+        "BACKEND_MODE",
         "UMS_LLM_GPU_INDICES",
         "UMS_LLM_MIN_FREE_VRAM_GB",
         "UMS_LLM_MIN_BALANCE_RATIO",
@@ -55,6 +121,9 @@ def _reset_ums_state(monkeypatch, tmp_path):
         "UMS_EMBED_CONCURRENCY",
         "UMS_CONCURRENCY_ACQUIRE_TIMEOUT_S",
         "UMS_FAIL_FAST_ON_SATURATION",
+        "VLLM_BASE_URL",
+        "VLLM_API_KEY",
+        "VLLM_MODEL_ID_QWEN_14B_LLM",
     ):
         monkeypatch.delenv(env_name, raising=False)
     monkeypatch.setenv("UMS_DYNAMIC_MODELS_REGISTRY_PATH", str(tmp_path / "ums_dynamic_models.json"))
@@ -495,6 +564,26 @@ def test_status_exposes_concurrency_policy(monkeypatch):
     assert payload["concurrency_policy"]["embedding_inflight"] == 0
 
 
+def test_status_exposes_backend_mode_for_vllm(monkeypatch):
+    monkeypatch.setenv("BACKEND_MODE", "vllm")
+    ums_server.state["processes"]["qwen-14b-llm"] = ums_server._RemoteProcess()
+    ums_server.state["placements"]["qwen-14b-llm"] = {
+        "placement_mode": "remote-vllm",
+        "backend": "vllm",
+        "upstream_url": "http://vllm.local:8000",
+        "served_model_id": "qwen-remote",
+        "gpu_indices": [],
+        "device_arg": "remote",
+    }
+    ums_server.state["active_model"] = "qwen-14b-llm"
+
+    payload = asyncio.run(ums_server.get_status())
+
+    assert payload["backend_mode"] == "vllm"
+    assert payload["running"] == ["qwen-14b-llm"]
+    assert payload["placements"]["qwen-14b-llm"]["placement_mode"] == "remote-vllm"
+
+
 def test_status_reports_inflight_concurrency(monkeypatch):
     monkeypatch.setenv("UMS_LLM_MAX_CONCURRENCY", "2")
     monkeypatch.setenv("UMS_EMBED_MAX_CONCURRENCY", "6")
@@ -636,6 +725,40 @@ def test_activate_endpoint_starts_model_and_returns_active_view():
     assert payload["model"]["running"] is True
     assert payload["model"]["active"] is True
     mock_start.assert_called_once_with("qwen-14b-llm", ums_server.DeviceMode.HYBRID)
+
+
+def test_activate_endpoint_uses_remote_vllm_backend(monkeypatch):
+    async def _run_inline(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setenv("BACKEND_MODE", "vllm")
+    monkeypatch.setenv("VLLM_BASE_URL", "http://vllm.local:8000")
+    monkeypatch.setenv("VLLM_MODEL_ID_QWEN_14B_LLM", "qwen-remote")
+
+    with patch.object(ums_server.asyncio, "to_thread", side_effect=_run_inline), patch.object(
+        ums_server, "_ensure_vllm_backend"
+    ) as mock_probe, patch.object(
+        ums_server, "_launch_server_process", side_effect=AssertionError("local process launch must not happen for vLLM")
+    ):
+        response = asyncio.run(
+            _api_request(
+                "POST",
+                "/models/qwen-14b-llm/activate",
+                json={},
+            )
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "success"
+    assert payload["model"]["backend"] == "vllm"
+    assert payload["model"]["running"] is True
+    assert payload["model"]["active"] is True
+    assert payload["model"]["placement"]["placement_mode"] == "remote-vllm"
+    assert payload["model"]["placement"]["served_model_id"] == "qwen-remote"
+    assert payload["model"]["placement"]["upstream_url"] == "http://vllm.local:8000"
+    assert isinstance(ums_server.state["processes"]["qwen-14b-llm"], ums_server._RemoteProcess)
+    mock_probe.assert_called_once_with("qwen-14b-llm")
 
 
 def test_stop_endpoint_stops_model_and_returns_stopped_view():
@@ -1005,6 +1128,124 @@ async def test_stream_infer_releases_slot_when_startup_fails(monkeypatch):
 
     assert exc_info.value.status_code == 500
     assert getattr(ums_server._llm_semaphore, "_value", None) == 1
+
+
+@pytest.mark.asyncio
+async def test_non_stream_infer_proxies_to_vllm_with_auth_headers(monkeypatch):
+    monkeypatch.setenv("BACKEND_MODE", "vllm")
+    monkeypatch.setenv("VLLM_BASE_URL", "http://vllm.local:8000")
+    monkeypatch.setenv("VLLM_API_KEY", "secret-token")
+    monkeypatch.setenv("VLLM_MODEL_ID_QWEN_14B_LLM", "qwen-remote")
+    fake_client = _FakeVLLMAsyncClient(_FakeJSONResponse({"id": "cmpl-1"}), headers={"Authorization": "Bearer secret-token"})
+
+    with patch.object(ums_server, "_start_server") as mock_start, patch(
+        "services.model_manager.unified_model_server.httpx.AsyncClient",
+        return_value=fake_client,
+    ):
+        response = await ums_server.infer(
+            ums_server.InferRequest(
+                model_id="qwen-14b-llm",
+                payload={"prompt": "hello"},
+                stream=False,
+            )
+        )
+
+    mock_start.assert_called_once()
+    assert response["status"] == "success"
+    assert response["result"] == {"id": "cmpl-1"}
+    assert fake_client.calls == [
+        {
+            "url": "http://vllm.local:8000/v1/completions",
+            "json": {"prompt": "hello", "model": "qwen-remote"},
+            "headers": {"Authorization": "Bearer secret-token"},
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_non_stream_chat_infer_uses_vllm_chat_completions(monkeypatch):
+    monkeypatch.setenv("BACKEND_MODE", "vllm")
+    monkeypatch.setenv("VLLM_BASE_URL", "http://vllm.local:8000")
+    monkeypatch.setenv("VLLM_MODEL_ID_QWEN_14B_LLM", "qwen-remote")
+    fake_client = _FakeVLLMAsyncClient(_FakeJSONResponse({"id": "chatcmpl-1"}))
+
+    with patch.object(ums_server, "_start_server") as mock_start, patch(
+        "services.model_manager.unified_model_server.httpx.AsyncClient",
+        return_value=fake_client,
+    ):
+        response = await ums_server.infer(
+            ums_server.InferRequest(
+                model_id="qwen-14b-llm",
+                payload={"messages": [{"role": "user", "content": "hello"}]},
+                stream=False,
+            )
+        )
+
+    mock_start.assert_called_once()
+    assert response["status"] == "success"
+    assert fake_client.calls[0]["url"] == "http://vllm.local:8000/v1/chat/completions"
+    assert fake_client.calls[0]["json"]["model"] == "qwen-remote"
+
+
+@pytest.mark.asyncio
+async def test_non_stream_infer_does_not_mask_vllm_upstream_http_error(monkeypatch):
+    monkeypatch.setenv("BACKEND_MODE", "vllm")
+    monkeypatch.setenv("VLLM_BASE_URL", "http://vllm.local:8000")
+    fake_client = _FakeVLLMAsyncClient(_FakeJSONResponse({"error": "unauthorized"}, status_code=401))
+
+    with patch.object(ums_server, "_start_server") as mock_start, patch(
+        "services.model_manager.unified_model_server.httpx.AsyncClient",
+        return_value=fake_client,
+    ):
+        with pytest.raises(ums_server.HTTPException) as exc_info:
+            await ums_server.infer(
+                ums_server.InferRequest(
+                    model_id="qwen-14b-llm",
+                    payload={"prompt": "hello"},
+                    stream=False,
+                )
+            )
+
+    mock_start.assert_called_once()
+    assert exc_info.value.status_code == 500
+    assert "status=401" in exc_info.value.detail
+
+
+def test_ensure_vllm_backend_rejects_missing_served_model(monkeypatch):
+    monkeypatch.setenv("VLLM_BASE_URL", "http://vllm.local:8000")
+    monkeypatch.setenv("VLLM_MODEL_ID_QWEN_14B_LLM", "qwen-remote")
+    fake_client = _FakeHTTPClient(
+        [
+            _FakeJSONResponse({"ok": True}, status_code=200),
+            _FakeJSONResponse({"data": [{"id": "other-model"}]}, status_code=200),
+        ]
+    )
+
+    with patch("services.model_manager.unified_model_server.httpx.Client", return_value=fake_client):
+        with pytest.raises(RuntimeError, match="qwen-remote"):
+            ums_server._ensure_vllm_backend("qwen-14b-llm")
+
+    assert fake_client.calls == [
+        "http://vllm.local:8000/health",
+        "http://vllm.local:8000/v1/models",
+    ]
+
+
+def test_stop_model_detaches_remote_vllm_without_killing_process(monkeypatch):
+    monkeypatch.setenv("BACKEND_MODE", "vllm")
+    ums_server.state["active_model"] = "qwen-14b-llm"
+    ums_server.state["processes"]["qwen-14b-llm"] = ums_server._RemoteProcess()
+    ums_server.state["placements"]["qwen-14b-llm"] = {
+        "placement_mode": "remote-vllm",
+        "backend": "vllm",
+    }
+
+    with patch.object(ums_server.os, "killpg", side_effect=AssertionError("remote stop must not kill local pg")):
+        ums_server._stop_model("qwen-14b-llm")
+
+    assert "qwen-14b-llm" not in ums_server.state["processes"]
+    assert "qwen-14b-llm" not in ums_server.state["placements"]
+    assert ums_server.state["active_model"] is None
 
 
 def test_register_endpoint_rejects_reserved_port_conflict():

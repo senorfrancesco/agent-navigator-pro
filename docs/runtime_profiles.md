@@ -2,6 +2,18 @@
 
 `Agent Navigator Pro` использует backend-owned runtime profiles для подстройки под железо и budget-контракт `UMS`.
 
+## Backend modes
+
+Отдельно от runtime profiles `UMS` поддерживает backend mode switch через `BACKEND_MODE`:
+
+- `llama-cpp-python`
+- `llama-server`
+- `vllm`
+
+`vllm` в текущем safe slice означает только remote text-generation adapter для heavy `gguf`-LLM. Это не меняет embedding path и не переносит `gguf-vl` / vision на upstream runtime.
+
+Для operator rollout отдельного upstream runtime используется `docker compose --profile vllm up -d vllm`; это отдельный deployment path поверх backend mode switch, а не замена runtime profiles.
+
 ## Профили
 
 - `default`

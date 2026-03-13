@@ -86,6 +86,36 @@ def test_run_all_is_wrapper_to_launcher(tmp_path):
     assert "launcher:test-mode target=container" in result.stdout
 
 
+def test_run_all_from_launcher_enables_vllm_compose_profile(tmp_path):
+    runtime_env = tmp_path / ".env.runtime"
+    env = os.environ.copy()
+    env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
+    env["AGENT_NAVIGATOR_RUNTIME_ENV_FILE"] = str(runtime_env)
+    env["BACKEND_MODE"] = "vllm"
+
+    result = _run_script("run_all.sh", "--from-launcher", "--no-attach", env=env)
+
+    assert result.returncode == 0
+    assert "run_all:test-mode backend_mode=vllm" in result.stdout
+    assert "compose_profiles=--profile vllm" in result.stdout
+    assert "compose_services=chainlit vllm" in result.stdout
+
+
+def test_run_all_from_launcher_keeps_chainlit_only_for_local_backend(tmp_path):
+    runtime_env = tmp_path / ".env.runtime"
+    env = os.environ.copy()
+    env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
+    env["AGENT_NAVIGATOR_RUNTIME_ENV_FILE"] = str(runtime_env)
+    env["BACKEND_MODE"] = "llama-server"
+
+    result = _run_script("run_all.sh", "--from-launcher", "--no-attach", env=env)
+
+    assert result.returncode == 0
+    assert "run_all:test-mode backend_mode=llama-server" in result.stdout
+    assert "compose_profiles=none" in result.stdout
+    assert "compose_services=chainlit" in result.stdout
+
+
 def test_install_mode_uses_bootstrap_script(tmp_path):
     runtime_env = tmp_path / ".env.runtime"
     env = os.environ.copy()

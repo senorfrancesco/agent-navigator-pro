@@ -271,6 +271,25 @@ docker compose --profile monitoring up -d prometheus grafana
 - `http://localhost:9090` — Prometheus
 - `http://localhost:3002` — Grafana
 
+### Вариант D: Remote vLLM runtime
+
+Если выбран `BACKEND_MODE=vllm`, отдельный upstream runtime можно поднять через compose profile:
+
+```bash
+docker compose --profile vllm up -d vllm
+docker compose logs --tail=200 -f vllm
+```
+
+Минимальный env surface:
+
+- `BACKEND_MODE=vllm`
+- `VLLM_BASE_URL=http://localhost:8101`
+- `VLLM_PORT=8101`
+- `VLLM_MODEL_SOURCE_QWEN_14B_LLM`
+- `VLLM_MODEL_ID_QWEN_14B_LLM`
+
+В текущем safe slice это поднимает только heavy text-generation runtime. Embeddings и `gguf-vl` остаются на локальном backend path.
+
 ### Подключение к tmux
 
 ```bash
@@ -414,6 +433,25 @@ Backend-сервисы (Agent API, UMS, Doc/Legal Server) работают на 
 ---
 
 ## 12. Troubleshooting
+
+### Remote vLLM adapter
+
+Если нужен `BACKEND_MODE=vllm`, помни:
+
+1. `UMS` не поднимает `vLLM` сам; upstream OpenAI-compatible server должен быть развёрнут отдельно.
+2. Нужны env-переменные:
+   - `BACKEND_MODE=vllm`
+   - `VLLM_BASE_URL`
+   - `VLLM_API_KEY` при закрытом upstream
+   - `VLLM_MODEL_ID_QWEN_14B_LLM`, если served model id отличается от локального `model_id`
+3. Быстрый preflight:
+   - `curl $VLLM_BASE_URL/health`
+   - `curl $VLLM_BASE_URL/v1/models`
+4. Rollback:
+   - вернуть `BACKEND_MODE=llama-server` или `llama-cpp-python`
+   - перезапустить `UMS`
+
+В текущем safe slice embeddings и `gguf-vl` остаются на локальном runtime path; compose-profile для самостоятельного `vLLM` deployment относится к отдельной фазе.
 
 ### Модель не грузится
 

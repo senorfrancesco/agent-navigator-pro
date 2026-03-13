@@ -157,7 +157,7 @@ Retrieval: BM25 (русские стоп-слова) + Dense (LaBSE) → RRF Fus
 Менеджер моделей. Порт 8090.
 
 - При старте: hardware profiling → GPU/VRAM → TierSelector → вычисляет `gpu_layers`, `ctx_size`
-- Предзагружает Qwen-14B в llama-server
+- Предзагружает Qwen-14B в локальный `llama-server` или цепляет внешний `vLLM` adapter, если `BACKEND_MODE=vllm`
 - Один тяжёлый GGUF в памяти — при смене выгружает предыдущий
 - `/v1/embeddings` — LaBSE ONNX (CPU, 1.2-1.4x быстрее SentenceTransformers)
 - `/status` — публикует runtime_profile, context budget, loaded models
