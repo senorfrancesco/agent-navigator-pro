@@ -175,6 +175,6 @@ Response:
 ### Verification Evidence
 
 - `pytest backend/tests/test_unified_model_server_startup.py -vv` → `25 passed`
+- `cd backend && pytest tests/ -q -m "not integration"` → `429 passed, 4 deselected`
 - `python -m py_compile backend/services/model_manager/unified_model_server.py backend/tests/test_unified_model_server_startup.py`
 - `git diff --check`
-- phase-level full backend regression recorded in `TASKS.md`
