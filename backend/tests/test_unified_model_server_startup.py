@@ -6,6 +6,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import httpx
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -23,6 +24,12 @@ class _FakeProcess:
 
     def wait(self, timeout=None):
         return self.returncode
+
+
+async def _api_request(method: str, path: str, json=None) -> httpx.Response:
+    transport = httpx.ASGITransport(app=ums_server.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        return await client.request(method, path, json=json)
 
 
 @pytest.fixture(autouse=True)
@@ -428,3 +435,159 @@ def test_status_exposes_current_placements():
 
     assert payload["placements"]["qwen-14b-llm"]["tensor_split"] == [0.6667, 0.3333]
     assert payload["placements"]["labse-embedding"]["device_arg"] == "cuda:2"
+
+
+def test_models_api_lists_available_models_and_active_state():
+    ums_server.state["active_model"] = "qwen-14b-llm"
+    ums_server.state["processes"] = {"qwen-14b-llm": _FakeProcess(pid=111)}
+    ums_server.state["placements"] = {
+        "qwen-14b-llm": {"placement_mode": "single-gpu", "gpu_indices": [0]},
+    }
+
+    with patch.object(
+        ums_server,
+        "_discover_available_model_ids",
+        return_value=["labse-embedding", "qwen-14b-llm"],
+    ):
+        response = asyncio.run(_api_request("GET", "/models"))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["active_heavy_model"] == "qwen-14b-llm"
+    models = {item["model_id"]: item for item in payload["models"]}
+    assert set(models) == {"labse-embedding", "qwen-14b-llm"}
+    assert models["qwen-14b-llm"]["running"] is True
+    assert models["qwen-14b-llm"]["active"] is True
+    assert models["qwen-14b-llm"]["resolved_path"] == models["qwen-14b-llm"]["path"]
+    assert models["labse-embedding"]["running"] is False
+    assert models["labse-embedding"]["active"] is False
+
+
+def test_models_running_api_lists_running_models_and_placements():
+    ums_server.state["active_model"] = "qwen-14b-llm"
+    ums_server.state["processes"] = {
+        "qwen-14b-llm": _FakeProcess(pid=111),
+        "labse-embedding": _FakeProcess(pid=222),
+    }
+    ums_server.state["placements"] = {
+        "qwen-14b-llm": {
+            "placement_mode": "multi-gpu",
+            "gpu_indices": [0, 1],
+            "tensor_split": [0.6667, 0.3333],
+        },
+        "labse-embedding": {
+            "placement_mode": "single-gpu",
+            "gpu_indices": [2],
+            "device_arg": "cuda:2",
+        },
+    }
+
+    response = asyncio.run(_api_request("GET", "/models/running"))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["active_heavy_model"] == "qwen-14b-llm"
+    assert payload["running_model_ids"] == ["qwen-14b-llm", "labse-embedding"]
+    running_models = {item["model_id"]: item for item in payload["running_models"]}
+    assert set(running_models) == {"qwen-14b-llm", "labse-embedding"}
+    assert payload["placements"]["qwen-14b-llm"]["tensor_split"] == [0.6667, 0.3333]
+    assert payload["placements"]["labse-embedding"]["device_arg"] == "cuda:2"
+
+
+def test_preload_endpoint_starts_model_with_requested_device_mode():
+    async def _run_inline(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    with patch.object(ums_server.asyncio, "to_thread", side_effect=_run_inline), patch.object(ums_server, "_start_server") as mock_start:
+        response = asyncio.run(
+            _api_request(
+                "POST",
+                "/models/labse-embedding/preload",
+                json={"device_mode": "cpu"},
+            )
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "success"
+    assert payload["action"] == "preload"
+    assert payload["model"]["model_id"] == "labse-embedding"
+    mock_start.assert_called_once_with("labse-embedding", ums_server.DeviceMode.CPU)
+
+
+def test_activate_endpoint_starts_model_and_returns_active_view():
+    async def _run_inline(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    def _fake_start(model_id, device_mode):
+        assert model_id == "qwen-14b-llm"
+        assert device_mode == ums_server.DeviceMode.HYBRID
+        ums_server.state["active_model"] = model_id
+        ums_server.state["processes"][model_id] = _FakeProcess(pid=111)
+        ums_server.state["placements"][model_id] = {
+            "placement_mode": "single-gpu",
+            "gpu_indices": [0],
+        }
+
+    with patch.object(ums_server.asyncio, "to_thread", side_effect=_run_inline), patch.object(ums_server, "_start_server", side_effect=_fake_start) as mock_start:
+        response = asyncio.run(
+            _api_request(
+                "POST",
+                "/models/qwen-14b-llm/activate",
+                json={},
+            )
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "success"
+    assert payload["action"] == "activate"
+    assert payload["model"]["model_id"] == "qwen-14b-llm"
+    assert payload["model"]["running"] is True
+    assert payload["model"]["active"] is True
+    mock_start.assert_called_once_with("qwen-14b-llm", ums_server.DeviceMode.HYBRID)
+
+
+def test_stop_endpoint_stops_model_and_returns_stopped_view():
+    async def _run_inline(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    ums_server.state["active_model"] = "qwen-14b-llm"
+    ums_server.state["processes"]["qwen-14b-llm"] = _FakeProcess(pid=111)
+    ums_server.state["placements"]["qwen-14b-llm"] = {
+        "placement_mode": "single-gpu",
+        "gpu_indices": [0],
+    }
+
+    def _fake_stop(model_id):
+        assert model_id == "qwen-14b-llm"
+        ums_server.state["processes"].pop(model_id, None)
+        ums_server.state["placements"].pop(model_id, None)
+        ums_server.state["active_model"] = None
+
+    with patch.object(ums_server.asyncio, "to_thread", side_effect=_run_inline), patch.object(ums_server, "_stop_model", side_effect=_fake_stop) as mock_stop:
+        response = asyncio.run(_api_request("POST", "/models/qwen-14b-llm/stop"))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "success"
+    assert payload["action"] == "stop"
+    assert payload["model"]["model_id"] == "qwen-14b-llm"
+    assert payload["model"]["running"] is False
+    assert payload["model"]["active"] is False
+    mock_stop.assert_called_once_with("qwen-14b-llm")
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("POST", "/models/missing-model/preload"),
+        ("POST", "/models/missing-model/activate"),
+        ("POST", "/models/missing-model/stop"),
+    ],
+)
+def test_model_control_endpoints_return_404_for_unknown_model(method, path):
+    response = asyncio.run(_api_request(method, path, json={}))
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Model missing-model not found"

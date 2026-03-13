@@ -7,6 +7,7 @@ import os
 import sys
 import json
 import time
+import copy
 import signal
 import subprocess
 import asyncio
@@ -594,6 +595,10 @@ class EmbeddingRequest(BaseModel):
     model: str = "labse-embedding"
     encoding_format: Optional[str] = "float"
 
+
+class ModelControlRequest(BaseModel):
+    device_mode: Optional[DeviceMode] = None
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # T3.7: Hardware profiling при старте
@@ -684,6 +689,35 @@ async def _proxy_sse_stream(url: str, payload: Dict[str, Any], sem: asyncio.Sema
         with suppress(asyncio.CancelledError):
             await producer_task
 
+
+def _discover_available_model_ids() -> List[str]:
+    model_ids = list(STATIC_MODELS_CONFIG.keys())
+    if MODELS_DIR.exists():
+        for root, _, files in os.walk(MODELS_DIR):
+            for file in files:
+                if file.endswith(".gguf"):
+                    model_id = os.path.splitext(file)[0]
+                    if model_id not in model_ids:
+                        model_ids.append(model_id)
+    return sorted(model_ids)
+
+
+def _build_model_view(model_id: str) -> Dict[str, Any]:
+    config = get_model_config(model_id)
+    if not config:
+        raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
+    resolved_path = resolve_model_path(config["path"])
+    return {
+        "model_id": model_id,
+        "type": config["type"],
+        "path": resolved_path,
+        "resolved_path": resolved_path,
+        "port": config["port"],
+        "running": model_id in state["processes"],
+        "active": state.get("active_model") == model_id,
+        "placement": copy.deepcopy((state.get("placements") or {}).get(model_id)),
+    }
+
 @app.post("/infer")
 async def infer(request: InferRequest):
     try:
@@ -711,6 +745,64 @@ async def infer(request: InferRequest):
     except Exception as e:
         logger.error(f"Inference Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/models")
+async def list_available_models():
+    return {
+        "models": [_build_model_view(model_id) for model_id in _discover_available_model_ids()],
+        "active_heavy_model": state.get("active_model"),
+    }
+
+
+@app.get("/models/running")
+async def list_running_models():
+    running_ids = list(state.get("processes") or {})
+    return {
+        "active_heavy_model": state.get("active_model"),
+        "running_model_ids": running_ids,
+        "running_models": [_build_model_view(model_id) for model_id in running_ids],
+        "placements": copy.deepcopy(state.get("placements") or {}),
+    }
+
+
+@app.post("/models/{model_id}/preload")
+async def preload_model(model_id: str, request: ModelControlRequest):
+    config = get_model_config(model_id)
+    if not config:
+        raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
+    await asyncio.to_thread(_start_server, model_id, request.device_mode or state["device_mode"])
+    return {
+        "status": "success",
+        "action": "preload",
+        "model": _build_model_view(model_id),
+    }
+
+
+@app.post("/models/{model_id}/activate")
+async def activate_model(model_id: str, request: ModelControlRequest):
+    config = get_model_config(model_id)
+    if not config:
+        raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
+    await asyncio.to_thread(_start_server, model_id, request.device_mode or state["device_mode"])
+    return {
+        "status": "success",
+        "action": "activate",
+        "model": _build_model_view(model_id),
+    }
+
+
+@app.post("/models/{model_id}/stop")
+async def stop_model(model_id: str):
+    config = get_model_config(model_id)
+    if not config:
+        raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
+    await asyncio.to_thread(_stop_model, model_id)
+    return {
+        "status": "success",
+        "action": "stop",
+        "model": _build_model_view(model_id),
+    }
 
 @app.get("/status")
 async def get_status():

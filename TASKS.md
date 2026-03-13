@@ -439,7 +439,21 @@
   **Текущий гибрид:** embedders (LaBSE, Qwen3-Embedding) на CPU, Qwen-14B inference на GPU — намеренный дизайн для сохранения VRAM.
 
 ### Inference & Ops
-- [ ] T4.4 — UMS Model Control API
+- [x] T4.4 — UMS Model Control API
+  Выполнено как backend-owned operator surface без возврата raw model control в Chainlit UI.
+  Реализовано:
+  - `GET /models` для configured + filesystem-discovered моделей с полями `model_id`, `running`, `active`, `port`, `placement`, `resolved_path`
+  - `GET /models/running` для compact operator view (`running_model_ids`, `active_heavy_model`, `placements`, `running_models`)
+  - `POST /models/{model_id}/preload`
+  - `POST /models/{model_id}/activate`
+  - `POST /models/{model_id}/stop`
+  - operator-safe JSON contract поверх существующей backend runtime/placement логики
+  - 404 contract для unknown model ids
+  Verification:
+  - `pytest backend/tests/test_unified_model_server_startup.py -q` → `20 passed`
+  - `cd backend && pytest tests/ -q -m "not integration"` → `424 passed, 4 deselected`
+  - `python -m py_compile backend/services/model_manager/unified_model_server.py backend/tests/test_unified_model_server_startup.py`
+  - `git diff --check`
 - [ ] T4.5 — Dynamic model registration
 - [ ] T4.6 — Port pool и scheduler в UMS
 - [ ] T4.7 — Concurrency policy для production
