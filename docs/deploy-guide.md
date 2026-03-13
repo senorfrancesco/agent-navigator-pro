@@ -271,6 +271,13 @@ docker compose --profile monitoring up -d prometheus grafana
 - `http://localhost:9090` — Prometheus
 - `http://localhost:3002` — Grafana
 
+Для production monitoring profile обязательно задать:
+
+- `GF_SECURITY_ADMIN_USER`
+- `GF_SECURITY_ADMIN_PASSWORD`
+
+Иначе Grafana поднимется с небезопасным дефолтным паролем.
+
 ### Вариант D: Remote vLLM runtime
 
 Если выбран `BACKEND_MODE=vllm`, отдельный upstream runtime можно поднять через compose profile:

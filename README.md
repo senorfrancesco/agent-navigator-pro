@@ -250,6 +250,11 @@ docker compose --profile monitoring up -d prometheus grafana
 - `http://localhost:9090` — Prometheus
 - `http://localhost:3002` — Grafana
 
+Для monitoring profile задай отдельные Grafana credentials:
+
+- `GF_SECURITY_ADMIN_USER`
+- `GF_SECURITY_ADMIN_PASSWORD`
+
 Remote `vLLM` runtime для `BACKEND_MODE=vllm`:
 
 ```bash

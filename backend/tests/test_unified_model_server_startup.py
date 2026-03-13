@@ -514,6 +514,7 @@ def test_metrics_endpoint_exposes_http_and_runtime_metrics():
     assert "agent_nav_http_requests_total" in payload
     assert 'service="ums"' in payload
     assert "agent_nav_ums_running_models" in payload
+    assert 'path="/metrics"' not in payload
 
 
 def test_status_exposes_current_placements():

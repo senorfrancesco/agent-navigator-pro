@@ -593,7 +593,20 @@
   - `git diff --check`
   Follow-up:
   - live benchmark с реально поднятым `vLLM` контейнером и production-size моделью остаётся operator/runtime exercise; этот шаг закрыл reproducible harness и compare contract
-- [ ] T4.12 — Security hardening для Ops UI
+- [x] T4.12 — Security hardening для Ops UI
+  Закрыт минимальный ops-security slice без смены runtime architecture:
+  - `docker-compose.yaml`: Grafana credentials и auth flags через env (`GF_SECURITY_ADMIN_USER`, `GF_SECURITY_ADMIN_PASSWORD`, sign-up/anonymous disabled)
+  - `backend/.env.example`: добавлены явные Grafana auth envs
+  - `backend/services/observability.py`: HTTP metrics нормализуют dynamic paths до low-cardinality labels
+  - `/metrics` исключён из общих HTTP request counters/latency, чтобы self-scrape не создавал шум
+  Проверки:
+  - `pytest backend/tests/test_observability.py backend/tests/test_unified_model_server_startup.py -q -k 'metrics or observability'`
+  - `docker compose --profile monitoring config`
+  - `python -m py_compile backend/services/observability.py backend/tests/test_observability.py backend/tests/test_unified_model_server_startup.py`
+  - `git diff --check`
+  Follow-up:
+  - полноценный auth/ACL для model-control endpoints остаётся отдельным ops-hardening block
+  - Grafana secret injection из vault/secret manager не входит в текущий env-based slice
 
 ### Другие
 - [ ] B3.11 — Убрать JSON salvage из DEBUG-POLISH (structured output platform-level)

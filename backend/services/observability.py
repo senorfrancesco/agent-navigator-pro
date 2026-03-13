@@ -151,6 +151,30 @@ class _MetricsStore:
 _METRICS = _MetricsStore()
 
 
+def _normalize_metrics_path(path: str) -> str:
+    normalized = str(path or "/")
+    if normalized == "/metrics":
+        return normalized
+    parts = [segment for segment in normalized.split("/") if segment]
+    if len(parts) >= 2 and parts[0] == "models":
+        if parts[1] not in {"running", "register"}:
+            parts[1] = "{model_id}"
+        return "/" + "/".join(parts)
+    if len(parts) == 1:
+        return normalized
+    normalized_parts = []
+    for segment in parts:
+        if segment.isdigit():
+            normalized_parts.append("{id}")
+            continue
+        compact = segment.replace("-", "")
+        if len(segment) >= 8 and compact.isalnum() and any(ch.isdigit() for ch in segment):
+            normalized_parts.append("{id}")
+            continue
+        normalized_parts.append(segment)
+    return "/" + "/".join(normalized_parts)
+
+
 def reset_observability_metrics() -> None:
     _METRICS.reset()
 
@@ -225,10 +249,14 @@ class ObservabilityMiddleware:
 
         method = str(scope.get("method", "GET")).upper()
         path = str(scope.get("path") or "/")
+        metrics_path = _normalize_metrics_path(path)
+        metrics_enabled = metrics_path != "/metrics"
         headers = Headers(scope=scope)
         trace_id = headers.get("x-trace-id") or str(uuid.uuid4())[:8]
         scope.setdefault("state", {})["trace_id"] = trace_id
-        started_at = begin_http_request(service=self.service_name, method=method, path=path)
+        started_at = None
+        if metrics_enabled:
+            started_at = begin_http_request(service=self.service_name, method=method, path=metrics_path)
         self.logger.info(
             "request_started service=%s method=%s path=%s trace_id=%s",
             self.service_name,
@@ -251,13 +279,14 @@ class ObservabilityMiddleware:
         except Exception:
             if self.post_response_hook is not None:
                 self.post_response_hook()
-            end_http_request(
-                service=self.service_name,
-                method=method,
-                path=path,
-                status_code=status_code,
-                started_at=started_at,
-            )
+            if metrics_enabled and started_at is not None:
+                end_http_request(
+                    service=self.service_name,
+                    method=method,
+                    path=metrics_path,
+                    status_code=status_code,
+                    started_at=started_at,
+                )
             self.logger.exception(
                 "request_failed service=%s method=%s path=%s trace_id=%s status_code=%s",
                 self.service_name,
@@ -270,14 +299,17 @@ class ObservabilityMiddleware:
 
         if self.post_response_hook is not None:
             self.post_response_hook()
-        end_http_request(
-            service=self.service_name,
-            method=method,
-            path=path,
-            status_code=status_code,
-            started_at=started_at,
-        )
-        duration_ms = (time.perf_counter() - started_at) * 1000.0
+        if metrics_enabled and started_at is not None:
+            end_http_request(
+                service=self.service_name,
+                method=method,
+                path=metrics_path,
+                status_code=status_code,
+                started_at=started_at,
+            )
+            duration_ms = (time.perf_counter() - started_at) * 1000.0
+        else:
+            duration_ms = 0.0
         self.logger.info(
             "request_completed service=%s method=%s path=%s trace_id=%s status_code=%s duration_ms=%.2f",
             self.service_name,

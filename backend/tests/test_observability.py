@@ -68,3 +68,57 @@ def test_observability_middleware_propagates_trace_id_and_records_http_metrics()
     assert "agent_nav_http_requests_total" in payload
     assert 'service="dummy"' in payload
     assert 'path="/health"' in payload
+
+
+def test_observability_middleware_normalizes_dynamic_model_paths():
+    middleware = ObservabilityMiddleware(_dummy_app, service_name="dummy", logger=_DummyLogger())
+    sent_messages = []
+
+    async def _receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def _send(message):
+        sent_messages.append(message)
+
+    scope = {
+        "type": "http",
+        "http_version": "1.1",
+        "method": "POST",
+        "path": "/models/qwen-14b-llm/activate",
+        "headers": [],
+        "state": {},
+    }
+
+    asyncio.run(middleware(scope, _receive, _send))
+
+    payload = render_metrics_text()
+    assert 'path="/models/{model_id}/activate"' in payload
+    assert 'path="/models/qwen-14b-llm/activate"' not in payload
+
+
+def test_observability_middleware_excludes_metrics_endpoint_from_http_metrics():
+    middleware = ObservabilityMiddleware(_dummy_app, service_name="dummy", logger=_DummyLogger())
+    sent_messages = []
+
+    async def _receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def _send(message):
+        sent_messages.append(message)
+
+    scope = {
+        "type": "http",
+        "http_version": "1.1",
+        "method": "GET",
+        "path": "/metrics",
+        "headers": [],
+        "state": {},
+    }
+
+    asyncio.run(middleware(scope, _receive, _send))
+
+    response_start = next(msg for msg in sent_messages if msg["type"] == "http.response.start")
+    assert any(header[0] == b"x-trace-id" for header in response_start["headers"])
+    payload = render_metrics_text()
+    assert "agent_nav_http_requests_total" not in payload
+    assert 'path="/metrics"' not in payload
