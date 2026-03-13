@@ -177,6 +177,14 @@ CHAINLIT_ADMIN_PASSWORD="your-secure-password"
 CHAINLIT_AUTH_SECRET="your-secret-key"
 ```
 
+Для local/dev launcher допускает override:
+
+```bash
+AGENT_NAVIGATOR_ALLOW_INSECURE_DEFAULTS=1
+```
+
+Но в production bootstrap считает дефолтные `CHAINLIT_AUTH_SECRET`, `CHAINLIT_ADMIN_PASSWORD` и `GF_SECURITY_ADMIN_PASSWORD` недопустимыми.
+
 ### 3. Сборка Docker-образа
 
 ```bash

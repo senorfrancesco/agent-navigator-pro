@@ -184,6 +184,12 @@ LEGAL_SERVER_URL="http://localhost:8002"
 CHAINLIT_AUTH_SECRET="your-production-secret-key-here"
 CHAINLIT_ADMIN_USER="admin"
 CHAINLIT_ADMIN_PASSWORD="your-secure-password"
+# Grafana auth (если используется monitoring profile)
+GF_SECURITY_ADMIN_PASSWORD="your-grafana-password"
+
+Launcher/bootstrap валидируют эти значения. Для local/dev можно временно разрешить дефолтные секреты только через:
+
+AGENT_NAVIGATOR_ALLOW_INSECURE_DEFAULTS=1
 
 # Intent classifier
 INTENT_CLASSIFIER_MODE="embedder"

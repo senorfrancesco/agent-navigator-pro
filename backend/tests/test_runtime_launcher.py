@@ -126,3 +126,62 @@ def test_install_mode_uses_bootstrap_script(tmp_path):
 
     assert result.returncode == 0
     assert "bootstrap:test-mode mode=install target=native" in result.stdout
+
+
+def test_bootstrap_check_rejects_default_secrets(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                'CHAINLIT_AUTH_SECRET="agent-navigator-secret-key-change-me"',
+                'CHAINLIT_ADMIN_PASSWORD="admin"',
+                'GF_SECURITY_ADMIN_PASSWORD="change-me-grafana"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["AGENT_NAVIGATOR_BACKEND_ENV_FILE"] = str(env_file)
+    env["AGENT_NAVIGATOR_SKIP_COMMAND_CHECKS"] = "1"
+
+    result = _run_script("bootstrap_env.sh", "--check", "--target=native", env=env)
+
+    assert result.returncode == 1
+    assert "insecure-secret:CHAINLIT_AUTH_SECRET" in result.stdout
+    assert "insecure-secret:CHAINLIT_ADMIN_PASSWORD" in result.stdout
+    assert "insecure-secret:GF_SECURITY_ADMIN_PASSWORD" in result.stdout
+
+
+def test_bootstrap_check_allows_insecure_defaults_when_explicitly_enabled(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                'CHAINLIT_AUTH_SECRET="agent-navigator-secret-key-change-me"',
+                'CHAINLIT_ADMIN_PASSWORD="admin"',
+                'GF_SECURITY_ADMIN_PASSWORD="change-me-grafana"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["AGENT_NAVIGATOR_BACKEND_ENV_FILE"] = str(env_file)
+    env["AGENT_NAVIGATOR_SKIP_COMMAND_CHECKS"] = "1"
+    env["AGENT_NAVIGATOR_ALLOW_INSECURE_DEFAULTS"] = "1"
+
+    result = _run_script("bootstrap_env.sh", "--check", "--target=native", env=env)
+
+    assert result.returncode == 0
+    assert "bootstrap:ok target=native" in result.stdout
+
+
+def test_run_all_never_prints_default_password_hint(tmp_path):
+    runtime_env = tmp_path / ".env.runtime"
+    env = os.environ.copy()
+    env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
+    env["AGENT_NAVIGATOR_RUNTIME_ENV_FILE"] = str(runtime_env)
+
+    result = _run_script("run_all.sh", "--from-launcher", "--no-attach", env=env)
+
+    assert result.returncode == 0
+    assert "admin/admin" not in result.stdout

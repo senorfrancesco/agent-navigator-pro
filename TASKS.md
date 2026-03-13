@@ -322,7 +322,22 @@
 ### Production Deployment (Фаза 6)
 - [ ] T3.17 — Dockerize backend services (UMS, Doc Server, Legal Server)
 - [ ] T3.18 — Model delivery strategy (130 GB GGUF)
-- [ ] T3.19 — Production secrets & auth hardening
+- [x] T3.19 — Production secrets & auth hardening
+  Закрыт minimal production-safe secrets/auth slice:
+  - `scripts/bootstrap_env.sh` читает `backend/.env` и fail-fast валидирует insecure defaults:
+    - `CHAINLIT_AUTH_SECRET`
+    - `CHAINLIT_ADMIN_PASSWORD`
+    - `GF_SECURITY_ADMIN_PASSWORD`
+  - local/dev escape hatch только через явный `AGENT_NAVIGATOR_ALLOW_INSECURE_DEFAULTS=1`
+  - `run_all.sh` больше не печатает пароль в stdout и не подсказывает `admin/admin`
+  - `backend/.env.example`, `README.md`, `docs/deploy-guide.md` синхронизированы под required secret rotation
+  Проверки:
+  - `pytest backend/tests/test_runtime_launcher.py -q -k 'bootstrap or insecure or launcher'`
+  - `bash -n scripts/bootstrap_env.sh scripts/launcher.sh scripts/run_all.sh`
+  - `git diff --check`
+  Follow-up:
+  - полноценный auth/ACL layer для operator endpoints остаётся отдельной фазой
+  - vault/secret-manager integration не входит в current env-based hardening slice
 - [ ] T3.20 — HTTPS reverse proxy
 - [ ] T3.21 — Healthchecks, logging, monitoring (docker)
 
