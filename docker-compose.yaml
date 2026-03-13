@@ -54,6 +54,35 @@ services:
     restart: unless-stopped
     depends_on: []
 
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: agent-nav-prometheus
+    ports:
+      - "9090:9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+    restart: unless-stopped
+    profiles:
+      - monitoring
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: agent-nav-grafana
+    ports:
+      - "3002:3000"
+    depends_on:
+      - prometheus
+    volumes:
+      - ./monitoring/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./monitoring/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+    restart: unless-stopped
+    profiles:
+      - monitoring
+
 volumes:
   open-webui: {}
   chainlit-data: {}

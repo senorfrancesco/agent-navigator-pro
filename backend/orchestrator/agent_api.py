@@ -10,6 +10,8 @@ import time
 import sys
 import os
 import re
+import uuid
+import logging
 import warnings
 from typing import Dict, Any, Optional, List, AsyncGenerator, Literal
 from dotenv import load_dotenv
@@ -21,10 +23,15 @@ warnings.filterwarnings("ignore", category=FutureWarning, module="pynvml")
 load_dotenv()
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from services.model_manager.ums_client import ums_client
+from services.observability import (
+    inc_metric_counter,
+    ObservabilityMiddleware,
+    render_metrics_text,
+)
 from orchestrator.shared.http_client import get_shared_client
 from orchestrator.knowledge_base_store import get_knowledge_base_store
 from orchestrator.execution_runtime import (
@@ -43,6 +50,7 @@ except ImportError:
     def get_system_resources(): return {"error": "Resource monitor not found"}
 
 app = FastAPI(title="Agent Navigator Pro Orchestrator", version="2.3.0")
+logger = logging.getLogger("agent_api")
 
 app.add_middleware(
     CORSMiddleware,
@@ -51,6 +59,26 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(ObservabilityMiddleware, service_name="agent_api", logger=logger)
+
+
+def _get_request_trace_id(request: Request) -> str:
+    state_trace_id = str(getattr(request.state, "trace_id", "") or "").strip()
+    if state_trace_id:
+        return state_trace_id
+    header_trace_id = str(request.headers.get("X-Trace-Id") or "").strip()
+    if header_trace_id:
+        request.state.trace_id = header_trace_id
+        return header_trace_id
+    generated = str(uuid.uuid4())[:8]
+    request.state.trace_id = generated
+    return generated
+
+
+def _resolve_http_trace_id(http_request: Optional[Request]) -> str:
+    if http_request is None:
+        return str(uuid.uuid4())[:8]
+    return _get_request_trace_id(http_request)
 
 # Дедупликация параллельных запросов от Open WebUI
 # Хранит dedup_key -> timestamp начала обработки
@@ -558,8 +586,13 @@ def health():
     return {"status": "ok"}
 
 
-@app.post("/orchestrate")
-async def orchestrate(request: OrchestrationRequest):
+@app.get("/metrics")
+def metrics():
+    return PlainTextResponse(render_metrics_text(), media_type="text/plain; version=0.0.4; charset=utf-8")
+
+
+async def orchestrate(request: OrchestrationRequest, http_request: Optional[Request] = None):
+    request.trace_id = request.trace_id or _resolve_http_trace_id(http_request)
     effective_settings = resolve_effective_settings(_collect_request_control_plane(request))
     response = decide_orchestration(
         query=request.message,
@@ -577,17 +610,36 @@ async def orchestrate(request: OrchestrationRequest):
     )
     response.update(build_control_plane_metadata(request.model_dump(exclude_none=True), effective_settings))
     response["effective_settings"] = effective_settings
+    inc_metric_counter(
+        "agent_nav_agent_api_orchestration_requests_total",
+        labels={"endpoint": "/orchestrate", "result": str(response.get("route") or "unknown")},
+    )
     return response
 
 
-@app.post("/execute_orchestration")
-async def execute_orchestration_api(request: OrchestrationRequest):
+@app.post("/orchestrate")
+async def orchestrate_route(request: OrchestrationRequest, http_request: Request):
+    return await orchestrate(request, http_request)
+
+
+async def execute_orchestration_api(request: OrchestrationRequest, http_request: Optional[Request] = None):
+    request.trace_id = request.trace_id or _resolve_http_trace_id(http_request)
     effective_settings = resolve_effective_settings(_collect_request_control_plane(request))
     deps = _build_api_execution_dependencies(request, effective_settings)
     payload = request.model_dump(exclude_none=True)
     payload["runtime_mode"] = resolve_request_runtime_mode(payload, effective_settings)
     payload["effective_settings"] = effective_settings
-    return await execute_orchestration(payload, deps=deps)
+    response = await execute_orchestration(payload, deps=deps)
+    inc_metric_counter(
+        "agent_nav_agent_api_orchestration_requests_total",
+        labels={"endpoint": "/execute_orchestration", "result": str(response.get("route") or "unknown")},
+    )
+    return response
+
+
+@app.post("/execute_orchestration")
+async def execute_orchestration_route(request: OrchestrationRequest, http_request: Request):
+    return await execute_orchestration_api(request, http_request)
 
 
 # === OpenAI Compatible API ===
@@ -619,6 +671,17 @@ async def openai_completions(request: Request):
     dedup_key = _compute_openai_dedup_key(target_model=target_model, user_query=user_query, attachments=found_files)
     now_ts = time.time()
     if dedup_key in _active_workflows and now_ts - _active_workflows[dedup_key] < DEDUP_WINDOW_SEC:
+        logger.info(
+            "openai_dedup_hit trace_id=%s model=%s stream=%s dedup_key=%s",
+            _get_request_trace_id(request),
+            target_model,
+            stream_mode,
+            dedup_key,
+        )
+        inc_metric_counter(
+            "agent_nav_agent_api_openai_dedup_hits_total",
+            labels={"model_family": "agent-navigator" if target_model == "agent-navigator" else "direct"},
+        )
         if not stream_mode:
             return _build_openai_chat_completion_response(target_model=target_model, text="")
 

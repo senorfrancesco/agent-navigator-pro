@@ -14,6 +14,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from services.model_manager import unified_model_server as ums_server
+from services.observability import reset_observability_metrics
 
 
 class _FakeProcess:
@@ -36,6 +37,7 @@ async def _api_request(method: str, path: str, json=None) -> httpx.Response:
 
 @pytest.fixture(autouse=True)
 def _reset_ums_state(monkeypatch, tmp_path):
+    reset_observability_metrics()
     original_state = {
         key: (value.copy() if isinstance(value, dict) else value)
         for key, value in ums_server.state.items()
@@ -72,6 +74,7 @@ def _reset_ums_state(monkeypatch, tmp_path):
     ums_server._concurrency_controls["llm_limit"] = 1
     ums_server._concurrency_controls["embed_limit"] = 4
     yield
+    reset_observability_metrics()
     ums_server.state.clear()
     ums_server.state.update(original_state)
     ums_server._model_start_locks.clear()
@@ -424,6 +427,24 @@ def test_status_respects_manual_runtime_budget(monkeypatch):
     assert payload["context_budget_ratio"] == 0.65
     assert payload["generation_tokens_reserve"] == 3072
     assert payload["retrieved_context_tokens_budget"] == 3072
+
+
+def test_health_returns_trace_header():
+    response = asyncio.run(_api_request("GET", "/health"))
+
+    assert response.status_code == 200
+    assert response.headers.get("X-Trace-Id")
+
+
+def test_metrics_endpoint_exposes_http_and_runtime_metrics():
+    asyncio.run(_api_request("GET", "/health"))
+    response = asyncio.run(_api_request("GET", "/metrics"))
+
+    assert response.status_code == 200
+    payload = response.text
+    assert "agent_nav_http_requests_total" in payload
+    assert 'service="ums"' in payload
+    assert "agent_nav_ums_running_models" in payload
 
 
 def test_status_exposes_current_placements():

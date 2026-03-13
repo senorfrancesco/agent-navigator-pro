@@ -509,7 +509,43 @@
   Follow-up:
   - текущий `fail-fast` реализован как safe slice поверх `asyncio.Semaphore`; остаётся теоретическая гонка между проверкой доступности и `acquire()`, если нужен строго lock-free immediate reject под экстремальной конкуренцией
   - `pytest backend/tests/test_unified_model_server_startup.py backend/tests/test_unified_model_server_streaming.py -q` в этой среде иногда зависает на tail уже после прохождения точек; новые `T4.7` assertions проходят, а residual выглядит как harness/process-exit issue, не как regression concurrency policy
-- [ ] T4.8 — Observability stack (Prometheus + Grafana + tracing)
+- [x] T4.8 — Observability stack (Prometheus + Grafana + tracing)
+  Реализовано как minimal production-safe slice без full APM stack:
+  - shared Prometheus-compatible exporter в `backend/services/observability.py`
+  - `/metrics` для:
+    - `backend/orchestrator/agent_api.py`
+    - `backend/services/model_manager/unified_model_server.py`
+  - request telemetry:
+    - `agent_nav_http_requests_total`
+    - `agent_nav_http_request_duration_seconds`
+    - `agent_nav_http_requests_in_progress`
+  - domain metrics:
+    - `agent_nav_agent_api_orchestration_requests_total`
+    - `agent_nav_agent_api_openai_dedup_hits_total`
+    - `agent_nav_ums_concurrency_saturation_total`
+    - `agent_nav_ums_running_models`
+    - `agent_nav_ums_active_heavy_model`
+  - trace-aware `X-Trace-Id` propagation и request logging через ASGI middleware
+  - compose profile `monitoring`:
+    - `prometheus` (`:9090`)
+    - `grafana` (`:3002`)
+  - provisioning assets:
+    - `monitoring/prometheus.yml`
+    - `monitoring/grafana/provisioning/...`
+    - starter dashboard `agent-navigator-overview`
+  - convenience launcher:
+    - `scripts/run_monitoring.sh`
+  Verification:
+  - `pytest backend/tests/test_observability.py backend/tests/test_agent_api_metrics.py backend/tests/test_unified_model_server_startup.py -q -k "metrics or trace or observability"`
+  - `pytest backend/tests/test_agent_api_orchestrate.py backend/tests/test_unified_model_server_streaming.py -q`
+  - `cd backend && pytest tests/ -q -m "not integration"`
+  - `python -m py_compile backend/services/observability.py backend/orchestrator/agent_api.py backend/services/model_manager/unified_model_server.py backend/tests/test_observability.py backend/tests/test_agent_api_metrics.py backend/tests/test_unified_model_server_startup.py`
+  - `docker compose --profile monitoring config`
+  - `bash -n scripts/run_monitoring.sh`
+  - `git diff --check`
+  Follow-up:
+  - tmux window `monitor` пока остаётся legacy-именем для `htop/top`; отдельный rename в `syswatch` лучше делать как небольшой ops-cleanup, а не смешивать с observability stack rollout
+  - health-monitoring для `document_server` / `legal_server` / `chainlit` лучше добавлять отдельным `blackbox-exporter`/synthetic probe block, а не через scrape JSON `/health` как Prometheus metrics
 - [ ] T4.9 — vLLM adapter в UMS
 - [ ] T4.10 — Production docker-compose profile для vLLM
 - [ ] T4.11 — E2E benchmark before/after migration

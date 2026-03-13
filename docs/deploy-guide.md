@@ -259,6 +259,18 @@ cd /opt/agent-navigator-pro
 
 Chainlit запускается напрямую на хосте (не в Docker). Полезно для отладки.
 
+### Вариант C: Monitoring stack
+
+```bash
+docker compose --profile monitoring up -d prometheus grafana
+# или
+./scripts/run_monitoring.sh
+```
+
+Доступно:
+- `http://localhost:9090` — Prometheus
+- `http://localhost:3002` — Grafana
+
 ### Подключение к tmux
 
 ```bash
@@ -304,13 +316,20 @@ curl -s http://localhost:8000/orchestrate \
   | python3 -m json.tool
 ```
 
-### 8.4. Chainlit UI
+### 8.4. Метрики
+
+```bash
+curl -s http://localhost:8000/metrics | head
+curl -s http://localhost:8090/metrics | head
+```
+
+### 8.5. Chainlit UI
 
 Открыть в браузере: `http://<server-ip>:3000`
 
 Логин: значения `CHAINLIT_ADMIN_USER` / `CHAINLIT_ADMIN_PASSWORD` из `.env`.
 
-### 8.5. Unit-тесты
+### 8.6. Unit-тесты
 
 ```bash
 cd /opt/agent-navigator-pro/backend

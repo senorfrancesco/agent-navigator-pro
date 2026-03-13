@@ -223,6 +223,19 @@ docker compose --profile legacy up -d open-webui
 
 - `http://localhost:3001`
 
+Monitoring stack:
+
+```bash
+docker compose --profile monitoring up -d prometheus grafana
+# или
+./scripts/run_monitoring.sh
+```
+
+Доступно:
+
+- `http://localhost:9090` — Prometheus
+- `http://localhost:3002` — Grafana
+
 ## Типовые сценарии
 
 ### RAG-вопрос по документу
@@ -314,6 +327,13 @@ curl -s http://localhost:8090/health && echo " UMS OK"
 
 ```bash
 curl -s http://localhost:8090/status | python3 -m json.tool
+```
+
+Scrapeable metrics:
+
+```bash
+curl -s http://localhost:8000/metrics | head
+curl -s http://localhost:8090/metrics | head
 ```
 
 Статус контейнеров:

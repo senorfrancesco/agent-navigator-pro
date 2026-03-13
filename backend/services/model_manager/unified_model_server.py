@@ -50,11 +50,17 @@ try:
 except ImportError:
     PYNVML_AVAILABLE = False
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 import httpx
 import uvicorn
+from services.observability import (
+    inc_metric_counter,
+    ObservabilityMiddleware,
+    render_metrics_text,
+    set_ums_runtime_metrics,
+)
 
 # === Configuration ===
 
@@ -802,6 +808,21 @@ _embed_semaphore = asyncio.Semaphore(4)
 _concurrency_controls = {"llm_limit": 1, "embed_limit": 4}
 
 
+def _update_runtime_observability_metrics() -> None:
+    set_ums_runtime_metrics(
+        running_models=len(state.get("processes") or {}),
+        active_heavy_model_present=bool(state.get("active_model")),
+    )
+
+
+app.add_middleware(
+    ObservabilityMiddleware,
+    service_name="ums",
+    logger=logger,
+    post_response_hook=_update_runtime_observability_metrics,
+)
+
+
 def _read_concurrency_limit(name: str, default: int, aliases: Optional[List[str]] = None) -> int:
     candidate_names = [name, *(aliases or [])]
     for candidate in candidate_names:
@@ -890,10 +911,18 @@ async def _reserve_runtime_slot(sem: asyncio.Semaphore, kind: str) -> Dict[str, 
     policy = _refresh_concurrency_controls()
     timeout_s = float(policy["acquire_timeout_s"])
     if bool(policy.get("fail_fast_on_saturation")) and getattr(sem, "_value", 0) <= 0:
+        inc_metric_counter(
+            "agent_nav_ums_concurrency_saturation_total",
+            labels={"kind": kind, "mode": "fail_fast"},
+        )
         raise HTTPException(status_code=429, detail=f"{kind} concurrency saturated")
     try:
         await asyncio.wait_for(sem.acquire(), timeout=timeout_s)
     except TimeoutError as exc:
+        inc_metric_counter(
+            "agent_nav_ums_concurrency_saturation_total",
+            labels={"kind": kind, "mode": "timeout"},
+        )
         raise HTTPException(status_code=429, detail=f"{kind} concurrency saturated") from exc
     state["concurrency_policy"] = _get_concurrency_policy_snapshot(policy, use_live_limits=False)
     return dict(state["concurrency_policy"])
@@ -1248,6 +1277,12 @@ async def stop_model(model_id: str):
         "model": _build_model_view(model_id),
     }
 
+
+@app.get("/metrics")
+async def metrics():
+    _update_runtime_observability_metrics()
+    return PlainTextResponse(render_metrics_text(), media_type="text/plain; version=0.0.4; charset=utf-8")
+
 @app.get("/status")
 async def get_status():
     tier_info = None
@@ -1262,6 +1297,7 @@ async def get_status():
             "embedding_backend": tc.embedding_backend,
         }
     runtime_budget = resolve_runtime_budget()
+    _update_runtime_observability_metrics()
     concurrency_policy = _get_concurrency_policy_snapshot()
     return {
         "active_heavy_model": state["active_model"],
