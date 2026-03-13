@@ -3,6 +3,7 @@ import sys
 import threading
 import time
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -33,7 +34,7 @@ async def _api_request(method: str, path: str, json=None) -> httpx.Response:
 
 
 @pytest.fixture(autouse=True)
-def _reset_ums_state(monkeypatch):
+def _reset_ums_state(monkeypatch, tmp_path):
     original_state = {
         key: (value.copy() if isinstance(value, dict) else value)
         for key, value in ums_server.state.items()
@@ -44,12 +45,17 @@ def _reset_ums_state(monkeypatch):
         "UMS_LLM_MIN_FREE_VRAM_GB",
         "UMS_LLM_MIN_BALANCE_RATIO",
         "UMS_EMBEDDING_GPU_INDEX",
+        "UMS_DYNAMIC_MODELS_REGISTRY_PATH",
     ):
         monkeypatch.delenv(env_name, raising=False)
+    monkeypatch.setenv("UMS_DYNAMIC_MODELS_REGISTRY_PATH", str(tmp_path / "ums_dynamic_models.json"))
     ums_server.state["processes"].clear()
     ums_server.state["placements"].clear()
     ums_server.state["active_model"] = None
     ums_server.state["tier_config"] = None
+    ums_server.state["dynamic_models"] = {}
+    ums_server.state["discovered_model_ports"] = {}
+    ums_server.state["dynamic_ports"] = 8100
     yield
     ums_server.state.clear()
     ums_server.state.update(original_state)
@@ -591,3 +597,128 @@ def test_model_control_endpoints_return_404_for_unknown_model(method, path):
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Model missing-model not found"
+
+
+def test_register_dynamic_model_endpoint_persists_and_lists_model(tmp_path, monkeypatch):
+    registry_path = tmp_path / "ums_dynamic_models.json"
+    monkeypatch.setenv("UMS_DYNAMIC_MODELS_REGISTRY_PATH", str(registry_path))
+    model_path = tmp_path / "dynamic.gguf"
+    model_path.write_text("stub", encoding="utf-8")
+
+    response = asyncio.run(
+        _api_request(
+            "POST",
+            "/models/register",
+            json={
+                "model_id": "dynamic-qwen",
+                "type": "gguf",
+                "path": str(model_path),
+                "ctx_size": 12288,
+                "gpu_layers": 33,
+                "port": 8115,
+            },
+        )
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "success"
+    assert payload["action"] == "register"
+    assert payload["model"]["model_id"] == "dynamic-qwen"
+    assert payload["model"]["port"] == 8115
+    assert payload["model"]["resolved_path"] == str(model_path.resolve())
+    models_response = asyncio.run(_api_request("GET", "/models"))
+    assert models_response.status_code == 200
+    models = {item["model_id"]: item for item in models_response.json()["models"]}
+    assert "dynamic-qwen" in models
+    assert models["dynamic-qwen"]["port"] == 8115
+
+    persisted = json.loads(registry_path.read_text())
+    assert persisted["models"]["dynamic-qwen"]["path"] == str(model_path.resolve())
+
+
+def test_register_dynamic_model_allocates_port_and_takes_config_precedence(tmp_path, monkeypatch):
+    registry_path = tmp_path / "ums_dynamic_models.json"
+    monkeypatch.setenv("UMS_DYNAMIC_MODELS_REGISTRY_PATH", str(registry_path))
+    discovered_path = tmp_path / "discovered" / "dynamic-qwen.gguf"
+    discovered_path.parent.mkdir(parents=True, exist_ok=True)
+    discovered_path.write_text("stub", encoding="utf-8")
+    registered_path = tmp_path / "registered.gguf"
+    registered_path.write_text("stub", encoding="utf-8")
+
+    with patch.object(ums_server, "MODELS_DIR", discovered_path.parent):
+        response = asyncio.run(
+            _api_request(
+                "POST",
+                "/models/register",
+                json={
+                    "model_id": "dynamic-qwen",
+                    "type": "gguf",
+                    "path": str(registered_path),
+                },
+            )
+        )
+
+        assert response.status_code == 200
+        assert response.json()["model"]["port"] == 8100
+
+        config = ums_server.get_model_config("dynamic-qwen")
+
+    assert config["path"] == str(registered_path.resolve())
+    assert config["port"] == 8100
+
+
+def test_unregister_dynamic_model_stops_running_process_and_removes_registration(tmp_path, monkeypatch):
+    registry_path = tmp_path / "ums_dynamic_models.json"
+    monkeypatch.setenv("UMS_DYNAMIC_MODELS_REGISTRY_PATH", str(registry_path))
+    model_path = tmp_path / "dynamic.gguf"
+    model_path.write_text("stub", encoding="utf-8")
+    ums_server.state["dynamic_models"]["dynamic-qwen"] = {
+        "type": "gguf",
+        "path": str(model_path.resolve()),
+        "port": 8110,
+    }
+    ums_server._save_dynamic_models_registry()
+    ums_server.state["processes"]["dynamic-qwen"] = _FakeProcess(pid=111)
+
+    with patch.object(ums_server, "_stop_model") as mock_stop:
+        response = asyncio.run(_api_request("DELETE", "/models/dynamic-qwen/registration"))
+
+    assert response.status_code == 200
+    assert response.json()["action"] == "unregister"
+    assert "dynamic-qwen" not in ums_server.state["dynamic_models"]
+    persisted = json.loads(registry_path.read_text())
+    assert persisted["models"] == {}
+    mock_stop.assert_called_once_with("dynamic-qwen")
+
+
+def test_register_rejects_duplicate_dynamic_model_without_replace(tmp_path):
+    model_path = tmp_path / "dynamic.gguf"
+    model_path.write_text("stub", encoding="utf-8")
+    ums_server.state["dynamic_models"]["dynamic-qwen"] = {
+        "type": "gguf",
+        "path": str(model_path.resolve()),
+        "port": 8110,
+    }
+
+    response = asyncio.run(
+        _api_request(
+            "POST",
+            "/models/register",
+            json={
+                "model_id": "dynamic-qwen",
+                "type": "gguf",
+                "path": str(model_path),
+            },
+        )
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Model dynamic-qwen is already registered"
+
+
+def test_unregister_rejects_static_model():
+    response = asyncio.run(_api_request("DELETE", "/models/qwen-14b-llm/registration"))
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Static models cannot be unregistered"

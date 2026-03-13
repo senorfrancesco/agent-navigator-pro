@@ -99,7 +99,9 @@ state = {
     "placements": {},     # model_id -> placement metadata
     "device_mode": DeviceMode.HYBRID,
     "runtime_budget": {},
-    "dynamic_ports": 8100 # Начальный порт для динамических моделей
+    "dynamic_ports": 8100, # Начальный порт для динамических моделей
+    "dynamic_models": {},
+    "discovered_model_ports": {},
 }
 _model_start_locks: Dict[str, threading.Lock] = {}
 _model_start_locks_guard = threading.Lock()
@@ -363,6 +365,12 @@ def resolve_model_path(path_str: str) -> str:
     return str(path.resolve())
 
 
+def _dynamic_models_registry_path() -> Path:
+    return Path(
+        os.getenv("UMS_DYNAMIC_MODELS_REGISTRY_PATH", str(BACKEND_ROOT / ".data" / "ums_dynamic_models.json"))
+    )
+
+
 def _get_model_start_lock(model_id: str) -> threading.Lock:
     with _model_start_locks_guard:
         lock = _model_start_locks.get(model_id)
@@ -422,18 +430,26 @@ def get_model_config(model_id: str) -> Optional[Dict[str, Any]]:
     """Возвращает конфиг модели, либо из статики, либо из файловой системы."""
     if model_id in STATIC_MODELS_CONFIG:
         return STATIC_MODELS_CONFIG[model_id]
+    dynamic_models = state.get("dynamic_models") or {}
+    if model_id in dynamic_models:
+        return dict(dynamic_models[model_id])
     
     # Ищем файл в папке gguf
     for root, dirs, files in os.walk(MODELS_DIR):
         for file in files:
             if file.endswith(".gguf") and os.path.splitext(file)[0] == model_id:
                 full_path = os.path.join(root, file)
+                discovered_ports = state.setdefault("discovered_model_ports", {})
+                assigned_port = discovered_ports.get(model_id)
+                if assigned_port is None:
+                    assigned_port = _allocate_dynamic_port()
+                    discovered_ports[model_id] = assigned_port
                 return {
                     "type": "gguf",
                     "path": full_path,
                     "ctx_size": 8192,  # Дефолт для новых моделей
                     "gpu_layers": -1,  # Пытаемся все на GPU
-                    "port": state["dynamic_ports"] # TODO: сделать пул портов
+                    "port": assigned_port,
                 }
     return None
 
@@ -599,9 +615,22 @@ class EmbeddingRequest(BaseModel):
 class ModelControlRequest(BaseModel):
     device_mode: Optional[DeviceMode] = None
 
+
+class ModelRegistrationRequest(BaseModel):
+    model_id: str
+    type: str
+    path: str
+    port: Optional[int] = None
+    ctx_size: Optional[int] = None
+    gpu_layers: Optional[int] = None
+    mmproj: Optional[str] = None
+    replace: bool = False
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # T3.7: Hardware profiling при старте
+    state["dynamic_models"] = _load_dynamic_models_registry()
+    _align_dynamic_port_counter()
     try:
         sys.path.insert(0, str(BACKEND_ROOT))
         from services.hardware import HardwareProfiler, TierSelector
@@ -692,6 +721,7 @@ async def _proxy_sse_stream(url: str, payload: Dict[str, Any], sem: asyncio.Sema
 
 def _discover_available_model_ids() -> List[str]:
     model_ids = list(STATIC_MODELS_CONFIG.keys())
+    model_ids.extend((state.get("dynamic_models") or {}).keys())
     if MODELS_DIR.exists():
         for root, _, files in os.walk(MODELS_DIR):
             for file in files:
@@ -717,6 +747,159 @@ def _build_model_view(model_id: str) -> Dict[str, Any]:
         "active": state.get("active_model") == model_id,
         "placement": copy.deepcopy((state.get("placements") or {}).get(model_id)),
     }
+
+
+def _ensure_dynamic_registry_parent() -> None:
+    _dynamic_models_registry_path().parent.mkdir(parents=True, exist_ok=True)
+
+
+def _load_dynamic_models_registry() -> Dict[str, Dict[str, Any]]:
+    registry_path = _dynamic_models_registry_path()
+    if not registry_path.exists():
+        return {}
+    try:
+        with registry_path.open("r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except Exception as e:
+        logger.warning(f"Failed to load dynamic models registry: {e}")
+        return {}
+    models = payload.get("models") if isinstance(payload, dict) else None
+    if not isinstance(models, dict):
+        return {}
+    next_dynamic_port = payload.get("next_dynamic_port") if isinstance(payload, dict) else None
+    if isinstance(next_dynamic_port, int):
+        state["dynamic_ports"] = max(int(state.get("dynamic_ports") or 8100), next_dynamic_port)
+    loaded: Dict[str, Dict[str, Any]] = {}
+    for model_id, config in models.items():
+        if not isinstance(model_id, str) or not isinstance(config, dict):
+            continue
+        loaded[model_id] = dict(config)
+    return loaded
+
+
+def _save_dynamic_models_registry() -> None:
+    _ensure_dynamic_registry_parent()
+    payload = {
+        "models": copy.deepcopy(state.get("dynamic_models") or {}),
+        "next_dynamic_port": int(state.get("dynamic_ports") or 8100),
+    }
+    with _dynamic_models_registry_path().open("w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def _align_dynamic_port_counter() -> None:
+    reserved = {
+        int(config["port"])
+        for config in STATIC_MODELS_CONFIG.values()
+        if config.get("port") is not None
+    }
+    reserved.update(
+        int(config["port"])
+        for config in (state.get("dynamic_models") or {}).values()
+        if config.get("port") is not None
+    )
+    reserved.update(int(port) for port in (state.get("discovered_model_ports") or {}).values())
+    state["dynamic_ports"] = max(8100, max(reserved, default=8099) + 1)
+
+
+def _normalize_registered_model_type(raw_type: str) -> str:
+    value = str(raw_type or "").strip().lower()
+    if value not in {"gguf", "gguf-vl", "st"}:
+        raise HTTPException(status_code=422, detail="Unsupported model type")
+    return value
+
+
+def _resolve_registration_path(path_str: str, *, expected_type: Optional[str] = None) -> str:
+    resolved = resolve_model_path(path_str)
+    resolved_path = Path(resolved)
+    if not resolved_path.exists():
+        raise HTTPException(status_code=422, detail=f"Model path not found: {resolved}")
+    if expected_type in {"gguf", "gguf-vl"} and (not resolved_path.is_file() or resolved_path.suffix != ".gguf"):
+        raise HTTPException(status_code=422, detail="GGUF models require an existing .gguf file")
+    if expected_type == "st" and not resolved_path.is_dir():
+        raise HTTPException(status_code=422, detail="ST models require an existing directory")
+    return resolved
+
+
+def _allocate_dynamic_port() -> int:
+    reserved = {
+        int(config["port"])
+        for config in STATIC_MODELS_CONFIG.values()
+        if config.get("port") is not None
+    }
+    reserved.update(
+        int(config["port"])
+        for config in (state.get("dynamic_models") or {}).values()
+        if config.get("port") is not None
+    )
+    reserved.update(int(port) for port in (state.get("discovered_model_ports") or {}).values())
+    port = int(state.get("dynamic_ports") or 8100)
+    while port in reserved:
+        port += 1
+    state["dynamic_ports"] = port + 1
+    return port
+
+
+def _register_dynamic_model(request: ModelRegistrationRequest) -> Dict[str, Any]:
+    model_id = request.model_id.strip()
+    if not model_id:
+        raise HTTPException(status_code=422, detail="model_id is required")
+    if model_id in STATIC_MODELS_CONFIG:
+        raise HTTPException(status_code=409, detail="Static models cannot be re-registered")
+
+    dynamic_models = state.setdefault("dynamic_models", {})
+    if model_id in dynamic_models and not request.replace:
+        raise HTTPException(status_code=409, detail=f"Model {model_id} is already registered")
+
+    model_type = _normalize_registered_model_type(request.type)
+    resolved_path = _resolve_registration_path(request.path, expected_type=model_type)
+    if request.port is not None:
+        reserved_ports = {
+            int(config["port"])
+            for config in STATIC_MODELS_CONFIG.values()
+            if config.get("port") is not None
+        }
+        reserved_ports.update(
+            int(config["port"])
+            for dynamic_id, config in dynamic_models.items()
+            if dynamic_id != model_id and config.get("port") is not None
+        )
+        reserved_ports.update(int(port) for port in (state.get("discovered_model_ports") or {}).values())
+        if int(request.port) in reserved_ports:
+            raise HTTPException(status_code=409, detail=f"Port {request.port} is already reserved")
+    config: Dict[str, Any] = {
+        "type": model_type,
+        "path": resolved_path,
+        "port": int(request.port) if request.port is not None else _allocate_dynamic_port(),
+    }
+    if request.port is not None:
+        state["dynamic_ports"] = max(int(state.get("dynamic_ports") or 8100), int(request.port) + 1)
+    if request.ctx_size is not None:
+        config["ctx_size"] = int(request.ctx_size)
+    if request.gpu_layers is not None:
+        config["gpu_layers"] = int(request.gpu_layers)
+    if model_type == "gguf-vl":
+        if request.mmproj is None:
+            raise HTTPException(status_code=422, detail="gguf-vl models require mmproj")
+        config["mmproj"] = _resolve_registration_path(request.mmproj, expected_type="gguf")
+    elif request.mmproj is not None:
+        config["mmproj"] = _resolve_registration_path(request.mmproj)
+
+    dynamic_models[model_id] = config
+    _save_dynamic_models_registry()
+    return _build_model_view(model_id)
+
+
+def _unregister_dynamic_model(model_id: str) -> None:
+    if model_id in STATIC_MODELS_CONFIG:
+        raise HTTPException(status_code=400, detail="Static models cannot be unregistered")
+    dynamic_models = state.get("dynamic_models") or {}
+    if model_id not in dynamic_models:
+        raise HTTPException(status_code=404, detail=f"Dynamic model {model_id} not found")
+    if model_id in state.get("processes", {}):
+        _stop_model(model_id)
+    dynamic_models.pop(model_id, None)
+    _save_dynamic_models_registry()
 
 @app.post("/infer")
 async def infer(request: InferRequest):
@@ -763,6 +946,26 @@ async def list_running_models():
         "running_model_ids": running_ids,
         "running_models": [_build_model_view(model_id) for model_id in running_ids],
         "placements": copy.deepcopy(state.get("placements") or {}),
+    }
+
+
+@app.post("/models/register")
+async def register_model(request: ModelRegistrationRequest):
+    model = _register_dynamic_model(request)
+    return {
+        "status": "success",
+        "action": "register",
+        "model": model,
+    }
+
+
+@app.delete("/models/{model_id}/registration")
+async def unregister_model(model_id: str):
+    _unregister_dynamic_model(model_id)
+    return {
+        "status": "success",
+        "action": "unregister",
+        "model_id": model_id,
     }
 
 

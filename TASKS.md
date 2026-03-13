@@ -454,7 +454,20 @@
   - `cd backend && pytest tests/ -q -m "not integration"` → `424 passed, 4 deselected`
   - `python -m py_compile backend/services/model_manager/unified_model_server.py backend/tests/test_unified_model_server_startup.py`
   - `git diff --check`
-- [ ] T4.5 — Dynamic model registration
+- [x] T4.5 — Dynamic model registration
+  Выполнено как backend-owned runtime registry для `UMS`, без UI selector и без смешивания с `T4.6` port pool/scheduler.
+  Реализовано:
+  - `POST /models/register`
+  - `DELETE /models/{model_id}/registration`
+  - persistent manifest для dynamic моделей через `UMS_DYNAMIC_MODELS_REGISTRY_PATH` (default: `backend/.data/ums_dynamic_models.json`)
+  - precedence `STATIC_MODELS_CONFIG -> registered dynamic models -> filesystem-discovered GGUF`
+  - deterministic auto-port allocation для dynamic/discovered моделей без полноценного scheduler
+  - unregister running dynamic model делает controlled stop через существующий `_stop_model`
+  Verification:
+  - `pytest backend/tests/test_unified_model_server_startup.py -vv` → `25 passed`
+  - `cd backend && pytest tests/ -q -m "not integration"` → `429 passed, 4 deselected`
+  - `python -m py_compile backend/services/model_manager/unified_model_server.py backend/tests/test_unified_model_server_startup.py`
+  - `git diff --check`
 - [ ] T4.6 — Port pool и scheduler в UMS
 - [ ] T4.7 — Concurrency policy для production
 - [ ] T4.8 — Observability stack (Prometheus + Grafana + tracing)
