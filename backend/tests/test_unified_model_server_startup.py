@@ -4,6 +4,7 @@ import threading
 import time
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -56,6 +57,9 @@ def _reset_ums_state(monkeypatch, tmp_path):
     ums_server.state["dynamic_models"] = {}
     ums_server.state["discovered_model_ports"] = {}
     ums_server.state["dynamic_ports"] = 8100
+    ums_server.state["reserved_ports"] = set()
+    ums_server.state["port_owners"] = {}
+    ums_server.state["released_dynamic_ports"] = []
     yield
     ums_server.state.clear()
     ums_server.state.update(original_state)
@@ -661,11 +665,12 @@ def test_register_dynamic_model_allocates_port_and_takes_config_precedence(tmp_p
 
         assert response.status_code == 200
         assert response.json()["model"]["port"] == 8100
-
         config = ums_server.get_model_config("dynamic-qwen")
 
     assert config["path"] == str(registered_path.resolve())
     assert config["port"] == 8100
+    assert ums_server.state["port_owners"][8100] == "dynamic-qwen"
+    assert 8100 in ums_server.state["reserved_ports"]
 
 
 def test_unregister_dynamic_model_stops_running_process_and_removes_registration(tmp_path, monkeypatch):
@@ -687,6 +692,8 @@ def test_unregister_dynamic_model_stops_running_process_and_removes_registration
     assert response.status_code == 200
     assert response.json()["action"] == "unregister"
     assert "dynamic-qwen" not in ums_server.state["dynamic_models"]
+    assert 8110 not in ums_server.state["reserved_ports"]
+    assert ums_server.state["released_dynamic_ports"] == [8110]
     persisted = json.loads(registry_path.read_text())
     assert persisted["models"] == {}
     mock_stop.assert_called_once_with("dynamic-qwen")
@@ -717,8 +724,199 @@ def test_register_rejects_duplicate_dynamic_model_without_replace(tmp_path):
     assert response.json()["detail"] == "Model dynamic-qwen is already registered"
 
 
+def test_register_rejects_explicitly_reserved_port(tmp_path, monkeypatch):
+    registry_path = tmp_path / "ums_dynamic_models.json"
+    monkeypatch.setenv("UMS_DYNAMIC_MODELS_REGISTRY_PATH", str(registry_path))
+    first_model = tmp_path / "first.gguf"
+    first_model.write_text("stub", encoding="utf-8")
+    second_model = tmp_path / "second.gguf"
+    second_model.write_text("stub", encoding="utf-8")
+
+    first = asyncio.run(
+        _api_request(
+            "POST",
+            "/models/register",
+            json={
+                "model_id": "dynamic-a",
+                "type": "gguf",
+                "path": str(first_model),
+                "port": 8111,
+            },
+        )
+    )
+    assert first.status_code == 200
+
+    second = asyncio.run(
+        _api_request(
+            "POST",
+            "/models/register",
+            json={
+                "model_id": "dynamic-b",
+                "type": "gguf",
+                "path": str(second_model),
+                "port": 8111,
+            },
+        )
+    )
+
+    assert second.status_code == 409
+    assert second.json()["detail"] == "Port 8111 is already reserved"
+
+
 def test_unregister_rejects_static_model():
     response = asyncio.run(_api_request("DELETE", "/models/qwen-14b-llm/registration"))
 
     assert response.status_code == 400
     assert response.json()["detail"] == "Static models cannot be unregistered"
+
+
+def test_register_reuses_released_dynamic_port(tmp_path, monkeypatch):
+    registry_path = tmp_path / "ums_dynamic_models.json"
+    monkeypatch.setenv("UMS_DYNAMIC_MODELS_REGISTRY_PATH", str(registry_path))
+    first_model = tmp_path / "first.gguf"
+    first_model.write_text("stub", encoding="utf-8")
+    second_model = tmp_path / "second.gguf"
+    second_model.write_text("stub", encoding="utf-8")
+
+    first = asyncio.run(
+        _api_request(
+            "POST",
+            "/models/register",
+            json={
+                "model_id": "dynamic-a",
+                "type": "gguf",
+                "path": str(first_model),
+            },
+        )
+    )
+    assert first.status_code == 200
+    assert first.json()["model"]["port"] == 8100
+
+    unregister = asyncio.run(_api_request("DELETE", "/models/dynamic-a/registration"))
+    assert unregister.status_code == 200
+    assert ums_server.state["released_dynamic_ports"] == [8100]
+
+    second = asyncio.run(
+        _api_request(
+            "POST",
+            "/models/register",
+            json={
+                "model_id": "dynamic-b",
+                "type": "gguf",
+                "path": str(second_model),
+            },
+        )
+    )
+    assert second.status_code == 200
+    assert second.json()["model"]["port"] == 8100
+    assert ums_server.state["port_owners"][8100] == "dynamic-b"
+
+
+def test_discovered_model_gets_stable_reserved_port_mapping(tmp_path):
+    discovered_path = tmp_path / "discovered" / "dynamic-qwen.gguf"
+    discovered_path.parent.mkdir(parents=True, exist_ok=True)
+    discovered_path.write_text("stub", encoding="utf-8")
+
+    with patch.object(ums_server, "MODELS_DIR", discovered_path.parent):
+        first = ums_server.get_model_config("dynamic-qwen")
+        second = ums_server.get_model_config("dynamic-qwen")
+
+    assert first["port"] == 8100
+    assert second["port"] == 8100
+    assert ums_server.state["discovered_model_ports"]["dynamic-qwen"] == 8100
+    assert ums_server.state["port_owners"][8100] == "dynamic-qwen"
+
+
+def test_register_endpoint_rejects_reserved_port_conflict():
+    first_path = Path(os.environ["UMS_DYNAMIC_MODELS_REGISTRY_PATH"]).with_name("first.gguf")
+    second_path = Path(os.environ["UMS_DYNAMIC_MODELS_REGISTRY_PATH"]).with_name("second.gguf")
+    first_path.write_text("first")
+    second_path.write_text("second")
+
+    first = asyncio.run(
+        _api_request(
+            "POST",
+            "/models/register",
+            json={
+                "model_id": "custom-first",
+                "type": "gguf",
+                "path": str(first_path),
+                "port": 8110,
+            },
+        )
+    )
+    second = asyncio.run(
+        _api_request(
+            "POST",
+            "/models/register",
+            json={
+                "model_id": "custom-second",
+                "type": "gguf",
+                "path": str(second_path),
+                "port": 8110,
+            },
+        )
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 409
+    assert second.json()["detail"] == "Port 8110 is already reserved"
+
+
+def test_unregister_releases_port_for_future_dynamic_registration():
+    first_path = Path(os.environ["UMS_DYNAMIC_MODELS_REGISTRY_PATH"]).with_name("first-reuse.gguf")
+    second_path = Path(os.environ["UMS_DYNAMIC_MODELS_REGISTRY_PATH"]).with_name("second-reuse.gguf")
+    first_path.write_text("first")
+    second_path.write_text("second")
+
+    first = asyncio.run(
+        _api_request(
+            "POST",
+            "/models/register",
+            json={"model_id": "custom-first", "type": "gguf", "path": str(first_path)},
+        )
+    )
+    assert first.status_code == 200
+    first_port = first.json()["model"]["port"]
+
+    asyncio.run(_api_request("DELETE", "/models/custom-first/registration"))
+
+    second = asyncio.run(
+        _api_request(
+            "POST",
+            "/models/register",
+            json={"model_id": "custom-second", "type": "gguf", "path": str(second_path)},
+        )
+    )
+
+    assert second.status_code == 200
+    assert second.json()["model"]["port"] == first_port
+
+
+def test_discovered_model_reserves_stable_port_and_owner_mapping(tmp_path):
+    model_root = tmp_path / "models"
+    model_root.mkdir()
+    gguf_path = model_root / "runtime-model.gguf"
+    gguf_path.write_text("stub")
+
+    with patch.object(ums_server, "MODELS_DIR", model_root):
+        first = ums_server.get_model_config("runtime-model")
+        second = ums_server.get_model_config("runtime-model")
+
+    assert first["port"] == second["port"]
+    assert ums_server.state["discovered_model_ports"]["runtime-model"] == first["port"]
+    assert ums_server.state["port_owners"][first["port"]] == "runtime-model"
+
+
+def test_stop_model_releases_discovered_port_reservation():
+    ums_server.state["processes"]["runtime-model"] = _FakeProcess(pid=123)
+    ums_server.state["discovered_model_ports"]["runtime-model"] = 8115
+    ums_server.state["reserved_ports"] = {8115}
+    ums_server.state["port_owners"] = {8115: "runtime-model"}
+
+    with patch.object(ums_server.os, "killpg"), patch.object(ums_server.os, "getpgid", return_value=123):
+        ums_server._stop_model("runtime-model")
+
+    assert "runtime-model" not in ums_server.state["discovered_model_ports"]
+    assert 8115 not in ums_server.state["reserved_ports"]
+    assert 8115 not in ums_server.state["port_owners"]

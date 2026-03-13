@@ -468,7 +468,24 @@
   - `cd backend && pytest tests/ -q -m "not integration"` → `429 passed, 4 deselected`
   - `python -m py_compile backend/services/model_manager/unified_model_server.py backend/tests/test_unified_model_server_startup.py`
   - `git diff --check`
-- [ ] T4.6 — Port pool и scheduler в UMS
+- [x] T4.6 — Port pool и scheduler в UMS
+  Выполнено как safe slice без distributed scheduler/queue.
+  Реализовано:
+  - backend-owned port registry в runtime state:
+    - `reserved_ports`
+    - `port_owners`
+    - `released_dynamic_ports`
+  - единая reserve/release policy для:
+    - registered dynamic models
+    - filesystem-discovered GGUF models
+  - reuse освобождённых dynamic портов
+  - stable owner mapping для discovered models
+  - minimal heavy lifecycle serialization через global reentrant lock поверх conflicting heavy start/stop transitions
+  Verification:
+  - `pytest backend/tests/test_unified_model_server_startup.py -q` → `32 passed`
+  - `cd backend && pytest tests/ -q -m "not integration"` → `436 passed, 4 deselected`
+  - `python -m py_compile backend/services/model_manager/unified_model_server.py backend/tests/test_unified_model_server_startup.py`
+  - `git diff --check`
 - [ ] T4.7 — Concurrency policy для production
 - [ ] T4.8 — Observability stack (Prometheus + Grafana + tracing)
 - [ ] T4.9 — vLLM adapter в UMS

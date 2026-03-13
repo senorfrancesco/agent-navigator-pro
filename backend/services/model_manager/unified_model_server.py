@@ -102,9 +102,13 @@ state = {
     "dynamic_ports": 8100, # Начальный порт для динамических моделей
     "dynamic_models": {},
     "discovered_model_ports": {},
+    "reserved_ports": set(),
+    "port_owners": {},
+    "released_dynamic_ports": [],
 }
 _model_start_locks: Dict[str, threading.Lock] = {}
 _model_start_locks_guard = threading.Lock()
+_heavy_model_lifecycle_lock = threading.RLock()
 
 # === Resource Helpers ===
 
@@ -380,6 +384,111 @@ def _get_model_start_lock(model_id: str) -> threading.Lock:
         return lock
 
 
+def _normalize_port_value(port: Any) -> Optional[int]:
+    try:
+        if port is None:
+            return None
+        return int(port)
+    except (TypeError, ValueError):
+        return None
+
+
+def _register_port_owner(model_id: str, port: int) -> None:
+    state.setdefault("reserved_ports", set()).add(int(port))
+    state.setdefault("port_owners", {})[int(port)] = model_id
+
+
+def _release_port(model_id: str, *, reusable: bool = True) -> Optional[int]:
+    port_owners = state.setdefault("port_owners", {})
+    released_port: Optional[int] = None
+    for port, owner in list(port_owners.items()):
+        if owner != model_id:
+            continue
+        released_port = int(port)
+        port_owners.pop(port, None)
+        state.setdefault("reserved_ports", set()).discard(int(port))
+        if reusable:
+            released_dynamic_ports = state.setdefault("released_dynamic_ports", [])
+            if int(port) not in released_dynamic_ports:
+                released_dynamic_ports.append(int(port))
+                released_dynamic_ports.sort()
+    if released_port is None:
+        config = (state.get("dynamic_models") or {}).get(model_id)
+        if config is not None:
+            released_port = _normalize_port_value(config.get("port"))
+        if released_port is None:
+            released_port = _normalize_port_value((state.get("discovered_model_ports") or {}).pop(model_id, None))
+        if released_port is not None:
+            state.setdefault("reserved_ports", set()).discard(int(released_port))
+            if reusable:
+                released_dynamic_ports = state.setdefault("released_dynamic_ports", [])
+                if int(released_port) not in released_dynamic_ports:
+                    released_dynamic_ports.append(int(released_port))
+                    released_dynamic_ports.sort()
+    return released_port
+
+
+def _sync_port_registry() -> None:
+    reserved_ports = set()
+    port_owners: Dict[int, str] = {}
+    for model_id, config in STATIC_MODELS_CONFIG.items():
+        port = _normalize_port_value(config.get("port"))
+        if port is None:
+            continue
+        reserved_ports.add(port)
+        port_owners[port] = model_id
+    for model_id, config in (state.get("dynamic_models") or {}).items():
+        port = _normalize_port_value(config.get("port"))
+        if port is None:
+            continue
+        reserved_ports.add(port)
+        port_owners[port] = model_id
+    for model_id, port in (state.get("discovered_model_ports") or {}).items():
+        normalized = _normalize_port_value(port)
+        if normalized is None:
+            continue
+        reserved_ports.add(normalized)
+        port_owners[normalized] = model_id
+    state["reserved_ports"] = reserved_ports
+    state["port_owners"] = port_owners
+    released_dynamic_ports = [
+        int(port)
+        for port in (state.get("released_dynamic_ports") or [])
+        if int(port) not in reserved_ports
+    ]
+    released_dynamic_ports.sort()
+    state["released_dynamic_ports"] = released_dynamic_ports
+
+
+def _reserve_port(model_id: str, requested_port: Optional[int] = None) -> int:
+    normalized_requested = _normalize_port_value(requested_port)
+    port_owners = state.setdefault("port_owners", {})
+    reserved_ports = state.setdefault("reserved_ports", set())
+    existing_port = next((int(port) for port, owner in port_owners.items() if owner == model_id), None)
+    if existing_port is not None and normalized_requested is None:
+        return existing_port
+
+    if normalized_requested is not None:
+        owner = port_owners.get(normalized_requested)
+        if owner is not None and owner != model_id:
+            raise HTTPException(status_code=409, detail=f"Port {normalized_requested} is already reserved")
+        _register_port_owner(model_id, normalized_requested)
+        return normalized_requested
+
+    released_dynamic_ports = state.setdefault("released_dynamic_ports", [])
+    while released_dynamic_ports:
+        candidate = int(released_dynamic_ports.pop(0))
+        owner = port_owners.get(candidate)
+        if owner is not None and owner != model_id:
+            continue
+        _register_port_owner(model_id, candidate)
+        return candidate
+
+    port = _allocate_dynamic_port()
+    _register_port_owner(model_id, port)
+    return port
+
+
 def _find_listener_pids(port: int) -> List[int]:
     pids = set()
     try:
@@ -442,7 +551,7 @@ def get_model_config(model_id: str) -> Optional[Dict[str, Any]]:
                 discovered_ports = state.setdefault("discovered_model_ports", {})
                 assigned_port = discovered_ports.get(model_id)
                 if assigned_port is None:
-                    assigned_port = _allocate_dynamic_port()
+                    assigned_port = _reserve_port(model_id)
                     discovered_ports[model_id] = assigned_port
                 return {
                     "type": "gguf",
@@ -457,17 +566,21 @@ def get_model_config(model_id: str) -> Optional[Dict[str, Any]]:
 
 def _stop_model(model_id: str):
     if model_id in state["processes"]:
-        proc = state["processes"].pop(model_id)
-        state["placements"].pop(model_id, None)
-        logger.info(f"Stopping server for {model_id}...")
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            proc.wait(timeout=5)
-        except:
-            try: os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except: pass
-        if state["active_model"] == model_id:
-            state["active_model"] = None
+        with _heavy_model_lifecycle_lock:
+            proc = state["processes"].pop(model_id)
+            state["placements"].pop(model_id, None)
+            logger.info(f"Stopping server for {model_id}...")
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                proc.wait(timeout=5)
+            except:
+                try: os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except: pass
+            if state["active_model"] == model_id:
+                state["active_model"] = None
+    if model_id in (state.get("discovered_model_ports") or {}):
+        state.get("discovered_model_ports", {}).pop(model_id, None)
+        _release_port(model_id, reusable=True)
 
 def _stop_all_servers():
     for model_id in list(state["processes"].keys()):
@@ -514,17 +627,6 @@ def _start_server(model_id: str, device_mode: DeviceMode):
 
         model_path = resolve_model_path(config["path"])
         is_heavy = config["type"] in ["gguf", "gguf-vl"]
-        
-        if is_heavy:
-            active_heavy = None
-            for pid in state["processes"]:
-                p_config = get_model_config(pid)
-                if p_config and p_config["type"] in ["gguf", "gguf-vl"]:
-                    active_heavy = pid
-                    break
-            if active_heavy and active_heavy != model_id:
-                logger.info(f"Stopping {active_heavy} to free memory for {model_id}")
-                _stop_model(active_heavy)
 
         existing_proc = state["processes"].get(model_id)
         if existing_proc is not None:
@@ -532,8 +634,6 @@ def _start_server(model_id: str, device_mode: DeviceMode):
                 return  # Уже работает
             state["processes"].pop(model_id, None)
             state["placements"].pop(model_id, None)
-
-        _reap_stale_listener_on_port(config["port"], tracked_proc=existing_proc)
 
         available_gpus = _get_gpu_info()
         n_gpu = len(available_gpus)
@@ -544,58 +644,70 @@ def _start_server(model_id: str, device_mode: DeviceMode):
             available_gpus=available_gpus,
         )
 
-        if config["type"] == "st":
-            preferred_device = str(placement.get("device_arg") or "cpu")
-            device_candidates = [preferred_device]
-            if preferred_device.startswith("cuda"):
-                device_candidates.append("cpu")
+        if is_heavy:
+            with _heavy_model_lifecycle_lock:
+                active_heavy = None
+                for pid in state["processes"]:
+                    p_config = get_model_config(pid)
+                    if p_config and p_config["type"] in ["gguf", "gguf-vl"]:
+                        active_heavy = pid
+                        break
+                if active_heavy and active_heavy != model_id:
+                    logger.info(f"Stopping {active_heavy} to free memory for {model_id}")
+                    _stop_model(active_heavy)
+                _reap_stale_listener_on_port(config["port"], tracked_proc=existing_proc)
 
-            last_error = None
-            for idx, device_arg in enumerate(device_candidates):
-                cmd = [
-                    sys.executable,
-                    str(Path(__file__).parent / "st_server.py"),
-                    "--model", model_path,
-                    "--port", str(config["port"]),
-                    "--device", device_arg,
-                ]
+                cmd = ["llama-server", "-m", model_path, "--port", str(config["port"]),
+                       "--host", "0.0.0.0", "-c", str(config["ctx_size"]),
+                       "-ngl", str(config["gpu_layers"] if device_mode != DeviceMode.CPU else 0)]
+                if placement.get("placement_mode") == "multi-gpu":
+                    tensor_split = placement.get("tensor_split") or []
+                    cmd.extend(["--tensor-split", ",".join(str(weight) for weight in tensor_split)])
+                if config["type"] == "gguf-vl" and "mmproj" in config:
+                    cmd.extend(["--mmproj", resolve_model_path(config["mmproj"])])
+
                 logger.info(f"Executing: {' '.join(cmd)}")
                 try:
                     process = _launch_server_process(cmd, config["port"])
                     state["processes"][model_id] = process
-                    state["placements"][model_id] = _placement_with_device_arg(placement, device_arg)
+                    state["placements"][model_id] = placement
+                    state["active_model"] = model_id
                     return
                 except Exception as e:
-                    last_error = e
-                    if idx < len(device_candidates) - 1:
-                        logger.warning(
-                            f"ST server startup failed on {device_arg}, retrying on {device_candidates[idx + 1]}: {e}"
-                        )
-                        continue
                     logger.error(f"Start failed: {e}")
                     raise
-            raise RuntimeError(f"Failed to start {model_id}: {last_error}")
-        else:
-            cmd = ["llama-server", "-m", model_path, "--port", str(config["port"]),
-                   "--host", "0.0.0.0", "-c", str(config["ctx_size"]),
-                   "-ngl", str(config["gpu_layers"] if device_mode != DeviceMode.CPU else 0)]
-            if placement.get("placement_mode") == "multi-gpu":
-                tensor_split = placement.get("tensor_split") or []
-                cmd.extend(["--tensor-split", ",".join(str(weight) for weight in tensor_split)])
-            if config["type"] == "gguf-vl" and "mmproj" in config:
-                cmd.extend(["--mmproj", resolve_model_path(config["mmproj"])])
 
-        logger.info(f"Executing: {' '.join(cmd)}")
-        try:
-            process = _launch_server_process(cmd, config["port"])
-            state["processes"][model_id] = process
-            state["placements"][model_id] = placement
-            if is_heavy:
-                state["active_model"] = model_id
-            return
-        except Exception as e:
-            logger.error(f"Start failed: {e}")
-            raise
+        _reap_stale_listener_on_port(config["port"], tracked_proc=existing_proc)
+        preferred_device = str(placement.get("device_arg") or "cpu")
+        device_candidates = [preferred_device]
+        if preferred_device.startswith("cuda"):
+            device_candidates.append("cpu")
+
+        last_error = None
+        for idx, device_arg in enumerate(device_candidates):
+            cmd = [
+                sys.executable,
+                str(Path(__file__).parent / "st_server.py"),
+                "--model", model_path,
+                "--port", str(config["port"]),
+                "--device", device_arg,
+            ]
+            logger.info(f"Executing: {' '.join(cmd)}")
+            try:
+                process = _launch_server_process(cmd, config["port"])
+                state["processes"][model_id] = process
+                state["placements"][model_id] = _placement_with_device_arg(placement, device_arg)
+                return
+            except Exception as e:
+                last_error = e
+                if idx < len(device_candidates) - 1:
+                    logger.warning(
+                        f"ST server startup failed on {device_arg}, retrying on {device_candidates[idx + 1]}: {e}"
+                    )
+                    continue
+                logger.error(f"Start failed: {e}")
+                raise
+        raise RuntimeError(f"Failed to start {model_id}: {last_error}")
 
 # === API ===
 
@@ -774,6 +886,8 @@ def _load_dynamic_models_registry() -> Dict[str, Dict[str, Any]]:
         if not isinstance(model_id, str) or not isinstance(config, dict):
             continue
         loaded[model_id] = dict(config)
+    state["dynamic_models"] = loaded
+    _sync_port_registry()
     return loaded
 
 
@@ -788,17 +902,8 @@ def _save_dynamic_models_registry() -> None:
 
 
 def _align_dynamic_port_counter() -> None:
-    reserved = {
-        int(config["port"])
-        for config in STATIC_MODELS_CONFIG.values()
-        if config.get("port") is not None
-    }
-    reserved.update(
-        int(config["port"])
-        for config in (state.get("dynamic_models") or {}).values()
-        if config.get("port") is not None
-    )
-    reserved.update(int(port) for port in (state.get("discovered_model_ports") or {}).values())
+    _sync_port_registry()
+    reserved = set(state.get("reserved_ports") or set())
     state["dynamic_ports"] = max(8100, max(reserved, default=8099) + 1)
 
 
@@ -822,17 +927,13 @@ def _resolve_registration_path(path_str: str, *, expected_type: Optional[str] = 
 
 
 def _allocate_dynamic_port() -> int:
-    reserved = {
-        int(config["port"])
-        for config in STATIC_MODELS_CONFIG.values()
-        if config.get("port") is not None
-    }
-    reserved.update(
-        int(config["port"])
-        for config in (state.get("dynamic_models") or {}).values()
-        if config.get("port") is not None
-    )
-    reserved.update(int(port) for port in (state.get("discovered_model_ports") or {}).values())
+    _sync_port_registry()
+    reserved = set(state.get("reserved_ports") or set())
+    released_dynamic_ports = state.setdefault("released_dynamic_ports", [])
+    if released_dynamic_ports:
+        port = int(released_dynamic_ports.pop(0))
+        state["dynamic_ports"] = max(int(state.get("dynamic_ports") or 8100), port + 1)
+        return port
     port = int(state.get("dynamic_ports") or 8100)
     while port in reserved:
         port += 1
@@ -854,18 +955,10 @@ def _register_dynamic_model(request: ModelRegistrationRequest) -> Dict[str, Any]
     model_type = _normalize_registered_model_type(request.type)
     resolved_path = _resolve_registration_path(request.path, expected_type=model_type)
     if request.port is not None:
-        reserved_ports = {
-            int(config["port"])
-            for config in STATIC_MODELS_CONFIG.values()
-            if config.get("port") is not None
-        }
-        reserved_ports.update(
-            int(config["port"])
-            for dynamic_id, config in dynamic_models.items()
-            if dynamic_id != model_id and config.get("port") is not None
-        )
-        reserved_ports.update(int(port) for port in (state.get("discovered_model_ports") or {}).values())
-        if int(request.port) in reserved_ports:
+        _sync_port_registry()
+        requested_port = int(request.port)
+        owner = (state.get("port_owners") or {}).get(requested_port)
+        if owner is not None and owner != model_id:
             raise HTTPException(status_code=409, detail=f"Port {request.port} is already reserved")
     config: Dict[str, Any] = {
         "type": model_type,
@@ -886,6 +979,8 @@ def _register_dynamic_model(request: ModelRegistrationRequest) -> Dict[str, Any]
         config["mmproj"] = _resolve_registration_path(request.mmproj)
 
     dynamic_models[model_id] = config
+    _release_port(model_id, reusable=False)
+    _register_port_owner(model_id, int(config["port"]))
     _save_dynamic_models_registry()
     return _build_model_view(model_id)
 
@@ -896,9 +991,11 @@ def _unregister_dynamic_model(model_id: str) -> None:
     dynamic_models = state.get("dynamic_models") or {}
     if model_id not in dynamic_models:
         raise HTTPException(status_code=404, detail=f"Dynamic model {model_id} not found")
+    _sync_port_registry()
     if model_id in state.get("processes", {}):
         _stop_model(model_id)
     dynamic_models.pop(model_id, None)
+    _release_port(model_id, reusable=True)
     _save_dynamic_models_registry()
 
 @app.post("/infer")
