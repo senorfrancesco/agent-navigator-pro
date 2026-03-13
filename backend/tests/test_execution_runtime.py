@@ -19,6 +19,15 @@ from orchestrator.doc_question_heuristics import (
     has_sufficient_evidence_v1,
 )
 from orchestrator.state_store import get_orchestration_state_store
+from services.observability import render_metrics_text, reset_observability_metrics
+
+
+def setup_function():
+    reset_observability_metrics()
+
+
+def teardown_function():
+    reset_observability_metrics()
 
 
 def _build_minimal_deps() -> ExecutionDependencies:
@@ -287,6 +296,52 @@ def test_run_graph_merges_errors_from_multiple_nodes():
     assert final_state["errors"] == ["first", "second"]
     assert final_state["value"] == 1
     assert final_state["other"] == 2
+
+
+def test_execute_orchestration_doc_question_records_rag_exception_fallback_metric(monkeypatch):
+    deps = _build_minimal_deps()
+    deps.has_retrieval_adapter = lambda: True
+    deps.get_all_docs = lambda: [{"document_id": "doc-1", "display_name": "contract.pdf", "text": "Штраф 10 процентов"}]
+    deps.get_active_docs = deps.get_all_docs
+    deps.resolve_target_doc_name = lambda query, docs: None
+    deps.ensure_rag_index_for_doc_ids = AsyncMock(return_value=True)
+    deps.get_rag_pipeline = lambda: SimpleNamespace(
+        _indexed=True,
+        top_k=5,
+        retrieve=lambda query, top_k=None: (_ for _ in ()).throw(RuntimeError("rag boom")),
+    )
+
+    async def fake_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr("orchestrator.execution_runtime.asyncio.to_thread", fake_to_thread)
+
+    response = asyncio.run(
+        execute_orchestration(
+            {
+                "message": "Что сказано про штраф?",
+                "runtime_mode": "specialized_tasks",
+                "assistant_mode": "rag_qa",
+                "rag_scope": "session_rag",
+                "has_session_docs": True,
+                "session_docs": {"contract.pdf": {"document_id": "doc-1", "text": "Штраф 10 процентов"}},
+                "active_doc_ids": ["doc-1"],
+                "classifier_result": {
+                    "intent": "document_question",
+                    "confidence": 0.95,
+                    "margin": 0.5,
+                    "needs_rag": True,
+                },
+            },
+            deps=deps,
+        )
+    )
+
+    assert "не удалось получить проверяемые источники" in response["assistant_message"].lower()
+    metrics = render_metrics_text()
+    assert "agent_nav_fallback_events_total" in metrics
+    assert 'component="doc_question"' in metrics
+    assert 'fallback="rag_exception"' in metrics
 
 
 def test_execute_orchestration_doc_question_handles_rag_result_without_metadata_and_filters_by_display_name(monkeypatch):

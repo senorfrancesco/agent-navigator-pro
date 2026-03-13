@@ -14,7 +14,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from services.model_manager import unified_model_server as ums_server
-from services.observability import reset_observability_metrics
+from services.observability import render_metrics_text, reset_observability_metrics
 
 
 class _FakeProcess:
@@ -240,6 +240,10 @@ def test_start_server_records_cpu_placement_after_st_fallback():
     assert ums_server.state["placements"]["labse-embedding"]["placement_mode"] == "cpu"
     assert ums_server.state["placements"]["labse-embedding"]["gpu_indices"] == []
     assert ums_server.state["placements"]["labse-embedding"]["device_arg"] == "cpu"
+    metrics = render_metrics_text()
+    assert "agent_nav_fallback_events_total" in metrics
+    assert 'component="ums"' in metrics
+    assert 'fallback="st_start_cpu_retry"' in metrics
 
 
 def test_start_server_uses_weighted_tensor_split_for_multi_gpu_gguf(monkeypatch):
@@ -1087,6 +1091,31 @@ def test_register_reuses_released_dynamic_port(tmp_path, monkeypatch):
     assert ums_server.state["port_owners"][8100] == "dynamic-b"
 
 
+def test_register_skips_released_dynamic_port_when_os_listener_is_present(tmp_path, monkeypatch):
+    registry_path = tmp_path / "ums_dynamic_models.json"
+    monkeypatch.setenv("UMS_DYNAMIC_MODELS_REGISTRY_PATH", str(registry_path))
+    model_path = tmp_path / "dynamic.gguf"
+    model_path.write_text("stub", encoding="utf-8")
+    ums_server.state["released_dynamic_ports"] = [8100]
+
+    with patch.object(ums_server, "_find_listener_pids", side_effect=lambda port: [4321] if int(port) == 8100 else []):
+        response = asyncio.run(
+            _api_request(
+                "POST",
+                "/models/register",
+                json={
+                    "model_id": "dynamic-c",
+                    "type": "gguf",
+                    "path": str(model_path),
+                },
+            )
+        )
+
+    assert response.status_code == 200
+    assert response.json()["model"]["port"] == 8101
+    assert ums_server.state["port_owners"][8101] == "dynamic-c"
+
+
 def test_discovered_model_gets_stable_reserved_port_mapping(tmp_path):
     discovered_path = tmp_path / "discovered" / "dynamic-qwen.gguf"
     discovered_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1100,6 +1129,67 @@ def test_discovered_model_gets_stable_reserved_port_mapping(tmp_path):
     assert second["port"] == 8100
     assert ums_server.state["discovered_model_ports"]["dynamic-qwen"] == 8100
     assert ums_server.state["port_owners"][8100] == "dynamic-qwen"
+
+
+def test_start_server_falls_back_when_static_requested_port_is_occupied(monkeypatch):
+    fake_process = _FakeProcess()
+    launch_calls = []
+
+    def fake_launch(cmd, port, health_timeout_s=120.0):
+        launch_calls.append((cmd, port))
+        return fake_process
+
+    with patch.object(
+        ums_server,
+        "get_model_config",
+        return_value={"type": "gguf", "path": "./models/gguf/qwen.gguf", "ctx_size": 8192, "gpu_layers": 0, "port": 8091},
+    ), patch.object(
+        ums_server,
+        "_find_listener_pids",
+        side_effect=lambda port: [9999] if int(port) == 8091 else [],
+    ), patch.object(
+        ums_server,
+        "_launch_server_process",
+        side_effect=fake_launch,
+    ):
+        ums_server._start_server("qwen-14b-llm", ums_server.DeviceMode.CPU)
+
+    assert len(launch_calls) == 1
+    cmd, assigned_port = launch_calls[0]
+    assert assigned_port == 8100
+    assert cmd[cmd.index("--port") + 1] == "8100"
+    assert ums_server.state["placements"]["qwen-14b-llm"]["port"] == 8100
+    assert ums_server.state["port_owners"][8100] == "qwen-14b-llm"
+
+
+def test_start_server_retries_on_bind_failure_with_fallback_port():
+    fake_process = _FakeProcess()
+    launch_calls = []
+
+    def fake_launch(cmd, port, health_timeout_s=120.0):
+        launch_calls.append((list(cmd), port))
+        if int(port) == 8091:
+            raise RuntimeError("Server exited with code 1: couldn't bind HTTP server socket")
+        return fake_process
+
+    with patch.object(
+        ums_server,
+        "get_model_config",
+        return_value={"type": "gguf", "path": "./models/gguf/qwen.gguf", "ctx_size": 8192, "gpu_layers": 0, "port": 8091},
+    ), patch.object(
+        ums_server,
+        "_find_listener_pids",
+        return_value=[],
+    ), patch.object(
+        ums_server,
+        "_launch_server_process",
+        side_effect=fake_launch,
+    ):
+        ums_server._start_server("qwen-14b-llm", ums_server.DeviceMode.CPU)
+
+    assert [port for _, port in launch_calls] == [8091, 8100]
+    assert ums_server.state["placements"]["qwen-14b-llm"]["port"] == 8100
+    assert ums_server.state["port_owners"][8100] == "qwen-14b-llm"
 
 
 @pytest.mark.asyncio

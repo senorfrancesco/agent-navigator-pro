@@ -312,7 +312,7 @@ wait_for_service "Legal Server" "$LEGAL_PORT" "/health" 30 || SERVICES_OK=false
 
 # 3) UMS
 echo -e "${GREEN}Запуск Unified Model Server на порту $UMS_PORT...${NC}"
-start_tmux_window "ums" "cd $BACKEND_DIR/services/model_manager && $ACTIVATE_CMD && python unified_model_server.py 2>&1 | tee ums.log"
+start_tmux_window "ums" "cd $BACKEND_DIR && $ACTIVATE_CMD && export PYTHONPATH='$BACKEND_DIR' && python services/model_manager/unified_model_server.py 2>&1 | tee services/model_manager/ums.log"
 wait_for_service "UMS" "$UMS_PORT" "/health" 90 || SERVICES_OK=false
 
 echo ""

@@ -29,6 +29,8 @@ _METRIC_HELP = {
     "agent_nav_agent_api_orchestration_requests_total": "Agent API orchestration requests by endpoint and result.",
     "agent_nav_agent_api_openai_dedup_hits_total": "OpenAI-compatible deduplicated requests served without execution.",
     "agent_nav_ums_concurrency_saturation_total": "UMS requests rejected because concurrency policy was saturated.",
+    "agent_nav_equipment_fallback_total": "Equipment workflow fallback and degraded-path activations by stage and reason.",
+    "agent_nav_fallback_events_total": "Fallback and degraded-path runtime events by component and fallback type.",
 }
 
 _METRIC_TYPE = {
@@ -40,6 +42,8 @@ _METRIC_TYPE = {
     "agent_nav_agent_api_orchestration_requests_total": "counter",
     "agent_nav_agent_api_openai_dedup_hits_total": "counter",
     "agent_nav_ums_concurrency_saturation_total": "counter",
+    "agent_nav_equipment_fallback_total": "counter",
+    "agent_nav_fallback_events_total": "counter",
 }
 
 

@@ -45,7 +45,7 @@ ACTIVATE_CMD="eval \"$(conda shell.bash hook)\" && conda activate $CONDA_ENV"
 
 # Window 3: Legal Server	mux new-window -t "$SESSION_NAME" -n "legal-server"	mux send-keys -t "$SESSION_NAME:legal-server" "cd $BACKEND_DIR/services/legal_server && $ACTIVATE_CMD && uvicorn mcp_legal_server:app --host 0.0.0.0 --port 8002" Enter
 
-# Window 4: UMS	mux new-window -t "$SESSION_NAME" -n "ums"	mux send-keys -t "$SESSION_NAME:ums" "cd $BACKEND_DIR/services/model_manager && $ACTIVATE_CMD && python unified_model_server.py" Enter
+# Window 4: UMS	mux new-window -t "$SESSION_NAME" -n "ums"	mux send-keys -t "$SESSION_NAME:ums" "cd $BACKEND_DIR && $ACTIVATE_CMD && export PYTHONPATH='$BACKEND_DIR' && python services/model_manager/unified_model_server.py" Enter
 
 echo "Tmux session '$SESSION_NAME' started in background."
 echo "Waiting 10 seconds for services to initialize..."

@@ -20,6 +20,7 @@ import numpy as np
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
+from services.observability import inc_metric_counter
 from orchestrator.utils import parse_json_garbage
 
 logger = logging.getLogger("classifier")
@@ -232,10 +233,18 @@ class LLMIntentClassifier:
         parsed = parse_json_garbage(raw_text)
         if not isinstance(parsed, dict):
             logger.warning("LLM intent classifier returned non-JSON payload: %s", raw_text)
+            inc_metric_counter(
+                "agent_nav_fallback_events_total",
+                labels={"component": "intent_classifier", "fallback": "llm_non_json", "source": "classifier"},
+            )
             return None
         normalized = self._normalize_result(parsed)
         if normalized is None:
             logger.warning("LLM intent classifier returned unsupported intent: %s", parsed)
+            inc_metric_counter(
+                "agent_nav_fallback_events_total",
+                labels={"component": "intent_classifier", "fallback": "llm_unsupported_intent", "source": "classifier"},
+            )
         return normalized
 
 
@@ -332,13 +341,21 @@ def select_classifier_result(
         )
 
     if normalized_mode == "llm":
-        return llm_result or _resolve_embedder_result(
+        if llm_result:
+            return llm_result
+        result = _resolve_embedder_result(
             embedder_result,
             confidence_threshold=embedder_confidence_threshold,
             margin_threshold=embedder_margin_threshold,
             source="embedder",
             reason="llm_fallback_embedder_low_confidence",
         )
+        if result is not None:
+            inc_metric_counter(
+                "agent_nav_fallback_events_total",
+                labels={"component": "intent_classifier", "fallback": "llm_missing_embedder_fallback", "source": "classifier"},
+            )
+        return result
 
     if normalized_mode == "hybrid":
         if llm_result and llm_result.get("confidence", 0.0) >= llm_confidence_threshold:
@@ -361,6 +378,10 @@ def select_classifier_result(
                 }
             return merged
         if embedder_result:
+            inc_metric_counter(
+                "agent_nav_fallback_events_total",
+                labels={"component": "intent_classifier", "fallback": "hybrid_low_confidence_unsure", "source": "classifier"},
+            )
             result = _build_unsure_result(
                 embedder_result,
                 source="hybrid_unsure",

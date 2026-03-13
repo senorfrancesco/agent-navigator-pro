@@ -536,6 +536,13 @@ def _register_port_owner(model_id: str, port: int) -> None:
     state.setdefault("port_owners", {})[int(port)] = model_id
 
 
+def _port_has_foreign_listener(port: int, *, allowed_pid: Optional[int] = None) -> bool:
+    listener_pids = _find_listener_pids(int(port))
+    if allowed_pid is None:
+        return bool(listener_pids)
+    return any(int(pid) != int(allowed_pid) for pid in listener_pids)
+
+
 def _release_port(model_id: str, *, reusable: bool = True) -> Optional[int]:
     port_owners = state.setdefault("port_owners", {})
     released_port: Optional[int] = None
@@ -601,7 +608,6 @@ def _sync_port_registry() -> None:
 def _reserve_port(model_id: str, requested_port: Optional[int] = None) -> int:
     normalized_requested = _normalize_port_value(requested_port)
     port_owners = state.setdefault("port_owners", {})
-    reserved_ports = state.setdefault("reserved_ports", set())
     existing_port = next((int(port) for port, owner in port_owners.items() if owner == model_id), None)
     if existing_port is not None and normalized_requested is None:
         return existing_port
@@ -610,8 +616,16 @@ def _reserve_port(model_id: str, requested_port: Optional[int] = None) -> int:
         owner = port_owners.get(normalized_requested)
         if owner is not None and owner != model_id:
             raise HTTPException(status_code=409, detail=f"Port {normalized_requested} is already reserved")
-        _register_port_owner(model_id, normalized_requested)
-        return normalized_requested
+        if _port_has_foreign_listener(normalized_requested):
+            logger.warning(
+                "Requested port %s for %s is already occupied by a foreign listener; allocating fallback dynamic port",
+                normalized_requested,
+                model_id,
+            )
+            normalized_requested = None
+        else:
+            _register_port_owner(model_id, normalized_requested)
+            return normalized_requested
 
     released_dynamic_ports = state.setdefault("released_dynamic_ports", [])
     while released_dynamic_ports:
@@ -619,12 +633,21 @@ def _reserve_port(model_id: str, requested_port: Optional[int] = None) -> int:
         owner = port_owners.get(candidate)
         if owner is not None and owner != model_id:
             continue
+        if _port_has_foreign_listener(candidate):
+            continue
         _register_port_owner(model_id, candidate)
         return candidate
 
     port = _allocate_dynamic_port()
     _register_port_owner(model_id, port)
     return port
+
+
+def _reassign_model_port(model_id: str, current_port: int) -> int:
+    _release_port(model_id, reusable=False)
+    next_port = _reserve_port(model_id, None)
+    logger.warning("Reassigned %s from occupied port %s to fallback port %s", model_id, current_port, next_port)
+    return next_port
 
 
 def _find_listener_pids(port: int) -> List[int]:
@@ -794,6 +817,7 @@ def _start_server(model_id: str, device_mode: DeviceMode):
         config = get_model_config(model_id)
         if not config:
             raise HTTPException(status_code=404, detail=f"Model {model_id} not found in filesystem.")
+        config = dict(config)
 
         model_path = resolve_model_path(config["path"])
         is_heavy = config["type"] in ["gguf", "gguf-vl"]
@@ -813,6 +837,10 @@ def _start_server(model_id: str, device_mode: DeviceMode):
             device_mode=device_mode,
             available_gpus=available_gpus,
         )
+        assigned_port = _reserve_port(model_id, config.get("port"))
+        config["port"] = assigned_port
+        placement = dict(placement)
+        placement["port"] = assigned_port
 
         if _should_use_vllm_backend(config):
             with _heavy_model_lifecycle_lock:
@@ -827,7 +855,9 @@ def _start_server(model_id: str, device_mode: DeviceMode):
                     _stop_model(active_heavy)
                 _ensure_vllm_backend(model_id)
                 state["processes"][model_id] = _RemoteProcess()
-                state["placements"][model_id] = _build_vllm_placement(model_id, config)
+                vllm_placement = _build_vllm_placement(model_id, config)
+                vllm_placement["port"] = assigned_port
+                state["placements"][model_id] = vllm_placement
                 state["active_model"] = model_id
                 return
 
@@ -861,8 +891,27 @@ def _start_server(model_id: str, device_mode: DeviceMode):
                     state["active_model"] = model_id
                     return
                 except Exception as e:
-                    logger.error(f"Start failed: {e}")
-                    raise
+                    detail = str(e)
+                    fallback_port = _reassign_model_port(model_id, int(config["port"]))
+                    config["port"] = fallback_port
+                    placement["port"] = fallback_port
+                    retry_cmd = list(cmd)
+                    retry_cmd[retry_cmd.index("--port") + 1] = str(fallback_port)
+                    logger.warning(
+                        "Retrying %s on fallback port %s after startup failure on %s",
+                        model_id,
+                        fallback_port,
+                        detail,
+                    )
+                    try:
+                        process = _launch_server_process(retry_cmd, fallback_port)
+                        state["processes"][model_id] = process
+                        state["placements"][model_id] = placement
+                        state["active_model"] = model_id
+                        return
+                    except Exception:
+                        logger.error(f"Start failed: {e}")
+                        raise
 
         _reap_stale_listener_on_port(config["port"], tracked_proc=existing_proc)
         preferred_device = str(placement.get("device_arg") or "cpu")
@@ -886,10 +935,37 @@ def _start_server(model_id: str, device_mode: DeviceMode):
                 state["placements"][model_id] = _placement_with_device_arg(placement, device_arg)
                 return
             except Exception as e:
+                detail = str(e)
+                bind_like_error = (
+                    "couldn't bind HTTP server socket" in detail
+                    or "HTTP server error" in detail
+                    or _port_has_foreign_listener(int(config["port"]))
+                )
+                if bind_like_error:
+                    fallback_port = _reassign_model_port(model_id, int(config["port"]))
+                    config["port"] = fallback_port
+                    placement["port"] = fallback_port
+                    retry_cmd = list(cmd)
+                    retry_cmd[retry_cmd.index("--port") + 1] = str(fallback_port)
+                    try:
+                        process = _launch_server_process(retry_cmd, fallback_port)
+                        state["processes"][model_id] = process
+                        state["placements"][model_id] = _placement_with_device_arg(placement, device_arg)
+                        return
+                    except Exception:
+                        pass
                 last_error = e
                 if idx < len(device_candidates) - 1:
                     logger.warning(
                         f"ST server startup failed on {device_arg}, retrying on {device_candidates[idx + 1]}: {e}"
+                    )
+                    inc_metric_counter(
+                        "agent_nav_fallback_events_total",
+                        labels={
+                            "component": "ums",
+                            "fallback": "st_start_cpu_retry",
+                            "source": "unified_model_server",
+                        },
                     )
                     continue
                 logger.error(f"Start failed: {e}")
@@ -1259,11 +1335,14 @@ def _allocate_dynamic_port() -> int:
     reserved = set(state.get("reserved_ports") or set())
     released_dynamic_ports = state.setdefault("released_dynamic_ports", [])
     if released_dynamic_ports:
-        port = int(released_dynamic_ports.pop(0))
-        state["dynamic_ports"] = max(int(state.get("dynamic_ports") or 8100), port + 1)
-        return port
+        while released_dynamic_ports:
+            port = int(released_dynamic_ports.pop(0))
+            if port in reserved or _port_has_foreign_listener(port):
+                continue
+            state["dynamic_ports"] = max(int(state.get("dynamic_ports") or 8100), port + 1)
+            return port
     port = int(state.get("dynamic_ports") or 8100)
-    while port in reserved:
+    while port in reserved or _port_has_foreign_listener(port):
         port += 1
     state["dynamic_ports"] = port + 1
     return port

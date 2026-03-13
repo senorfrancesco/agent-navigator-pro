@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -12,11 +13,14 @@ from orchestrator.orchestration_runtime import decide_orchestration, is_social_q
 from orchestrator.state_store import get_orchestration_state_store
 from orchestrator.ui_control_plane import get_prompt_profile_system_message, resolve_effective_settings
 from orchestrator.workflows.equipment import detect_equipment_mode
+from services.observability import inc_metric_counter
 
 
 AsyncStrFn = Callable[..., Awaitable[str]]
 AsyncAnyFn = Callable[..., Awaitable[Any]]
 SyncAnyFn = Callable[..., Any]
+
+logger = logging.getLogger("execution_runtime")
 
 
 @dataclass
@@ -640,7 +644,12 @@ async def _execute_doc_question(
             rag_result = await asyncio.to_thread(rag.retrieve, query, retrieve_top_k)
             rag_meta = getattr(rag_result, "metadata", None) or {}
             rag_mode = str(rag_meta.get("mode", "simple"))
-        except Exception:
+        except Exception as exc:
+            logger.warning("RAG retrieve failed in doc_question path: %s", exc, exc_info=True)
+            inc_metric_counter(
+                "agent_nav_fallback_events_total",
+                labels={"component": "doc_question", "fallback": "rag_exception", "source": "execution_runtime"},
+            )
             rag_result = None
 
     if rag_result is None and not sources and not retrieval_available:
@@ -661,6 +670,10 @@ async def _execute_doc_question(
         }
 
     if rag_result is None and not sources:
+        inc_metric_counter(
+            "agent_nav_fallback_events_total",
+            labels={"component": "doc_question", "fallback": "no_sources", "source": "execution_runtime"},
+        )
         return {
             "assistant_message": (
                 "По текущему запросу не удалось получить проверяемые источники из RAG. "

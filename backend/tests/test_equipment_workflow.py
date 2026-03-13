@@ -52,6 +52,7 @@ from orchestrator.workflows.equipment import (
     _extract_from_single_chunk,
     _extract_items_llm,
 )
+from services.observability import render_metrics_text, reset_observability_metrics
 
 
 # ============================================================================
@@ -107,6 +108,13 @@ def base_state():
         "errors": [],
         "session_id": "test-session",
     }
+
+
+@pytest.fixture(autouse=True)
+def _reset_equipment_metrics():
+    reset_observability_metrics()
+    yield
+    reset_observability_metrics()
 
 
 @pytest.fixture
@@ -419,6 +427,10 @@ class TestPolishItemsSpecsLlm:
 
         assert items[0]["specs"] == "Тип устройства: Сервер"
         assert items[1]["specs"] == "Тип корпуса: Rack 19"
+        metrics = render_metrics_text()
+        assert "agent_nav_equipment_fallback_total" in metrics
+        assert 'stage="polisher"' in metrics
+        assert 'reason="parse_failed"' in metrics
 
     @pytest.mark.asyncio
     async def test_polish_items_specs_llm_sends_large_item_in_single_batch(self):
@@ -837,6 +849,10 @@ class TestEvaluateComplianceNode:
         results = result["analysis_results"]
         assert len(results) == 1
         assert results[0]["result"] == "ERROR"
+        metrics = render_metrics_text()
+        assert "agent_nav_equipment_fallback_total" in metrics
+        assert 'stage="evaluate"' in metrics
+        assert 'reason="llm_batch_error"' in metrics
 
     @pytest.mark.asyncio
     async def test_smeta_vs_smeta_mode(self, base_state):
@@ -1196,6 +1212,10 @@ class TestChunkText:
             assert len(chunks) >= 2
             for c in chunks:
                 assert len(c) <= MAX_TEXT_FOR_LLM + 200  # допуск на последнюю строку
+        metrics = render_metrics_text()
+        assert "agent_nav_equipment_fallback_total" in metrics
+        assert 'stage="chunking"' in metrics
+        assert 'reason="smart_chunk_failed"' in metrics
 
     @pytest.mark.asyncio
     async def test_oversized_smart_chunk_resplit(self):

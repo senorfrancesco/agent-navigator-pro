@@ -713,8 +713,36 @@
 - [ ] Conda environment export
 
 ### Открытый Tech Debt
-- [ ] TD-7 — O(N·M) reverse mapping в match_items_node → dict lookup
+- [x] TD-7 — O(N·M) reverse mapping в match_items_node → dict lookup
+  Уже реализовано в `backend/orchestrator/workflows/equipment.py`: `match_items_node()` использует `items_1_by_text/items_2_by_text` для O(1) reverse lookup по `old_text/new_text` вместо повторного линейного поиска по спискам.
+  Проверки:
+  - `pytest backend/tests/test_equipment_workflow.py -q -k "TestMatchItemsNode or matching_error or empty_matches"` -> `7 passed`
+  - `rg -n "O\\(1\\) reverse mapping|TD-7 Fix" backend/orchestrator/workflows/equipment.py`
 - [ ] TD-8 — Fallback-цепочки скрывают ошибки → WARNING + счётчики
+  Progress (equipment + runtime critical slices):
+  - `backend/orchestrator/workflows/equipment.py` теперь публикует `WARNING + agent_nav_equipment_fallback_total` для:
+    - `smart_chunk` → line-based fallback
+    - invalid `DEBUG-POLISH` structured output
+    - LLM batch error в `evaluate_compliance_node`
+  - `backend/orchestrator/execution_runtime.py` теперь публикует `WARNING + agent_nav_fallback_events_total` для:
+    - `doc_question` retrieval exception (`fallback=rag_exception`)
+    - generic `doc_question` no-sources degraded branch (`fallback=no_sources`)
+  - `backend/orchestrator/rag/classifier.py` теперь публикует `agent_nav_fallback_events_total` для:
+    - `llm_non_json`
+    - `llm_unsupported_intent`
+    - `llm_missing_embedder_fallback`
+    - `hybrid_low_confidence_unsure`
+  - `backend/services/model_manager/unified_model_server.py` теперь публикует `agent_nav_fallback_events_total` для:
+    - ST GPU → CPU retry (`fallback=st_start_cpu_retry`)
+  - Проверки:
+    - `pytest backend/tests/test_equipment_workflow.py -q -k "falls_back_when_batch_xml_invalid or smart_chunk_fails_fallback or llm_error_produces_error_result"` -> `3 passed`
+    - `pytest backend/tests/test_equipment_workflow.py -q` -> `84 passed`
+    - `pytest backend/tests/test_execution_runtime.py -q -k "rag_exception_fallback_metric"` -> `1 passed`
+    - `pytest backend/tests/test_intent_classifier.py -q -k "non_json_records_metric or rejects_unknown_intent or hybrid_can_end_unsure or llm_fallback_still_respects_embedder_abstain"` -> `4 passed`
+    - `pytest backend/tests/test_unified_model_server_startup.py -q -k "records_cpu_placement_after_st_fallback"` -> `1 passed`
+    - `pytest backend/tests/test_execution_runtime.py backend/tests/test_intent_classifier.py backend/tests/test_unified_model_server_startup.py backend/tests/test_equipment_workflow.py -q -k "rag_exception_fallback_metric or non_json_records_metric or rejects_unknown_intent or hybrid_can_end_unsure or llm_fallback_still_respects_embedder_abstain or records_cpu_placement_after_st_fallback or falls_back_when_batch_xml_invalid or smart_chunk_fails_fallback or llm_error_produces_error_result"` -> `9 passed`
+  Follow-up:
+  - распространить тот же WARNING+metrics pattern на `compare`, `document_analysis`, `ums_client` и остальные fallback-heavy paths, после чего закрыть `TD-8` целиком
 - [ ] TD-9 — Magic numbers без документации → именованные константы + env override
 
 ---

@@ -12,6 +12,7 @@ Batch LLM evaluation по BATCH_SIZE=5.
 
 import html
 import json
+import logging
 import os
 import re
 import time
@@ -23,6 +24,7 @@ from langgraph.graph import StateGraph, END
 
 # Абсолютные импорты пакета (TD-5 Fix)
 from services.model_manager.ums_client import ums_client
+from services.observability import inc_metric_counter
 from orchestrator.structured_output import extract_model_text, parse_strict_json
 from orchestrator.utils import parse_json_garbage
 from orchestrator.shared.http_client import get_shared_client
@@ -56,6 +58,8 @@ _KP_TEXT_KEYWORDS = [
     "предложение действительно", "итого:", "ндс", "стоимость с ндс",
     "коммерческое", "quotation",
 ]
+
+logger = logging.getLogger("equipment_workflow")
 
 
 def detect_equipment_mode(
@@ -400,8 +404,18 @@ async def _polish_items_specs_llm(items: List[Dict[str, Any]]):
                         print(f"  [DEBUG-POLISH] Item {entry_idx} specs updated: {item['specs'][:50]}...")
             else:
                 print("  [DEBUG-POLISH] Failed to parse XML polish response.")
+                logger.warning("DEBUG-POLISH returned invalid structured output; applying fallback", extra={"stage": "polisher"})
+                inc_metric_counter(
+                    "agent_nav_equipment_fallback_total",
+                    labels={"stage": "polisher", "reason": "parse_failed"},
+                )
         except Exception as e:
             print(f"  [LLM Polisher] Error batch {batch_idx}: {e}")
+            logger.warning("DEBUG-POLISH failed; applying fallback: %s", e, exc_info=True)
+            inc_metric_counter(
+                "agent_nav_equipment_fallback_total",
+                labels={"stage": "polisher", "reason": "llm_error"},
+            )
             
         # Гарантированный Fallback для каждого айтема в батче, если specs остались пустыми
         for entry in batch:
@@ -703,6 +717,11 @@ async def _chunk_text(text: str) -> List[str]:
             return result
     except Exception as e:
         print(f"[Chunk] /smart_chunk failed, fallback: {e}")
+        logger.warning("/smart_chunk failed, using line-based fallback: %s", e, exc_info=True)
+        inc_metric_counter(
+            "agent_nav_equipment_fallback_total",
+            labels={"stage": "chunking", "reason": "smart_chunk_failed"},
+        )
 
     return _split_by_lines(text, MAX_TEXT_FOR_LLM)
 
@@ -1144,6 +1163,11 @@ SAME — без изменений, PRICE_CHANGE — изменилась цен
 
         except Exception as e:
             print(f"[Equipment] Error in batch {batch_idx + 1}: {e}")
+            logger.warning("Equipment LLM batch failed: %s", e, exc_info=True)
+            inc_metric_counter(
+                "agent_nav_equipment_fallback_total",
+                labels={"stage": "evaluate", "reason": "llm_batch_error"},
+            )
             for m in batch:
                 results.append({
                     "item_1": m.get("item_1"),

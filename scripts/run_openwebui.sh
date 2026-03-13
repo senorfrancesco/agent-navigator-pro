@@ -171,7 +171,7 @@ sleep 2
 # Окно 4: UMS (Unified Model Server)
 echo -e "${GREEN}Запуск Unified Model Server на порту $UMS_PORT...${NC}"
 tmux new-window -t "$SESSION_NAME" -n "ums"
-tmux send-keys -t "$SESSION_NAME:ums" "cd $BACKEND_DIR/services/model_manager && $ACTIVATE_CMD && python unified_model_server.py 2>&1 | tee ums.log" Enter
+tmux send-keys -t "$SESSION_NAME:ums" "cd $BACKEND_DIR && $ACTIVATE_CMD && export PYTHONPATH='$BACKEND_DIR' && python services/model_manager/unified_model_server.py 2>&1 | tee services/model_manager/ums.log" Enter
 
 # Окно 5: Monitor/Logs
 echo -e "${GREEN}Открытие окна мониторинга...${NC}"
