@@ -290,6 +290,34 @@ docker compose logs --tail=200 -f vllm
 
 В текущем safe slice это поднимает только heavy text-generation runtime. Embeddings и `gguf-vl` остаются на локальном backend path.
 
+### Benchmark before/after migration
+
+Для честного сравнения `llama-server` и `vLLM` используй один и тот же benchmark harness:
+
+```bash
+# baseline
+python scripts/benchmark.py --output results/llama-server.json
+
+# candidate
+docker compose --profile vllm up -d vllm
+BACKEND_MODE=vllm python scripts/benchmark.py --output results/vllm.json
+
+# compare
+python scripts/benchmark_compare.py \
+  results/llama-server.json \
+  results/vllm.json \
+  --baseline-label llama-server \
+  --candidate-label vllm \
+  --json-output results/vllm-migration-compare.json
+```
+
+Сравнение нужно читать вместе с:
+- `backend_mode`
+- `runtime_profile`
+- `effective_context_tokens`
+- `retrieved_context_tokens_budget`
+- `placements`
+
 ### Подключение к tmux
 
 ```bash

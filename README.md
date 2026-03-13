@@ -330,6 +330,33 @@ python scripts/benchmark_compare.py results/cpu.json results/gpu.json --json-out
 Скрипт автоматически фиксирует параметры `.env` и UMS runtime profile в JSON-результат.
 `benchmark_compare.py` сравнивает latency/status/runtime metadata по shared/add/remove scenarios и даёт operator-friendly сводку.
 
+Для сравнения **`llama-server` vs `vLLM` migration path**:
+
+```bash
+# 1. Baseline: локальный heavy runtime
+BACKEND_MODE=llama-server ./scripts/run_all.sh --no-attach
+python scripts/benchmark.py --output results/llama-server.json
+
+# 2. Candidate: remote vLLM runtime
+docker compose --profile vllm up -d vllm
+BACKEND_MODE=vllm python scripts/benchmark.py --output results/vllm.json
+
+# 3. Compare
+python scripts/benchmark_compare.py \
+  results/llama-server.json \
+  results/vllm.json \
+  --baseline-label llama-server \
+  --candidate-label vllm \
+  --json-output results/vllm-migration-compare.json
+```
+
+В benchmark JSON теперь отдельно фиксируются:
+- `backend_mode`
+- `runtime_metadata`
+- `runtime_profile`
+- `active_heavy_model`
+- `running_models`
+
 ## Полезные команды
 
 Runtime preflight report:

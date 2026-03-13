@@ -13,6 +13,7 @@ from scripts import benchmark_compare
 
 def _make_report(
     *,
+    backend_mode="llama-server",
     runtime_profile="adaptive",
     total_time_sec=10.0,
     results=None,
@@ -21,7 +22,19 @@ def _make_report(
     return {
         "timestamp": "2026-03-13 10:00:00",
         "api_url": "http://localhost:8000",
+        "backend_mode": backend_mode,
+        "runtime_metadata": {
+            "backend_mode": backend_mode,
+            "runtime_profile": runtime_profile,
+            "active_heavy_model": "qwen-14b-llm",
+            "running_models": ["qwen-14b-llm"],
+            "effective_context_tokens": 8192,
+            "retrieved_context_tokens_budget": 4915,
+            "generation_tokens_reserve": 1024,
+            "placements": placements or {},
+        },
         "ums_status": {
+            "backend_mode": backend_mode,
             "runtime_profile": runtime_profile,
             "effective_context_tokens": 8192,
             "retrieved_context_tokens_budget": 4915,
@@ -52,6 +65,7 @@ def test_compare_reports_marks_status_regression_and_speedup():
         ],
     )
     candidate = _make_report(
+        backend_mode="vllm",
         runtime_profile="manual",
         total_time_sec=9.0,
         results=[
@@ -73,7 +87,7 @@ def test_compare_reports_marks_status_regression_and_speedup():
     assert report["summary"]["regressed_status_count"] == 1
     assert report["summary"]["faster_count"] == 2
     assert report["summary"]["overall_speedup"] == 1.3333
-    assert report["runtime_diff"]["changed_keys"] == ["runtime_profile"]
+    assert report["runtime_diff"]["changed_keys"] == ["backend_mode", "runtime_profile"]
     compare_row = next(item for item in report["scenarios"] if item["scenario"] == "compare")
     assert compare_row["status_change"] == "regressed_status"
     assert compare_row["speedup"] == 1.1429
@@ -129,9 +143,9 @@ def test_render_console_report_contains_runtime_and_summary():
             "overall_speedup": 2.0,
         },
         "runtime_diff": {
-            "baseline": {"runtime_profile": "adaptive"},
-            "candidate": {"runtime_profile": "manual"},
-            "changed_keys": ["runtime_profile"],
+            "baseline": {"backend_mode": "llama-server", "runtime_profile": "adaptive"},
+            "candidate": {"backend_mode": "vllm", "runtime_profile": "manual"},
+            "changed_keys": ["backend_mode", "runtime_profile"],
         },
         "scenarios": [
             {
@@ -152,7 +166,7 @@ def test_render_console_report_contains_runtime_and_summary():
     text = benchmark_compare.render_console_report(report)
 
     assert "Benchmark Compare: CPU -> GPU" in text
-    assert "Runtime changes: runtime_profile" in text
+    assert "Runtime changes: backend_mode, runtime_profile" in text
     assert "chat" in text
     assert "2.00x" in text
 
@@ -177,6 +191,7 @@ def test_main_writes_json_output(tmp_path, capsys):
     candidate_path.write_text(
         json.dumps(
             _make_report(
+                backend_mode="vllm",
                 runtime_profile="manual",
                 results=[{"scenario": "chat", "status": "ok", "elapsed_sec": 2.5}],
                 total_time_sec=2.5,
@@ -203,4 +218,4 @@ def test_main_writes_json_output(tmp_path, capsys):
     assert exit_code == 0
     assert "Benchmark Compare: CPU -> GPU" in captured.out
     assert payload["summary"]["overall_speedup"] == 2.0
-    assert payload["runtime_diff"]["changed_keys"] == ["runtime_profile"]
+    assert payload["runtime_diff"]["changed_keys"] == ["backend_mode", "runtime_profile"]

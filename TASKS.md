@@ -581,7 +581,18 @@
   Follow-up:
   - end-to-end smoke с живым `vLLM` контейнером и реальной моделью остаётся отдельным benchmark/deployment блоком (`T4.11`)
   - общий pytest tail-hang для более широкого `UMS`/runtime slice по-прежнему иногда проявляется после прохождения тестов; это известный harness residual, а не регрессия `T4.10`
-- [ ] T4.11 — E2E benchmark before/after migration
+- [x] T4.11 — E2E benchmark before/after migration
+  Benchmark harness обновлён под migration comparison `llama-server -> vllm`:
+  - `scripts/benchmark.py` теперь пишет `backend_mode` и `runtime_metadata`
+  - `scripts/benchmark_compare.py` сравнивает runtime diff с учётом `backend_mode`
+  - добавлен benchmark runner coverage в `backend/tests/test_benchmark_runner.py`
+  - operator workflow для before/after migration задокументирован в `README.md` и `docs/deploy-guide.md`
+  Проверки:
+  - `pytest backend/tests/test_benchmark_compare.py backend/tests/test_benchmark_runner.py -q`
+  - `python -m py_compile scripts/benchmark.py scripts/benchmark_compare.py backend/tests/test_benchmark_compare.py backend/tests/test_benchmark_runner.py`
+  - `git diff --check`
+  Follow-up:
+  - live benchmark с реально поднятым `vLLM` контейнером и production-size моделью остаётся operator/runtime exercise; этот шаг закрыл reproducible harness и compare contract
 - [ ] T4.12 — Security hardening для Ops UI
 
 ### Другие

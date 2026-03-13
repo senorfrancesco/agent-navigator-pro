@@ -96,7 +96,9 @@ class BenchmarkResult:
 class BenchmarkReport:
     timestamp: str = ""
     api_url: str = ""
+    backend_mode: str = ""
     ums_status: Dict[str, Any] = field(default_factory=dict)
+    runtime_metadata: Dict[str, Any] = field(default_factory=dict)
     env_snapshot: Dict[str, str] = field(default_factory=dict)
     results: List[Dict[str, Any]] = field(default_factory=list)
     summary: Dict[str, Any] = field(default_factory=dict)
@@ -133,6 +135,24 @@ def _print_result(result: BenchmarkResult, idx: int) -> None:
     print(f"  {icon} [{idx}] {result.scenario:<20s} {time_str:>10s}  {result.description}")
     if result.error:
         print(f"       \033[31m{result.error[:120]}\033[0m")
+
+
+def _build_runtime_metadata(ums_status: Dict[str, Any]) -> Dict[str, Any]:
+    placements = ums_status.get("placements") if isinstance(ums_status, dict) else {}
+    return {
+        "backend_mode": str((ums_status or {}).get("backend_mode") or os.getenv("BACKEND_MODE", "unknown")),
+        "runtime_profile": (ums_status or {}).get("runtime_profile"),
+        "active_heavy_model": (ums_status or {}).get("active_heavy_model"),
+        "running_models": (ums_status or {}).get("running"),
+        "effective_context_tokens": (ums_status or {}).get("effective_context_tokens"),
+        "retrieved_context_tokens_budget": (ums_status or {}).get("retrieved_context_tokens_budget"),
+        "generation_tokens_reserve": (ums_status or {}).get("generation_tokens_reserve"),
+        "placements": placements if isinstance(placements, dict) else {},
+        "agent_api_url": AGENT_API_URL,
+        "ums_url": UMS_URL,
+        "doc_server_url": DOC_SERVER_URL,
+        "legal_server_url": LEGAL_SERVER_URL,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -555,6 +575,8 @@ def collect_env_snapshot() -> Dict[str, str]:
         "INTENT_CLASSIFIER_MODE", "INTENT_CLASSIFIER_EMBEDDER_MODEL",
         "UMS_PORT", "AGENT_API_PORT",
         "MODEL_PATH_QWEN14B", "MODEL_PATH_LABSE",
+        "BACKEND_MODE", "VLLM_BASE_URL", "VLLM_MODEL_ID_QWEN_14B_LLM",
+        "UMS_RUNTIME_PROFILE", "ACTIVE_MODEL_ID",
     ]
     env_file = PROJECT_ROOT / "backend" / ".env"
     env_values: Dict[str, str] = {}
@@ -589,6 +611,7 @@ def run_benchmark(scenarios: List[str], repeats: int = 1, api_url: Optional[str]
     report = BenchmarkReport(
         timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
         api_url=AGENT_API_URL,
+        backend_mode=str(os.getenv("BACKEND_MODE", "unknown")),
         env_snapshot=collect_env_snapshot(),
     )
 
@@ -599,8 +622,11 @@ def run_benchmark(scenarios: List[str], repeats: int = 1, api_url: Optional[str]
         ums_resp = client.get(f"{UMS_URL}/status", timeout=15.0)
         if ums_resp.status_code == 200:
             report.ums_status = ums_resp.json()
+            report.backend_mode = str(report.ums_status.get("backend_mode") or report.backend_mode)
     except Exception:
         pass
+    report.runtime_metadata = _build_runtime_metadata(report.ums_status)
+    report.backend_mode = str(report.runtime_metadata.get("backend_mode") or report.backend_mode)
 
     print()
     print(f"\033[1;34m{'='*65}\033[0m")
@@ -613,9 +639,10 @@ def run_benchmark(scenarios: List[str], repeats: int = 1, api_url: Optional[str]
     gpu_layers = report.env_snapshot.get("N_GPU_LAYERS_QWEN14B", "?")
     ctx_size = report.env_snapshot.get("CONTEXT_SIZE_QWEN14B", "?")
     print(f"  GPU layers: {gpu_layers}  |  Context: {ctx_size}")
+    print(f"  Backend mode: {report.backend_mode}")
 
     if report.ums_status:
-        loaded = report.ums_status.get("loaded_models", [])
+        loaded = report.runtime_metadata.get("running_models") or report.ums_status.get("loaded_models", [])
         profile = report.ums_status.get("runtime_profile", "?")
         print(f"  UMS models: {', '.join(str(m) for m in loaded) if loaded else 'none'}")
         print(f"  Runtime profile: {profile}")

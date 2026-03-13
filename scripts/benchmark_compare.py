@@ -17,6 +17,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 RUNTIME_DIFF_KEYS = [
+    "backend_mode",
     "runtime_profile",
     "effective_context_tokens",
     "retrieved_context_tokens_budget",
@@ -84,8 +85,8 @@ def _compare_status(baseline_status: str, candidate_status: str) -> str:
 
 
 def _compare_runtime_diff(baseline: Dict[str, Any], candidate: Dict[str, Any]) -> Dict[str, Any]:
-    baseline_status = baseline.get("ums_status") or {}
-    candidate_status = candidate.get("ums_status") or {}
+    baseline_status = baseline.get("runtime_metadata") or baseline.get("ums_status") or {}
+    candidate_status = candidate.get("runtime_metadata") or candidate.get("ums_status") or {}
     runtime_diff = {
         "baseline": {},
         "candidate": {},
