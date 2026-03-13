@@ -47,6 +47,12 @@ def _reset_ums_state(monkeypatch, tmp_path):
         "UMS_LLM_MIN_BALANCE_RATIO",
         "UMS_EMBEDDING_GPU_INDEX",
         "UMS_DYNAMIC_MODELS_REGISTRY_PATH",
+        "UMS_LLM_MAX_CONCURRENCY",
+        "UMS_EMBED_MAX_CONCURRENCY",
+        "UMS_LLM_CONCURRENCY",
+        "UMS_EMBED_CONCURRENCY",
+        "UMS_CONCURRENCY_ACQUIRE_TIMEOUT_S",
+        "UMS_FAIL_FAST_ON_SATURATION",
     ):
         monkeypatch.delenv(env_name, raising=False)
     monkeypatch.setenv("UMS_DYNAMIC_MODELS_REGISTRY_PATH", str(tmp_path / "ums_dynamic_models.json"))
@@ -60,6 +66,11 @@ def _reset_ums_state(monkeypatch, tmp_path):
     ums_server.state["reserved_ports"] = set()
     ums_server.state["port_owners"] = {}
     ums_server.state["released_dynamic_ports"] = []
+    ums_server.state["concurrency_policy"] = {}
+    ums_server._llm_semaphore = asyncio.Semaphore(1)
+    ums_server._embed_semaphore = asyncio.Semaphore(4)
+    ums_server._concurrency_controls["llm_limit"] = 1
+    ums_server._concurrency_controls["embed_limit"] = 4
     yield
     ums_server.state.clear()
     ums_server.state.update(original_state)
@@ -447,6 +458,54 @@ def test_status_exposes_current_placements():
     assert payload["placements"]["labse-embedding"]["device_arg"] == "cuda:2"
 
 
+def test_status_exposes_concurrency_policy(monkeypatch):
+    monkeypatch.setenv("UMS_LLM_MAX_CONCURRENCY", "2")
+    monkeypatch.setenv("UMS_EMBED_MAX_CONCURRENCY", "6")
+    monkeypatch.setenv("UMS_CONCURRENCY_ACQUIRE_TIMEOUT_S", "1.5")
+    ums_server._refresh_concurrency_controls()
+
+    payload = asyncio.run(ums_server.get_status())
+
+    assert payload["concurrency_policy"]["llm_max_concurrency"] == 2
+    assert payload["concurrency_policy"]["embed_max_concurrency"] == 6
+    assert payload["concurrency_policy"]["acquire_timeout_s"] == 1.5
+    assert payload["concurrency_policy"]["fail_fast_on_saturation"] is False
+    assert payload["concurrency_policy"]["llm_inflight"] == 0
+    assert payload["concurrency_policy"]["embedding_inflight"] == 0
+
+
+def test_status_reports_inflight_concurrency(monkeypatch):
+    monkeypatch.setenv("UMS_LLM_MAX_CONCURRENCY", "2")
+    monkeypatch.setenv("UMS_EMBED_MAX_CONCURRENCY", "6")
+    ums_server._concurrency_controls["llm_limit"] = 2
+    ums_server._concurrency_controls["embed_limit"] = 6
+    ums_server._llm_semaphore = asyncio.Semaphore(1)
+    ums_server._embed_semaphore = asyncio.Semaphore(4)
+
+    payload = asyncio.run(ums_server.get_status())
+
+    assert payload["concurrency_policy"]["llm_inflight"] == 1
+    assert payload["concurrency_policy"]["embedding_inflight"] == 2
+
+
+def test_status_does_not_recreate_live_semaphores(monkeypatch):
+    original_llm_sem = asyncio.Semaphore(1)
+    original_embed_sem = asyncio.Semaphore(3)
+    ums_server._llm_semaphore = original_llm_sem
+    ums_server._embed_semaphore = original_embed_sem
+    ums_server._concurrency_controls["llm_limit"] = 2
+    ums_server._concurrency_controls["embed_limit"] = 5
+    monkeypatch.setenv("UMS_LLM_MAX_CONCURRENCY", "7")
+    monkeypatch.setenv("UMS_EMBED_MAX_CONCURRENCY", "9")
+
+    payload = asyncio.run(ums_server.get_status())
+
+    assert ums_server._llm_semaphore is original_llm_sem
+    assert ums_server._embed_semaphore is original_embed_sem
+    assert payload["concurrency_policy"]["llm_max_concurrency"] == 2
+    assert payload["concurrency_policy"]["embed_max_concurrency"] == 5
+
+
 def test_models_api_lists_available_models_and_active_state():
     ums_server.state["active_model"] = "qwen-14b-llm"
     ums_server.state["processes"] = {"qwen-14b-llm": _FakeProcess(pid=111)}
@@ -825,6 +884,106 @@ def test_discovered_model_gets_stable_reserved_port_mapping(tmp_path):
     assert second["port"] == 8100
     assert ums_server.state["discovered_model_ports"]["dynamic-qwen"] == 8100
     assert ums_server.state["port_owners"][8100] == "dynamic-qwen"
+
+
+@pytest.mark.asyncio
+async def test_infer_returns_429_when_llm_concurrency_is_saturated(monkeypatch):
+    monkeypatch.setenv("UMS_FAIL_FAST_ON_SATURATION", "true")
+    monkeypatch.setenv("UMS_CONCURRENCY_ACQUIRE_TIMEOUT_S", "0.01")
+    ums_server._llm_semaphore = asyncio.Semaphore(0)
+
+    with patch.object(ums_server, "_start_server") as mock_start:
+        with pytest.raises(ums_server.HTTPException) as exc_info:
+            await ums_server.infer(
+                ums_server.InferRequest(
+                    model_id="qwen-14b-llm",
+                    payload={"prompt": "test"},
+                    stream=False,
+                )
+            )
+
+    mock_start.assert_not_called()
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.detail == "llm concurrency saturated"
+
+
+@pytest.mark.asyncio
+async def test_openai_embeddings_returns_429_when_embedding_concurrency_is_saturated(monkeypatch):
+    monkeypatch.setenv("UMS_FAIL_FAST_ON_SATURATION", "true")
+    monkeypatch.setenv("UMS_CONCURRENCY_ACQUIRE_TIMEOUT_S", "0.01")
+    ums_server._embed_semaphore = asyncio.Semaphore(0)
+
+    with patch.object(ums_server, "_start_server") as mock_start:
+        with pytest.raises(ums_server.HTTPException) as exc_info:
+            await ums_server.openai_embeddings(
+                ums_server.EmbeddingRequest(
+                    input="test embedding",
+                    model="labse-embedding",
+                )
+            )
+
+    mock_start.assert_not_called()
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.detail == "embedding concurrency saturated"
+
+
+@pytest.mark.asyncio
+async def test_fail_fast_rejects_without_waiting(monkeypatch):
+    monkeypatch.setenv("UMS_FAIL_FAST_ON_SATURATION", "true")
+    sem = asyncio.Semaphore(0)
+
+    async def unexpected_wait_for(*args, **kwargs):
+        raise AssertionError("wait_for should not be used in fail-fast mode")
+
+    with patch.object(ums_server.asyncio, "wait_for", side_effect=unexpected_wait_for):
+        with pytest.raises(ums_server.HTTPException) as exc_info:
+            async with ums_server._acquire_runtime_slot(sem, "llm"):
+                pytest.fail("slot acquisition should fail before entering context")
+
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.detail == "llm concurrency saturated"
+
+
+@pytest.mark.asyncio
+async def test_stream_infer_returns_429_before_opening_stream(monkeypatch):
+    monkeypatch.setenv("UMS_FAIL_FAST_ON_SATURATION", "true")
+    monkeypatch.setenv("UMS_CONCURRENCY_ACQUIRE_TIMEOUT_S", "0.01")
+    ums_server._llm_semaphore = asyncio.Semaphore(0)
+
+    with patch.object(ums_server, "_start_server") as mock_start:
+        response = await _api_request(
+            "POST",
+            "/infer",
+            json={
+                "model_id": "qwen-14b-llm",
+                "payload": {"prompt": "test"},
+                "stream": True,
+            },
+        )
+
+    mock_start.assert_not_called()
+    assert response.status_code == 429
+    assert response.json()["detail"] == "stream concurrency saturated"
+
+
+@pytest.mark.asyncio
+async def test_stream_infer_releases_slot_when_startup_fails(monkeypatch):
+    monkeypatch.setenv("UMS_FAIL_FAST_ON_SATURATION", "true")
+    monkeypatch.setenv("UMS_LLM_MAX_CONCURRENCY", "1")
+    ums_server._llm_semaphore = asyncio.Semaphore(1)
+
+    with patch.object(ums_server, "_start_server", side_effect=RuntimeError("boom")):
+        with pytest.raises(ums_server.HTTPException) as exc_info:
+            await ums_server.infer(
+                ums_server.InferRequest(
+                    model_id="qwen-14b-llm",
+                    payload={"prompt": "test"},
+                    stream=True,
+                )
+            )
+
+    assert exc_info.value.status_code == 500
+    assert getattr(ums_server._llm_semaphore, "_value", None) == 1
 
 
 def test_register_endpoint_rejects_reserved_port_conflict():

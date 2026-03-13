@@ -16,6 +16,7 @@ import psutil
 import warnings
 import threading
 from contextlib import suppress
+from contextlib import asynccontextmanager as async_cm
 from enum import Enum
 from typing import Dict, List, Optional, Any, AsyncGenerator
 from pathlib import Path
@@ -105,6 +106,7 @@ state = {
     "reserved_ports": set(),
     "port_owners": {},
     "released_dynamic_ports": [],
+    "concurrency_policy": {},
 }
 _model_start_locks: Dict[str, threading.Lock] = {}
 _model_start_locks_guard = threading.Lock()
@@ -279,6 +281,18 @@ def _read_runtime_float(name: str, default: float) -> float:
         return float(raw)
     except ValueError:
         return default
+
+
+def _read_runtime_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = str(raw).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
 
 
 def _get_runtime_ctx_size() -> int:
@@ -782,12 +796,121 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Unified Model Server", version="3.0.0", lifespan=lifespan)
 
-# Concurrency control: llama-server — однопоточный inference, ONNX LaBSE — допускает параллелизм
+# Concurrency control: llama-server — ограниченный параллелизм, embeddings допускают более широкий.
 _llm_semaphore = asyncio.Semaphore(1)
 _embed_semaphore = asyncio.Semaphore(4)
+_concurrency_controls = {"llm_limit": 1, "embed_limit": 4}
 
 
-async def _proxy_sse_stream(url: str, payload: Dict[str, Any], sem: asyncio.Semaphore) -> AsyncGenerator[bytes, None]:
+def _read_concurrency_limit(name: str, default: int, aliases: Optional[List[str]] = None) -> int:
+    candidate_names = [name, *(aliases or [])]
+    for candidate in candidate_names:
+        raw = os.getenv(candidate)
+        if raw is None:
+            continue
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            continue
+    return default
+
+
+def _get_concurrency_inflight_snapshot() -> Dict[str, int]:
+    llm_limit = int(_concurrency_controls["llm_limit"])
+    embed_limit = int(_concurrency_controls["embed_limit"])
+    llm_available = max(0, int(getattr(_llm_semaphore, "_value", llm_limit)))
+    embed_available = max(0, int(getattr(_embed_semaphore, "_value", embed_limit)))
+    return {
+        "llm_inflight": max(0, llm_limit - llm_available),
+        "llm_available": min(llm_limit, llm_available),
+        "llm_saturated": llm_available <= 0,
+        "embedding_inflight": max(0, embed_limit - embed_available),
+        "embedding_available": min(embed_limit, embed_available),
+        "embedding_saturated": embed_available <= 0,
+    }
+
+
+def _get_concurrency_policy_snapshot(
+    policy: Optional[Dict[str, Any]] = None,
+    *,
+    use_live_limits: bool = True,
+) -> Dict[str, Any]:
+    base_policy = dict(policy or _resolve_concurrency_policy())
+    if use_live_limits:
+        base_policy["llm_max_concurrency"] = int(_concurrency_controls["llm_limit"])
+        base_policy["embed_max_concurrency"] = int(_concurrency_controls["embed_limit"])
+    return {
+        **base_policy,
+        **_get_concurrency_inflight_snapshot(),
+    }
+
+
+def _resolve_concurrency_policy() -> Dict[str, Any]:
+    return {
+        "llm_max_concurrency": _read_concurrency_limit(
+            "UMS_LLM_MAX_CONCURRENCY",
+            1,
+            aliases=["UMS_LLM_CONCURRENCY"],
+        ),
+        "embed_max_concurrency": _read_concurrency_limit(
+            "UMS_EMBED_MAX_CONCURRENCY",
+            4,
+            aliases=["UMS_EMBED_CONCURRENCY"],
+        ),
+        "acquire_timeout_s": max(0.1, _read_runtime_float("UMS_CONCURRENCY_ACQUIRE_TIMEOUT_S", 5.0)),
+        "fail_fast_on_saturation": _read_runtime_bool("UMS_FAIL_FAST_ON_SATURATION", False),
+    }
+
+
+def _refresh_concurrency_controls() -> Dict[str, Any]:
+    global _llm_semaphore, _embed_semaphore
+    policy = _resolve_concurrency_policy()
+    llm_limit = int(policy["llm_max_concurrency"])
+    embed_limit = int(policy["embed_max_concurrency"])
+    if _concurrency_controls["llm_limit"] != llm_limit:
+        _llm_semaphore = asyncio.Semaphore(llm_limit)
+        _concurrency_controls["llm_limit"] = llm_limit
+    if _concurrency_controls["embed_limit"] != embed_limit:
+        _embed_semaphore = asyncio.Semaphore(embed_limit)
+        _concurrency_controls["embed_limit"] = embed_limit
+    state["concurrency_policy"] = _get_concurrency_policy_snapshot(policy, use_live_limits=False)
+    return dict(state["concurrency_policy"])
+
+
+@async_cm
+async def _acquire_runtime_slot(sem: asyncio.Semaphore, kind: str):
+    policy = await _reserve_runtime_slot(sem, kind)
+    try:
+        yield policy
+    finally:
+        _release_runtime_slot(sem)
+
+
+async def _reserve_runtime_slot(sem: asyncio.Semaphore, kind: str) -> Dict[str, Any]:
+    policy = _refresh_concurrency_controls()
+    timeout_s = float(policy["acquire_timeout_s"])
+    if bool(policy.get("fail_fast_on_saturation")) and getattr(sem, "_value", 0) <= 0:
+        raise HTTPException(status_code=429, detail=f"{kind} concurrency saturated")
+    try:
+        await asyncio.wait_for(sem.acquire(), timeout=timeout_s)
+    except TimeoutError as exc:
+        raise HTTPException(status_code=429, detail=f"{kind} concurrency saturated") from exc
+    state["concurrency_policy"] = _get_concurrency_policy_snapshot(policy, use_live_limits=False)
+    return dict(state["concurrency_policy"])
+
+
+def _release_runtime_slot(sem: asyncio.Semaphore) -> None:
+    sem.release()
+    state["concurrency_policy"] = _get_concurrency_policy_snapshot()
+
+
+async def _proxy_sse_stream(
+    url: str,
+    payload: Dict[str, Any],
+    sem: asyncio.Semaphore,
+    *,
+    slot_pre_acquired: bool = False,
+) -> AsyncGenerator[bytes, None]:
     """
     Проксирует upstream SSE через очередь и отдельную producer-task.
 
@@ -798,20 +921,25 @@ async def _proxy_sse_stream(url: str, payload: Dict[str, Any], sem: asyncio.Sema
     queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
 
     async def producer() -> None:
+        owns_slot = False
         try:
-            async with sem:
-                async with httpx.AsyncClient(timeout=300.0) as stream_client:
-                    async with stream_client.stream("POST", url, json=payload) as resp:
-                        resp.raise_for_status()
-                        async for line in resp.aiter_lines():
-                            if line:
-                                await queue.put(("chunk", f"{line}\n\n".encode()))
+            if not slot_pre_acquired:
+                await _reserve_runtime_slot(sem, "stream")
+                owns_slot = True
+            async with httpx.AsyncClient(timeout=300.0) as stream_client:
+                async with stream_client.stream("POST", url, json=payload) as resp:
+                    resp.raise_for_status()
+                    async for line in resp.aiter_lines():
+                        if line:
+                            await queue.put(("chunk", f"{line}\n\n".encode()))
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.warning(f"Upstream SSE proxy error for {url}: {exc}")
             await queue.put(("error", exc))
         finally:
+            if slot_pre_acquired or owns_slot:
+                _release_runtime_slot(sem)
             await queue.put(("done", None))
 
     producer_task = asyncio.create_task(producer(), name=f"ums-proxy:{os.path.basename(url)}")
@@ -1001,9 +1129,10 @@ def _unregister_dynamic_model(model_id: str) -> None:
 @app.post("/infer")
 async def infer(request: InferRequest):
     try:
-        await asyncio.to_thread(_start_server, request.model_id, request.device_mode or state["device_mode"])
+        policy = _refresh_concurrency_controls()
         config = get_model_config(request.model_id)
         sem = _embed_semaphore if config["type"] == "st" else _llm_semaphore
+        slot_kind = "embedding" if config["type"] == "st" else "llm"
 
         is_chat = "messages" in request.payload
         url_suffix = "v1/embeddings" if config["type"] == "st" else f"v1/{'chat/' if is_chat else ''}completions"
@@ -1013,16 +1142,31 @@ async def infer(request: InferRequest):
         if request.stream: payload["stream"] = True
 
         if request.stream:
+            policy = await _reserve_runtime_slot(sem, "stream")
+            try:
+                await asyncio.to_thread(_start_server, request.model_id, request.device_mode or state["device_mode"])
+            except Exception:
+                _release_runtime_slot(sem)
+                raise
             return StreamingResponse(
-                _proxy_sse_stream(url, payload, sem),
+                _proxy_sse_stream(url, payload, sem, slot_pre_acquired=True),
                 media_type="text/event-stream",
+                headers={"X-UMS-Concurrency-Policy": json.dumps(policy, sort_keys=True)},
             )
         else:
-            async with sem:
+            async with _acquire_runtime_slot(sem, slot_kind) as policy:
+                await asyncio.to_thread(_start_server, request.model_id, request.device_mode or state["device_mode"])
                 async with httpx.AsyncClient(timeout=300.0) as client:
                     resp = await client.post(url, json=payload)
-                    return {"status": "success", "model": request.model_id, "result": resp.json()}
+                    return {
+                        "status": "success",
+                        "model": request.model_id,
+                        "result": resp.json(),
+                        "concurrency_policy": policy,
+                    }
     except Exception as e:
+        if isinstance(e, HTTPException):
+            raise
         logger.error(f"Inference Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1118,6 +1262,7 @@ async def get_status():
             "embedding_backend": tc.embedding_backend,
         }
     runtime_budget = resolve_runtime_budget()
+    concurrency_policy = _get_concurrency_policy_snapshot()
     return {
         "active_heavy_model": state["active_model"],
         "running": list(state["processes"].keys()),
@@ -1129,6 +1274,7 @@ async def get_status():
         "retrieved_context_tokens_budget": runtime_budget["retrieved_context_tokens_budget"],
         "generation_tokens_reserve": runtime_budget["generation_tokens_reserve"],
         "context_budget_ratio": runtime_budget["context_budget_ratio"],
+        "concurrency_policy": concurrency_policy,
     }
 
 @app.post("/v1/embeddings")
@@ -1139,7 +1285,6 @@ async def openai_embeddings(request: EmbeddingRequest):
         model_id = "labse-embedding"
 
     try:
-        await asyncio.to_thread(_start_server, model_id, state["device_mode"])
         config = get_model_config(model_id)
         url = f"http://localhost:{config['port']}/v1/embeddings"
 
@@ -1147,7 +1292,8 @@ async def openai_embeddings(request: EmbeddingRequest):
         texts = request.input if isinstance(request.input, list) else [request.input]
 
         payload = {"input": texts, "model": model_id}
-        async with _embed_semaphore:
+        async with _acquire_runtime_slot(_embed_semaphore, "embedding"):
+            await asyncio.to_thread(_start_server, model_id, state["device_mode"])
             async with httpx.AsyncClient(timeout=60.0) as client:
                 resp = await client.post(url, json=payload)
                 resp.raise_for_status()
@@ -1169,6 +1315,8 @@ async def openai_embeddings(request: EmbeddingRequest):
 
         return result
     except Exception as e:
+        if isinstance(e, HTTPException):
+            raise
         logger.error(f"Embeddings Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
