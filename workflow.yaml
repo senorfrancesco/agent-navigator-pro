@@ -11,11 +11,11 @@ description: |
 context:
   required_reads:
     - AGENTS.md
-    - TASKS.md
     - TASKS_NIGHT.md
     - workflow.yaml
   primary_backlog: TASKS_NIGHT.md
-  secondary_backlog: TASKS.md
+  global_backlog: TASKS.md
+  night_logs_target: TASKS_NIGHT.md#ЛОГИ
 
 scope:
   allowed_paths:
@@ -23,7 +23,6 @@ scope:
     - docs/**
     - README.md
     - AGENTS.md
-    - TASKS.md
     - TASKS_NIGHT.md
     - workflow.yaml
   soft_allowed_paths:
@@ -55,7 +54,8 @@ policy:
   legacy_ui: open-webui
   backend_first: true
   one_task_group_at_a_time: true
-  require_task_md_sync: true
+  require_task_night_sync: true
+  require_night_logs_sync: true
   require_safe_checkpoint: true
   no_push_by_default: true
   no_destructive_commands: true
@@ -74,6 +74,8 @@ execution:
     - update-backlog
     - checkpoint
   checkpoint_output:
+    target_file: TASKS_NIGHT.md
+    target_section: ЛОГИ
     required_fields:
       - completed_work
       - verification_run
@@ -136,8 +138,8 @@ commit_policy:
 
 night_handoff:
   update_files:
-    - TASKS.md
     - TASKS_NIGHT.md
+  logs_section: ЛОГИ
   must_record:
     - decisions
     - workarounds

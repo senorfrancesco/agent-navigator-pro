@@ -35,11 +35,11 @@
 
 Требования:
 
-- [ ] читать `AGENTS.md`, `TASKS.md`, `TASKS_NIGHT.md`, `workflow.yaml` перед циклом работы
+- [ ] читать `AGENTS.md`, `TASKS_NIGHT.md`, `workflow.yaml` перед циклом работы
 - [ ] работать только по первому незавершённому блоку из `TASKS_NIGHT.md`
 - [ ] не делать push без явного запроса
 - [ ] не делать destructive git actions
-- [ ] обновлять `TASKS.md` при workaround/blocker
+- [ ] писать workaround/blocker/progress только в главу `ЛОГИ` в конце `TASKS_NIGHT.md`
 - [ ] не закрывать задачу без verification
 - [ ] останавливаться на safe checkpoint при blocker'е
 
@@ -276,7 +276,7 @@ README.md
 
 ## Deliverables
 
-- Обновлённый `TASKS.md` с follow-up'ами и найденным техдолгом.
+- Обновлённая глава `ЛОГИ` в `TASKS_NIGHT.md` с follow-up'ами и найденным техдолгом.
 - Проверки для затронутых shell-скриптов и docs.
 - Локальный checkpoint summary в конце ночного цикла.
 
@@ -284,7 +284,7 @@ README.md
 
 - [ ] После каждого shell-change есть `bash -n` для затронутых скриптов.
 - [ ] После документационных правок проверены ссылки и согласованность с `README.md`.
-- [ ] Все временные допущения записаны в `TASKS.md`.
+- [ ] Все временные допущения записаны в главе `ЛОГИ` в `TASKS_NIGHT.md`.
 - [ ] Если slice не закрыт, это явно отмечено как `partial` в `TASKS_NIGHT.md`.
 
 ---
@@ -296,7 +296,7 @@ README.md
 - [ ] `bash -n` для затронутых `scripts/*.sh`
 - [ ] targeted smoke-команды только если они безопасны и не требуют ручного ввода
 - [ ] `git diff --check`
-- [ ] обновление `TASKS.md`
+- [ ] обновление главы `ЛОГИ` в `TASKS_NIGHT.md`
 - [ ] web research по официальным источникам, если задача зависит от внешних install/runtime docs
 
 ---
@@ -320,5 +320,23 @@ README.md
 - [ ] что сделано
 - [ ] что проверено
 - [ ] что осталось
-- [ ] какие follow-up'ы добавлены в `TASKS.md`
+- [ ] какие follow-up'ы добавлены в главу `ЛОГИ`
 - [ ] был ли сделан commit
+
+---
+
+# ЛОГИ
+
+Добавлять новые записи только в конец этого раздела.
+
+Формат записи:
+
+```md
+## YYYY-MM-DD HH:MM — Night checkpoint
+- Task group: ...
+- Что сделано: ...
+- Что проверено: ...
+- Блокеры / риски: ...
+- Follow-up: ...
+- Commit status: ...
+```
