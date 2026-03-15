@@ -1,0 +1,145 @@
+version: 1
+mode: night-autonomous
+name: codex-night-safe-workflow
+schema_status: repo-local-policy
+description: |
+  This file is a repository-local execution policy for Codex night work.
+  It is not treated as an official OpenAI Codex workflow schema; official Codex
+  materials publicly document AGENTS.md and configurable rules/sandboxing, but
+  do not define a native workflow.yaml contract.
+
+context:
+  required_reads:
+    - AGENTS.md
+    - TASKS.md
+    - TASKS_NIGHT.md
+    - workflow.yaml
+  primary_backlog: TASKS_NIGHT.md
+  secondary_backlog: TASKS.md
+
+scope:
+  allowed_paths:
+    - scripts/**
+    - docs/**
+    - README.md
+    - AGENTS.md
+    - TASKS.md
+    - TASKS_NIGHT.md
+    - workflow.yaml
+  soft_allowed_paths:
+    - backend/tests/**
+  forbidden_paths:
+    - .env
+    - .env.*
+    - backend/open_webui_uploads/**
+    - backend/.chainlit/**
+    - .chainlit/**
+    - backend/models/**
+    - backend/orchestrator/.files/**
+  forbidden_work_types:
+    - destructive_git
+    - schema_migration
+    - secret_rotation
+    - dependency_upgrade_without_plan
+    - broad_backend_refactor
+    - push_without_request
+
+policy:
+  base_branch: v3.0
+  current_branch_is_not_canonical: true
+  current_branch_handling:
+    rule: treat-current-branch-as-feature-branch
+    never-present-as-mainline: true
+    do-not-rewrite-branch-history: true
+  primary_ui: chainlit
+  legacy_ui: open-webui
+  backend_first: true
+  one_task_group_at_a_time: true
+  require_task_md_sync: true
+  require_safe_checkpoint: true
+  no_push_by_default: true
+  no_destructive_commands: true
+
+execution:
+  task_selection:
+    strategy: first-unchecked-task-group
+    max_parallel_subtasks: 2
+    require_disjoint_scope_for_parallelism: true
+  phases:
+    - read-context
+    - choose-task-group
+    - decompose-subtasks
+    - implement
+    - verify
+    - update-backlog
+    - checkpoint
+  checkpoint_output:
+    required_fields:
+      - completed_work
+      - verification_run
+      - remaining_work
+      - blockers
+      - followups_added
+      - commit_status
+
+verification:
+  web_research:
+    required_when:
+      - information_is_time_sensitive
+      - task_depends_on_external_tooling_or_official_install_docs
+      - user_explicitly_requests_internet_verification
+    preferred_sources:
+      - official_docs
+      - vendor_docs
+      - primary_repositories
+  shell_changes:
+    required:
+      - bash -n
+      - git diff --check
+  docs_changes:
+    required:
+      - link-consistency-review
+      - readme-sync-review
+  python_changes:
+    required:
+      - python -m py_compile
+      - targeted-pytest
+  completion_rules:
+    allow_partial_when:
+      - blocker_recorded
+      - verification_scope_documented
+    forbid_completion_when:
+      - no_verification_ran
+      - failing_required_check
+      - undocumented_workaround
+
+stop_conditions:
+  - unexpected_dirty_diff_outside_scope
+  - required_network_access_without_approval
+  - missing_secret_or_external_credential
+  - need_for_schema_or_data_migration
+  - need_for_file_deletion_outside_temp_artifacts
+  - task_expands_beyond_allowed_paths
+  - verification_flaky_without_localized_cause
+  - acceptance_criteria_ambiguous
+
+commit_policy:
+  allow_local_commit: true
+  allow_push: false
+  require_conventional_commit: true
+  require_single_logical_slice: true
+  require_verification_summary_in_handoff: true
+  forbid_commit_when:
+    - unrelated_diff_present
+    - required_checks_not_run
+    - blocker_unrecorded
+
+night_handoff:
+  update_files:
+    - TASKS.md
+    - TASKS_NIGHT.md
+  must_record:
+    - decisions
+    - workarounds
+    - residual_risks
+    - next_step

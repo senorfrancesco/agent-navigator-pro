@@ -103,24 +103,8 @@ fi
 # Создаем новую tmux сессию
 # -------------------------------------------
 SESSION_NAME="agent-navigator"
-
-if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
-    echo -e "${YELLOW}Завершение существующей сессии...${NC}"
-    tmux kill-session -t "$SESSION_NAME"
-fi
-
-# Явное завершение llama-server (остаётся в памяти после закрытия tmux)
-LLAMA_PIDS=$(pgrep -f "llama-server" 2>/dev/null)
-if [ -n "$LLAMA_PIDS" ]; then
-    echo -e "${YELLOW}Завершение llama-server перед запуском (PID: $LLAMA_PIDS)...${NC}"
-    echo "$LLAMA_PIDS" | xargs kill 2>/dev/null
-    sleep 1
-    LLAMA_PIDS=$(pgrep -f "llama-server" 2>/dev/null)
-    if [ -n "$LLAMA_PIDS" ]; then
-        echo "$LLAMA_PIDS" | xargs kill -9 2>/dev/null
-    fi
-    echo -e "${GREEN}  llama-server завершён${NC}"
-fi
+echo -e "${YELLOW}Завершение существующих tmux/runtime/docker процессов...${NC}"
+"$SCRIPT_DIR/stop_all.sh" >/dev/null 2>&1 || true
 
 tmux new-session -d -s "$SESSION_NAME" -x 200 -y 50
 
@@ -159,13 +143,13 @@ sleep 2
 # Окно 2: Document Server
 echo -e "${GREEN}Запуск Document Server на порту $DOC_PORT...${NC}"
 tmux new-window -t "$SESSION_NAME" -n "doc-server"
-tmux send-keys -t "$SESSION_NAME:doc-server" "cd $BACKEND_DIR/services/document_server && $ACTIVATE_CMD && uvicorn mcp_document_server:app --host 0.0.0.0 --port $DOC_PORT 2>&1 | tee doc-server.log" Enter
+tmux send-keys -t "$SESSION_NAME:doc-server" "cd $BACKEND_DIR/services/document_server && $ACTIVATE_CMD && export PYTHONPATH='$BACKEND_DIR' && uvicorn mcp_document_server:app --host 0.0.0.0 --port $DOC_PORT 2>&1 | tee doc-server.log" Enter
 sleep 2
 
 # Окно 3: Legal Server
 echo -e "${GREEN}Запуск Legal Server на порту $LEGAL_PORT...${NC}"
 tmux new-window -t "$SESSION_NAME" -n "legal-server"
-tmux send-keys -t "$SESSION_NAME:legal-server" "cd $BACKEND_DIR/services/legal_server && $ACTIVATE_CMD && uvicorn mcp_legal_server:app --host 0.0.0.0 --port $LEGAL_PORT 2>&1 | tee legal-server.log" Enter
+tmux send-keys -t "$SESSION_NAME:legal-server" "cd $BACKEND_DIR/services/legal_server && $ACTIVATE_CMD && export PYTHONPATH='$BACKEND_DIR' && uvicorn mcp_legal_server:app --host 0.0.0.0 --port $LEGAL_PORT 2>&1 | tee legal-server.log" Enter
 sleep 2
 
 # Окно 4: UMS (Unified Model Server)

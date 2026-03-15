@@ -913,6 +913,28 @@
   Follow-up:
   - remaining magic numbers в `shared/report_utils`, `rag/retriever`, `equipment` и API glue остаются отдельным cleanup slice; `TD-9` закрыт только для runtime-critical surface
 
+### Night autonomy and shutdown hardening
+
+- [x] Added safe night-autonomous control layer:
+  - `AGENTS.md` now contains `Night Autonomous Mode`
+  - `TASKS_NIGHT.md` added as agent-friendly nightly backlog
+  - `workflow.yaml` added as repo-local execution policy
+- [x] Recorded that `workflow.yaml` is not an official Codex schema:
+  - public Codex guidance confirms `AGENTS.md` and configurable rules/sandboxing
+  - this repository uses `workflow.yaml` only as a local policy layer for unattended work
+- [x] Hardened shutdown and relaunch scripts against orphaned model runtimes:
+  - `stop_native.sh` and `stop_all.sh` now clean up `unified_model_server.py`, project-scoped `llama-server`, and orphaned `st_server.py`
+  - `stop_all.sh` now stops both tmux sessions: `agent-navigator` and `agent-navigator-native`
+  - service ports are now loaded from `.env` / `.env.native` / `.env.runtime` instead of being hardcoded
+  - `run_native.sh`, `run_all.sh`, `run_openwebui.sh`, and `start_system_test.sh` now reuse the full stop-path before relaunch so orphaned embedding runtimes do not accumulate across restarts
+  Verification:
+  - `bash -n scripts/stop_native.sh scripts/stop_all.sh scripts/run_native.sh scripts/run_all.sh scripts/run_openwebui.sh scripts/start_system_test.sh`
+  - live runtime check:
+    - `./scripts/run_native.sh --no-attach`
+    - `./scripts/stop_native.sh`
+    - `ps -eo pid,ppid,cmd | rg "(llama-server|st_server.py|unified_model_server.py)"`
+    - confirmed: orphaned `st_server.py` no longer remains after shutdown
+
 ---
 
 ## PR Inventory (20 draft PR)
@@ -951,6 +973,7 @@
 ### 2026-03-11 — NotebookLM operational note
 - Auth валидна (`nlm login --check` подтверждён)
 - MCP-интеграция нестабильна — использовать CLI fallback `nlm ...`
+- VS Code + Gemini Code Assist может циклически переподнимать `notebooklm-mcp`, если в `~/.gemini/settings.json` одновременно присутствуют `mcpServers.notebooklm` и `mcpServers.notebooklm-mcp`, а в `~/.gemini/mcp-server-enablement.json` отключён только `notebooklm`. Follow-up: оставить один канонический сервер и синхронизировать ключ enablement с фактическим именем сервера.
 
 ### 2026-03-12 — Orchestration boundary review
 - B3.31 ядро закрыто в коде (3 новых модуля + 37 тестов)

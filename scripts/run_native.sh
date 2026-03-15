@@ -116,18 +116,8 @@ if ! command -v tmux &> /dev/null; then
 fi
 
 SESSION_NAME="agent-navigator-native"
-
-if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
-  echo -e "${YELLOW}Завершение существующей native tmux сессии...${NC}"
-  tmux kill-session -t "$SESSION_NAME"
-fi
-
-LLAMA_PIDS=$(pgrep -f "llama-server" 2>/dev/null || true)
-if [ -n "$LLAMA_PIDS" ]; then
-  echo -e "${YELLOW}Завершение llama-server перед запуском (PID: $LLAMA_PIDS)...${NC}"
-  echo "$LLAMA_PIDS" | xargs kill 2>/dev/null || true
-  sleep 1
-fi
+echo -e "${YELLOW}Завершение существующей native tmux сессии и runtime-процессов...${NC}"
+"$SCRIPT_DIR/stop_native.sh" >/dev/null 2>&1 || true
 
 tmux new-session -d -s "$SESSION_NAME" -x 220 -y 60
 
@@ -221,12 +211,12 @@ SERVICES_OK=true
 
 # 1) Document Server
 echo -e "${GREEN}Запуск Document Server на порту $DOC_PORT...${NC}"
-start_tmux_window "doc-server" "cd $BACKEND_DIR/services/document_server && $ACTIVATE_CMD && uvicorn mcp_document_server:app --host 0.0.0.0 --port $DOC_PORT 2>&1 | tee doc-server.log"
+start_tmux_window "doc-server" "cd $BACKEND_DIR/services/document_server && $ACTIVATE_CMD && export PYTHONPATH='$BACKEND_DIR' && uvicorn mcp_document_server:app --host 0.0.0.0 --port $DOC_PORT 2>&1 | tee doc-server.log"
 wait_for_service "Document Server" "$DOC_PORT" "/health" 30 || SERVICES_OK=false
 
 # 2) Legal Server
 echo -e "${GREEN}Запуск Legal Server на порту $LEGAL_PORT...${NC}"
-start_tmux_window "legal-server" "cd $BACKEND_DIR/services/legal_server && $ACTIVATE_CMD && uvicorn mcp_legal_server:app --host 0.0.0.0 --port $LEGAL_PORT 2>&1 | tee legal-server.log"
+start_tmux_window "legal-server" "cd $BACKEND_DIR/services/legal_server && $ACTIVATE_CMD && export PYTHONPATH='$BACKEND_DIR' && uvicorn mcp_legal_server:app --host 0.0.0.0 --port $LEGAL_PORT 2>&1 | tee legal-server.log"
 wait_for_service "Legal Server" "$LEGAL_PORT" "/health" 30 || SERVICES_OK=false
 
 # 3) UMS

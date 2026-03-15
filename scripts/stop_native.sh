@@ -15,6 +15,58 @@ NC='\033[0m'
 
 SESSION_NAME="agent-navigator-native"
 
+load_runtime_env() {
+  local env_file
+  set -a
+  for env_file in \
+    "$PROJECT_ROOT/backend/.env" \
+    "$PROJECT_ROOT/backend/.env.native" \
+    "$PROJECT_ROOT/backend/.env.runtime"
+  do
+    if [ -f "$env_file" ]; then
+      # shellcheck disable=SC1090
+      source "$env_file"
+    fi
+  done
+  set +a
+}
+
+kill_pid_list() {
+  local label="$1"
+  local pids="$2"
+  if [ -z "$pids" ]; then
+    return
+  fi
+  echo -e "${YELLOW}Завершение $label (PID: $pids)...${NC}"
+  echo "$pids" | xargs kill 2>/dev/null || true
+  sleep 1
+  local survivors=""
+  for pid in $pids; do
+    if kill -0 "$pid" 2>/dev/null; then
+      survivors="${survivors}${pid} "
+    fi
+  done
+  if [ -n "$survivors" ]; then
+    echo "$survivors" | xargs kill -9 2>/dev/null || true
+  fi
+}
+
+kill_matching_processes() {
+  local label="$1"
+  local pattern="$2"
+  local pids
+  pids=$(pgrep -f "$pattern" 2>/dev/null || true)
+  kill_pid_list "$label" "$pids"
+}
+
+load_runtime_env
+
+CHAINLIT_PORT="${CHAINLIT_PORT:-3000}"
+AGENT_API_PORT="${AGENT_API_PORT:-8000}"
+DOC_PORT="${DOC_PORT:-8001}"
+LEGAL_PORT="${LEGAL_PORT:-8002}"
+UMS_PORT="${UMS_PORT:-8090}"
+
 echo -e "${RED}=== Остановка native сессии Agent Navigator ===${NC}"
 
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
@@ -25,13 +77,11 @@ else
   echo -e "${BLUE}  tmux сессия '$SESSION_NAME' не найдена${NC}"
 fi
 
-LLAMA_PIDS=$(pgrep -f "llama-server" 2>/dev/null || true)
-if [ -n "$LLAMA_PIDS" ]; then
-  echo -e "${YELLOW}Завершение llama-server (PID: $LLAMA_PIDS)...${NC}"
-  echo "$LLAMA_PIDS" | xargs kill 2>/dev/null || true
-fi
+kill_matching_processes "UMS" "$PROJECT_ROOT/backend/services/model_manager/unified_model_server.py"
+kill_matching_processes "llama-server runtime" "llama-server.*$PROJECT_ROOT/backend/models/"
+kill_matching_processes "embedding runtime" "$PROJECT_ROOT/backend/services/model_manager/st_server.py"
 
-PORTS=(3000 8000 8001 8002 8090)
+PORTS=("$CHAINLIT_PORT" "$AGENT_API_PORT" "$DOC_PORT" "$LEGAL_PORT" "$UMS_PORT")
 NAMES=("Chainlit" "Agent API" "Document Server" "Legal Server" "UMS")
 KILLED=0
 
@@ -40,14 +90,13 @@ for i in "${!PORTS[@]}"; do
   name="${NAMES[$i]}"
   pids=$(lsof -ti ":$port" 2>/dev/null || true)
   if [ -n "$pids" ]; then
-    echo -e "${YELLOW}Завершение $name (порт $port, PID: $pids)...${NC}"
-    echo "$pids" | xargs kill 2>/dev/null || true
+    kill_pid_list "$name (порт $port)" "$pids"
     KILLED=1
   fi
 done
 
 if [ "$KILLED" -eq 0 ]; then
-  echo -e "${BLUE}  Активных native-процессов на портах 3000/8000/8001/8002/8090 не найдено${NC}"
+  echo -e "${BLUE}  Активных native-процессов на сервисных портах не найдено${NC}"
 fi
 
 echo ""

@@ -15,24 +15,8 @@ echo "Starting Backend Services in tmux..."
 SESSION_NAME="agent-navigator"
 CONDA_ENV="diploma_llm" # Hardcoded for test safety, or derive from .env
 
-# Check/Kill existing session
-if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
-    echo "Killing existing tmux session..."
-    tmux kill-session -t "$SESSION_NAME"
-fi
-
-# Явное завершение llama-server (остаётся в памяти после закрытия tmux)
-LLAMA_PIDS=$(pgrep -f "llama-server" 2>/dev/null)
-if [ -n "$LLAMA_PIDS" ]; then
-    echo "Stopping llama-server before test (PID: $LLAMA_PIDS)..."
-    echo "$LLAMA_PIDS" | xargs kill 2>/dev/null
-    sleep 1
-    LLAMA_PIDS=$(pgrep -f "llama-server" 2>/dev/null)
-    if [ -n "$LLAMA_PIDS" ]; then
-        echo "$LLAMA_PIDS" | xargs kill -9 2>/dev/null
-    fi
-    echo "llama-server stopped."
-fi
+echo "Stopping existing tmux/runtime/docker processes..."
+"$SCRIPT_DIR/stop_all.sh" >/dev/null 2>&1 || true
 
 # Create session	mux new-session -d -s "$SESSION_NAME" -x 200 -y 50
 
@@ -41,9 +25,9 @@ ACTIVATE_CMD="eval \"$(conda shell.bash hook)\" && conda activate $CONDA_ENV"
 
 # Window 1: Agent API	mux new-window -t "$SESSION_NAME" -n "agent-api"	mux send-keys -t "$SESSION_NAME:agent-api" "cd $BACKEND_DIR/orchestrator && $ACTIVATE_CMD && python agent_api.py" Enter
 
-# Window 2: Document Server	mux new-window -t "$SESSION_NAME" -n "doc-server"	mux send-keys -t "$SESSION_NAME:doc-server" "cd $BACKEND_DIR/services/document_server && $ACTIVATE_CMD && uvicorn mcp_document_server:app --host 0.0.0.0 --port 8001" Enter
+# Window 2: Document Server	mux new-window -t "$SESSION_NAME" -n "doc-server"	mux send-keys -t "$SESSION_NAME:doc-server" "cd $BACKEND_DIR/services/document_server && $ACTIVATE_CMD && export PYTHONPATH='$BACKEND_DIR' && uvicorn mcp_document_server:app --host 0.0.0.0 --port 8001" Enter
 
-# Window 3: Legal Server	mux new-window -t "$SESSION_NAME" -n "legal-server"	mux send-keys -t "$SESSION_NAME:legal-server" "cd $BACKEND_DIR/services/legal_server && $ACTIVATE_CMD && uvicorn mcp_legal_server:app --host 0.0.0.0 --port 8002" Enter
+# Window 3: Legal Server	mux new-window -t "$SESSION_NAME" -n "legal-server"	mux send-keys -t "$SESSION_NAME:legal-server" "cd $BACKEND_DIR/services/legal_server && $ACTIVATE_CMD && export PYTHONPATH='$BACKEND_DIR' && uvicorn mcp_legal_server:app --host 0.0.0.0 --port 8002" Enter
 
 # Window 4: UMS	mux new-window -t "$SESSION_NAME" -n "ums"	mux send-keys -t "$SESSION_NAME:ums" "cd $BACKEND_DIR && $ACTIVATE_CMD && export PYTHONPATH='$BACKEND_DIR' && python services/model_manager/unified_model_server.py" Enter
 

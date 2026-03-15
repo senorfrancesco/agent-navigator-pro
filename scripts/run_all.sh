@@ -86,19 +86,19 @@ fi
 
 BACKEND_MODE_RESOLVED="${BACKEND_MODE:-llama-cpp-python}"
 VLLM_ENABLED=false
-COMPOSE_PROFILE_ARGS=()
-COMPOSE_LOG_TARGETS=("chainlit")
-COMPOSE_PROFILE_TEXT="none"
-COMPOSE_SERVICES_TEXT="chainlit"
+COMPOSE_PROFILE_ARGS=("--profile" "backend")
+COMPOSE_LOG_TARGETS=("agent-api" "document-server" "legal-server" "ums" "chainlit")
+COMPOSE_PROFILE_TEXT="--profile backend"
+COMPOSE_SERVICES_TEXT="agent-api document-server legal-server ums chainlit"
 VLLM_PORT="${VLLM_PORT:-8101}"
 VLLM_SERVED_MODEL_ID="${VLLM_MODEL_ID_QWEN_14B_LLM:-qwen-14b-llm}"
 
 if [ "$BACKEND_MODE_RESOLVED" = "vllm" ]; then
     VLLM_ENABLED=true
-    COMPOSE_PROFILE_ARGS=("--profile" "vllm")
-    COMPOSE_LOG_TARGETS=("chainlit" "vllm")
-    COMPOSE_PROFILE_TEXT="--profile vllm"
-    COMPOSE_SERVICES_TEXT="chainlit vllm"
+    COMPOSE_PROFILE_ARGS=("--profile" "backend" "--profile" "vllm")
+    COMPOSE_LOG_TARGETS=("agent-api" "document-server" "legal-server" "ums" "chainlit" "vllm")
+    COMPOSE_PROFILE_TEXT="--profile backend --profile vllm"
+    COMPOSE_SERVICES_TEXT="agent-api document-server legal-server ums chainlit vllm"
 fi
 
 if [ "${AGENT_NAVIGATOR_TEST_MODE:-0}" = "1" ]; then
@@ -106,60 +106,7 @@ if [ "${AGENT_NAVIGATOR_TEST_MODE:-0}" = "1" ]; then
     exit 0
 fi
 
-# -------------------------------------------
-# Определение Conda окружения
-# -------------------------------------------
-CONDA_ENV="${CONDA_ENV:-diploma_llm}"
-CONDA_SH_PATH=""
-
-# Функция для поиска и активации conda
-find_conda() {
-    # Попытка 1: Стандартные пути
-    local conda_paths=(
-        "$HOME/anaconda3"
-        "$HOME/miniconda3"
-        "/opt/conda"
-        "/opt/anaconda3"
-        "/usr/local/anaconda3"
-    )
-
-    for conda_path in "${conda_paths[@]}"; do
-        if [ -f "$conda_path/etc/profile.d/conda.sh" ]; then
-            CONDA_SH_PATH="$conda_path/etc/profile.d/conda.sh"
-            source "$CONDA_SH_PATH"
-            conda activate "$CONDA_ENV" 2>/dev/null && return 0
-        fi
-    done
-
-    # Попытка 2: Через which conda
-    if command -v conda &> /dev/null; then
-        local conda_bin=$(which conda)
-        local conda_root=$(dirname $(dirname "$conda_bin"))
-        if [ -f "$conda_root/etc/profile.d/conda.sh" ]; then
-            CONDA_SH_PATH="$conda_root/etc/profile.d/conda.sh"
-            source "$CONDA_SH_PATH"
-            conda activate "$CONDA_ENV" 2>/dev/null && return 0
-        fi
-
-        # Fallback: eval hook
-        eval "$(conda shell.bash hook)"
-        conda activate "$CONDA_ENV" 2>/dev/null && return 0
-    fi
-
-    return 1
-}
-
-echo -e "${YELLOW}Активация Conda окружения: $CONDA_ENV...${NC}"
-if ! find_conda; then
-    echo -e "${RED}Ошибка: Не удалось активировать conda окружение $CONDA_ENV${NC}"
-    echo -e "${YELLOW}Попробуйте активировать вручную: conda activate $CONDA_ENV${NC}"
-    exit 1
-fi
-
-echo -e "${GREEN}Conda окружение активировано: $CONDA_ENV${NC}"
-if [ -n "$CONDA_SH_PATH" ]; then
-    echo -e "${BLUE}Используется conda.sh: $CONDA_SH_PATH${NC}"
-fi
+CONDA_ENV="container-compose"
 
 # -------------------------------------------
 # Проверяем наличие tmux
@@ -173,33 +120,10 @@ fi
 # Создаем новую tmux сессию
 # -------------------------------------------
 SESSION_NAME="agent-navigator"
-
-if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
-    echo -e "${YELLOW}Завершение существующей сессии...${NC}"
-    tmux kill-session -t "$SESSION_NAME"
-fi
-
-# Явное завершение llama-server (остаётся в памяти после закрытия tmux)
-LLAMA_PIDS=$(pgrep -f "llama-server" 2>/dev/null || true)
-if [ -n "$LLAMA_PIDS" ]; then
-    echo -e "${YELLOW}Завершение llama-server перед запуском (PID: $LLAMA_PIDS)...${NC}"
-    echo "$LLAMA_PIDS" | xargs kill 2>/dev/null || true
-    sleep 1
-    LLAMA_PIDS=$(pgrep -f "llama-server" 2>/dev/null || true)
-    if [ -n "$LLAMA_PIDS" ]; then
-        echo "$LLAMA_PIDS" | xargs kill -9 2>/dev/null || true
-    fi
-    echo -e "${GREEN}  llama-server завершён${NC}"
-fi
+echo -e "${YELLOW}Завершение существующих tmux/runtime/docker процессов...${NC}"
+"$SCRIPT_DIR/stop_all.sh" >/dev/null 2>&1 || true
 
 tmux new-session -d -s "$SESSION_NAME" -x 200 -y 50
-
-# Команда активации для tmux окон
-if [ -n "$CONDA_SH_PATH" ]; then
-    ACTIVATE_CMD="source $CONDA_SH_PATH && conda activate $CONDA_ENV"
-else
-    ACTIVATE_CMD="eval \"\$(conda shell.bash hook)\" && conda activate $CONDA_ENV"
-fi
 
 # Порты из .env или значения по умолчанию
 AGENT_PORT="${AGENT_API_PORT:-8000}"
@@ -300,34 +224,28 @@ echo -e "${YELLOW}Проверка и запуск сервисов...${NC}"
 
 SERVICES_OK=true
 
+echo -e "${GREEN}Запуск backend services через Docker Compose...${NC}"
+COMPOSE_ENV_PREFIX="CHAINLIT_UMS_URL=http://ums:$UMS_PORT CHAINLIT_DOC_SERVER_URL=http://document-server:$DOC_PORT CHAINLIT_LEGAL_SERVER_URL=http://legal-server:$LEGAL_PORT CHAINLIT_MCP_DOCUMENT_SERVER_URL=http://document-server:$DOC_PORT CHAINLIT_MCP_LEGAL_SERVER_URL=http://legal-server:$LEGAL_PORT"
+CHAINLIT_COMPOSE_CMD="cd $PROJECT_ROOT && env $COMPOSE_ENV_PREFIX docker compose ${COMPOSE_PROFILE_ARGS[*]} up -d ${COMPOSE_LOG_TARGETS[*]} && env $COMPOSE_ENV_PREFIX docker compose ${COMPOSE_PROFILE_ARGS[*]} logs -f ${COMPOSE_LOG_TARGETS[*]}"
+start_tmux_window "backend-compose" "$CHAINLIT_COMPOSE_CMD"
+
 # 1) Document Server
-echo -e "${GREEN}Запуск Document Server на порту $DOC_PORT...${NC}"
-start_tmux_window "doc-server" "cd $BACKEND_DIR/services/document_server && $ACTIVATE_CMD && uvicorn mcp_document_server:app --host 0.0.0.0 --port $DOC_PORT 2>&1 | tee doc-server.log"
-wait_for_service "Document Server" "$DOC_PORT" "/health" 30 || SERVICES_OK=false
+wait_for_service "Document Server" "$DOC_PORT" "/health" 60 || SERVICES_OK=false
 
 # 2) Legal Server
-echo -e "${GREEN}Запуск Legal Server на порту $LEGAL_PORT...${NC}"
-start_tmux_window "legal-server" "cd $BACKEND_DIR/services/legal_server && $ACTIVATE_CMD && uvicorn mcp_legal_server:app --host 0.0.0.0 --port $LEGAL_PORT 2>&1 | tee legal-server.log"
-wait_for_service "Legal Server" "$LEGAL_PORT" "/health" 30 || SERVICES_OK=false
+wait_for_service "Legal Server" "$LEGAL_PORT" "/health" 60 || SERVICES_OK=false
 
 # 3) UMS
-echo -e "${GREEN}Запуск Unified Model Server на порту $UMS_PORT...${NC}"
-start_tmux_window "ums" "cd $BACKEND_DIR && $ACTIVATE_CMD && export PYTHONPATH='$BACKEND_DIR' && python services/model_manager/unified_model_server.py 2>&1 | tee services/model_manager/ums.log"
-wait_for_service "UMS" "$UMS_PORT" "/health" 90 || SERVICES_OK=false
+wait_for_service "UMS" "$UMS_PORT" "/health" 120 || SERVICES_OK=false
 
 echo ""
 echo -e "${YELLOW}Ожидание загрузки модели Qwen LLM (до 3 мин)...${NC}"
 wait_for_model 180 || SERVICES_OK=false
 
 # 4) Agent API
-echo -e "${GREEN}Запуск Agent API на порту $AGENT_PORT...${NC}"
-start_tmux_window "agent-api" "cd $BACKEND_DIR/orchestrator && $ACTIVATE_CMD && python agent_api.py 2>&1 | tee agent-api.log"
 wait_for_service "Agent API" "$AGENT_PORT" "/health" 30 || SERVICES_OK=false
 
 # 5) Chainlit UI (Docker)
-echo -e "${GREEN}Запуск Chainlit UI (Docker) на порту $CHAINLIT_PORT...${NC}"
-CHAINLIT_COMPOSE_CMD="cd $PROJECT_ROOT && docker compose ${COMPOSE_PROFILE_ARGS[*]} up -d ${COMPOSE_LOG_TARGETS[*]} && docker compose ${COMPOSE_PROFILE_ARGS[*]} logs -f ${COMPOSE_LOG_TARGETS[*]}"
-start_tmux_window "chainlit" "$CHAINLIT_COMPOSE_CMD"
 if [ "$VLLM_ENABLED" = true ]; then
     wait_for_service "vLLM" "$VLLM_PORT" "/health" 180 || SERVICES_OK=false
 fi
@@ -335,7 +253,7 @@ wait_for_service "Chainlit UI" "$CHAINLIT_PORT" "/" 60 || SERVICES_OK=false
 
 # 6) Monitor/Logs
 echo -e "${GREEN}Открытие окна мониторинга...${NC}"
-start_tmux_window "monitor" "cd $BACKEND_DIR && echo -e '${GREEN}Система запущена.${NC}\nДля выхода нажмите ${YELLOW}Ctrl+B${NC} затем ${YELLOW}:kill-session${NC} (это остановит все сервисы, включая Docker).' && (htop 2>/dev/null || top)"
+start_tmux_window "monitor" "cd $PROJECT_ROOT && echo -e '${GREEN}Compose backend stack запущен.${NC}\nДля остановки используйте ${YELLOW}docker compose down${NC} или завершите tmux сессию.' && (docker compose ps || true) && (htop 2>/dev/null || top)"
 
 if [ "$SERVICES_OK" = true ]; then
     SYSTEM_STATUS="${GREEN}ГОТОВА К РАБОТЕ${NC}"
@@ -352,7 +270,7 @@ echo -e "${GREEN}║        Agent Navigator Pro v3.0                          �
 echo -e "${GREEN}╠════════════════════════════════════════════════════════════╣${NC}"
 echo -e "${GREEN}║${NC} Статус:          $SYSTEM_STATUS"
 echo -e "${GREEN}║${NC} Сессия tmux:     ${YELLOW}$SESSION_NAME${NC}"
-echo -e "${GREEN}║${NC} Conda окружение: ${YELLOW}$CONDA_ENV${NC}"
+echo -e "${GREEN}║${NC} Runtime target:   ${YELLOW}container-compose${NC}"
 echo -e "${GREEN}╠════════════════════════════════════════════════════════════╣${NC}"
 echo -e "${GREEN}║${NC} Chainlit UI:     ${YELLOW}http://localhost:$CHAINLIT_PORT${NC}  (login: ${CHAINLIT_ADMIN_USER:-admin}, password from env)"
 echo -e "${GREEN}║${NC} Agent API:       ${YELLOW}http://localhost:$AGENT_PORT${NC}"
