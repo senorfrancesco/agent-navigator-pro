@@ -109,6 +109,10 @@ def _reset_ums_state(monkeypatch, tmp_path):
     }
     original_locks = dict(ums_server._model_start_locks)
     for env_name in (
+        "MODEL_PATH_LLM",
+        "MODEL_PATH_VLM",
+        "MODEL_PATH_EMBEDDING_INTENT",
+        "MODEL_PATH_EMBEDDING_RETRIEVAL",
         "BACKEND_MODE",
         "UMS_LLAMA_CACHE_PROMPT",
         "UMS_LLM_GPU_INDICES",
@@ -125,6 +129,10 @@ def _reset_ums_state(monkeypatch, tmp_path):
         "VLLM_BASE_URL",
         "VLLM_API_KEY",
         "VLLM_MODEL_ID_QWEN_14B_LLM",
+        "MODEL_PATH_QWEN14B",
+        "MODEL_PATH_QWENVL",
+        "MODEL_PATH_LABSE",
+        "MODEL_PATH_QWEN3_EMBEDDING_06B",
     ):
         monkeypatch.delenv(env_name, raising=False)
     monkeypatch.setenv("UMS_DYNAMIC_MODELS_REGISTRY_PATH", str(tmp_path / "ums_dynamic_models.json"))
@@ -730,6 +738,34 @@ def test_models_api_lists_available_models_and_active_state():
     assert models["qwen-14b-llm"]["resolved_path"] == models["qwen-14b-llm"]["path"]
     assert models["labse-embedding"]["running"] is False
     assert models["labse-embedding"]["active"] is False
+
+
+def test_get_model_config_prefers_canonical_runtime_path_env(monkeypatch):
+    monkeypatch.setenv("MODEL_PATH_LLM", "/models/runtime/llm.gguf")
+    monkeypatch.setenv("MODEL_PATH_VLM", "/models/runtime/vlm.gguf")
+    monkeypatch.setenv("MODEL_PATH_EMBEDDING_INTENT", "/models/runtime/intent")
+    monkeypatch.setenv("MODEL_PATH_EMBEDDING_RETRIEVAL", "/models/runtime/retrieval")
+    monkeypatch.setenv("MODEL_PATH_QWEN14B", "/legacy/llm.gguf")
+    monkeypatch.setenv("MODEL_PATH_QWENVL", "/legacy/vlm.gguf")
+    monkeypatch.setenv("MODEL_PATH_QWEN3_EMBEDDING_06B", "/legacy/intent")
+    monkeypatch.setenv("MODEL_PATH_LABSE", "/legacy/retrieval")
+
+    assert ums_server.get_model_config("qwen-14b-llm")["path"] == "/models/runtime/llm.gguf"
+    assert ums_server.get_model_config("qwen-vl-8b")["path"] == "/models/runtime/vlm.gguf"
+    assert ums_server.get_model_config("qwen3-embedding-0.6b")["path"] == "/models/runtime/intent"
+    assert ums_server.get_model_config("labse-embedding")["path"] == "/models/runtime/retrieval"
+
+
+def test_get_model_config_falls_back_to_legacy_runtime_path_aliases(monkeypatch):
+    monkeypatch.setenv("MODEL_PATH_QWEN14B", "/legacy/llm.gguf")
+    monkeypatch.setenv("MODEL_PATH_QWENVL", "/legacy/vlm.gguf")
+    monkeypatch.setenv("MODEL_PATH_QWEN3_EMBEDDING_06B", "/legacy/intent")
+    monkeypatch.setenv("MODEL_PATH_LABSE", "/legacy/retrieval")
+
+    assert ums_server.get_model_config("qwen-14b-llm")["path"] == "/legacy/llm.gguf"
+    assert ums_server.get_model_config("qwen-vl-8b")["path"] == "/legacy/vlm.gguf"
+    assert ums_server.get_model_config("qwen3-embedding-0.6b")["path"] == "/legacy/intent"
+    assert ums_server.get_model_config("labse-embedding")["path"] == "/legacy/retrieval"
 
 
 def test_models_running_api_lists_running_models_and_placements():

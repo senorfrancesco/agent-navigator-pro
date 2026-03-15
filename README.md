@@ -166,9 +166,11 @@ cp .env.example .env
 Обязательно задать пути к моделям:
 
 ```bash
-# Пути — абсолютные
-MODEL_PATH_QWEN14B="/path/to/models/gguf/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
-MODEL_PATH_LABSE="/path/to/models/st/LaBSE"
+# Канонический env contract: пути задаём через универсальные имена
+MODEL_PATH_LLM="/path/to/models/gguf/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
+MODEL_PATH_VLM="/path/to/models/gguf/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
+MODEL_PATH_EMBEDDING_INTENT="/path/to/models/st/Qwen3-Embedding-0.6B"
+MODEL_PATH_EMBEDDING_RETRIEVAL="/path/to/models/st/LaBSE"
 
 # GPU: -1 = все слои на GPU, 0 = CPU only
 N_GPU_LAYERS_QWEN14B=-1
@@ -177,6 +179,12 @@ N_GPU_LAYERS_QWEN14B=-1
 CHAINLIT_ADMIN_PASSWORD="your-secure-password"
 CHAINLIT_AUTH_SECRET="your-secret-key"
 ```
+
+Legacy aliases в тексте и конфиге сохранены для обратной совместимости:
+`MODEL_PATH_QWEN14B` -> `MODEL_PATH_LLM`,
+`MODEL_PATH_QWENVL` -> `MODEL_PATH_VLM`,
+`MODEL_PATH_QWEN3_EMBEDDING_06B` -> `MODEL_PATH_EMBEDDING_INTENT`,
+`MODEL_PATH_LABSE` -> `MODEL_PATH_EMBEDDING_RETRIEVAL`.
 
 Для local/dev launcher допускает override:
 

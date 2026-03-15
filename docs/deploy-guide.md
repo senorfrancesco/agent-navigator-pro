@@ -164,10 +164,11 @@ cp backend/.env.example backend/.env
 Отредактировать `backend/.env`:
 
 ```bash
-# Пути к моделям — АБСОЛЮТНЫЕ на сервере
-MODEL_PATH_QWEN14B="/opt/agent-navigator-pro/backend/models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
-MODEL_PATH_LABSE="/opt/agent-navigator-pro/backend/models/st/LaBSE"
-MODEL_PATH_QWEN3_EMBEDDING_06B="/opt/agent-navigator-pro/backend/models/st/Qwen3-Embedding-0.6B"
+# Канонический env contract для путей моделей: значения должны быть АБСОЛЮТНЫМИ на сервере
+MODEL_PATH_LLM="/opt/agent-navigator-pro/backend/models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
+MODEL_PATH_VLM="/opt/agent-navigator-pro/backend/models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
+MODEL_PATH_EMBEDDING_INTENT="/opt/agent-navigator-pro/backend/models/st/Qwen3-Embedding-0.6B"
+MODEL_PATH_EMBEDDING_RETRIEVAL="/opt/agent-navigator-pro/backend/models/st/LaBSE"
 
 # GPU layers (-1 = все на GPU, 0 = CPU only)
 N_GPU_LAYERS_QWEN14B=-1
@@ -197,6 +198,12 @@ INTENT_CLASSIFIER_EMBEDDER_MODEL="qwen3-embedding-0.6b"
 INTENT_CLASSIFIER_EMBEDDER_CONFIDENCE_THRESHOLD="0.60"
 INTENT_CLASSIFIER_EMBEDDER_MARGIN_THRESHOLD="0.10"
 ```
+
+Legacy aliases для rollout и старых инсталляций всё ещё допустимы:
+`MODEL_PATH_QWEN14B` -> `MODEL_PATH_LLM`,
+`MODEL_PATH_QWENVL` -> `MODEL_PATH_VLM`,
+`MODEL_PATH_QWEN3_EMBEDDING_06B` -> `MODEL_PATH_EMBEDDING_INTENT`,
+`MODEL_PATH_LABSE` -> `MODEL_PATH_EMBEDDING_RETRIEVAL`.
 
 ### 5.3. Директории
 
@@ -506,12 +513,14 @@ Backend-сервисы (Agent API, UMS, Doc/Legal Server) работают на 
 
 ```bash
 # Проверить пути
-ls -la $(grep MODEL_PATH_QWEN14B backend/.env | cut -d= -f2 | tr -d '"')
+ls -la $(grep MODEL_PATH_LLM backend/.env | cut -d= -f2 | tr -d '"')
 # Проверить GPU
 nvidia-smi
 # Проверить логи UMS
 tmux attach -t agent-navigator   # окно "ums"
 ```
+
+Если используется старый `.env`, можно временно проверить и legacy alias `MODEL_PATH_QWEN14B`, но для новых конфигураций ориентиром остаётся `MODEL_PATH_LLM`.
 
 ### Chainlit не стартует в Docker
 

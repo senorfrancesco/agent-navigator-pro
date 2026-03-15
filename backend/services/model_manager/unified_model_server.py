@@ -61,6 +61,7 @@ from services.observability import (
     render_metrics_text,
     set_ums_runtime_metrics,
 )
+from services.model_manager.models_config import resolve_model_path as resolve_runtime_model_path
 
 # === Configuration ===
 
@@ -87,27 +88,27 @@ MODELS_DIR = BACKEND_ROOT / "models" / "gguf"
 STATIC_MODELS_CONFIG = {
     "qwen-14b-llm": {
         "type": "gguf",
-        "path": os.getenv("MODEL_PATH_QWEN14B", "./models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"),
+        "path": resolve_runtime_model_path("qwen-14b-llm"),
         "ctx_size": 16384,
         "gpu_layers": -1,
         "port": 8091
     },
     "qwen-vl-8b": {
         "type": "gguf-vl",
-        "path": os.getenv("MODEL_PATH_QWENVL", "./models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"),
-        "mmproj": os.getenv("MMPROJ_PATH", "./models/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf"),
+        "path": resolve_runtime_model_path("qwen-vl-8b"),
+        "mmproj": os.getenv("MODEL_MMPROJ_PATH_VLM", os.getenv("MMPROJ_PATH", "./models/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf")),
         "ctx_size": 8192,
         "gpu_layers": 20,
         "port": 8092
     },
     "labse-embedding": {
         "type": "st",
-        "path": os.getenv("MODEL_PATH_LABSE", "./models/st/LaBSE"),
+        "path": resolve_runtime_model_path("labse-embedding"),
         "port": 8093
     },
     "qwen3-embedding-0.6b": {
         "type": "st",
-        "path": os.getenv("MODEL_PATH_QWEN3_EMBEDDING_06B", "./models/st/Qwen3-Embedding-0.6B"),
+        "path": resolve_runtime_model_path("qwen3-embedding-0.6b"),
         "port": 8094
     }
 }
@@ -737,6 +738,18 @@ def _prune_dead_processes() -> List[str]:
 def get_model_config(model_id: str) -> Optional[Dict[str, Any]]:
     """Возвращает конфиг модели, либо из статики, либо из файловой системы."""
     if model_id in STATIC_MODELS_CONFIG:
+        if model_id == "qwen-14b-llm":
+            STATIC_MODELS_CONFIG[model_id]["path"] = resolve_runtime_model_path("qwen-14b-llm")
+        elif model_id == "qwen-vl-8b":
+            STATIC_MODELS_CONFIG[model_id]["path"] = resolve_runtime_model_path("qwen-vl-8b")
+            STATIC_MODELS_CONFIG[model_id]["mmproj"] = os.getenv(
+                "MODEL_MMPROJ_PATH_VLM",
+                os.getenv("MMPROJ_PATH", "./models/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf"),
+            )
+        elif model_id == "labse-embedding":
+            STATIC_MODELS_CONFIG[model_id]["path"] = resolve_runtime_model_path("labse-embedding")
+        elif model_id == "qwen3-embedding-0.6b":
+            STATIC_MODELS_CONFIG[model_id]["path"] = resolve_runtime_model_path("qwen3-embedding-0.6b")
         return STATIC_MODELS_CONFIG[model_id]
     dynamic_models = state.get("dynamic_models") or {}
     if model_id in dynamic_models:

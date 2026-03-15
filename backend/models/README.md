@@ -17,17 +17,25 @@
 Разместите ваши файлы моделей в соответствующих подпапках.
 
 ### 2. Конфигурация
-Настройте переменные окружения, чтобы указать пути к вашим моделям. Обратите внимание, что пути теперь должны начинаться с `models/gguf/` или `models/st/`.
+Настройте переменные окружения, чтобы указать пути к вашим моделям. Канонический env contract использует универсальные имена, а старые переменные сохранены как legacy aliases. Пути должны указывать на содержимое внутри `models/gguf/` или `models/st/`.
 
 ```bash
-# Пример для GGUF моделей
-export MODEL_PATH_QWEN14B="./models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
-export MODEL_PATH_QWENVL="./models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
+# Канонические переменные для GGUF моделей
+export MODEL_PATH_LLM="./models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
+export MODEL_PATH_VLM="./models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
 export MMPROJ_PATH="./models/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf"
 
-# Пример для Sentence Transformer моделей
-export MODEL_PATH_LABSE="./models/st/LaBSE" # Путь к папке, а не к файлу GGUF
+# Канонические переменные для embedding моделей
+export MODEL_PATH_EMBEDDING_INTENT="./models/st/Qwen3-Embedding-0.6B"
+export MODEL_PATH_EMBEDDING_RETRIEVAL="./models/st/LaBSE" # Путь к папке, а не к GGUF-файлу
 ```
+
+Legacy aliases для обратной совместимости:
+
+- `MODEL_PATH_QWEN14B` -> `MODEL_PATH_LLM`
+- `MODEL_PATH_QWENVL` -> `MODEL_PATH_VLM`
+- `MODEL_PATH_QWEN3_EMBEDDING_06B` -> `MODEL_PATH_EMBEDDING_INTENT`
+- `MODEL_PATH_LABSE` -> `MODEL_PATH_EMBEDDING_RETRIEVAL`
 
 ## Важное Примечание
 

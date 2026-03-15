@@ -213,12 +213,12 @@ class TestChainlitControlPlaneSettings:
         assert [widget["id"] for widget in rag_inputs] == ["rag_scope", "knowledge_collection_id"]
         assert [widget["id"] for widget in prompt_inputs] == ["prompt_profile", "custom_system_prompt"]
         assert [widget["id"] for widget in generation_inputs] == ["temperature", "top_p", "max_tokens"]
-        assert list(tabs[2]["inputs"][0]["items"].keys()) == [
-            "default-chat",
-            "long-context",
-            "legal-compare",
-            "low-vram",
-        ]
+        assert use_case_inputs[0]["initial_value"] == "specific_tasks"
+        assert use_case_inputs[0]["items"]["Specific Tasks"] == "specific_tasks"
+        assert use_case_inputs[1]["items"]["Агентный режим: приоритет task-routing"] == "specialized_tasks"
+        assert rag_inputs[0]["items"]["Session RAG"] == "session_rag"
+        assert tabs[2]["inputs"][0]["items"]["Legal Compare"] == "legal-compare"
+        assert prompt_inputs[0]["items"]["Task Router"] == "task-router"
         self._chat_settings_instance.send.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -298,9 +298,6 @@ class TestChainlitControlPlaneSettings:
     @pytest.mark.asyncio
     async def test_on_chat_start_sends_control_plane_settings(self):
         created = []
-        welcome_message = MagicMock()
-        welcome_message.send = AsyncMock()
-        self._mock_cl.Message.return_value = welcome_message
 
         def _fake_create_task(coro):
             created.append(coro)
@@ -315,10 +312,7 @@ class TestChainlitControlPlaneSettings:
             await self._module.on_chat_start()
 
         mock_send_settings.assert_awaited_once()
-        welcome_message.send.assert_awaited_once()
-        content = self._mock_cl.Message.call_args.kwargs["content"]
-        assert "Добро пожаловать" in content
-        assert "Active docs: `0`" in content
+        self._mock_cl.Message.assert_not_called()
         assert self._store["runtime_mode"] == "auto"
         assert "control_plane_state" in self._store
         assert "effective_settings" in self._store

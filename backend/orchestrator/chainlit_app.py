@@ -1075,6 +1075,11 @@ def _format_effective_settings_summary(effective: Optional[Dict[str, Any]] = Non
     return "\n".join(lines)
 
 
+def _ui_select_items(items: Dict[str, str]) -> Dict[str, str]:
+    """Chainlit Select expects label -> value mapping on the frontend."""
+    return {label: value for value, label in items.items()}
+
+
 async def _send_control_plane_settings() -> None:
     effective = _get_effective_settings()
     settings = cl.ChatSettings(
@@ -1087,14 +1092,14 @@ async def _send_control_plane_settings() -> None:
                         id="assistant_mode",
                         label="Сценарий",
                         initial_value=effective.get("assistant_mode"),
-                        items=_ASSISTANT_MODE_ITEMS,
+                        items=_ui_select_items(_ASSISTANT_MODE_ITEMS),
                         description="Крупный продуктовый сценарий без жёсткой смены chat profile.",
                     ),
                     cl.input_widget.Select(
                         id="runtime_mode",
                         label="Режим работы",
                         initial_value=effective.get("runtime_mode"),
-                        items=_RUNTIME_MODE_ITEMS,
+                        items=_ui_select_items(_RUNTIME_MODE_ITEMS),
                         description="Policy роутинга backend для текущего чата.",
                     ),
                 ],
@@ -1107,7 +1112,7 @@ async def _send_control_plane_settings() -> None:
                         id="rag_scope",
                         label="RAG scope",
                         initial_value=effective.get("rag_scope"),
-                        items=_RAG_SCOPE_ITEMS,
+                        items=_ui_select_items(_RAG_SCOPE_ITEMS),
                         description="Выбирает session RAG или knowledge-base контур.",
                     ),
                     cl.input_widget.TextInput(
@@ -1127,7 +1132,7 @@ async def _send_control_plane_settings() -> None:
                         id="model_profile",
                         label="Model Profile",
                         initial_value=effective.get("model_profile"),
-                        items=_MODEL_PROFILE_ITEMS,
+                        items=_ui_select_items(_MODEL_PROFILE_ITEMS),
                         description="Логический профиль модели. Backend сам резолвит физическую модель.",
                     ),
                 ],
@@ -1140,7 +1145,7 @@ async def _send_control_plane_settings() -> None:
                         id="prompt_profile",
                         label="Prompt Profile",
                         initial_value=effective.get("prompt_profile"),
-                        items=_PROMPT_PROFILE_ITEMS,
+                        items=_ui_select_items(_PROMPT_PROFILE_ITEMS),
                         description="Профиль системного промпта до применения пользовательского override.",
                     ),
                     cl.input_widget.TextInput(
@@ -1904,7 +1909,6 @@ async def on_chat_start():
     await _persist_current_backend_state(status="initialized")
     await _send_control_plane_settings()
     await _sync_thread_presentation()
-    await cl.Message(content=_build_welcome_markdown()).send()
 
 def _default_starters() -> List[cl.Starter]:
     return [

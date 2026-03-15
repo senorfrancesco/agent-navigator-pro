@@ -296,7 +296,7 @@
 - [x] **T4.2 — Chainlit UX hardening**
   Выполнено поверх стабилизированных `B3.31a + T4.13 + T4.14`.
   Что закрыто:
-  - welcome/status message для нового чата с прозрачным current context summary
+  - новый чат стартует без auto-welcome assistant message; starter cards остаются реальным entrypoint'ом сценариев
   - unified resume status messaging для backend-snapshot-first и legacy-history fallback
   - thread title/metadata sync в Chainlit data layer для видимого списка тредов
   - явное отображение active docs / rag scope / runtime profile / pending action state в UX summary
@@ -390,6 +390,12 @@
     - `CHAINLIT_INTENT_EMBEDDER_PROFILE_DEFAULT_MODEL`
     - `CHAINLIT_RETRIEVAL_EMBEDDER_PROFILE_LEGAL_DEFAULT_MODEL`
     - `CHAINLIT_RETRIEVAL_EMBEDDER_PROFILE_LOW_VRAM_MODEL`
+  - Runtime model paths дополнительно унифицированы через generic env contract с backward compatibility:
+    - `MODEL_PATH_LLM`
+    - `MODEL_PATH_VLM`
+    - `MODEL_PATH_EMBEDDING_INTENT`
+    - `MODEL_PATH_EMBEDDING_RETRIEVAL`
+    - legacy aliases `MODEL_PATH_QWEN14B`, `MODEL_PATH_QWENVL`, `MODEL_PATH_QWEN3_EMBEDDING_06B`, `MODEL_PATH_LABSE` сохранены как compatibility layer
   - Verification:
     - `pytest backend/tests/test_ui_control_plane.py backend/tests/test_chainlit_runtime_mode.py backend/tests/test_agent_api_orchestrate.py -q`
     - `cd backend && pytest tests/ -q -m "not integration"` -> `397 passed, 4 deselected`

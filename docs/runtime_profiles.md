@@ -16,6 +16,24 @@
 
 Для локального `llama-server` prompt-cache policy управляется отдельно через `UMS_LLAMA_CACHE_PROMPT=true|false`. Effective policy публикуется в `UMS /status -> prompt_cache_policy` и используется benchmark probe `prompt_cache_probe`.
 
+## Model path contract
+
+Для путей моделей канонический env contract теперь такой:
+
+- `MODEL_PATH_LLM`
+- `MODEL_PATH_VLM`
+- `MODEL_PATH_EMBEDDING_INTENT`
+- `MODEL_PATH_EMBEDDING_RETRIEVAL`
+
+Legacy aliases остаются допустимыми для compatibility rollout:
+
+- `MODEL_PATH_QWEN14B` -> `MODEL_PATH_LLM`
+- `MODEL_PATH_QWENVL` -> `MODEL_PATH_VLM`
+- `MODEL_PATH_QWEN3_EMBEDDING_06B` -> `MODEL_PATH_EMBEDDING_INTENT`
+- `MODEL_PATH_LABSE` -> `MODEL_PATH_EMBEDDING_RETRIEVAL`
+
+Runtime profiles не меняют этот contract. Они управляют budget, placement и routing policy поверх уже заданных model paths.
+
 ## Профили
 
 - `default`
