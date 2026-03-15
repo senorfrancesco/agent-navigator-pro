@@ -9,6 +9,29 @@ DOC_QA_MIN_CHUNKS_SIMPLE = int(os.getenv("DOC_QA_MIN_CHUNKS_SIMPLE", "1"))
 DOC_QA_MIN_CHUNKS_MULTIHOP = int(os.getenv("DOC_QA_MIN_CHUNKS_MULTIHOP", "2"))
 DOC_QA_MIN_RAW_SCORE_SIMPLE = float(os.getenv("DOC_QA_MIN_RAW_SCORE_SIMPLE", "0.01"))
 DOC_QA_MIN_ZSCORE_CORRECTIVE = float(os.getenv("DOC_QA_MIN_ZSCORE_CORRECTIVE", "-0.5"))
+DOC_QA_CONFIDENCE_HIGH_THRESHOLD = float(os.getenv("DOC_QA_CONFIDENCE_HIGH_THRESHOLD", "0.75"))
+DOC_QA_CONFIDENCE_MEDIUM_THRESHOLD = float(os.getenv("DOC_QA_CONFIDENCE_MEDIUM_THRESHOLD", "0.5"))
+DOC_QA_CONFIDENCE_EMPTY_BASE = float(os.getenv("DOC_QA_CONFIDENCE_EMPTY_BASE", "0.2"))
+DOC_QA_CONFIDENCE_BASE_OFFSET = float(os.getenv("DOC_QA_CONFIDENCE_BASE_OFFSET", "0.25"))
+DOC_QA_CONFIDENCE_AVG_NORM_WEIGHT = float(os.getenv("DOC_QA_CONFIDENCE_AVG_NORM_WEIGHT", "0.30"))
+DOC_QA_CONFIDENCE_AVG_RAW_WEIGHT = float(os.getenv("DOC_QA_CONFIDENCE_AVG_RAW_WEIGHT", "0.20"))
+DOC_QA_CONFIDENCE_COVERAGE_WEIGHT = float(os.getenv("DOC_QA_CONFIDENCE_COVERAGE_WEIGHT", "0.12"))
+DOC_QA_CONFIDENCE_GOOD_BONUS = float(os.getenv("DOC_QA_CONFIDENCE_GOOD_BONUS", "0.08"))
+DOC_QA_CONFIDENCE_MULTIHOP_BONUS = float(os.getenv("DOC_QA_CONFIDENCE_MULTIHOP_BONUS", "0.05"))
+DOC_QA_CONFIDENCE_MULTIHOP_PENALTY = float(os.getenv("DOC_QA_CONFIDENCE_MULTIHOP_PENALTY", "-0.12"))
+DOC_QA_CONFIDENCE_CROSS_DOC_BONUS = float(os.getenv("DOC_QA_CONFIDENCE_CROSS_DOC_BONUS", "0.05"))
+DOC_QA_CONFIDENCE_CROSS_DOC_PENALTY = float(
+    os.getenv("DOC_QA_CONFIDENCE_CROSS_DOC_PENALTY", "-0.08")
+)
+DOC_QA_INSUFFICIENT_EVIDENCE_CONFIDENCE_CAP = float(
+    os.getenv("DOC_QA_INSUFFICIENT_EVIDENCE_CONFIDENCE_CAP", "0.35")
+)
+DOC_QA_DIRECT_EVIDENCE_MIN_RAW_SCORE = float(
+    os.getenv("DOC_QA_DIRECT_EVIDENCE_MIN_RAW_SCORE", "0.01")
+)
+DOC_QA_DIRECT_EVIDENCE_MIN_NORM_SCORE = float(
+    os.getenv("DOC_QA_DIRECT_EVIDENCE_MIN_NORM_SCORE", "0.45")
+)
 
 _MULTIHOP_MARKERS = ["сравни", "сопостав", "что подходит", "какие отличия", " и ", " vs ", " между "]
 _CROSS_DOC_MARKERS = ["сравни", "сопостав", "отличия", "разница", "между", " vs "]
@@ -143,10 +166,41 @@ def has_sufficient_evidence_v1(
     return raw_top >= DOC_QA_MIN_RAW_SCORE_SIMPLE
 
 
+def has_direct_grounded_evidence_v1(
+    sources: List[SourceRef],
+    cited_ids: List[int],
+    query: str,
+    *,
+    citations_valid: bool,
+) -> bool:
+    if not citations_valid or not cited_ids:
+        return False
+
+    coverage = compute_coverage_v1(sources, cited_ids, query)
+    if coverage["is_multihop"]:
+        return False
+    if coverage["requires_cross_document_support"]:
+        return False
+
+    cited_sources = [source for source in sources if source.get("source_id") in cited_ids]
+    if len(cited_sources) != 1:
+        return False
+
+    source = cited_sources[0]
+    raw_top = float(source.get("raw_score", 0.0))
+    norm_top = float(source.get("normalized_score", 0.0))
+    quote = str(source.get("quote") or "").strip()
+    if not quote:
+        return False
+    if coverage["coverage_ratio"] <= 0.0:
+        return False
+    return raw_top >= DOC_QA_DIRECT_EVIDENCE_MIN_RAW_SCORE and norm_top >= DOC_QA_DIRECT_EVIDENCE_MIN_NORM_SCORE
+
+
 def _confidence_label(value: float) -> Literal["high", "medium", "low"]:
-    if value >= 0.75:
+    if value >= DOC_QA_CONFIDENCE_HIGH_THRESHOLD:
         return "high"
-    if value >= 0.5:
+    if value >= DOC_QA_CONFIDENCE_MEDIUM_THRESHOLD:
         return "medium"
     return "low"
 
@@ -162,22 +216,38 @@ def compute_confidence_v1(
     coverage = compute_coverage_v1(sources, cited_ids, query)
 
     if not cited_sources:
-        base = 0.2
+        base = DOC_QA_CONFIDENCE_EMPTY_BASE
     else:
         avg_raw = sum(float(source.get("raw_score", 0.0)) for source in cited_sources) / len(cited_sources)
         avg_norm = sum(float(source.get("normalized_score", 0.0)) for source in cited_sources) / len(cited_sources)
         good_bonus = (
-            0.08 if any((source.get("grade") or "").lower() in ("good", "excellent") for source in cited_sources) else 0.0
+            DOC_QA_CONFIDENCE_GOOD_BONUS
+            if any((source.get("grade") or "").lower() in ("good", "excellent") for source in cited_sources)
+            else 0.0
         )
-        coverage_bonus = 0.12 * coverage["coverage_ratio"]
-        multihop_bonus = 0.05 if coverage["is_multihop"] and coverage["cited_source_count"] >= 2 else 0.0
-        multihop_penalty = -0.12 if coverage["is_multihop"] and coverage["cited_source_count"] < 2 else 0.0
-        cross_doc_bonus = 0.05 if coverage["has_cross_document_support"] else 0.0
-        cross_doc_penalty = -0.08 if coverage["requires_cross_document_support"] and not coverage["has_cross_document_support"] else 0.0
+        coverage_bonus = DOC_QA_CONFIDENCE_COVERAGE_WEIGHT * coverage["coverage_ratio"]
+        multihop_bonus = (
+            DOC_QA_CONFIDENCE_MULTIHOP_BONUS
+            if coverage["is_multihop"] and coverage["cited_source_count"] >= 2
+            else 0.0
+        )
+        multihop_penalty = (
+            DOC_QA_CONFIDENCE_MULTIHOP_PENALTY
+            if coverage["is_multihop"] and coverage["cited_source_count"] < 2
+            else 0.0
+        )
+        cross_doc_bonus = (
+            DOC_QA_CONFIDENCE_CROSS_DOC_BONUS if coverage["has_cross_document_support"] else 0.0
+        )
+        cross_doc_penalty = (
+            DOC_QA_CONFIDENCE_CROSS_DOC_PENALTY
+            if coverage["requires_cross_document_support"] and not coverage["has_cross_document_support"]
+            else 0.0
+        )
         base = (
-            0.25
-            + 0.30 * avg_norm
-            + 0.20 * avg_raw
+            DOC_QA_CONFIDENCE_BASE_OFFSET
+            + DOC_QA_CONFIDENCE_AVG_NORM_WEIGHT * avg_norm
+            + DOC_QA_CONFIDENCE_AVG_RAW_WEIGHT * avg_raw
             + coverage_bonus
             + good_bonus
             + multihop_bonus
@@ -188,7 +258,7 @@ def compute_confidence_v1(
         base = max(0.0, min(1.0, base))
 
     if answer_mode == "insufficient_evidence":
-        base = min(base, 0.35)
+        base = min(base, DOC_QA_INSUFFICIENT_EVIDENCE_CONFIDENCE_CAP)
     return base, _confidence_label(base)
 
 

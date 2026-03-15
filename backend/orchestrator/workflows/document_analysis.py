@@ -13,6 +13,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import glob as glob_mod
 import json
+import logging
 import os
 import re
 import time
@@ -23,6 +24,7 @@ from langgraph.graph import StateGraph, END
 
 # Абсолютные импорты пакета (TD-5 Fix)
 from services.model_manager.ums_client import ums_client
+from services.observability import inc_metric_counter
 from orchestrator.utils import parse_json_garbage
 from orchestrator.shared.http_client import get_shared_client
 from orchestrator.workflows.equipment import (
@@ -39,6 +41,19 @@ MCP_DOCUMENT_SERVER_URL = os.getenv("MCP_DOCUMENT_SERVER_URL", "http://localhost
 UMS_URL = os.getenv("UMS_URL", "http://localhost:8090")
 
 MAX_TEXT_FOR_LLM = 8000  # Снижено для стабильности KV-кэша GPU
+DOCUMENT_ANALYSIS_SUMMARIZE_TEMPERATURE = float(
+    os.getenv("DOCUMENT_ANALYSIS_SUMMARIZE_TEMPERATURE", "0.1")
+)
+DOCUMENT_ANALYSIS_SUMMARIZE_MAX_TOKENS = int(
+    os.getenv("DOCUMENT_ANALYSIS_SUMMARIZE_MAX_TOKENS", "1500")
+)
+DOCUMENT_ANALYSIS_REDUCE_MAX_TOKENS = int(
+    os.getenv("DOCUMENT_ANALYSIS_REDUCE_MAX_TOKENS", "2000")
+)
+DOCUMENT_ANALYSIS_SUMMARIZE_SLEEP_S = float(
+    os.getenv("DOCUMENT_ANALYSIS_SUMMARIZE_SLEEP_S", "1.0")
+)
+logger = logging.getLogger("document_analysis_workflow")
 
 
 # === State Definition ===
@@ -161,6 +176,11 @@ async def classify_and_load_node(state: DocumentAnalysisState) -> dict:
         else:
             full_text = data.get("text", "")
     except Exception as e:
+        logger.warning("Document analysis load_document fallback: %s", e, exc_info=True)
+        inc_metric_counter(
+            "agent_nav_fallback_events_total",
+            labels={"component": "document_analysis", "fallback": "load_document_failed", "source": "workflow"},
+        )
         errors.append(f"Failed to load document: {e}")
 
     # Количество страниц (PDF)
@@ -174,6 +194,11 @@ async def classify_and_load_node(state: DocumentAnalysisState) -> dict:
             data = resp.json()
             pages = data.get("total_pages", 0)
         except Exception as e:
+            logger.warning("Document analysis load_pages fallback: %s", e, exc_info=True)
+            inc_metric_counter(
+                "agent_nav_fallback_events_total",
+                labels={"component": "document_analysis", "fallback": "load_pages_failed", "source": "workflow"},
+            )
             errors.append(f"Failed to load pages: {e}")
 
     # Количество таблиц
@@ -187,6 +212,11 @@ async def classify_and_load_node(state: DocumentAnalysisState) -> dict:
         if data.get("status") != "error":
             tables_count = len(data.get("tables", []))
     except Exception:
+        logger.warning("Document analysis extract_tables degraded path", exc_info=True)
+        inc_metric_counter(
+            "agent_nav_fallback_events_total",
+            labels={"component": "document_analysis", "fallback": "extract_tables_failed", "source": "workflow"},
+        )
         pass  # Таблицы опциональны
 
     # Классификация
@@ -224,6 +254,11 @@ async def extract_positions_node(state: DocumentAnalysisState) -> dict:
         items_table = await _extract_tables_from_doc(path)
         print(f"  [DocAnalysis] Tables: {len(items_table)} items")
     except Exception as e:
+        logger.warning("Document analysis table extraction fallback: %s", e, exc_info=True)
+        inc_metric_counter(
+            "agent_nav_fallback_events_total",
+            labels={"component": "document_analysis", "fallback": "table_extract_failed", "source": "workflow"},
+        )
         errors.append(f"Table extraction failed: {e}")
 
     # Pass 2: LLM текстовые позиции (Условный запуск)
@@ -236,6 +271,11 @@ async def extract_positions_node(state: DocumentAnalysisState) -> dict:
             items_text = await _extract_items_llm(path, already_names)
             print(f"  [DocAnalysis] LLM text: {len(items_text)} items")
         except Exception as e:
+            logger.warning("Document analysis llm extraction fallback: %s", e, exc_info=True)
+            inc_metric_counter(
+                "agent_nav_fallback_events_total",
+                labels={"component": "document_analysis", "fallback": "llm_extract_failed", "source": "workflow"},
+            )
             errors.append(f"LLM extraction failed: {e}")
 
     items = _dedup_items(items_table + items_text)
@@ -320,7 +360,9 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
         try:
             async with _optional_chainlit_step(step_name, "tool") as step:
                 response = await ums_client.async_infer("qwen-14b-llm", {
-                    "prompt": prompt, "temperature": 0.1, "max_tokens": 1500
+                    "prompt": prompt,
+                    "temperature": DOCUMENT_ANALYSIS_SUMMARIZE_TEMPERATURE,
+                    "max_tokens": DOCUMENT_ANALYSIS_SUMMARIZE_MAX_TOKENS,
                 })
 
                 content = _extract_llm_content(response)
@@ -329,9 +371,14 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
                     if step is not None:
                         step.output = f"Успешно: {len(content)} симв."
 
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(DOCUMENT_ANALYSIS_SUMMARIZE_SLEEP_S)
         except Exception as e:
             print(f"    [DocAnalysis] Chunk {idx+1} failed: {e}")
+            logger.warning("Document analysis summarize chunk fallback idx=%s: %s", idx + 1, e, exc_info=True)
+            inc_metric_counter(
+                "agent_nav_fallback_events_total",
+                labels={"component": "document_analysis", "fallback": "summarize_chunk_failed", "source": "workflow"},
+            )
             errors.append(f"Summarize chunk {idx+1} failed: {e}")
 
     if not chunk_summaries:
@@ -352,13 +399,20 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
 """
         try:
             response = await ums_client.async_infer("qwen-14b-llm", {
-                "prompt": reduce_prompt, "temperature": 0.1, "max_tokens": 2000
+                "prompt": reduce_prompt,
+                "temperature": DOCUMENT_ANALYSIS_SUMMARIZE_TEMPERATURE,
+                "max_tokens": DOCUMENT_ANALYSIS_REDUCE_MAX_TOKENS,
             })
             content = response.get("content", "")
             if not content and "choices" in response:
                 content = response["choices"][0].get("text", "")
             summary = content.strip() if content.strip() else "\n\n".join(chunk_summaries)
         except Exception as e:
+            logger.warning("Document analysis reduce summarization fallback: %s", e, exc_info=True)
+            inc_metric_counter(
+                "agent_nav_fallback_events_total",
+                labels={"component": "document_analysis", "fallback": "reduce_summarization_failed", "source": "workflow"},
+            )
             errors.append(f"Reduce summarization failed: {e}")
             summary = "\n\n".join(chunk_summaries)
 

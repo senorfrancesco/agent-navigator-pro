@@ -4,6 +4,7 @@ Workflow: Compare Documents
 """
 
 import json
+import logging
 import os
 import re
 import httpx
@@ -13,6 +14,7 @@ from langgraph.graph import StateGraph, END
 
 # Абсолютные импорты пакета (TD-5 Fix)
 from services.model_manager.ums_client import ums_client
+from services.observability import inc_metric_counter
 from orchestrator.utils import parse_json_garbage
 from orchestrator.shared.http_client import get_shared_client
 
@@ -22,6 +24,12 @@ MCP_LEGAL_SERVER_URL = os.getenv("MCP_LEGAL_SERVER_URL", "http://localhost:8002"
 UMS_URL = os.getenv("UMS_URL", "http://localhost:8090")
 
 BATCH_SIZE = 5  # Кол-во различий в одном LLM-вызове (batch analysis)
+COMPARE_TRUNCATE_CHARS = int(os.getenv("COMPARE_TRUNCATE_CHARS", "2000"))
+COMPARE_SECTION_MAX_CHARS = int(os.getenv("COMPARE_SECTION_MAX_CHARS", "2000"))
+COMPARE_MIN_CHUNK_CHARS = int(os.getenv("COMPARE_MIN_CHUNK_CHARS", "40"))
+COMPARE_ANALYSIS_MAX_TOKENS = int(os.getenv("COMPARE_ANALYSIS_MAX_TOKENS", "600"))
+COMPARE_ANALYSIS_TEMPERATURE = float(os.getenv("COMPARE_ANALYSIS_TEMPERATURE", "0.1"))
+logger = logging.getLogger("compare_workflow")
 
 # === State Definition ===
 
@@ -40,7 +48,7 @@ class CompareState(TypedDict):
 
 # === Nodes ===
 
-def truncate_text(text: str, max_chars: int = 2000) -> str:
+def truncate_text(text: str, max_chars: int = COMPARE_TRUNCATE_CHARS) -> str:
     if len(text) <= max_chars:
         return text
     return text[:max_chars].rsplit(' ', 1)[0] + "..."
@@ -50,8 +58,8 @@ def dc_create_prompt(old, new):
 Ты эксперт-юрист.<|im_end|>
 <|im_start|>user
 Сравни тексты.
-СТАРЫЙ: {truncate_text(old, 2000)}
-НОВЫЙ: {truncate_text(new, 2000)}
+СТАРЫЙ: {truncate_text(old, COMPARE_TRUNCATE_CHARS)}
+НОВЫЙ: {truncate_text(new, COMPARE_TRUNCATE_CHARS)}
 Найди юридические изменения (сроки, права, обязанности, штрафы). Игнорируй стиль.
 Ответ JSON: {{"is_critical": true/false, "diff": "описание изменения", "impact": "последствия"}}<|im_end|>
 <|im_start|>assistant
@@ -79,14 +87,14 @@ async def load_documents_node(state: CompareState):
             section_pattern = r'\n(?=\d+\.(?:\d+\.)*\s+[А-ЯA])'
             sections = re.split(section_pattern, text)
             for section in sections:
-                if len(section) > 2000:
+                if len(section) > COMPARE_SECTION_MAX_CHARS:
                     parts = re.split(r'\n\s*\n', section)
                     for p in parts:
                         clean = ' '.join(p.split())
-                        if len(clean) > 40: chunks.append(clean)
+                        if len(clean) > COMPARE_MIN_CHUNK_CHARS: chunks.append(clean)
                 else:
                     clean = ' '.join(section.split())
-                    if len(clean) > 40: chunks.append(clean)
+                    if len(clean) > COMPARE_MIN_CHUNK_CHARS: chunks.append(clean)
             return chunks
 
         chunks_old = dc_smart_chunk(text1)
@@ -97,6 +105,11 @@ async def load_documents_node(state: CompareState):
             "chunks_new": chunks_new
         }
     except Exception as e:
+        logger.warning("Compare load_documents fallback: %s", e, exc_info=True)
+        inc_metric_counter(
+            "agent_nav_fallback_events_total",
+            labels={"component": "compare_workflow", "fallback": "load_documents_failed", "source": "workflow"},
+        )
         return {"errors": [f"Error loading docs: {str(e)}"]}
 
 async def match_chunks_node(state: CompareState):
@@ -128,6 +141,11 @@ async def match_chunks_node(state: CompareState):
         return {"matches": diffs}
     except Exception as e:
         print(f"Error in match_batches workflow: {e}")
+        logger.warning("Compare match_batches fallback: %s", e, exc_info=True)
+        inc_metric_counter(
+            "agent_nav_fallback_events_total",
+            labels={"component": "compare_workflow", "fallback": "match_batches_failed", "source": "workflow"},
+        )
         return {"errors": [f"Error in batch matching: {str(e)}"]}
 
 async def analyze_differences_node(state: CompareState):
@@ -181,7 +199,12 @@ async def analyze_differences_node(state: CompareState):
 <|im_start|>assistant
 """
         try:
-            payload = {"prompt": prompt, "max_tokens": 600, "temperature": 0.1, "echo": False}
+            payload = {
+                "prompt": prompt,
+                "max_tokens": COMPARE_ANALYSIS_MAX_TOKENS,
+                "temperature": COMPARE_ANALYSIS_TEMPERATURE,
+                "echo": False,
+            }
             response = await ums_client.async_infer("qwen-14b-llm", payload)
 
             content = response.get("content", "")
@@ -193,6 +216,16 @@ async def analyze_differences_node(state: CompareState):
             parsed = parse_json_garbage(content)
             if not isinstance(parsed, list):
                 parsed = [parsed] if isinstance(parsed, dict) else []
+            if len(parsed) < len(batch):
+                logger.warning(
+                    "Compare analyze fallback: structured output count mismatch batch=%s parsed=%s",
+                    len(batch),
+                    len(parsed),
+                )
+                inc_metric_counter(
+                    "agent_nav_fallback_events_total",
+                    labels={"component": "compare_workflow", "fallback": "analyze_parse_partial", "source": "workflow"},
+                )
 
             for idx, m in enumerate(batch):
                 item_data = parsed[idx] if idx < len(parsed) else {}
@@ -208,6 +241,11 @@ async def analyze_differences_node(state: CompareState):
 
         except Exception as e:
             print(f"[Workflow] Error in batch {batch_idx+1}: {e}")
+            logger.warning("Compare analyze fallback in batch %s: %s", batch_idx + 1, e, exc_info=True)
+            inc_metric_counter(
+                "agent_nav_fallback_events_total",
+                labels={"component": "compare_workflow", "fallback": "analyze_batch_error", "source": "workflow"},
+            )
             for m in batch:
                 results.append({
                     "type": "MODIFIED",

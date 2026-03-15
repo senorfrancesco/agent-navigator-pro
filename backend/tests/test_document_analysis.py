@@ -34,6 +34,7 @@ from orchestrator.workflows.document_analysis import (
     _SUMMARY_PROMPTS,
     _DOC_TYPE_LABELS,
 )
+from services.observability import render_metrics_text, reset_observability_metrics
 
 
 # ============================================================================
@@ -53,6 +54,13 @@ def base_state() -> DocumentAnalysisState:
         "final_report": "",
         "errors": [],
     }
+
+
+@pytest.fixture(autouse=True)
+def _reset_document_analysis_metrics():
+    reset_observability_metrics()
+    yield
+    reset_observability_metrics()
 
 
 @pytest.fixture
@@ -259,6 +267,21 @@ class TestExtractPositionsNode:
         assert result["items"][0]["source"] == "text"
 
     @pytest.mark.asyncio
+    async def test_extract_llm_failure_records_metric(self, base_state):
+        with patch("orchestrator.workflows.document_analysis._extract_tables_from_doc", new_callable=AsyncMock) as mock_tables, \
+             patch("orchestrator.workflows.document_analysis._extract_items_llm", new_callable=AsyncMock) as mock_llm:
+            mock_tables.return_value = []
+            mock_llm.side_effect = RuntimeError("llm exploded")
+
+            result = await extract_positions_node(base_state)
+
+        assert any("LLM extraction failed" in error for error in result["errors"])
+        metrics = render_metrics_text()
+        assert "agent_nav_fallback_events_total" in metrics
+        assert 'component="document_analysis"' in metrics
+        assert 'fallback="llm_extract_failed"' in metrics
+
+    @pytest.mark.asyncio
     async def test_extract_dedup(self, base_state):
         table_items = [
             {"name": "Сервер HP ProLiant", "specs": "2x Xeon", "quantity": "2", "price": "100000", "unit": "шт", "source": "table", "page": 1},
@@ -348,6 +371,10 @@ class TestSummarizeNode:
         # Не должен упасть — вернёт ошибку в summary или errors
         assert "errors" in result
         assert any("failed" in e.lower() or "timeout" in e.lower() for e in result["errors"])
+        metrics = render_metrics_text()
+        assert "agent_nav_fallback_events_total" in metrics
+        assert 'component="document_analysis"' in metrics
+        assert 'fallback="summarize_chunk_failed"' in metrics
 
     @pytest.mark.asyncio
     async def test_summarize_accepts_choices_response_shape(self, base_state, tz_text):
@@ -373,6 +400,29 @@ class TestSummarizeNode:
 
         result = await summarize_node(base_state)
         assert "пуст" in result["summary"].lower()
+
+    @pytest.mark.asyncio
+    async def test_summarize_reduce_failure_records_metric(self, base_state, tz_text):
+        base_state["full_text"] = tz_text
+        base_state["doc_type"] = "tz"
+
+        with patch("orchestrator.workflows.document_analysis._chunk_text", new_callable=AsyncMock) as mock_chunk, \
+             patch("orchestrator.workflows.document_analysis.ums_client") as mock_ums:
+            mock_chunk.return_value = [tz_text[:80], tz_text[80:]]
+            mock_ums.async_infer = AsyncMock(side_effect=[
+                {"content": "- Срок поставки: 10 дней"},
+                {"content": "- Гарантия: 12 месяцев"},
+                RuntimeError("reduce exploded"),
+            ])
+
+            result = await summarize_node(base_state)
+
+        assert "10 дней" in result["summary"]
+        assert any("Reduce summarization failed" in error for error in result["errors"])
+        metrics = render_metrics_text()
+        assert "agent_nav_fallback_events_total" in metrics
+        assert 'component="document_analysis"' in metrics
+        assert 'fallback="reduce_summarization_failed"' in metrics
 
 
 # ============================================================================

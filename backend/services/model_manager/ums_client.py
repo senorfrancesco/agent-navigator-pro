@@ -6,6 +6,7 @@ UMS Client - HTTP-клиент для взаимодействия с Unified Mo
 
 import asyncio
 import inspect
+import logging
 import os
 import time
 import random
@@ -15,8 +16,24 @@ import httpx
 import numpy as np
 from typing import Dict, Any, Optional, List, AsyncGenerator, Callable, Awaitable
 import json
+from services.observability import inc_metric_counter
 
 UMS_URL = os.getenv("UMS_URL", "http://localhost:8090")
+logger = logging.getLogger("ums_client")
+
+UMS_CLIENT_TIMEOUT_S = float(os.getenv("UMS_CLIENT_TIMEOUT_S", "300.0"))
+UMS_CLIENT_CONNECT_TIMEOUT_S = float(os.getenv("UMS_CLIENT_CONNECT_TIMEOUT_S", "10.0"))
+UMS_CLIENT_KEEPALIVE_CONNECTIONS = int(os.getenv("UMS_CLIENT_KEEPALIVE_CONNECTIONS", "10"))
+UMS_CLIENT_MAX_CONNECTIONS = int(os.getenv("UMS_CLIENT_MAX_CONNECTIONS", "50"))
+UMS_SYNC_INFER_RETRIES = int(os.getenv("UMS_SYNC_INFER_RETRIES", "3"))
+UMS_SWITCH_MODEL_TIMEOUT_S = float(os.getenv("UMS_SWITCH_MODEL_TIMEOUT_S", "120.0"))
+UMS_STATUS_TIMEOUT_S = float(os.getenv("UMS_STATUS_TIMEOUT_S", "10.0"))
+UMS_EMBED_PROBE_TIMEOUT_S = float(os.getenv("UMS_EMBED_PROBE_TIMEOUT_S", "10.0"))
+UMS_EMBED_BATCH_SIZE = int(os.getenv("UMS_EMBED_BATCH_SIZE", "10"))
+UMS_EMBED_BATCH_TIMEOUT_S = float(os.getenv("UMS_EMBED_BATCH_TIMEOUT_S", "120.0"))
+UMS_EMBED_BATCH_CONNECT_TIMEOUT_S = float(os.getenv("UMS_EMBED_BATCH_CONNECT_TIMEOUT_S", "10.0"))
+UMS_EMBED_BATCH_RETRIES = int(os.getenv("UMS_EMBED_BATCH_RETRIES", "3"))
+UMS_EMBED_BATCH_RETRY_DELAY_S = float(os.getenv("UMS_EMBED_BATCH_RETRY_DELAY_S", "1.0"))
 
 # Shared async client для повторного использования соединений
 _async_client: Optional[httpx.AsyncClient] = None
@@ -30,8 +47,11 @@ async def _get_async_client() -> httpx.AsyncClient:
         async with _client_lock:
             if _async_client is None:
                 _async_client = httpx.AsyncClient(
-                    timeout=httpx.Timeout(300.0, connect=10.0),
-                    limits=httpx.Limits(max_keepalive_connections=10, max_connections=50),
+                    timeout=httpx.Timeout(UMS_CLIENT_TIMEOUT_S, connect=UMS_CLIENT_CONNECT_TIMEOUT_S),
+                    limits=httpx.Limits(
+                        max_keepalive_connections=UMS_CLIENT_KEEPALIVE_CONNECTIONS,
+                        max_connections=UMS_CLIENT_MAX_CONNECTIONS,
+                    ),
                 )
     return _async_client
 
@@ -96,12 +116,12 @@ class UMSClient:
             "priority": "normal"
         }
         
-        retries = 3
+        retries = UMS_SYNC_INFER_RETRIES
         last_error = None
         for attempt in range(retries):
             try:
                 print(f"[UMS_CLIENT] Sending inference request for model: {model_id} (attempt {attempt+1})")
-                response = requests.post(url, json=request_body, timeout=300)
+                response = requests.post(url, json=request_body, timeout=UMS_CLIENT_TIMEOUT_S)
                 response.raise_for_status()
                 data = response.json()
 
@@ -113,6 +133,18 @@ class UMSClient:
             except requests.exceptions.RequestException as e:
                 last_error = e
                 print(f"[UMS_CLIENT] Error (attempt {attempt+1}/{retries}): {e}")
+                if attempt < retries - 1:
+                    logger.warning(
+                        "UMS client infer retry model=%s attempt=%s/%s: %s",
+                        model_id,
+                        attempt + 1,
+                        retries,
+                        e,
+                    )
+                    inc_metric_counter(
+                        "agent_nav_fallback_events_total",
+                        labels={"component": "ums_client", "fallback": "infer_retry", "source": "client"},
+                    )
                 if attempt < retries - 1:
                     time.sleep(2)
         raise RuntimeError(f"Failed to connect to UMS after {retries} attempts: {last_error}")
@@ -149,6 +181,17 @@ class UMSClient:
                 last_error = e
                 print(f"[UMS_CLIENT] Async error (attempt {attempt+1}/{retries}): {e}")
                 if attempt < retries - 1 and _should_retry_async_infer(e):
+                    logger.warning(
+                        "UMS client async retry model=%s attempt=%s/%s: %s",
+                        model_id,
+                        attempt + 1,
+                        retries,
+                        e,
+                    )
+                    inc_metric_counter(
+                        "agent_nav_fallback_events_total",
+                        labels={"component": "ums_client", "fallback": "async_infer_retry", "source": "client"},
+                    )
                     delay = min(max_delay_s, base_delay_s * (2 ** attempt))
                     jitter = random.uniform(0.0, min(0.5, delay * 0.2))
                     await asyncio.sleep(delay + jitter)
@@ -189,6 +232,11 @@ class UMSClient:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                logger.warning("UMS client stream fallback model=%s: %s", model_id, exc, exc_info=True)
+                inc_metric_counter(
+                    "agent_nav_fallback_events_total",
+                    labels={"component": "ums_client", "fallback": "stream_error", "source": "client"},
+                )
                 await queue.put(("error", exc))
             finally:
                 await queue.put(("done", None))
@@ -237,7 +285,7 @@ class UMSClient:
         
         try:
             print(f"[UMS_CLIENT] Switching to model: {model_id}")
-            response = requests.post(url, json=request_body, timeout=120)
+            response = requests.post(url, json=request_body, timeout=UMS_SWITCH_MODEL_TIMEOUT_S)
             response.raise_for_status()
             return response.json()
         
@@ -250,7 +298,7 @@ class UMSClient:
         url = f"{self.base_url}/status"
         
         try:
-            response = requests.get(url, timeout=10)
+            response = requests.get(url, timeout=UMS_STATUS_TIMEOUT_S)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
@@ -340,7 +388,11 @@ def create_ums_embed_fn(
 
     # Probe: проверяем доступность UMS и конкретной embedding-модели
     try:
-        resp = requests.post(url, json={"input": ["test"], "model": model_id}, timeout=10)
+        resp = requests.post(
+            url,
+            json={"input": ["test"], "model": model_id},
+            timeout=UMS_EMBED_PROBE_TIMEOUT_S,
+        )
         resp.raise_for_status()
     except Exception:
         return None
@@ -350,16 +402,17 @@ def create_ums_embed_fn(
         if not texts: return np.array([], dtype=np.float32)
         
         all_embeddings = []
-        BATCH_SIZE = 10
         last_error = None
         
         try:
-            with httpx.Client(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
-                for i in range(0, len(texts), BATCH_SIZE):
-                    batch = texts[i : i + BATCH_SIZE]
+            with httpx.Client(
+                timeout=httpx.Timeout(UMS_EMBED_BATCH_TIMEOUT_S, connect=UMS_EMBED_BATCH_CONNECT_TIMEOUT_S)
+            ) as client:
+                for i in range(0, len(texts), UMS_EMBED_BATCH_SIZE):
+                    batch = texts[i : i + UMS_EMBED_BATCH_SIZE]
                     
                     # Ретраи для каждого батча
-                    for attempt in range(3):
+                    for attempt in range(UMS_EMBED_BATCH_RETRIES):
                         try:
                             resp = client.post(url, json={"input": batch, "model": model_id})
                             resp.raise_for_status()
@@ -370,7 +423,8 @@ def create_ums_embed_fn(
                             break # Успех
                         except Exception as e:
                             last_error = e
-                            if attempt < 2: time.sleep(1)
+                            if attempt < UMS_EMBED_BATCH_RETRIES - 1:
+                                time.sleep(UMS_EMBED_BATCH_RETRY_DELAY_S)
                             else: raise
                             
             return np.array(all_embeddings, dtype=np.float32)

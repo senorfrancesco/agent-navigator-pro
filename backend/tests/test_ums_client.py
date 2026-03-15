@@ -9,6 +9,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from services.model_manager.ums_client import UMSClient
+from services.observability import render_metrics_text, reset_observability_metrics
 
 
 class _FakeResponse:
@@ -42,6 +43,13 @@ class _FakeClient:
         return response
 
 
+@pytest.fixture(autouse=True)
+def _reset_ums_client_metrics():
+    reset_observability_metrics()
+    yield
+    reset_observability_metrics()
+
+
 @pytest.mark.asyncio
 async def test_async_infer_retries_on_503(monkeypatch):
     client = UMSClient(base_url="http://localhost:8090")
@@ -60,6 +68,10 @@ async def test_async_infer_retries_on_503(monkeypatch):
 
     assert result["content"] == "ok"
     assert fake_client.calls == 3
+    metrics = render_metrics_text()
+    assert "agent_nav_fallback_events_total" in metrics
+    assert 'component="ums_client"' in metrics
+    assert 'fallback="async_infer_retry"' in metrics
 
 
 @pytest.mark.asyncio
@@ -76,3 +88,29 @@ async def test_async_infer_does_not_retry_on_400(monkeypatch):
             await client.async_infer("qwen-14b-llm", {"prompt": "x"})
 
     assert fake_client.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_async_infer_stream_records_stream_error_metric():
+    client = UMSClient(base_url="http://localhost:8090")
+
+    class _FailingStreamContext:
+        async def __aenter__(self):
+            raise httpx.ReadTimeout("stream timeout")
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class _FakeStreamingClient:
+        def stream(self, *args, **kwargs):
+            return _FailingStreamContext()
+
+    with patch("services.model_manager.ums_client._get_async_client", new=AsyncMock(return_value=_FakeStreamingClient())):
+        with pytest.raises(httpx.ReadTimeout):
+            async for _ in client.async_infer_stream("qwen-14b-llm", {"prompt": "x"}):
+                pass
+
+    metrics = render_metrics_text()
+    assert "agent_nav_fallback_events_total" in metrics
+    assert 'component="ums_client"' in metrics
+    assert 'fallback="stream_error"' in metrics

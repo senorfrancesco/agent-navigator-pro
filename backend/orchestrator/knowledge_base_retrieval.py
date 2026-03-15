@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
@@ -8,6 +9,22 @@ import numpy as np
 from orchestrator.knowledge_base_store import SQLiteKnowledgeBaseStore
 from orchestrator.rag.chunker import LegalDocumentChunker
 from orchestrator.rag.retriever import HybridRetriever
+
+
+KB_RETRIEVAL_DEFAULT_TOP_K = int(os.getenv("KB_RETRIEVAL_DEFAULT_TOP_K", "5"))
+KB_RETRIEVAL_CANDIDATE_BUDGET_PER_SCOPE = int(
+    os.getenv("KB_RETRIEVAL_CANDIDATE_BUDGET_PER_SCOPE", "12")
+)
+KB_RETRIEVAL_NORMALIZED_DEFAULT = float(os.getenv("KB_RETRIEVAL_NORMALIZED_DEFAULT", "0.5"))
+KB_RETRIEVAL_SPREAD_EPSILON = float(os.getenv("KB_RETRIEVAL_SPREAD_EPSILON", "1e-9"))
+KB_RETRIEVAL_RANK_BONUS_NUMERATOR = float(os.getenv("KB_RETRIEVAL_RANK_BONUS_NUMERATOR", "1.0"))
+KB_RETRIEVAL_SCOPE_SCORE_WEIGHT = float(os.getenv("KB_RETRIEVAL_SCOPE_SCORE_WEIGHT", "0.80"))
+KB_RETRIEVAL_RANK_BONUS_WEIGHT = float(os.getenv("KB_RETRIEVAL_RANK_BONUS_WEIGHT", "0.20"))
+KB_RETRIEVAL_SESSION_TIE_BREAK_MARGIN = float(
+    os.getenv("KB_RETRIEVAL_SESSION_TIE_BREAK_MARGIN", "0.05")
+)
+KB_RETRIEVAL_RERANK_BASE_WEIGHT = float(os.getenv("KB_RETRIEVAL_RERANK_BASE_WEIGHT", "0.70"))
+KB_RETRIEVAL_RERANK_SCORE_WEIGHT = float(os.getenv("KB_RETRIEVAL_RERANK_SCORE_WEIGHT", "0.30"))
 
 
 def _normalize_text_hash(text: str) -> str:
@@ -118,9 +135,16 @@ def _annotate_scope_merge_scores(chunks: List[Dict[str, Any]]) -> List[Dict[str,
     for chunk in chunks:
         raw_score = float(chunk.get("raw_score", 0.0))
         rank = int(chunk.get("scope_rank", 1) or 1)
-        norm_score = 0.5 if spread <= 1e-9 else max(0.0, min(1.0, (raw_score - min_score) / spread))
-        rank_bonus = 1.0 / rank
-        merged = 0.80 * norm_score + 0.20 * rank_bonus
+        norm_score = (
+            KB_RETRIEVAL_NORMALIZED_DEFAULT
+            if spread <= KB_RETRIEVAL_SPREAD_EPSILON
+            else max(0.0, min(1.0, (raw_score - min_score) / spread))
+        )
+        rank_bonus = KB_RETRIEVAL_RANK_BONUS_NUMERATOR / rank
+        merged = (
+            KB_RETRIEVAL_SCOPE_SCORE_WEIGHT * norm_score
+            + KB_RETRIEVAL_RANK_BONUS_WEIGHT * rank_bonus
+        )
         annotated.append({**chunk, "scope_score": norm_score, "merge_score": merged})
     return annotated
 
@@ -128,7 +152,7 @@ def _annotate_scope_merge_scores(chunks: List[Dict[str, Any]]) -> List[Dict[str,
 def _prefer_chunk(existing: Dict[str, Any], candidate: Dict[str, Any]) -> Dict[str, Any]:
     existing_merge = float(existing.get("merge_score", 0.0))
     candidate_merge = float(candidate.get("merge_score", 0.0))
-    if abs(candidate_merge - existing_merge) <= 0.05:
+    if abs(candidate_merge - existing_merge) <= KB_RETRIEVAL_SESSION_TIE_BREAK_MARGIN:
         existing_origin = str(existing.get("source_origin") or "")
         candidate_origin = str(candidate.get("source_origin") or "")
         if existing_origin != candidate_origin:
@@ -158,7 +182,11 @@ def _dedup_and_normalize(chunks: List[Dict[str, Any]], top_k: int) -> List[Dict[
     spread = max_score - min_score
     for chunk in deduped:
         raw_score = float(chunk.get("merge_score", 0.0))
-        normalized = 0.5 if spread <= 1e-9 else max(0.0, min(1.0, (raw_score - min_score) / spread))
+        normalized = (
+            KB_RETRIEVAL_NORMALIZED_DEFAULT
+            if spread <= KB_RETRIEVAL_SPREAD_EPSILON
+            else max(0.0, min(1.0, (raw_score - min_score) / spread))
+        )
         chunk["normalized_score"] = normalized
     return deduped
 
@@ -179,8 +207,15 @@ def _apply_optional_rerank(
     spread = max_score - min_score
     reranked: List[Dict[str, Any]] = []
     for chunk, rerank_score in zip(chunks, rerank_scores):
-        normalized = 0.5 if spread <= 1e-9 else max(0.0, min(1.0, (float(rerank_score) - min_score) / spread))
-        final_score = 0.70 * float(chunk.get("normalized_score", 0.0)) + 0.30 * normalized
+        normalized = (
+            KB_RETRIEVAL_NORMALIZED_DEFAULT
+            if spread <= KB_RETRIEVAL_SPREAD_EPSILON
+            else max(0.0, min(1.0, (float(rerank_score) - min_score) / spread))
+        )
+        final_score = (
+            KB_RETRIEVAL_RERANK_BASE_WEIGHT * float(chunk.get("normalized_score", 0.0))
+            + KB_RETRIEVAL_RERANK_SCORE_WEIGHT * normalized
+        )
         reranked.append(
             {
                 **chunk,
@@ -202,8 +237,8 @@ def retrieve_merged_chunks(
     active_doc_ids: List[str],
     embed_fn: Optional[Callable],
     kb_store: Optional[SQLiteKnowledgeBaseStore],
-    top_k: int = 5,
-    candidate_budget_per_scope: int = 12,
+    top_k: int = KB_RETRIEVAL_DEFAULT_TOP_K,
+    candidate_budget_per_scope: int = KB_RETRIEVAL_CANDIDATE_BUDGET_PER_SCOPE,
     mode: str = "hybrid",
     rerank_fn: Optional[Callable[[str, List[Dict[str, Any]]], List[float]]] = None,
 ) -> Dict[str, Any]:
