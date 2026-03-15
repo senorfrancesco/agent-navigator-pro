@@ -260,6 +260,89 @@ class TestChainlitControlPlaneSettings:
         assert effective["context_budget_profile"] == "compact"
         assert self._store["runtime_mode"] == "chat_only"
 
+    @pytest.mark.asyncio
+    async def test_on_settings_update_switching_only_assistant_mode_applies_preset_fields(self):
+        await self._module.on_settings_update(
+            {
+                "assistant_mode": "specific_tasks",
+                "runtime_mode": "auto",
+                "rag_scope": "off",
+                "model_profile": "default-chat",
+                "prompt_profile": "default-assistant",
+                "temperature": 0.7,
+                "top_p": 0.9,
+                "max_tokens": 2048,
+            }
+        )
+
+        raw = self._store["control_plane_state"]
+        effective = self._store["effective_settings"]
+
+        assert raw["assistant_mode"] == "specific_tasks"
+        assert raw["runtime_mode"] == "specialized_tasks"
+        assert raw["rag_scope"] == "session_rag"
+        assert raw["model_profile"] == "legal-compare"
+        assert raw["prompt_profile"] == "task-router"
+        assert raw["tool_scope"] == "domain_tasks"
+        assert raw["generation_overrides"] == {
+            "temperature": 0.2,
+            "top_p": 0.8,
+            "max_tokens": 2048,
+        }
+        assert effective["assistant_mode"] == "specific_tasks"
+        assert effective["runtime_mode"] == "specialized_tasks"
+        assert effective["rag_scope"] == "session_rag"
+        assert effective["model_profile"] == "legal-compare"
+        assert effective["prompt_profile"] == "task-router"
+        assert effective["tool_scope"] == "domain_tasks"
+        assert effective["generation"] == {
+            "temperature": 0.2,
+            "top_p": 0.8,
+            "max_tokens": 2048,
+        }
+        assert self._store["runtime_mode"] == "specialized_tasks"
+
+    @pytest.mark.asyncio
+    async def test_on_settings_update_preserves_only_explicit_overrides_after_assistant_mode_change(self):
+        await self._module.on_settings_update(
+            {
+                "assistant_mode": "specific_tasks",
+                "runtime_mode": "chat_only",
+                "rag_scope": "off",
+                "model_profile": "default-chat",
+                "prompt_profile": "default-assistant",
+                "temperature": 0.15,
+                "top_p": 0.9,
+                "max_tokens": 2048,
+            }
+        )
+
+        raw = self._store["control_plane_state"]
+        effective = self._store["effective_settings"]
+
+        assert raw["assistant_mode"] == "specific_tasks"
+        assert raw["runtime_mode"] == "chat_only"
+        assert raw["rag_scope"] == "session_rag"
+        assert raw["model_profile"] == "legal-compare"
+        assert raw["prompt_profile"] == "task-router"
+        assert raw["tool_scope"] == "domain_tasks"
+        assert raw["generation_overrides"] == {
+            "temperature": 0.15,
+            "top_p": 0.8,
+            "max_tokens": 2048,
+        }
+        assert effective["runtime_mode"] == "chat_only"
+        assert effective["rag_scope"] == "session_rag"
+        assert effective["model_profile"] == "legal-compare"
+        assert effective["prompt_profile"] == "task-router"
+        assert effective["tool_scope"] == "domain_tasks"
+        assert effective["generation"] == {
+            "temperature": 0.15,
+            "top_p": 0.8,
+            "max_tokens": 2048,
+        }
+        assert self._store["runtime_mode"] == "chat_only"
+
     def test_set_pending_route_choice_writes_both_session_keys(self):
         payload = {"type": "choose_route", "route_choice_id": "rc-1"}
 
@@ -297,18 +380,7 @@ class TestChainlitControlPlaneSettings:
 
     @pytest.mark.asyncio
     async def test_on_chat_start_sends_control_plane_settings(self):
-        created = []
-
-        def _fake_create_task(coro):
-            created.append(coro)
-            coro.close()
-            return None
-
-        with patch.object(self._module, "_send_control_plane_settings", new=AsyncMock()) as mock_send_settings, patch.object(
-            self._module.asyncio,
-            "create_task",
-            side_effect=_fake_create_task,
-        ):
+        with patch.object(self._module, "_send_control_plane_settings", new=AsyncMock()) as mock_send_settings:
             await self._module.on_chat_start()
 
         mock_send_settings.assert_awaited_once()
@@ -318,6 +390,10 @@ class TestChainlitControlPlaneSettings:
         assert "effective_settings" in self._store
         assert self._store["run_id"] == "run-test"
         assert self._store["state_ref"] == "run:run-test"
+
+    def test_chainlit_app_has_no_local_classifier_runtime_helpers(self):
+        assert not hasattr(self._module, "_get_classifier_result")
+        assert not hasattr(self._module, "_init_classifier")
 
     @pytest.mark.asyncio
     async def test_on_message_uses_backend_execution_path_instead_of_local_execute_intent(self):
@@ -349,6 +425,8 @@ class TestChainlitControlPlaneSettings:
             await self._module.on_message(fake_message)
 
         mock_execute.assert_awaited_once()
+        request_payload = mock_execute.await_args.args[0]
+        assert "classifier_result" not in request_payload
         message_instance.send.assert_awaited_once()
 
     @pytest.mark.asyncio

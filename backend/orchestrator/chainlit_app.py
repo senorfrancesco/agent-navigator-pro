@@ -13,7 +13,9 @@ Chainlit App — замена Open WebUI для Agent Navigator Pro.
 
 import asyncio
 import copy
+import json
 import logging
+import mimetypes
 import os
 import re
 import sqlite3
@@ -22,7 +24,9 @@ import time
 import shutil
 import httpx
 import uuid
+from pathlib import Path
 from typing import Dict, List, Optional, Any
+from urllib.parse import quote
 
 # Добавляем пути (оставляем для обратной совместимости, но используем абсолютные)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -31,10 +35,11 @@ try:
     import chainlit as cl
 except ImportError:
     raise ImportError("chainlit not installed. Run: pip install chainlit")
+from fastapi import HTTPException
+from fastapi.responses import FileResponse
 
 from services.model_manager.ums_client import ums_client
 from services.hardware.tier_selector import describe_rag_mode
-from orchestrator.rag.classifier import LLMIntentClassifier, select_classifier_result
 from orchestrator.shared.http_client import get_shared_client
 from orchestrator.orchestration_runtime import (
     ROUTE_CHOICE_TIMEOUT_S,
@@ -74,21 +79,6 @@ from orchestrator.ui_control_plane import (
 
 logger = logging.getLogger("chainlit_app")
 
-INTENT_CLASSIFIER_MODE = os.getenv("INTENT_CLASSIFIER_MODE", "embedder").strip().lower()
-INTENT_CLASSIFIER_EMBEDDER_MODEL = os.getenv(
-    "INTENT_CLASSIFIER_EMBEDDER_MODEL",
-    "qwen3-embedding-0.6b",
-)
-INTENT_CLASSIFIER_LLM_MODEL = os.getenv("INTENT_CLASSIFIER_LLM_MODEL", "qwen-14b-llm")
-INTENT_CLASSIFIER_LLM_CONFIDENCE_THRESHOLD = float(
-    os.getenv("INTENT_CLASSIFIER_LLM_CONFIDENCE_THRESHOLD", "0.75")
-)
-INTENT_CLASSIFIER_EMBEDDER_CONFIDENCE_THRESHOLD = float(
-    os.getenv("INTENT_CLASSIFIER_EMBEDDER_CONFIDENCE_THRESHOLD", "0.60")
-)
-INTENT_CLASSIFIER_EMBEDDER_MARGIN_THRESHOLD = float(
-    os.getenv("INTENT_CLASSIFIER_EMBEDDER_MARGIN_THRESHOLD", "0.10")
-)
 LEGAL_EMBEDDER_MODEL = os.getenv("LEGAL_EMBEDDER_MODEL", "labse-embedding")
 
 _DOC_QUESTION_UPLOAD_REQUEST_PHRASES = [
@@ -226,6 +216,7 @@ def _bootstrap_chainlit_sqlite_schema(conninfo: str) -> None:
         "id" TEXT PRIMARY KEY,
         "name" TEXT,
         "type" TEXT,
+        "command" TEXT,
         "threadId" TEXT,
         "parentId" TEXT,
         "streaming" INTEGER,
@@ -238,6 +229,7 @@ def _bootstrap_chainlit_sqlite_schema(conninfo: str) -> None:
         "createdAt" TEXT,
         "start" TEXT,
         "end" TEXT,
+        "defaultOpen" INTEGER,
         "generation" TEXT,
         "showInput" TEXT,
         "language" TEXT
@@ -269,18 +261,243 @@ def _bootstrap_chainlit_sqlite_schema(conninfo: str) -> None:
         "props" TEXT
     );
     """
+    required_columns = {
+        "threads": {
+            "id": 'TEXT PRIMARY KEY',
+            "createdAt": "TEXT",
+            "name": "TEXT",
+            "userId": "TEXT",
+            "userIdentifier": "TEXT",
+            "tags": "TEXT",
+            "metadata": "TEXT",
+        },
+        "steps": {
+            "id": 'TEXT PRIMARY KEY',
+            "name": "TEXT",
+            "type": "TEXT",
+            "command": "TEXT",
+            "threadId": "TEXT",
+            "parentId": "TEXT",
+            "streaming": "INTEGER",
+            "waitForAnswer": "INTEGER",
+            "isError": "INTEGER",
+            "metadata": "TEXT",
+            "tags": "TEXT",
+            "input": "TEXT",
+            "output": "TEXT",
+            "createdAt": "TEXT",
+            "start": "TEXT",
+            "end": "TEXT",
+            "defaultOpen": "INTEGER",
+            "generation": "TEXT",
+            "showInput": "TEXT",
+            "language": "TEXT",
+        },
+        "elements": {
+            "id": 'TEXT PRIMARY KEY',
+            "threadId": "TEXT",
+            "type": "TEXT",
+            "chainlitKey": "TEXT",
+            "url": "TEXT",
+            "objectKey": "TEXT",
+            "name": "TEXT",
+            "display": "TEXT",
+            "size": "TEXT",
+            "language": "TEXT",
+            "page": "INTEGER",
+            "autoPlay": "INTEGER",
+            "playerConfig": "TEXT",
+            "forId": "TEXT",
+            "mime": "TEXT",
+            "props": "TEXT",
+        },
+    }
     with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
         conn.executescript(schema_sql)
+        for table_name, columns in required_columns.items():
+            existing_columns = {
+                row[1]
+                for row in conn.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+            }
+            for column_name, column_type in columns.items():
+                if column_name in existing_columns:
+                    continue
+                conn.execute(
+                    f'ALTER TABLE "{table_name}" ADD COLUMN "{column_name}" {column_type}'
+                )
         conn.commit()
 
 if _ENABLE_DATA_LAYER:
     try:
+        from chainlit.config import config as chainlit_config
         from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
+        from chainlit.data.storage_clients.base import BaseStorageClient
+        import chainlit.server as chainlit_server
+        from sqlalchemy import event as sqlalchemy_event
+
+        def _uploads_root() -> str:
+            return str(globals().get("UPLOADS_DIR") or os.getenv("UPLOADS_DIR", "/app/uploads"))
+
+        def _chainlit_elements_root() -> str:
+            return os.path.join(_uploads_root(), "chainlit-elements")
+
+        def _resolve_chainlit_element_fs_path(object_key: str) -> Path:
+            normalized_key = object_key.strip().lstrip("/")
+            if not normalized_key:
+                raise HTTPException(status_code=404, detail="Element not found")
+            key_path = Path(normalized_key)
+            if key_path.is_absolute() or ".." in key_path.parts:
+                raise HTTPException(status_code=400, detail="Invalid element path")
+            root_path = Path(_chainlit_elements_root()).resolve()
+            resolved_path = (root_path / key_path).resolve()
+            try:
+                resolved_path.relative_to(root_path)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="Invalid element path") from exc
+            return resolved_path
+
+        class _LocalChainlitStorageProvider(BaseStorageClient):
+            """Persist Chainlit elements in a local file tree under UPLOADS_DIR."""
+
+            def __init__(self, base_dir: Optional[str] = None):
+                self.base_dir = os.path.abspath(base_dir or _chainlit_elements_root())
+                os.makedirs(self.base_dir, exist_ok=True)
+
+            async def upload_file(
+                self,
+                object_key: str,
+                data: bytes | str,
+                mime: str = "application/octet-stream",
+                overwrite: bool = True,
+                content_disposition: str | None = None,
+            ) -> Dict[str, Any]:
+                file_path = _resolve_chainlit_element_fs_path(object_key)
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+                if file_path.exists() and not overwrite:
+                    raise FileExistsError(f"Object already exists: {object_key}")
+                payload = data.encode("utf-8") if isinstance(data, str) else data
+                file_path.write_bytes(payload)
+                return {
+                    "object_key": object_key,
+                    "url": await self.get_read_url(object_key),
+                    "mime": mime,
+                    "content_disposition": content_disposition,
+                }
+
+            async def delete_file(self, object_key: str) -> bool:
+                file_path = _resolve_chainlit_element_fs_path(object_key)
+                if not file_path.exists():
+                    return False
+                file_path.unlink()
+                parent = file_path.parent
+                root_path = Path(self.base_dir).resolve()
+                while parent != root_path and parent.exists():
+                    try:
+                        parent.rmdir()
+                    except OSError:
+                        break
+                    parent = parent.parent
+                return True
+
+            async def get_read_url(self, object_key: str) -> str:
+                encoded_key = quote(object_key.strip().lstrip("/"), safe="/")
+                return f"{chainlit_config.run.root_path}/project/file/{encoded_key}"
+
+            async def close(self) -> None:
+                return None
+
+        async def _serve_local_chainlit_element_file(
+            object_key: str,
+            current_user: Any,
+        ) -> FileResponse:
+            if not current_user:
+                raise HTTPException(status_code=401, detail="Unauthorized")
+            normalized_key = object_key.strip().lstrip("/")
+            if not normalized_key.startswith(f"{current_user.identifier}/"):
+                raise HTTPException(status_code=403, detail="Forbidden")
+            file_path = _resolve_chainlit_element_fs_path(normalized_key)
+            if not file_path.exists():
+                raise HTTPException(status_code=404, detail="Element not found")
+            media_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
+            return FileResponse(file_path, media_type=media_type, filename=file_path.name)
+
+        if not getattr(chainlit_server.app.state, "agent_nav_element_file_route_registered", False):
+
+            @chainlit_server.app.get(f"{chainlit_config.run.root_path}/project/file/{{object_key:path}}")
+            async def get_local_chainlit_element_file(
+                object_key: str,
+                current_user: chainlit_server.UserParam,
+            ):
+                return await _serve_local_chainlit_element_file(
+                    object_key=object_key,
+                    current_user=current_user,
+                )
+
+            chainlit_server.app.state.agent_nav_element_file_route_registered = True
+
+        class _CompatibleSQLAlchemyDataLayer(SQLAlchemyDataLayer):
+            """Compatibility wrapper for local SQLite bootstrap schema and tag serialization."""
+
+            def __init__(self, conninfo: str, *args, **kwargs):
+                connect_args = dict(kwargs.pop("connect_args", {}) or {})
+                sqlite_timeout_s = float(os.getenv("CHAINLIT_SQLITE_TIMEOUT_S", "30"))
+                if conninfo.startswith("sqlite"):
+                    connect_args.setdefault("timeout", sqlite_timeout_s)
+                super().__init__(conninfo=conninfo, *args, connect_args=connect_args, **kwargs)
+                if conninfo.startswith("sqlite"):
+                    busy_timeout_ms = int(sqlite_timeout_s * 1000)
+
+                    @sqlalchemy_event.listens_for(self.engine.sync_engine, "connect")
+                    def _configure_sqlite_connection(dbapi_connection, connection_record):
+                        cursor = dbapi_connection.cursor()
+                        cursor.execute("PRAGMA journal_mode=WAL")
+                        cursor.execute("PRAGMA synchronous=NORMAL")
+                        cursor.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
+                        cursor.close()
+
+            async def update_thread(
+                self,
+                thread_id: str,
+                name: Optional[str] = None,
+                user_id: Optional[str] = None,
+                metadata: Optional[Dict] = None,
+                tags: Optional[List[str]] = None,
+            ):
+                serialized_tags = json.dumps(tags) if isinstance(tags, list) else tags
+                await super().update_thread(
+                    thread_id=thread_id,
+                    name=name,
+                    user_id=user_id,
+                    metadata=metadata,
+                    tags=serialized_tags,
+                )
+
+            async def get_all_user_threads(
+                self, user_id: Optional[str] = None, thread_id: Optional[str] = None
+            ) -> Optional[List[dict]]:
+                threads = await super().get_all_user_threads(user_id=user_id, thread_id=thread_id)
+                if not threads:
+                    return threads
+                for thread in threads:
+                    raw_tags = thread.get("tags")
+                    if isinstance(raw_tags, str):
+                        try:
+                            decoded = json.loads(raw_tags)
+                        except json.JSONDecodeError:
+                            decoded = raw_tags
+                        if isinstance(decoded, list):
+                            thread["tags"] = decoded
+                return threads
 
         @cl.data_layer
         def get_data_layer():
             _bootstrap_chainlit_sqlite_schema(_DB_URL)
-            return SQLAlchemyDataLayer(conninfo=_DB_URL)
+            return _CompatibleSQLAlchemyDataLayer(
+                conninfo=_DB_URL,
+                storage_provider=_LocalChainlitStorageProvider(),
+            )
 
     except ImportError:
         logger.warning("SQLAlchemy data layer unavailable, continuing without persistence")
@@ -940,7 +1157,6 @@ def _build_execution_request(
     trace_id: str,
     new_files: List[Dict[str, Any]],
     session_docs: Dict[str, Any],
-    classifier_result: Optional[Dict[str, Any]],
     forced_route: Optional[str] = None,
 ) -> Dict[str, Any]:
     effective = _get_effective_settings()
@@ -970,7 +1186,6 @@ def _build_execution_request(
         "file_count": len(new_files),
         "has_session_docs": bool(session_docs),
         "session_docs": session_docs,
-        "classifier_result": classifier_result,
         "trace_id": trace_id,
         "forced_route": forced_route,
         "effective_settings": effective,
@@ -1007,7 +1222,7 @@ def _store_control_plane_state(state: Dict[str, Any]) -> Dict[str, Any]:
     return effective
 
 
-def _extract_control_plane_state_from_settings(settings: Any) -> Dict[str, Any]:
+def _settings_payload_from_input(settings: Any) -> Dict[str, Any]:
     payload: Dict[str, Any] = {}
     if isinstance(settings, dict):
         payload = dict(settings)
@@ -1021,6 +1236,7 @@ def _extract_control_plane_state_from_settings(settings: Any) -> Dict[str, Any]:
                 "knowledge_collection_id",
                 "model_profile",
                 "prompt_profile",
+                "tool_scope",
                 "custom_system_prompt",
                 "temperature",
                 "top_p",
@@ -1029,7 +1245,67 @@ def _extract_control_plane_state_from_settings(settings: Any) -> Dict[str, Any]:
                 value = getter(key)
                 if value is not None:
                     payload[key] = value
-    return merge_control_plane_state(_get_control_plane_state(), payload)
+    return payload
+
+
+def _assistant_mode_changed_via_modal(
+    payload: Dict[str, Any],
+    previous_effective: Dict[str, Any],
+) -> bool:
+    assistant_mode = payload.get("assistant_mode")
+    if not isinstance(assistant_mode, str):
+        return False
+    assistant_mode = assistant_mode.strip()
+    if assistant_mode not in _ASSISTANT_MODE_ITEMS:
+        return False
+    return assistant_mode != previous_effective.get("assistant_mode")
+
+
+def _generation_value_changed(
+    key: str,
+    value: Any,
+    previous_generation: Dict[str, Any],
+) -> bool:
+    normalized = clamp_generation_overrides({key: value}, base=previous_generation)
+    return normalized.get(key) != previous_generation.get(key)
+
+
+def _extract_control_plane_state_from_settings(
+    settings: Any,
+    *,
+    previous_state: Optional[Dict[str, Any]] = None,
+    previous_effective: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    payload = _settings_payload_from_input(settings)
+    previous_state = previous_state or _get_control_plane_state()
+    previous_effective = previous_effective or _get_effective_settings()
+
+    if not _assistant_mode_changed_via_modal(payload, previous_effective):
+        return merge_control_plane_state(previous_state, payload)
+
+    assistant_mode = payload["assistant_mode"].strip()
+    normalized_payload: Dict[str, Any] = {}
+
+    for key in ("knowledge_collection_id", "custom_system_prompt"):
+        if key in previous_state:
+            normalized_payload[key] = previous_state.get(key)
+        if key in payload:
+            normalized_payload[key] = payload.get(key)
+
+    for key in ("runtime_mode", "rag_scope", "model_profile", "prompt_profile", "tool_scope"):
+        if key in payload and payload.get(key) != previous_effective.get(key):
+            normalized_payload[key] = payload.get(key)
+
+    previous_generation = dict(previous_effective.get("generation") or {})
+    for key in ("temperature", "top_p", "max_tokens"):
+        if key in payload and payload.get(key) is not None and _generation_value_changed(
+            key,
+            payload.get(key),
+            previous_generation,
+        ):
+            normalized_payload[key] = payload.get(key)
+
+    return merge_control_plane_state(build_preset_state(assistant_mode), normalized_payload)
 
 
 def _apply_control_plane_preset(command: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -1193,49 +1469,6 @@ def _is_report_query(query: str) -> bool:
     return ("отчет" in q) or ("отчёт" in q) or ("report_" in q) or ("по отчету" in q) or ("по отчёту" in q)
 
 
-def _get_classifier_result(query: str) -> Optional[Dict[str, Any]]:
-    embedder_result = None
-    rag = cl.user_session.get("rag_pipeline")
-    if rag and rag._classifier_initialized:
-        embedder_result = rag.classify_intent(query)
-    elif cl.user_session.get("intent_classifier"):
-        standalone = cl.user_session.get("intent_classifier")
-        try:
-            embedder_result = standalone.classify(query)
-        except Exception as e:
-            logger.warning(f"Standalone classifier error: {e}")
-    llm_result = None
-    if INTENT_CLASSIFIER_MODE in {"llm", "hybrid"}:
-        llm_classifier = cl.user_session.get("intent_classifier_llm")
-        if llm_classifier is None:
-            llm_classifier = LLMIntentClassifier(infer_text_fn=_infer_intent_via_llm)
-            cl.user_session.set("intent_classifier_llm", llm_classifier)
-        try:
-            llm_result = llm_classifier.classify(query)
-        except Exception as e:
-            logger.warning(f"LLM classifier error: {e}")
-
-    return select_classifier_result(
-        INTENT_CLASSIFIER_MODE,
-        embedder_result=embedder_result,
-        llm_result=llm_result,
-        llm_confidence_threshold=INTENT_CLASSIFIER_LLM_CONFIDENCE_THRESHOLD,
-        embedder_confidence_threshold=INTENT_CLASSIFIER_EMBEDDER_CONFIDENCE_THRESHOLD,
-        embedder_margin_threshold=INTENT_CLASSIFIER_EMBEDDER_MARGIN_THRESHOLD,
-    )
-
-
-def _infer_intent_via_llm(prompt: str) -> str:
-    payload = {
-        "prompt": prompt,
-        "temperature": 0.0,
-        "top_p": 0.1,
-        "max_tokens": 96,
-    }
-    response = ums_client.infer(INTENT_CLASSIFIER_LLM_MODEL, payload)
-    return response.get("choices", [{}])[0].get("text", str(response))
-
-
 def _get_intent_decision(
     query: str,
     file_count: int = 0,
@@ -1244,7 +1477,6 @@ def _get_intent_decision(
     classifier_result: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     session_docs = session_docs if session_docs is not None else (_get_session_docs() if has_session_docs else {})
-    classifier_result = classifier_result if classifier_result is not None else _get_classifier_result(query)
     response = _backend_decide_orchestration(
         query=query,
         trace_id=cl.user_session.get("request_trace_id"),
@@ -1837,47 +2069,6 @@ async def _ensure_rag_index_for_doc_ids(doc_ids: List[str], step_name: Optional[
 
 # === Chainlit Handlers ===
 
-async def _init_classifier():
-    """Фоновая инициализация EmbeddingIntentClassifier до загрузки файлов."""
-    try:
-        if INTENT_CLASSIFIER_MODE == "llm":
-            logger.info("Skipping embedder classifier pre-init: INTENT_CLASSIFIER_MODE=llm")
-            return
-        from orchestrator.rag.classifier import EmbeddingIntentClassifier
-        from services.model_manager.ums_client import create_ums_embed_fn
-
-        retries = int(os.getenv("CHAINLIT_CLASSIFIER_PREINIT_RETRIES", "6"))
-        delay_s = float(os.getenv("CHAINLIT_CLASSIFIER_PREINIT_DELAY_S", "2.0"))
-        embed_fn = None
-        effective = _get_effective_settings()
-        intent_embedder_model_id = str(
-            effective.get("resolved_intent_embedder_model_id") or INTENT_CLASSIFIER_EMBEDDER_MODEL
-        )
-
-        for attempt in range(1, retries + 1):
-            embed_fn = await asyncio.to_thread(
-                create_ums_embed_fn,
-                model_id=intent_embedder_model_id,
-            )
-            if embed_fn:
-                break
-            if attempt < retries:
-                logger.info(
-                    f"Classifier pre-init: UMS unavailable, retrying ({attempt}/{retries})"
-                )
-                await asyncio.sleep(delay_s)
-
-        if not embed_fn:
-            logger.info("Classifier pre-init skipped: UMS unavailable after retries")
-            return
-        classifier = EmbeddingIntentClassifier(embed_fn=embed_fn)
-        await asyncio.to_thread(classifier.initialize)
-        cl.user_session.set("intent_classifier", classifier)
-        logger.info("Classifier pre-initialized successfully")
-    except Exception as e:
-        logger.warning(f"Classifier pre-init failed: {e}")
-
-
 @cl.on_chat_start
 async def on_chat_start():
     ids = _get_current_chainlit_session_ids()
@@ -1903,9 +2094,6 @@ async def on_chat_start():
     cl.user_session.set("rag_index_key", "")
     cl.user_session.set("rag_index_doc_ids", [])
     cl.user_session.set("rag_pipeline_cache", {})
-
-    # Фоновая инициализация classifier для раннего semantic routing
-    asyncio.create_task(_init_classifier())
     await _persist_current_backend_state(status="initialized")
     await _send_control_plane_settings()
     await _sync_thread_presentation()
@@ -1962,7 +2150,13 @@ async def set_chat_profiles(current_user: Optional[cl.User]):
 @cl.on_settings_update
 async def on_settings_update(settings: Dict[str, Any]):
     _ensure_session_state()
-    effective = _store_control_plane_state(_extract_control_plane_state_from_settings(settings))
+    effective = _store_control_plane_state(
+        _extract_control_plane_state_from_settings(
+            settings,
+            previous_state=_get_control_plane_state(),
+            previous_effective=_get_effective_settings(),
+        )
+    )
     cl.user_session.set("effective_settings_summary", _format_effective_settings_summary(effective))
     await _sync_thread_presentation()
     await _persist_current_backend_state()
@@ -2206,7 +2400,6 @@ async def on_message(message: cl.Message):
                 await _ensure_rag_index_for_active_docs(step_name=step_name)
 
     active_session_docs = _get_active_session_docs()
-    classifier_result = _get_classifier_result(query)
 
     response = await _backend_execute_orchestration(
         _build_execution_request(
@@ -2214,7 +2407,6 @@ async def on_message(message: cl.Message):
             trace_id=trace_id,
             new_files=new_files,
             session_docs=active_session_docs,
-            classifier_result=classifier_result,
         ),
         deps=_build_execution_dependencies(),
     )
@@ -2271,7 +2463,6 @@ async def on_message(message: cl.Message):
                         trace_id=trace_id,
                         new_files=new_files,
                         session_docs=_get_active_session_docs(),
-                        classifier_result=classifier_result,
                         forced_route=chosen_route,
                     ),
                     deps=_build_execution_dependencies(),

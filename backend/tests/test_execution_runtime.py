@@ -3,6 +3,7 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import asyncio
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -28,6 +29,17 @@ def setup_function():
 
 def teardown_function():
     reset_observability_metrics()
+
+
+@pytest.fixture(autouse=True)
+def _stub_backend_classifier_resolution(monkeypatch):
+    async def _noop_classifier_result(**kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "orchestrator.execution_runtime._resolve_classifier_result_for_request",
+        _noop_classifier_result,
+    )
 
 
 def _build_minimal_deps() -> ExecutionDependencies:
@@ -128,6 +140,132 @@ def test_execute_orchestration_runs_chat_handler_via_backend_dependencies():
     assert response["executor"] == "chat"
     assert response["assistant_message"] == "Привет!"
     deps.infer_assistant_text.assert_awaited_once()
+
+
+def test_execute_orchestration_general_chat_regenerates_on_language_contamination():
+    deps = _build_minimal_deps()
+    deps.infer_assistant_text = AsyncMock(
+        side_effect=[
+            "系统 готова. Система работает.",
+            "Система работает.",
+        ]
+    )
+
+    response = asyncio.run(
+        execute_orchestration(
+            {
+                "message": "Привет! Ответь одной короткой фразой, что система работает.",
+                "assistant_mode": "general_chat",
+                "runtime_mode": "chat_only",
+                "rag_scope": "off",
+                "history": [],
+            },
+            deps=deps,
+        )
+    )
+
+    assert response["assistant_message"] == "Система работает."
+    assert deps.infer_assistant_text.await_count == 2
+
+
+def test_execute_orchestration_general_chat_skips_language_guard_for_translation_request():
+    deps = _build_minimal_deps()
+    deps.infer_assistant_text = AsyncMock(return_value="System works.")
+
+    response = asyncio.run(
+        execute_orchestration(
+            {
+                "message": "Переведи на английский: система работает.",
+                "assistant_mode": "general_chat",
+                "runtime_mode": "chat_only",
+                "rag_scope": "off",
+                "history": [],
+            },
+            deps=deps,
+        )
+    )
+
+    assert response["assistant_message"] == "System works."
+    deps.infer_assistant_text.assert_awaited_once()
+
+
+def test_execute_orchestration_general_chat_regenerates_on_english_answer_to_russian_query():
+    deps = _build_minimal_deps()
+    deps.infer_assistant_text = AsyncMock(
+        side_effect=[
+            "Hello, the system works.",
+            "Система работает.",
+        ]
+    )
+
+    response = asyncio.run(
+        execute_orchestration(
+            {
+                "message": "Привет! Ответь одной короткой фразой, что система работает.",
+                "assistant_mode": "general_chat",
+                "runtime_mode": "chat_only",
+                "rag_scope": "off",
+                "history": [],
+            },
+            deps=deps,
+        )
+    )
+
+    assert response["assistant_message"] == "Система работает."
+    assert deps.infer_assistant_text.await_count == 2
+
+
+def test_execute_orchestration_resolves_classifier_result_in_backend_when_missing(monkeypatch):
+    deps = _build_minimal_deps()
+    captured = {}
+
+    async def fake_classifier_result(*, query, effective_settings):
+        captured["query"] = query
+        captured["assistant_mode"] = effective_settings.get("assistant_mode")
+        return {
+            "intent": "general_chat",
+            "confidence": 0.81,
+            "margin": 0.42,
+            "needs_rag": False,
+            "source": "embedder",
+        }
+
+    def fake_decide(**kwargs):
+        captured["classifier_result"] = kwargs.get("classifier_result")
+        return {
+            "route": "general_chat",
+            "executor": "chat",
+            "assistant_message": None,
+            "action_required": None,
+            "session_state_patch": {},
+            "trace_id": kwargs.get("trace_id") or "trace-test",
+            "reason": "classifier",
+            "confidence": kwargs.get("classifier_result", {}).get("confidence", 0.0),
+            "margin": kwargs.get("classifier_result", {}).get("margin", 0.0),
+        }
+
+    monkeypatch.setattr(
+        "orchestrator.execution_runtime._resolve_classifier_result_for_request",
+        fake_classifier_result,
+    )
+    monkeypatch.setattr("orchestrator.execution_runtime.decide_orchestration", fake_decide)
+
+    response = asyncio.run(
+        execute_orchestration(
+            {
+                "message": "Привет",
+                "assistant_mode": "general_chat",
+                "runtime_mode": "chat_only",
+                "history": [],
+            },
+            deps=deps,
+        )
+    )
+
+    assert captured["query"] == "Привет"
+    assert captured["assistant_mode"] == "general_chat"
+    assert captured["classifier_result"]["intent"] == "general_chat"
+    assert response["assistant_message"] == "Привет!"
 
 
 def test_execute_orchestration_adds_top_level_control_plane_fields():
@@ -283,6 +421,312 @@ def test_execute_orchestration_doc_question_multihop_single_citation_falls_back(
 
     assert response["route"] == "document_question"
     assert "данных недостаточно" in response["assistant_message"].lower()
+
+
+def test_execute_orchestration_doc_question_direct_single_source_evidence_avoids_fallback(monkeypatch):
+    deps = _build_minimal_deps()
+    deps.get_all_docs = lambda: [
+        {"document_id": "doc-1", "display_name": "murka.txt", "text": "Мурка живет на пятом этаже"}
+    ]
+    deps.get_active_docs = deps.get_all_docs
+    deps.resolve_target_doc_name = lambda query, docs: "murka.txt"
+    deps.get_rag_pipeline = lambda: SimpleNamespace(
+        _indexed=True,
+        top_k=5,
+        retrieve=lambda query, top_k=None: SimpleNamespace(
+            chunks=["chunk-murka"],
+            metadata={"mode": "simple"},
+        ),
+    )
+    deps.build_sources_from_rag_result = lambda rag_result, rag_pipeline, max_sources=20: [
+        {
+            "source_id": 1,
+            "document_id": "doc-1",
+            "display_name": "murka.txt",
+            "chunk_id": 0,
+            "char_span": {"start_char": 0, "end_char": 100},
+            "page": None,
+            "quote": "Мурка живет на пятом этаже",
+            "raw_score": 0.72,
+            "normalized_score": 0.95,
+            "grade": "excellent",
+            "z_score": 0.8,
+        },
+    ]
+    deps.infer_assistant_text = AsyncMock(
+        side_effect=[
+            "По документу недостаточно данных для короткого ответа, но есть указание на пятый этаж [1]",
+            "5 [1]",
+        ]
+    )
+    deps.citations_are_valid = citations_are_valid
+    deps.extract_citation_ids = extract_citation_ids
+    deps.has_sufficient_evidence = lambda **kwargs: False
+    deps.compute_confidence_v1 = compute_confidence_v1
+    deps.build_doc_question_deterministic_fallback = build_doc_question_deterministic_fallback
+    deps.render_doc_question_markdown = lambda payload: payload["answer_text"]
+    deps.build_doc_question_prompt_with_sources = lambda query, history, sources: "prompt"
+
+    async def fake_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr("orchestrator.execution_runtime.asyncio.to_thread", fake_to_thread)
+
+    response = asyncio.run(
+        execute_orchestration(
+            {
+                "message": "На каком этаже живет Мурка? Ответь только числом.",
+                "runtime_mode": "specialized_tasks",
+                "assistant_mode": "rag_qa",
+                "rag_scope": "session_rag",
+                "has_session_docs": True,
+                "session_docs": {
+                    "murka.txt": {"document_id": "doc-1", "text": "Мурка живет на пятом этаже"}
+                },
+                "active_doc_ids": ["doc-1"],
+                "classifier_result": {
+                    "intent": "document_question",
+                    "confidence": 0.95,
+                    "margin": 0.5,
+                    "needs_rag": True,
+                },
+            },
+            deps=deps,
+        )
+    )
+
+    assert response["route"] == "document_question"
+    assert response["assistant_message"] == "5 [1]"
+    assert "данных недостаточно" not in response["assistant_message"].lower()
+
+
+def test_execute_orchestration_doc_question_single_source_regens_when_initial_citations_invalid(monkeypatch):
+    deps = _build_minimal_deps()
+    deps.get_all_docs = lambda: [
+        {"document_id": "doc-1", "display_name": "murka.txt", "text": "Мурка живет на пятом этаже"}
+    ]
+    deps.get_active_docs = deps.get_all_docs
+    deps.resolve_target_doc_name = lambda query, docs: "murka.txt"
+    deps.get_rag_pipeline = lambda: SimpleNamespace(
+        _indexed=True,
+        top_k=5,
+        retrieve=lambda query, top_k=None: SimpleNamespace(
+            chunks=["chunk-murka"],
+            metadata={"mode": "simple"},
+        ),
+    )
+    deps.build_sources_from_rag_result = lambda rag_result, rag_pipeline, max_sources=20: [
+        {
+            "source_id": 1,
+            "document_id": "doc-1",
+            "display_name": "murka.txt",
+            "chunk_id": 0,
+            "char_span": {"start_char": 0, "end_char": 100},
+            "page": None,
+            "quote": "Мурка живет на пятом этаже",
+            "raw_score": 0.05,
+            "normalized_score": 0.5,
+            "grade": None,
+            "z_score": None,
+        },
+    ]
+    deps.infer_assistant_text = AsyncMock(
+        side_effect=[
+            "Мурка живет на пятом этаже.",
+            "Мурка живет на пятом этаже.",
+            "5 [1]",
+        ]
+    )
+    deps.citations_are_valid = citations_are_valid
+    deps.extract_citation_ids = extract_citation_ids
+    deps.has_sufficient_evidence = lambda **kwargs: False
+    deps.compute_confidence_v1 = compute_confidence_v1
+    deps.build_doc_question_deterministic_fallback = build_doc_question_deterministic_fallback
+    deps.render_doc_question_markdown = lambda payload: payload["answer_text"]
+    deps.build_doc_question_prompt_with_sources = lambda query, history, sources: "prompt"
+
+    async def fake_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr("orchestrator.execution_runtime.asyncio.to_thread", fake_to_thread)
+
+    response = asyncio.run(
+        execute_orchestration(
+            {
+                "message": "На каком этаже живет Мурка? Ответь только числом.",
+                "runtime_mode": "specialized_tasks",
+                "assistant_mode": "rag_qa",
+                "rag_scope": "session_rag",
+                "has_session_docs": True,
+                "session_docs": {
+                    "murka.txt": {"document_id": "doc-1", "text": "Мурка живет на пятом этаже"}
+                },
+                "active_doc_ids": ["doc-1"],
+                "classifier_result": {
+                    "intent": "document_question",
+                    "confidence": 0.95,
+                    "margin": 0.5,
+                    "needs_rag": True,
+                },
+            },
+            deps=deps,
+        )
+    )
+
+    assert response["assistant_message"] == "5 [1]"
+    assert deps.infer_assistant_text.await_count == 3
+
+
+def test_execute_orchestration_doc_question_single_source_builds_deterministic_grounded_answer_when_model_still_fails(monkeypatch):
+    deps = _build_minimal_deps()
+    deps.get_all_docs = lambda: [
+        {"document_id": "doc-1", "display_name": "murka.txt", "text": "Мурка живет на пятом этаже"}
+    ]
+    deps.get_active_docs = deps.get_all_docs
+    deps.resolve_target_doc_name = lambda query, docs: "murka.txt"
+    deps.get_rag_pipeline = lambda: SimpleNamespace(
+        _indexed=True,
+        top_k=5,
+        retrieve=lambda query, top_k=None: SimpleNamespace(
+            chunks=["chunk-murka"],
+            metadata={"mode": "simple"},
+        ),
+    )
+    deps.build_sources_from_rag_result = lambda rag_result, rag_pipeline, max_sources=20: [
+        {
+            "source_id": 1,
+            "document_id": "doc-1",
+            "display_name": "murka.txt",
+            "chunk_id": 0,
+            "char_span": {"start_char": 0, "end_char": 100},
+            "page": None,
+            "quote": "Мурка живет на пятом этаже",
+            "raw_score": 0.05,
+            "normalized_score": 0.5,
+            "grade": None,
+            "z_score": None,
+        },
+    ]
+    deps.infer_assistant_text = AsyncMock(
+        side_effect=[
+            "Мурка живет на пятом этаже.",
+            "Мурка живет на пятом этаже.",
+            "Не могу ответить с валидной ссылкой.",
+        ]
+    )
+    deps.citations_are_valid = citations_are_valid
+    deps.extract_citation_ids = extract_citation_ids
+    deps.has_sufficient_evidence = lambda **kwargs: False
+    deps.compute_confidence_v1 = compute_confidence_v1
+    deps.build_doc_question_deterministic_fallback = build_doc_question_deterministic_fallback
+    deps.render_doc_question_markdown = lambda payload: payload["answer_text"]
+    deps.build_doc_question_prompt_with_sources = lambda query, history, sources: "prompt"
+
+    async def fake_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr("orchestrator.execution_runtime.asyncio.to_thread", fake_to_thread)
+
+    response = asyncio.run(
+        execute_orchestration(
+            {
+                "message": "На каком этаже живет Мурка? Ответь только числом.",
+                "runtime_mode": "specialized_tasks",
+                "assistant_mode": "rag_qa",
+                "rag_scope": "session_rag",
+                "has_session_docs": True,
+                "session_docs": {
+                    "murka.txt": {"document_id": "doc-1", "text": "Мурка живет на пятом этаже"}
+                },
+                "active_doc_ids": ["doc-1"],
+                "classifier_result": {
+                    "intent": "document_question",
+                    "confidence": 0.95,
+                    "margin": 0.5,
+                    "needs_rag": True,
+                },
+            },
+            deps=deps,
+        )
+    )
+
+    assert response["assistant_message"] == "5 [1]"
+
+
+def test_execute_orchestration_doc_question_floor_query_does_not_take_first_unrelated_number(monkeypatch):
+    deps = _build_minimal_deps()
+    deps.get_all_docs = lambda: [
+        {"document_id": "doc-1", "display_name": "murka.txt", "text": "п. 3: Мурка живет на 10 этаже 10 дней"}
+    ]
+    deps.get_active_docs = deps.get_all_docs
+    deps.resolve_target_doc_name = lambda query, docs: "murka.txt"
+    deps.get_rag_pipeline = lambda: SimpleNamespace(
+        _indexed=True,
+        top_k=5,
+        retrieve=lambda query, top_k=None: SimpleNamespace(
+            chunks=["chunk-murka"],
+            metadata={"mode": "simple"},
+        ),
+    )
+    deps.build_sources_from_rag_result = lambda rag_result, rag_pipeline, max_sources=20: [
+        {
+            "source_id": 1,
+            "document_id": "doc-1",
+            "display_name": "murka.txt",
+            "chunk_id": 0,
+            "char_span": {"start_char": 0, "end_char": 100},
+            "page": None,
+            "quote": "п. 3: Мурка живет на 10 этаже 10 дней",
+            "raw_score": 0.05,
+            "normalized_score": 0.5,
+            "grade": None,
+            "z_score": None,
+        },
+    ]
+    deps.infer_assistant_text = AsyncMock(
+        side_effect=[
+            "Без валидной ссылки.",
+            "Без валидной ссылки.",
+            "Без валидной ссылки.",
+        ]
+    )
+    deps.citations_are_valid = citations_are_valid
+    deps.extract_citation_ids = extract_citation_ids
+    deps.has_sufficient_evidence = lambda **kwargs: False
+    deps.compute_confidence_v1 = compute_confidence_v1
+    deps.build_doc_question_deterministic_fallback = build_doc_question_deterministic_fallback
+    deps.render_doc_question_markdown = lambda payload: payload["answer_text"]
+    deps.build_doc_question_prompt_with_sources = lambda query, history, sources: "prompt"
+
+    async def fake_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr("orchestrator.execution_runtime.asyncio.to_thread", fake_to_thread)
+
+    response = asyncio.run(
+        execute_orchestration(
+            {
+                "message": "На каком этаже живет Мурка? Ответь только числом.",
+                "runtime_mode": "specialized_tasks",
+                "assistant_mode": "rag_qa",
+                "rag_scope": "session_rag",
+                "has_session_docs": True,
+                "session_docs": {
+                    "murka.txt": {"document_id": "doc-1", "text": "п. 3: Мурка живет на 10 этаже 10 дней"}
+                },
+                "active_doc_ids": ["doc-1"],
+                "classifier_result": {
+                    "intent": "document_question",
+                    "confidence": 0.95,
+                    "margin": 0.5,
+                    "needs_rag": True,
+                },
+            },
+            deps=deps,
+        )
+    )
+
+    assert response["assistant_message"] == "10 [1]"
 
 
 def test_run_graph_merges_errors_from_multiple_nodes():

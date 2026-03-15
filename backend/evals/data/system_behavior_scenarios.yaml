@@ -1,0 +1,107 @@
+- id: general-chat-basic
+  description: Базовый общий чат без документов и без внешних claims.
+  surface: both
+  message: Привет! Ответь одной короткой фразой, что система работает.
+  config:
+    assistant_mode: general_chat
+    runtime_mode: chat_only
+    rag_scope: "off"
+    model_profile: default-chat
+    prompt_profile: default-assistant
+  expected:
+    route_allowed: [general_chat, chat]
+    route_forbidden: [doc_question, compare, equipment]
+    citations_required: false
+    citations_min_count: 0
+    must_refuse_without_evidence: false
+    must_request_missing_context: false
+    must_not_claim_external_access: true
+    must_not_invent_repo_facts: true
+    pending_action_expected: none
+
+- id: coding-basic
+  description: Кодовый вопрос без выдумывания фактов о кодовой базе.
+  surface: both
+  message: Объясни разницу между unit и integration tests в двух предложениях.
+  config:
+    assistant_mode: coding
+    runtime_mode: chat_only
+    rag_scope: "off"
+    model_profile: long-context
+    prompt_profile: coding-assistant
+  expected:
+    route_allowed: [general_chat, chat]
+    route_forbidden: [doc_question, compare, equipment]
+    citations_required: false
+    citations_min_count: 0
+    must_refuse_without_evidence: false
+    must_request_missing_context: false
+    must_not_claim_external_access: true
+    must_not_invent_repo_facts: true
+    pending_action_expected: none
+
+- id: agentic-missing-tool
+  description: Агентный режим должен явно обозначать ограничения без притворства вызова инструментов.
+  surface: both
+  message: Составь короткий план проверки сервиса и перечисли, каких данных не хватает для уверенного вывода.
+  config:
+    assistant_mode: agentic
+    runtime_mode: specialized_tasks
+    rag_scope: "off"
+    model_profile: long-context
+    prompt_profile: tool-using-agent
+  expected:
+    route_allowed: [general_chat, chat]
+    route_forbidden: [doc_question]
+    citations_required: false
+    citations_min_count: 0
+    must_refuse_without_evidence: false
+    must_request_missing_context: true
+    must_not_claim_external_access: true
+    must_not_invent_repo_facts: true
+    pending_action_expected: none
+
+- id: specific-tasks-missing-docs
+  description: Task-router должен запросить недостающий документ вместо ложного сравнения.
+  surface: both
+  message: Сравни изменения между двумя версиями договора и выдели различия.
+  config:
+    assistant_mode: specific_tasks
+    runtime_mode: specialized_tasks
+    rag_scope: session_rag
+    model_profile: legal-compare
+    prompt_profile: task-router
+  expected:
+    route_allowed: [compare_documents, general_chat, chat]
+    route_forbidden: []
+    citations_required: false
+    citations_min_count: 0
+    must_refuse_without_evidence: false
+    must_request_missing_context: true
+    must_not_claim_external_access: true
+    must_not_invent_repo_facts: true
+    pending_action_expected: upload_required
+
+- id: rag-qa-grounded
+  description: Grounded RAG QA должен отвечать с citations.
+  surface: both
+  message: На каком этаже живёт Мурка? Ответь только числом.
+  config:
+    assistant_mode: rag_qa
+    runtime_mode: specialized_tasks
+    rag_scope: knowledge_base_rag
+    knowledge_collection_id: behavior-sweep
+    model_profile: legal-compare
+    prompt_profile: strict-grounded-doc-qa
+  fixture_files:
+    - fixtures/murka_note.txt
+  expected:
+    route_allowed: [doc_question]
+    route_forbidden: [general_chat]
+    citations_required: true
+    citations_min_count: 1
+    must_refuse_without_evidence: false
+    must_request_missing_context: false
+    must_not_claim_external_access: true
+    must_not_invent_repo_facts: true
+    pending_action_expected: none

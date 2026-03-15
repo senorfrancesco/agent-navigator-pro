@@ -4,16 +4,25 @@ import asyncio
 import copy
 import logging
 import os
+import re
 import time
+import threading
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from orchestrator.knowledge_base_retrieval import retrieve_merged_chunks
 from orchestrator.orchestration_runtime import decide_orchestration, is_social_query
+from orchestrator.doc_question_heuristics import has_direct_grounded_evidence_v1
+from orchestrator.rag.classifier import (
+    EmbeddingIntentClassifier,
+    LLMIntentClassifier,
+    select_classifier_result,
+)
 from orchestrator.state_store import get_orchestration_state_store
 from orchestrator.ui_control_plane import get_prompt_profile_system_message, resolve_effective_settings
 from orchestrator.workflows.equipment import detect_equipment_mode
 from services.observability import inc_metric_counter
+from services.model_manager.ums_client import create_ums_embed_fn, ums_client
 
 
 AsyncStrFn = Callable[..., Awaitable[str]]
@@ -21,6 +30,57 @@ AsyncAnyFn = Callable[..., Awaitable[Any]]
 SyncAnyFn = Callable[..., Any]
 
 logger = logging.getLogger("execution_runtime")
+INTENT_CLASSIFIER_MODE = os.getenv("INTENT_CLASSIFIER_MODE", "embedder").strip().lower()
+INTENT_CLASSIFIER_EMBEDDER_MODEL = os.getenv(
+    "INTENT_CLASSIFIER_EMBEDDER_MODEL",
+    "qwen3-embedding-0.6b",
+)
+INTENT_CLASSIFIER_LLM_MODEL = os.getenv("INTENT_CLASSIFIER_LLM_MODEL", "qwen-14b-llm")
+INTENT_CLASSIFIER_LLM_CONFIDENCE_THRESHOLD = float(
+    os.getenv("INTENT_CLASSIFIER_LLM_CONFIDENCE_THRESHOLD", "0.75")
+)
+INTENT_CLASSIFIER_EMBEDDER_CONFIDENCE_THRESHOLD = float(
+    os.getenv("INTENT_CLASSIFIER_EMBEDDER_CONFIDENCE_THRESHOLD", "0.60")
+)
+INTENT_CLASSIFIER_EMBEDDER_MARGIN_THRESHOLD = float(
+    os.getenv("INTENT_CLASSIFIER_EMBEDDER_MARGIN_THRESHOLD", "0.10")
+)
+_INTENT_CLASSIFIER_CACHE: Dict[str, Any] = {}
+_INTENT_CLASSIFIER_LLM_CACHE: Dict[str, LLMIntentClassifier] = {}
+_INTENT_CLASSIFIER_LOCK = threading.Lock()
+GENERAL_CHAT_LANGUAGE_GUARD_TEMPERATURE = float(
+    os.getenv("GENERAL_CHAT_LANGUAGE_GUARD_TEMPERATURE", "0.2")
+)
+GENERAL_CHAT_LANGUAGE_GUARD_TOP_P = float(
+    os.getenv("GENERAL_CHAT_LANGUAGE_GUARD_TOP_P", "0.6")
+)
+_CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
+_LATIN_RE = re.compile(r"[A-Za-z]")
+_CJK_RE = re.compile(r"[\u3400-\u4DBF\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]")
+_TRANSLATION_MARKERS = (
+    "переведи",
+    "translate",
+    "translation",
+    "на англий",
+    "на русском",
+    "на китай",
+    "по-английски",
+    "по-русски",
+    "翻译",
+)
+_CODE_HEAVY_MARKERS = ("```", "def ", "class ", "function ", "=>", "{", "}", "</", "/>")
+_RUSSIAN_NUMBER_WORDS = {
+    "перв": "1",
+    "втор": "2",
+    "трет": "3",
+    "четвер": "4",
+    "пят": "5",
+    "шест": "6",
+    "седь": "7",
+    "вось": "8",
+    "девят": "9",
+    "десят": "10",
+}
 
 
 @dataclass
@@ -53,6 +113,85 @@ class ExecutionDependencies:
     to_host_path: SyncAnyFn
     active_set_status_line: SyncAnyFn
     attach_and_register_report: AsyncAnyFn
+
+
+def _infer_intent_via_llm(prompt: str) -> str:
+    payload = {
+        "prompt": prompt,
+        "temperature": 0.0,
+        "top_p": 0.1,
+        "max_tokens": 96,
+    }
+    response = ums_client.infer(INTENT_CLASSIFIER_LLM_MODEL, payload)
+    return response.get("choices", [{}])[0].get("text", str(response))
+
+
+def _get_cached_embedder_classifier(model_id: str) -> Optional[EmbeddingIntentClassifier]:
+    classifier = _INTENT_CLASSIFIER_CACHE.get(model_id)
+    if classifier is not None:
+        return classifier
+    with _INTENT_CLASSIFIER_LOCK:
+        classifier = _INTENT_CLASSIFIER_CACHE.get(model_id)
+        if classifier is not None:
+            return classifier
+        embed_fn = create_ums_embed_fn(model_id=model_id)
+        if not embed_fn:
+            return None
+        classifier = EmbeddingIntentClassifier(embed_fn=embed_fn)
+        classifier.initialize()
+        _INTENT_CLASSIFIER_CACHE[model_id] = classifier
+        return classifier
+
+
+def _get_cached_llm_classifier(model_id: str) -> LLMIntentClassifier:
+    classifier = _INTENT_CLASSIFIER_LLM_CACHE.get(model_id)
+    if classifier is not None:
+        return classifier
+    with _INTENT_CLASSIFIER_LOCK:
+        classifier = _INTENT_CLASSIFIER_LLM_CACHE.get(model_id)
+        if classifier is not None:
+            return classifier
+        classifier = LLMIntentClassifier(infer_text_fn=_infer_intent_via_llm)
+        _INTENT_CLASSIFIER_LLM_CACHE[model_id] = classifier
+        return classifier
+
+
+async def _resolve_classifier_result_for_request(
+    *,
+    query: str,
+    effective_settings: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    if not query.strip():
+        return None
+
+    embedder_result = None
+    if INTENT_CLASSIFIER_MODE != "llm":
+        intent_embedder_model_id = str(
+            effective_settings.get("resolved_intent_embedder_model_id") or INTENT_CLASSIFIER_EMBEDDER_MODEL
+        )
+        try:
+            classifier = await asyncio.to_thread(_get_cached_embedder_classifier, intent_embedder_model_id)
+            if classifier is not None:
+                embedder_result = await asyncio.to_thread(classifier.classify, query)
+        except Exception as exc:
+            logger.warning("Backend embedder classifier failed: %s", exc)
+
+    llm_result = None
+    if INTENT_CLASSIFIER_MODE in {"llm", "hybrid"}:
+        try:
+            llm_classifier = _get_cached_llm_classifier(INTENT_CLASSIFIER_LLM_MODEL)
+            llm_result = await asyncio.to_thread(llm_classifier.classify, query)
+        except Exception as exc:
+            logger.warning("Backend LLM classifier failed: %s", exc)
+
+    return select_classifier_result(
+        INTENT_CLASSIFIER_MODE,
+        embedder_result=embedder_result,
+        llm_result=llm_result,
+        llm_confidence_threshold=INTENT_CLASSIFIER_LLM_CONFIDENCE_THRESHOLD,
+        embedder_confidence_threshold=INTENT_CLASSIFIER_EMBEDDER_CONFIDENCE_THRESHOLD,
+        embedder_margin_threshold=INTENT_CLASSIFIER_EMBEDDER_MARGIN_THRESHOLD,
+    )
 
 
 def _collect_raw_control_plane(request: Dict[str, Any]) -> Dict[str, Any]:
@@ -158,6 +297,131 @@ def _build_ui_effects(
         effects["set_pending_action"] = action_required
         effects["pending_action_id"] = pending_action_id
     return effects
+
+
+def _count_script(regex: re.Pattern[str], text: str) -> int:
+    return len(regex.findall(text or ""))
+
+
+def _detect_dominant_script(text: str) -> Optional[str]:
+    cyrillic = _count_script(_CYRILLIC_RE, text)
+    latin = _count_script(_LATIN_RE, text)
+    if cyrillic <= 0 and latin <= 0:
+        return None
+    return "cyrillic" if cyrillic >= latin else "latin"
+
+
+def _is_translation_request(query: str) -> bool:
+    query_lower = (query or "").lower()
+    return any(marker in query_lower for marker in _TRANSLATION_MARKERS)
+
+
+def _is_code_heavy_text(text: str) -> bool:
+    lowered = (text or "").lower()
+    return any(marker in lowered for marker in _CODE_HEAVY_MARKERS)
+
+
+def _should_regenerate_for_language_consistency(query: str, answer: str) -> bool:
+    if not query.strip() or not answer.strip():
+        return False
+    if _is_translation_request(query) or _is_code_heavy_text(query) or _is_code_heavy_text(answer):
+        return False
+    if _count_script(_CJK_RE, query) > 0:
+        return False
+
+    dominant_script = _detect_dominant_script(query)
+    if dominant_script == "cyrillic":
+        return _count_script(_CJK_RE, answer) >= 2 or (
+            _count_script(_LATIN_RE, answer) >= 3 and _count_script(_CYRILLIC_RE, answer) == 0
+        )
+    if dominant_script == "latin":
+        return _count_script(_CJK_RE, answer) >= 2 or (
+            _count_script(_CYRILLIC_RE, answer) >= 2 and _count_script(_CYRILLIC_RE, query) == 0
+        )
+    return False
+
+
+def _doc_answer_needs_direct_evidence_regen(answer_text: str) -> bool:
+    lowered = (answer_text or "").lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "недостаточно",
+            "не хватает",
+            "не могу",
+            "нет данных",
+            "недостаточно данных",
+        )
+    )
+
+
+def _build_direct_evidence_concise_prompt(
+    deps: ExecutionDependencies,
+    *,
+    query: str,
+    history: List[Dict[str, Any]],
+    sources: List[Dict[str, Any]],
+) -> str:
+    return (
+        deps.build_doc_question_prompt_with_sources(query, history, sources)
+        + "\n\nЕсли ответ прямо подтверждается одним источником, дай короткий фактический ответ "
+        + "в одной строке и используй только нужную ссылку [n]. Не добавляй вводных фраз "
+        + "про достаточность данных."
+    )
+
+
+def _extract_clean_sentence_for_script(answer: str, dominant_script: Optional[str]) -> str:
+    if dominant_script != "cyrillic":
+        return answer
+    chunks = re.split(r"(?<=[.!?])\s+", answer.strip())
+    for chunk in chunks:
+        if _count_script(_CYRILLIC_RE, chunk) > 0 and _count_script(_CJK_RE, chunk) == 0:
+            return chunk.strip()
+    return answer
+
+
+def _extract_number_from_quote(quote: str, *, query: str = "") -> Optional[str]:
+    quote_lower = quote.lower()
+    query_lower = (query or "").lower()
+
+    floor_hint = any(
+        marker in query_lower
+        for marker in (
+            "этаж",
+            "этаже",
+            "этажа",
+            "этажу",
+            "floor",
+        )
+    )
+    if floor_hint:
+        floor_match = re.search(r"\b(\d+)(?:-й|-йй|-й|)\s+этаж", quote_lower)
+        if floor_match:
+            return floor_match.group(1)
+        for stem, value in _RUSSIAN_NUMBER_WORDS.items():
+            if f"{stem}ом этаже" in quote_lower or f"{stem}ый этаж" in quote_lower or f"{stem} этаж" in quote_lower:
+                return value
+
+    digit_match = re.search(r"\b(\d+)\b", quote_lower)
+    if digit_match:
+        return digit_match.group(1)
+    for stem, value in _RUSSIAN_NUMBER_WORDS.items():
+        if stem in quote_lower:
+            return value
+    return None
+
+
+def _build_direct_grounded_answer_from_source(query: str, source: Dict[str, Any]) -> Optional[str]:
+    quote = str(source.get("quote") or "").strip()
+    if not quote:
+        return None
+    citation_id = int(source.get("source_id", 1))
+    query_lower = (query or "").lower()
+    if "только числом" in query_lower:
+        extracted_number = _extract_number_from_quote(quote, query=query)
+        if extracted_number is not None:
+            return f"{extracted_number} [{citation_id}]"
+    return f"{quote.rstrip('.')} [{citation_id}]"
 
 
 def _with_execution_metadata(
@@ -724,6 +988,32 @@ async def _execute_doc_question(
         citations_valid = deps.citations_are_valid(response_text, source_count=len(sources))
 
     if not citations_valid:
+        if len(sources) == 1 and has_direct_grounded_evidence_v1(
+            sources=sources,
+            cited_ids=[int(sources[0].get("source_id", 1))],
+            query=query,
+            citations_valid=True,
+        ):
+            concise_prompt = _build_direct_evidence_concise_prompt(
+                deps,
+                query=query,
+                history=history,
+                sources=sources,
+            )
+            concise_response = await deps.infer_assistant_text(
+                concise_prompt,
+                enforced_overrides={"temperature": 0.2},
+            )
+            if deps.citations_are_valid(concise_response, source_count=len(sources)):
+                response_text = concise_response
+                citations_valid = True
+            else:
+                deterministic_direct_answer = _build_direct_grounded_answer_from_source(query, sources[0])
+                if deterministic_direct_answer:
+                    response_text = deterministic_direct_answer
+                    citations_valid = True
+
+    if not citations_valid:
         payload = deps.build_doc_question_deterministic_fallback(
             query=query,
             sources=sources,
@@ -743,13 +1033,59 @@ async def _execute_doc_question(
         query=query,
         citations_valid=True,
     )
-    if not has_evidence:
-        payload = deps.build_doc_question_deterministic_fallback(
+    direct_grounded_evidence = has_direct_grounded_evidence_v1(
+        sources=sources,
+        cited_ids=cited_ids,
+        query=query,
+        citations_valid=True,
+    )
+    if direct_grounded_evidence and _doc_answer_needs_direct_evidence_regen(response_text):
+        concise_prompt = _build_direct_evidence_concise_prompt(
+            deps,
             query=query,
+            history=history,
             sources=sources,
-            fallback_type="insufficient_evidence",
-            source_scope_summary=source_scope_summary,
         )
+        concise_response = await deps.infer_assistant_text(
+            concise_prompt,
+            enforced_overrides={"temperature": 0.2},
+        )
+        if deps.citations_are_valid(concise_response, source_count=len(sources)):
+            response_text = concise_response
+            cited_ids = deps.extract_citation_ids(response_text)
+        elif len(sources) == 1:
+            deterministic_direct_answer = _build_direct_grounded_answer_from_source(query, sources[0])
+            if deterministic_direct_answer:
+                response_text = deterministic_direct_answer
+                cited_ids = deps.extract_citation_ids(response_text)
+
+    if not has_evidence:
+        if direct_grounded_evidence:
+            confidence, label = deps.compute_confidence_v1(
+                sources,
+                cited_ids,
+                "grounded_answer",
+                query=query,
+            )
+            payload = {
+                "answer_text": deps.strip_model_source_sections(response_text),
+                "sources": sources,
+                "source_scope_summary": source_scope_summary,
+                "answer_mode": "grounded_answer",
+                "fallback_type": "none",
+                "fallback_reason": None,
+                "confidence": confidence,
+                "confidence_label": label,
+                "confidence_method": "heuristic_v1",
+                "confidence_version": "1",
+            }
+        else:
+            payload = deps.build_doc_question_deterministic_fallback(
+                query=query,
+                sources=sources,
+                fallback_type="insufficient_evidence",
+                source_scope_summary=source_scope_summary,
+            )
     else:
         confidence, label = deps.compute_confidence_v1(
             sources,
@@ -800,7 +1136,28 @@ async def _execute_general_chat(
             "\n\nКонтекст: у пользователя уже есть загруженные документы. "
             "Отвечай как в обычном чате, без шаблонных фраз и без просьбы перезагрузить файлы."
         )
+    if _detect_dominant_script(query) == "cyrillic" and not _is_translation_request(query):
+        prompt += "\n\nОтвечай только на русском языке, если пользователь явно не просит иначе."
+    elif _detect_dominant_script(query) == "latin" and not _is_translation_request(query):
+        prompt += "\n\nAnswer in the user's language only unless they explicitly request a translation."
     answer = await deps.infer_assistant_text(prompt)
+    if _should_regenerate_for_language_consistency(query, answer):
+        guarded_prompt = (
+            prompt
+            + "\n\nЖЕСТКОЕ ПРАВИЛО: ответь только на языке пользователя, без смешения языков. "
+            + "Если пользователь пишет по-русски, ответь только по-русски, без иероглифов, английского "
+            + "и вводных пояснений. Если пользователь просит короткий ответ, дай одну короткую фразу."
+        )
+        answer = await deps.infer_assistant_text(
+            guarded_prompt,
+            enforced_overrides={
+                "temperature": GENERAL_CHAT_LANGUAGE_GUARD_TEMPERATURE,
+                "top_p": GENERAL_CHAT_LANGUAGE_GUARD_TOP_P,
+                "max_tokens": 96,
+            },
+        )
+        if _should_regenerate_for_language_consistency(query, answer):
+            answer = _extract_clean_sentence_for_script(answer, _detect_dominant_script(query))
     return {"assistant_message": answer}
 
 
@@ -826,6 +1183,13 @@ async def execute_orchestration(
     request["run_id"] = run_record.run_id
     request["state_ref"] = run_record.state_ref
     request["state_version"] = run_record.version
+    classifier_result = request.get("classifier_result")
+    if classifier_result is None and not request.get("forced_route"):
+        classifier_result = await _resolve_classifier_result_for_request(
+            query=str(request.get("message", "") or ""),
+            effective_settings=effective_settings,
+        )
+    request["classifier_result"] = classifier_result
 
     decision = decide_orchestration(
         query=request.get("message", ""),
@@ -836,7 +1200,7 @@ async def execute_orchestration(
         file_count=int(request.get("file_count", 0)),
         has_session_docs=bool(request.get("has_session_docs", False)),
         session_docs=session_docs,
-        classifier_result=request.get("classifier_result"),
+        classifier_result=classifier_result,
         new_files=attachments_meta,
         active_doc_ids=request.get("active_doc_ids") or [],
         forced_route=request.get("forced_route"),

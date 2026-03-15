@@ -131,6 +131,8 @@
 
 - [x] **B3.31-cleanup — Удалить routing-дубликаты из chainlit_app.py**
   Удалены thin-wrapper routing helper’ы из `chainlit_app.py`; UI использует backend aliases напрямую, без второго локального routing-layer.
+  Доп. cleanup:
+  - UI-side `classifier_result` generation и classifier pre-init удалены из `Chainlit`; semantic classification теперь считается только в backend `execution_runtime.py`.
 
 - [x] **B3.31-session-sync — Sync guard для pending_action / pending_route_choice session keys**
   `pending_action` и `pending_route_choice` инициализируются и обновляются через единый `_set_pending_route_choice()` path, а `_apply_session_state_patch()` больше не создаёт разъезд session-ключей.
@@ -265,7 +267,42 @@
     - targeted tiers/evidence suite зелёный
     - `cd backend && pytest tests/ -q -m "not integration"` -> `389 passed, 4 deselected`
 
-### Блок E — Runtime Budgeting (T4.13)
+### Блок E — System Behavior Sweep (B3.37)
+
+- [x] **B3.37 — Full system behavior sweep for model/control-plane**
+  - Добавлен канонический harness: `backend/evals/system_behavior_sweep.py`
+  - Harness покрывает:
+    - `api` surface через `/execute_orchestration`
+    - `ui` surface через thin Playwright CLI runner
+    - shared scorecard contract
+    - unified JSON report shape
+  - Добавлен scenario dataset:
+    - `backend/evals/data/system_behavior_scenarios.yaml`
+    - stable fixture `backend/evals/data/fixtures/murka_note.txt`
+  - Full control-plane sweep helper строит `900` комбинаций:
+    - `assistant_mode`
+    - `runtime_mode`
+    - `rag_scope`
+    - `model_profile`
+    - `prompt_profile`
+  - Scorecard проверяет:
+    - route allowed/forbidden
+    - citations required / minimum count
+    - missing-context request
+    - refusal on insufficient evidence
+    - запрет claims про внешний доступ
+    - запрет выдуманных repo/codebase claims
+    - pending action semantics
+  - Verification:
+    - `pytest backend/tests/test_system_behavior_sweep.py -q` -> `12 passed`
+    - live API sweep на native stack:
+      - `python backend/evals/system_behavior_sweep.py --surface api --json-output /tmp/system-behavior-api.json`
+      - результат: `5 passed / 0 failed / 0 error`
+  Follow-up:
+  - live `ui` full sweep по-прежнему требует окружение с доступным `playwright-cli`; если он не становится поддерживаемым operator binary, нужен repo-owned wrapper вместо внешней зависимости
+  - отдельный operator run для полного `ui` batch всё ещё желателен после укрепления `PlaywrightCliRunner`, хотя ручной smoke уже подтвердил starter/settings parity
+
+### Блок F — Runtime Budgeting (T4.13)
 
 - [x] **T4.13 — Runtime Context Budget + Preflight Profiles**
   - Выполнено через backend-owned runtime budget contract в `UMS` и token-derived RAG truncation
@@ -288,10 +325,11 @@
   - Hardware detect + profile planning + `.env.runtime`
   - `run_all.sh`, `run_native.sh`, `run_container.sh` переведены в compatibility wrappers
   - runtime profiles документированы в `docs/runtime_profiles.md`
+  - native/legacy service launch scripts (`run_native.sh`, `run_openwebui.sh`, `start_system_test.sh`) теперь экспортируют `PYTHONPATH=$BACKEND_DIR` и для `document_server`/`legal_server`, чтобы shared backend imports не ломали live startup
   Pragmatic follow-up:
   - cleanup/закрытие PR #3-#7 как superseded остаётся отдельным repo-maintenance шагом
 
-### Блок F — UX Hardening (T4.2, T4.3)
+### Блок G — UX Hardening (T4.2, T4.3)
 
 - [x] **T4.2 — Chainlit UX hardening**
   Выполнено поверх стабилизированных `B3.31a + T4.13 + T4.14`.
@@ -375,6 +413,82 @@
   Follow-up:
   - richer document-ref hydration/resolution beyond current minimal `path/display_name/version` shape remains an incremental follow-up, not a blocker for backend-owned store semantics
   - production deployment of Postgres store still requires `psycopg` to be present in runtime environment
+
+- [x] **Chainlit persistence schema compatibility**
+  Починен drift между локальным SQLite bootstrap schema и фактическим `chainlit 2.9.6` runtime.
+  Что закрыто:
+  - idempotent schema upgrade для `threads/steps/elements` вместо чистого `CREATE TABLE IF NOT EXISTS`
+  - добавлены missing columns `steps.command` и `steps.defaultOpen`
+  - `threads.tags` больше не падает на SQLite bind: локальный compatibility data-layer сериализует list в JSON string на запись и декодирует обратно на чтении
+  - живой native smoke подтвердил, что sidebar снова показывает сохранённые треды
+  Verification:
+  - `pytest backend/tests/test_chainlit_persistence_schema.py -q`
+  - `pytest backend/tests/test_chainlit_runtime_mode.py -q`
+  - `./scripts/run_native.sh --no-attach`
+  - живой Playwright smoke: создание треда через starter + проверка sidebar/history + `tail -n 80 backend/orchestrator/chainlit.log`
+
+- [x] **Chainlit elements persistence**
+  Локальная persistence для `cl.File` / `cl.Pdf` переведена на file-backed storage provider поверх `UPLOADS_DIR`, без внешнего blob storage.
+  Что закрыто:
+  - `SQLAlchemyDataLayer` теперь получает локальный `storage_provider`, поэтому warning `storage client is not initialized and elements will not be persisted` исчезает
+  - persisted elements пишутся в `UPLOADS_DIR/chainlit-elements`
+  - read URLs обслуживаются через локальный `Chainlit` route `/project/file/{object_key}`
+  - targeted coverage:
+    - `backend/tests/test_chainlit_elements_persistence.py`
+  Verification:
+  - `pytest backend/tests/test_chainlit_elements_persistence.py -q`
+  - `pytest backend/tests/test_chainlit_elements_persistence.py backend/tests/test_chainlit_runtime_mode.py -q`
+  - `./scripts/run_native.sh --no-attach`
+  - живой Playwright smoke: upload text file, file element появляется в треде, старый storage warning в `backend/orchestrator/chainlit.log` больше не появляется
+  Follow-up:
+  - local file route сейчас авторизует доступ по префиксу `current_user.identifier` в `object_key`; если модель user/thread identity будет меняться, этот guard нужно отдельно пересмотреть
+
+- [x] **Chainlit SQLite locking hardening**
+  После включения локальной elements persistence `Chainlit SQLite` был дополнительно усилен для native/dev path, чтобы убрать `database is locked` на серийных thread updates.
+  Что закрыто:
+  - bootstrap теперь включает `PRAGMA journal_mode=WAL` и `PRAGMA synchronous=NORMAL`
+  - compatibility data layer для SQLite добавляет `connect_args.timeout`
+  - на каждое SQLite подключение вешается `busy_timeout` через SQLAlchemy connect hook
+  - targeted coverage:
+    - `backend/tests/test_chainlit_persistence_schema.py`
+  Verification:
+  - `pytest backend/tests/test_chainlit_persistence_schema.py backend/tests/test_chainlit_elements_persistence.py backend/tests/test_chainlit_runtime_mode.py -q`
+  - `./scripts/run_native.sh --no-attach`
+  - живой Playwright smoke: создание fresh thread
+  - `rg -n "database is locked|Authorization for the thread failed" backend/orchestrator/chainlit.log` -> no matches
+
+- [x] **System behavior sweep harness**
+  Собран repeatable harness для проверки поведения системы при смене control-plane параметров и generation overrides.
+  Что закрыто:
+  - added `backend/evals/system_behavior_sweep.py`
+    - canonical scenario loader
+    - shared scorecard evaluator
+    - full control-plane matrix builder (`5 x 3 x 3 x 4 x 5 = 900` combinations)
+    - unified JSON report contract
+    - live API runner for `/execute_orchestration`
+    - thin `playwright-cli` UI adapter with fail-fast dependency check
+  - added canonical dataset:
+    - `backend/evals/data/system_behavior_scenarios.yaml`
+  - added targeted coverage:
+    - `backend/tests/test_system_behavior_sweep.py`
+  - added plan/doc:
+    - `docs/plans/2026-03-15-system-behavior-sweep.md`
+  Verification:
+  - `pytest backend/tests/test_system_behavior_sweep.py -q`
+  - `pytest backend/tests/test_system_behavior_sweep.py backend/tests/test_ui_control_plane.py backend/tests/test_chainlit_runtime_mode.py backend/tests/test_agent_api_orchestrate.py -q` -> `55 passed`
+  - `pytest backend/tests/test_system_behavior_sweep.py backend/tests/test_chainlit_runtime_mode.py backend/tests/test_execution_runtime.py backend/tests/test_agent_api_orchestrate.py -q` -> `69 passed`
+  - live native API sweep:
+    - `python backend/evals/system_behavior_sweep.py --surface api --json-output /tmp/system-behavior-api.json`
+  Findings from live run:
+  - initial live run surfaced two concrete quality bugs:
+    - multilingual contamination in short `general_chat`
+    - overly conservative grounded `rag_qa` on direct single-source factoid (`Мурка -> 5`)
+  - both are fixed in current backend slice:
+    - `general_chat` now applies a narrow language-consistency guard with one constrained regen
+    - `document_question` now preserves grounded answers for single-source direct evidence and can deterministically synthesize a short cited answer when the model still fails
+  Follow-up:
+  - extend behavior dataset with harder generation-sensitive prompts and stricter answer-shape checks (`exact short answer`, `must avoid multilingual spill`)
+  - strengthen `PlaywrightCliRunner` after repeated live runs against current `Chainlit` DOM
 
 ### Динамическая конфигурация
 - [x] **B3.22 — Dynamic selection of models and embedders**
@@ -724,8 +838,9 @@
   Проверки:
   - `pytest backend/tests/test_equipment_workflow.py -q -k "TestMatchItemsNode or matching_error or empty_matches"` -> `7 passed`
   - `rg -n "O\\(1\\) reverse mapping|TD-7 Fix" backend/orchestrator/workflows/equipment.py`
-- [ ] TD-8 — Fallback-цепочки скрывают ошибки → WARNING + счётчики
-  Progress (equipment + runtime critical slices):
+- [x] TD-8 — Fallback-цепочки скрывают ошибки → WARNING + счётчики
+  Закрыто на workflow/runtime critical slices, compare/document_analysis и `ums_client`.
+  Что покрыто:
   - `backend/orchestrator/workflows/equipment.py` теперь публикует `WARNING + agent_nav_equipment_fallback_total` для:
     - `smart_chunk` → line-based fallback
     - invalid `DEBUG-POLISH` structured output
@@ -740,6 +855,20 @@
     - `hybrid_low_confidence_unsure`
   - `backend/services/model_manager/unified_model_server.py` теперь публикует `agent_nav_fallback_events_total` для:
     - ST GPU → CPU retry (`fallback=st_start_cpu_retry`)
+  - `backend/orchestrator/workflows/compare.py` теперь публикует `WARNING + agent_nav_fallback_events_total` для:
+    - document load error (`fallback=load_documents_failed`)
+    - legal match error (`fallback=match_batches_failed`)
+    - partial/short structured output в batch-анализе (`fallback=analyze_parse_partial`)
+    - batch LLM error (`fallback=analyze_batch_error`)
+  - `backend/orchestrator/workflows/document_analysis.py` теперь публикует `WARNING + agent_nav_fallback_events_total` для:
+    - document load/page load/table load issues
+    - table extraction / LLM extraction fallback
+    - summarize chunk failure
+    - reduce summarization failure
+  - `backend/services/model_manager/ums_client.py` теперь публикует `WARNING + agent_nav_fallback_events_total` для:
+    - sync infer retry (`fallback=infer_retry`)
+    - async infer retry (`fallback=async_infer_retry`)
+    - stream error (`fallback=stream_error`)
   - Проверки:
     - `pytest backend/tests/test_equipment_workflow.py -q -k "falls_back_when_batch_xml_invalid or smart_chunk_fails_fallback or llm_error_produces_error_result"` -> `3 passed`
     - `pytest backend/tests/test_equipment_workflow.py -q` -> `84 passed`
@@ -747,9 +876,42 @@
     - `pytest backend/tests/test_intent_classifier.py -q -k "non_json_records_metric or rejects_unknown_intent or hybrid_can_end_unsure or llm_fallback_still_respects_embedder_abstain"` -> `4 passed`
     - `pytest backend/tests/test_unified_model_server_startup.py -q -k "records_cpu_placement_after_st_fallback"` -> `1 passed`
     - `pytest backend/tests/test_execution_runtime.py backend/tests/test_intent_classifier.py backend/tests/test_unified_model_server_startup.py backend/tests/test_equipment_workflow.py -q -k "rag_exception_fallback_metric or non_json_records_metric or rejects_unknown_intent or hybrid_can_end_unsure or llm_fallback_still_respects_embedder_abstain or records_cpu_placement_after_st_fallback or falls_back_when_batch_xml_invalid or smart_chunk_fails_fallback or llm_error_produces_error_result"` -> `9 passed`
+    - `pytest backend/tests/test_compare_workflow.py backend/tests/test_document_analysis.py backend/tests/test_ums_client.py -q` -> `73 passed`
+    - `pytest backend/tests/test_compare_workflow.py backend/tests/test_document_analysis.py backend/tests/test_execution_runtime.py backend/tests/test_intent_classifier.py backend/tests/test_ums_client.py backend/tests/test_unified_model_server_startup.py backend/tests/test_equipment_workflow.py -q -k "fallback or metric or retry or stream_error or records_cpu_placement_after_st_fallback or llm_error_produces_error_result or parse_failed or rag_exception_fallback_metric or non_json_records_metric or llm_fallback_still_respects_embedder_abstain or hybrid_can_end_unsure or compare_load_documents_failure_records_metric or compare_match_batches_failure_records_metric or compare_analyze_partial_parse_records_metric or extract_llm_failure_records_metric or summarize_reduce_failure_records_metric or summarize_llm_error or test_async_infer_retries_on_503"` -> `21 passed`
+  Residual:
+  - широкий multi-file pytest bundle всё ещё иногда залипает на старом tail-noise после прохождения основной части; это не выглядит регрессом `TD-8`
+- [x] TD-9 — Magic numbers без документации → именованные константы + env override
+  Реализован как narrow runtime-critical hardening slice, без full-sweep по всему репозиторию.
+  - `backend/services/model_manager/ums_client.py`
+    - retries / timeouts / pool limits / embedding batch controls вынесены в именованные константы и env overrides:
+      - `UMS_CLIENT_TIMEOUT_S`
+      - `UMS_CLIENT_CONNECT_TIMEOUT_S`
+      - `UMS_CLIENT_KEEPALIVE_CONNECTIONS`
+      - `UMS_CLIENT_MAX_CONNECTIONS`
+      - `UMS_SYNC_INFER_RETRIES`
+      - `UMS_SWITCH_MODEL_TIMEOUT_S`
+      - `UMS_STATUS_TIMEOUT_S`
+      - `UMS_EMBED_PROBE_TIMEOUT_S`
+      - `UMS_EMBED_BATCH_SIZE`
+      - `UMS_EMBED_BATCH_TIMEOUT_S`
+      - `UMS_EMBED_BATCH_CONNECT_TIMEOUT_S`
+      - `UMS_EMBED_BATCH_RETRIES`
+      - `UMS_EMBED_BATCH_RETRY_DELAY_S`
+  - `backend/orchestrator/workflows/compare.py`
+    - compare truncate/chunk/analyze thresholds вынесены в именованные константы и env overrides
+  - `backend/orchestrator/workflows/document_analysis.py`
+    - summarize/reduce temperature/max_tokens/sleep вынесены в именованные константы и env overrides
+  - `backend/orchestrator/knowledge_base_retrieval.py`
+    - merge/dedup/rerank shortlist coefficients и candidate budget вынесены в именованные константы и env overrides
+  - `backend/orchestrator/doc_question_heuristics.py`
+    - confidence thresholds, coverage weights, multihop/cross-doc bonuses и insufficient-evidence cap вынесены в именованные константы и env overrides
+  - Проверки:
+    - `pytest backend/tests/test_ums_client.py backend/tests/test_compare_workflow.py backend/tests/test_document_analysis.py -q` -> `73 passed`
+    - `python -m py_compile backend/services/model_manager/ums_client.py backend/orchestrator/workflows/compare.py backend/orchestrator/workflows/document_analysis.py backend/tests/test_ums_client.py backend/tests/test_compare_workflow.py backend/tests/test_document_analysis.py`
+    - `pytest backend/tests/test_knowledge_base_retrieval.py backend/tests/test_execution_runtime.py backend/tests/test_document_analysis.py backend/tests/test_ums_client.py backend/tests/test_compare_workflow.py -q` -> `91 passed`
+    - `python -m py_compile backend/orchestrator/doc_question_heuristics.py backend/orchestrator/knowledge_base_retrieval.py backend/orchestrator/workflows/document_analysis.py backend/orchestrator/workflows/compare.py backend/services/model_manager/ums_client.py backend/tests/test_knowledge_base_retrieval.py backend/tests/test_execution_runtime.py backend/tests/test_document_analysis.py backend/tests/test_ums_client.py backend/tests/test_compare_workflow.py`
   Follow-up:
-  - распространить тот же WARNING+metrics pattern на `compare`, `document_analysis`, `ums_client` и остальные fallback-heavy paths, после чего закрыть `TD-8` целиком
-- [ ] TD-9 — Magic numbers без документации → именованные константы + env override
+  - remaining magic numbers в `shared/report_utils`, `rag/retriever`, `equipment` и API glue остаются отдельным cleanup slice; `TD-9` закрыт только для runtime-critical surface
 
 ---
 
