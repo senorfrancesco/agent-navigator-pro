@@ -13,9 +13,35 @@ PROFILE="${UMS_RUNTIME_PROFILE:-adaptive}"
 NO_ATTACH=false
 REPORT_ONLY=false
 INSTALL=false
+INSTALL_PLATFORM="auto"
+
+print_help() {
+  cat <<EOF
+launcher.sh
+
+Canonical entrypoint for Agent Navigator runtime and guided install.
+
+Usage:
+  ./scripts/launcher.sh --target native --profile adaptive
+  ./scripts/launcher.sh --target container --profile default
+  ./scripts/launcher.sh --install --platform ubuntu
+
+Flags:
+  --target native|container
+  --profile <runtime-profile>
+  --platform auto|ubuntu|ubuntu-server|wsl|windows
+  --no-attach
+  --report-only
+  --install
+EOF
+}
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    --help)
+      print_help
+      exit 0
+      ;;
     --target)
       TARGET="$2"
       shift 2
@@ -44,6 +70,14 @@ while [ $# -gt 0 ]; do
       INSTALL=true
       shift
       ;;
+    --platform)
+      INSTALL_PLATFORM="$2"
+      shift 2
+      ;;
+    --platform=*)
+      INSTALL_PLATFORM="${1#*=}"
+      shift
+      ;;
     *)
       echo "Неизвестный аргумент launcher.sh: $1" >&2
       exit 1
@@ -52,7 +86,7 @@ while [ $# -gt 0 ]; do
 done
 
 if [ "$INSTALL" = true ]; then
-  bash "$SCRIPT_DIR/bootstrap_env.sh" --install "--target=$TARGET"
+  bash "$SCRIPT_DIR/bootstrap_env.sh" --install "--target=$TARGET" "--platform=$INSTALL_PLATFORM"
   exit $?
 fi
 

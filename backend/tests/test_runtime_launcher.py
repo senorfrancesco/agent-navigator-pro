@@ -41,6 +41,14 @@ def test_launcher_report_only_outputs_runtime_plan(tmp_path):
     assert not runtime_env.exists()
 
 
+def test_launcher_help_documents_install_and_platform_flags():
+    result = _run_script("launcher.sh", "--help", env=os.environ.copy())
+
+    assert result.returncode == 0
+    assert "Canonical entrypoint" in result.stdout
+    assert "--install --platform ubuntu" in result.stdout
+
+
 def test_launcher_test_mode_writes_env_runtime_and_reports_target(tmp_path):
     runtime_env = tmp_path / ".env.runtime"
     env = os.environ.copy()
@@ -126,8 +134,8 @@ def test_run_all_from_launcher_enables_vllm_compose_profile(tmp_path):
 
     assert result.returncode == 0
     assert "run_all:test-mode backend_mode=vllm" in result.stdout
-    assert "compose_profiles=--profile vllm" in result.stdout
-    assert "compose_services=chainlit vllm" in result.stdout
+    assert "compose_profiles=--profile backend --profile vllm" in result.stdout
+    assert "compose_services=agent-api document-server legal-server ums chainlit vllm" in result.stdout
 
 
 def test_run_all_from_launcher_keeps_chainlit_only_for_local_backend(tmp_path):
@@ -141,11 +149,11 @@ def test_run_all_from_launcher_keeps_chainlit_only_for_local_backend(tmp_path):
 
     assert result.returncode == 0
     assert "run_all:test-mode backend_mode=llama-server" in result.stdout
-    assert "compose_profiles=none" in result.stdout
-    assert "compose_services=chainlit" in result.stdout
+    assert "compose_profiles=--profile backend" in result.stdout
+    assert "compose_services=agent-api document-server legal-server ums chainlit" in result.stdout
 
 
-def test_install_mode_uses_bootstrap_script(tmp_path):
+def test_install_mode_uses_installer_coordinator(tmp_path):
     runtime_env = tmp_path / ".env.runtime"
     env = os.environ.copy()
     env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
@@ -154,7 +162,83 @@ def test_install_mode_uses_bootstrap_script(tmp_path):
     result = _run_script("launcher.sh", "--target", "native", "--install", env=env)
 
     assert result.returncode == 0
-    assert "bootstrap:test-mode mode=install target=native" in result.stdout
+    assert "install:test-mode target=native" in result.stdout
+    assert "platform=ubuntu" in result.stdout or "platform=wsl" in result.stdout
+
+
+def test_install_script_supports_dry_run_in_test_mode():
+    env = os.environ.copy()
+    env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
+
+    result = _run_script("install/install.sh", "--target=native", "--platform=ubuntu", "--dry-run", env=env)
+
+    assert result.returncode == 0
+    assert "install:test-mode target=native platform=ubuntu dry_run=1" in result.stdout
+
+
+def test_install_coordinator_reports_native_legacy_delegate(tmp_path):
+    env = os.environ.copy()
+    env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
+
+    result = _run_script("install/install.sh", "--target=native", "--platform=ubuntu", env=env)
+
+    assert result.returncode == 0
+    assert "install:test-mode target=native platform=ubuntu" in result.stdout
+    assert "coordinator=install_ubuntu.sh" in result.stdout
+
+
+def test_install_coordinator_accepts_ubuntu_server_platform():
+    env = os.environ.copy()
+    env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
+
+    result = _run_script("install/install.sh", "--target=native", "--platform=ubuntu-server", env=env)
+
+    assert result.returncode == 0
+    assert "platform=ubuntu-server" in result.stdout
+    assert "coordinator=install_ubuntu_server.sh" in result.stdout
+
+
+def test_install_coordinator_accepts_wsl_platform():
+    env = os.environ.copy()
+    env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
+
+    result = _run_script("install/install.sh", "--target=native", "--platform=wsl", env=env)
+
+    assert result.returncode == 0
+    assert "platform=wsl" in result.stdout
+    assert "coordinator=install_wsl.sh" in result.stdout
+
+
+def test_install_coordinator_auto_detects_wsl():
+    env = os.environ.copy()
+    env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
+    env["WSL_DISTRO_NAME"] = "Ubuntu"
+
+    result = _run_script("install/install.sh", "--target=native", env=env)
+
+    assert result.returncode == 0
+    assert "platform=wsl" in result.stdout
+    assert "coordinator=install_wsl.sh" in result.stdout
+
+
+def test_install_coordinator_windows_platform_reports_powershell_entrypoint():
+    env = os.environ.copy()
+    env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
+
+    result = _run_script("install/install.sh", "--target=native", "--platform=windows", env=env)
+
+    assert result.returncode == 0
+    assert "platform=windows" in result.stdout
+    assert "coordinator=install_windows.ps1" in result.stdout
+
+
+def test_install_coordinator_accepts_container_guidance(tmp_path):
+    env = os.environ.copy()
+
+    result = _run_script("install/install.sh", "--target=container", env=env)
+
+    assert result.returncode == 0
+    assert "Container target does not require host installer" in result.stderr
 
 
 def test_bootstrap_check_rejects_default_secrets(tmp_path):
@@ -214,3 +298,35 @@ def test_run_all_never_prints_default_password_hint(tmp_path):
 
     assert result.returncode == 0
     assert "admin/admin" not in result.stdout
+
+
+def test_native_and_legacy_scripts_export_backend_pythonpath_for_service_servers():
+    run_native = (SCRIPTS_DIR / "run_native.sh").read_text(encoding="utf-8")
+    run_openwebui = (SCRIPTS_DIR / "run_openwebui.sh").read_text(encoding="utf-8")
+    start_system_test = (SCRIPTS_DIR / "start_system_test.sh").read_text(encoding="utf-8")
+
+    assert "export PYTHONPATH='$BACKEND_DIR' && uvicorn mcp_document_server:app" in run_native
+    assert "export PYTHONPATH='$BACKEND_DIR' && uvicorn mcp_legal_server:app" in run_native
+    assert "export PYTHONPATH='$BACKEND_DIR' && uvicorn mcp_document_server:app" in run_openwebui
+    assert "export PYTHONPATH='$BACKEND_DIR' && uvicorn mcp_legal_server:app" in run_openwebui
+    assert "export PYTHONPATH='$BACKEND_DIR' && uvicorn mcp_document_server:app" in start_system_test
+    assert "export PYTHONPATH='$BACKEND_DIR' && uvicorn mcp_legal_server:app" in start_system_test
+
+
+def test_stop_scripts_kill_detached_runtime_process_patterns():
+    stop_native = (SCRIPTS_DIR / "stop_native.sh").read_text(encoding="utf-8")
+    stop_all = (SCRIPTS_DIR / "stop_all.sh").read_text(encoding="utf-8")
+
+    expected_patterns = [
+        'kill_matching_processes "UMS" "services/model_manager/unified_model_server.py"',
+        'kill_matching_processes "llama-server runtime" "llama-server"',
+        'kill_matching_processes "embedding runtime" "services/model_manager/st_server.py"',
+        'kill_matching_processes "Document Server" "uvicorn mcp_document_server:app --host 0.0.0.0 --port $DOC_PORT"',
+        'kill_matching_processes "Legal Server" "uvicorn mcp_legal_server:app --host 0.0.0.0 --port $LEGAL_PORT"',
+        'kill_matching_processes "Agent API" "python agent_api.py"',
+        'kill_matching_processes "Chainlit" "chainlit run chainlit_app.py --host 0.0.0.0 --port $CHAINLIT_PORT"',
+    ]
+
+    for pattern in expected_patterns:
+        assert pattern in stop_native
+        assert pattern in stop_all

@@ -87,22 +87,65 @@ graph TD
 
 ## Установка
 
-### Способ 1 — одна команда (Ubuntu/Debian)
+### Способ 1 — одна команда через launcher/install coordinator
 
 Клонировать репозиторий, установить все зависимости (Docker, Miniconda, Python env) и подготовить конфиг:
 
 ```bash
 git clone <repo-url> agent-navigator-pro && cd agent-navigator-pro
-bash scripts/setup_ubuntu.sh
+./scripts/launcher.sh --install --platform ubuntu
 ```
 
-Скрипт устанавливает: `tmux`, `docker`, `conda`, `python 3.11`, все pip-зависимости, создаёт `backend/.env` из шаблона и нужные директории.
+Для Ubuntu Server:
+
+```bash
+./scripts/launcher.sh --install --platform ubuntu-server
+```
+
+Для WSL внутри Ubuntu-дистрибутива:
+
+```bash
+./scripts/launcher.sh --install --platform wsl
+```
+
+Для Windows host:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/install/install_windows.ps1 -Mode Guide
+```
+
+Unified install path использует platform-specific wrappers и для Linux по-прежнему переиспользует heavy bootstrap через `scripts/setup_ubuntu.sh`.
 
 Если репозиторий уже клонирован — запустить установку через launcher:
 
 ```bash
-./scripts/launcher.sh --install
+./scripts/launcher.sh --install --platform ubuntu
 ```
+
+Этот путь теперь сводится к одному installer coordinator:
+
+```bash
+./scripts/install/install.sh
+```
+
+Сейчас он выбирает platform wrapper (`ubuntu`, `ubuntu-server`, `wsl`, `windows`). Для Linux heavy install всё ещё делегируется в `scripts/setup_ubuntu.sh`, а модульные installer-step scripts остаются scaffold-only.
+
+Поддерживаемые platform-specific install paths:
+
+```bash
+# Ubuntu / Ubuntu Server / WSL
+./scripts/install/install.sh --platform auto
+./scripts/install/install.sh --platform ubuntu
+./scripts/install/install.sh --platform ubuntu-server
+./scripts/install/install.sh --platform wsl
+```
+
+```powershell
+# Windows host bootstrap for WSL-based development path
+powershell -ExecutionPolicy Bypass -File scripts/install/install_windows.ps1 -Mode Guide
+```
+
+Windows host path подготавливает WSL/Docker Desktop, а сам рабочий dev runtime для проекта остаётся Linux/WSL-first.
 
 ### Способ 2 — curl без клонирования
 
@@ -206,6 +249,7 @@ docker compose build chainlit
 
 ```bash
 ./scripts/launcher.sh --target native --profile adaptive
+./scripts/launcher.sh --install
 ```
 
 Container-oriented path:
@@ -221,6 +265,8 @@ Launcher:
 - запускает нужный target (`native` или `container`)
 - печатает runtime summary через `UMS /status`
 
+Полная карта runtime-скриптов, их роли и ограничения описана в [docs/scripts/README.md](docs/scripts/README.md).
+
 Совместимые wrapper scripts сохранены:
 
 ```bash
@@ -229,7 +275,26 @@ Launcher:
 ./scripts/run_container.sh
 ```
 
-Они делегируют в `launcher.sh` и оставлены как compatibility aliases.
+Они делегируют в `launcher.sh` и оставлены как compatibility aliases, а не как конкурирующие canonical entrypoints.
+
+Для install-path launcher тоже остаётся user-facing entrypoint. Внутренний coordinator находится в `./scripts/install/install.sh`: сейчас он делегирует `native` установку в `scripts/setup_ubuntu.sh`, а для `container` target выводит guidance без host-install действий.
+
+Platform-specific install paths:
+
+```bash
+# Ubuntu / Ubuntu Server / WSL
+./scripts/install/install.sh --platform auto
+./scripts/install/install.sh --platform ubuntu
+./scripts/install/install.sh --platform ubuntu-server
+./scripts/install/install.sh --platform wsl
+```
+
+```powershell
+# Windows host bootstrap for WSL-based development path
+powershell -ExecutionPolicy Bypass -File scripts/install/install_windows.ps1
+```
+
+Windows host path подготавливает WSL/Docker Desktop, а сам рабочий dev runtime для проекта остаётся Linux/WSL-first.
 
 ### 5. Отдельный запуск Chainlit
 
@@ -249,6 +314,8 @@ Legacy Open WebUI при необходимости:
 ```bash
 docker compose --profile legacy up -d open-webui
 ```
+
+Для старого mixed runtime path существует `./scripts/run_openwebui.sh`, но это только legacy-скрипт и не рекомендованный путь для новых сценариев.
 
 Он будет доступен на:
 

@@ -77,9 +77,16 @@ else
   echo -e "${BLUE}  tmux сессия '$SESSION_NAME' не найдена${NC}"
 fi
 
+kill_matching_processes "UMS" "services/model_manager/unified_model_server.py"
 kill_matching_processes "UMS" "$PROJECT_ROOT/backend/services/model_manager/unified_model_server.py"
+kill_matching_processes "llama-server runtime" "llama-server"
 kill_matching_processes "llama-server runtime" "llama-server.*$PROJECT_ROOT/backend/models/"
+kill_matching_processes "embedding runtime" "services/model_manager/st_server.py"
 kill_matching_processes "embedding runtime" "$PROJECT_ROOT/backend/services/model_manager/st_server.py"
+kill_matching_processes "Document Server" "uvicorn mcp_document_server:app --host 0.0.0.0 --port $DOC_PORT"
+kill_matching_processes "Legal Server" "uvicorn mcp_legal_server:app --host 0.0.0.0 --port $LEGAL_PORT"
+kill_matching_processes "Agent API" "python agent_api.py"
+kill_matching_processes "Chainlit" "chainlit run chainlit_app.py --host 0.0.0.0 --port $CHAINLIT_PORT"
 
 PORTS=("$CHAINLIT_PORT" "$AGENT_API_PORT" "$DOC_PORT" "$LEGAL_PORT" "$UMS_PORT")
 NAMES=("Chainlit" "Agent API" "Document Server" "Legal Server" "UMS")

@@ -5,9 +5,11 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BACKEND_ENV_FILE="${AGENT_NAVIGATOR_BACKEND_ENV_FILE:-$PROJECT_ROOT/backend/.env}"
+INSTALL_COORDINATOR_SCRIPT="$SCRIPT_DIR/install/install.sh"
 
 MODE="check"
 TARGET="native"
+PLATFORM="auto"
 
 for arg in "$@"; do
   case "$arg" in
@@ -19,6 +21,9 @@ for arg in "$@"; do
       ;;
     --target=*)
       TARGET="${arg#*=}"
+      ;;
+    --platform=*)
+      PLATFORM="${arg#*=}"
       ;;
     *)
       echo "Неизвестный аргумент bootstrap_env.sh: $arg" >&2
@@ -33,8 +38,8 @@ if [ -f "$BACKEND_ENV_FILE" ]; then
   set +a
 fi
 
-if [ "${AGENT_NAVIGATOR_TEST_MODE:-0}" = "1" ]; then
-  echo "bootstrap:test-mode mode=$MODE target=$TARGET"
+if [ "${AGENT_NAVIGATOR_TEST_MODE:-0}" = "1" ] && [ "$MODE" != "install" ]; then
+  echo "bootstrap:test-mode mode=$MODE target=$TARGET platform=$PLATFORM"
   exit 0
 fi
 
@@ -60,10 +65,13 @@ if [ "${AGENT_NAVIGATOR_SKIP_COMMAND_CHECKS:-0}" != "1" ]; then
 fi
 
 if [ "$MODE" = "install" ]; then
+  if [ -x "$INSTALL_COORDINATOR_SCRIPT" ]; then
+    exec "$INSTALL_COORDINATOR_SCRIPT" "--target=$TARGET" "--platform=$PLATFORM"
+  fi
   if [ -x "$SCRIPT_DIR/setup_ubuntu.sh" ]; then
     exec "$SCRIPT_DIR/setup_ubuntu.sh"
   fi
-  echo "setup_ubuntu.sh not found or not executable" >&2
+  echo "install.sh/setup_ubuntu.sh not found or not executable" >&2
   exit 1
 fi
 
