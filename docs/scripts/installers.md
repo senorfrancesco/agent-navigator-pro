@@ -11,7 +11,7 @@
   - `target=native` -> select platform wrapper (`ubuntu`, `ubuntu-server`, `wsl`, `windows`)
   - Linux wrappers -> delegate to `setup_ubuntu.sh`
   - `target=container` -> guidance only, без host install
-- Остальные installer-step scripts добавлены как scaffold-only contracts, без destructive install logic
+- Остальные installer-step scripts добавлены как scaffold-only contracts, без destructive install logic; `scripts/models/install_models.sh` уже реализован отдельно как model provisioning layer
 
 ## Platform Matrix
 
@@ -43,7 +43,7 @@ scripts/
 
 - Installer path остаётся additive слоем поверх текущего launcher/bootstrap setup.
 - `scripts/setup_ubuntu.sh` остаётся существующим heavy Linux bootstrap path до отдельного controlled rewrite.
-- Новые scaffold scripts не выполняют реальную установку по умолчанию и намеренно завершаются сообщением `scaffold only`.
+- Новые scaffold scripts не выполняют реальную установку по умолчанию и намеренно завершаются сообщением `scaffold only`; исключение — `scripts/models/install_models.sh`, который уже выполняет model provisioning.
 - `install.sh` стал unified coordinator shim, а platform-specific wrappers задают поддерживаемые install entrypoints.
 - Источником правды для runtime orchestration остаётся `launcher.sh`, а не installer path.
 
@@ -131,11 +131,26 @@ scripts/
 
 ### `scripts/models/install_models.sh`
 
-- Делает: скачивает или валидирует наличие model artifacts в заранее заданных путях, разделяя LLM/VLM/embedding artifacts.
-- Не делает: не выбирает модель "по умолчанию" без явной конфигурации и не перезаписывает существующие большие файлы без подтверждения.
-- Зависимости: доступ к model source, свободное место на диске, явные target directories, при Hugging Face path `huggingface_hub`/`hf` CLI или другой утверждённый downloader.
-- Успех проверяется через: наличие ожидаемых файлов/директорий, контроль размеров/имен, сформированный отчёт для последующего заполнения `backend/.env`.
-- Official docs: [Hugging Face model downloads](https://huggingface.co/docs/hub/en/models-downloading) как reference для `hf download`; конкретные model-card источники должны добавляться отдельно на этапе реальной реализации.
+- Делает: скачивает или валидирует наличие model artifacts в канонических `MODEL_PATH_*`, разделяя `core` set (`LLM + intent + retrieval`) и `all` (`core + VLM + mmproj`).
+- Не делает: не переписывает `.env` автоматически и не меняет runtime profile; если модели лежат на другом диске, пользователь фиксирует absolute paths в `backend/.env.native`.
+- Зависимости: `huggingface_hub`, доступ к model source, свободное место на диске, явные target directories.
+- Успех проверяется через: наличие ожидаемых файлов/директорий, контроль путей и печать канонического env block для `MODEL_PATH_LLM`, `MODEL_PATH_VLM`, `MMPROJ_PATH`, `MODEL_PATH_EMBEDDING_INTENT`, `MODEL_PATH_EMBEDDING_RETRIEVAL`.
+- Official docs and source ids:
+  - [Hugging Face model downloads](https://huggingface.co/docs/hub/en/models-downloading)
+  - `Qwen/Qwen2.5-14B-Instruct-GGUF`
+  - `Qwen/Qwen3-VL-8B-Instruct-GGUF`
+  - `Qwen/Qwen3-Embedding-0.6B`
+  - `sentence-transformers/LaBSE`
+
+Примеры:
+
+```bash
+./scripts/models/install_models.sh --dry-run
+./scripts/models/install_models.sh --ensure-present --models-root=/mnt/d/agent-models
+./scripts/models/install_models.sh --ensure-present --asset-set=all --huggingface-cache=/mnt/d/hf-cache
+```
+
+Для `WSL` и другого диска модели можно хранить вне `C:` и прописывать absolute paths в `backend/.env.native`, например `/mnt/d/agent-models/...`.
 
 ### `scripts/utils/system_check.sh`
 

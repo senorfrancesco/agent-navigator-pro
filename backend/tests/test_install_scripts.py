@@ -57,3 +57,25 @@ def test_windows_installer_contains_wsl_guidance():
     script = (SCRIPTS_DIR / "install" / "install_windows.ps1").read_text(encoding="utf-8")
     assert "windows/wsl/install" in script
     assert "launcher.sh --install" in script
+
+
+def test_model_downloader_dry_run_supports_custom_models_root(tmp_path):
+    result = _run_script(
+        [
+            "bash",
+            str(SCRIPTS_DIR / "models" / "install_models.sh"),
+            "--dry-run",
+            f"--models-root={tmp_path}",
+            "--asset-set=all",
+        ]
+    )
+    assert result.returncode == 0
+    assert "models:plan" in result.stdout
+    assert str(tmp_path / "gguf" / "qwen-14b" / "Qwen2.5-14B-Instruct-Q4_K_M.gguf") in result.stdout
+    assert str(tmp_path / "st" / "Qwen3-Embedding-0.6B") in result.stdout
+
+
+def test_model_downloader_help_mentions_models_root_example():
+    result = _run_script(["bash", str(SCRIPTS_DIR / "models" / "install_models.sh"), "--help"])
+    assert result.returncode == 0
+    assert "--models-root=/mnt/d/agent-models" in result.stdout

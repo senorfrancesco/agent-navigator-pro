@@ -65,9 +65,51 @@ def test_launcher_test_mode_writes_env_runtime_and_reports_target(tmp_path):
     )
 
     assert result.returncode == 0
+    assert "models:plan" in result.stdout
     assert "launcher:test-mode target=container profile=adaptive" in result.stdout
     assert runtime_env.exists()
     assert "UMS_RUNTIME_PROFILE=adaptive" in runtime_env.read_text(encoding="utf-8")
+
+
+def test_launcher_can_skip_model_download_phase(tmp_path):
+    runtime_env = tmp_path / ".env.runtime"
+    env = os.environ.copy()
+    env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
+    env["AGENT_NAVIGATOR_RUNTIME_ENV_FILE"] = str(runtime_env)
+
+    result = _run_script(
+        "launcher.sh",
+        "--target",
+        "native",
+        "--skip-model-download",
+        env=env,
+    )
+
+    assert result.returncode == 0
+    assert "models:plan" not in result.stdout
+    assert "launcher:test-mode target=native" in result.stdout
+
+
+def test_launcher_forwards_models_root_to_downloader(tmp_path):
+    runtime_env = tmp_path / ".env.runtime"
+    models_root = tmp_path / "models-root"
+    env = os.environ.copy()
+    env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
+    env["AGENT_NAVIGATOR_RUNTIME_ENV_FILE"] = str(runtime_env)
+
+    result = _run_script(
+        "launcher.sh",
+        "--target",
+        "native",
+        f"--models-root={models_root}",
+        "--asset-set=all",
+        env=env,
+    )
+
+    assert result.returncode == 0
+    assert str(models_root / "gguf" / "qwen-14b" / "Qwen2.5-14B-Instruct-Q4_K_M.gguf") in result.stdout
+    assert str(models_root / "gguf" / "Qwen3-VL-8B-Q4" / "mmproj-Qwen3-VL-8B-Instruct-F16.gguf") in result.stdout
+    assert str(models_root / "gguf" / "qwen-14b" / "Qwen2.5-14B-Instruct-Q4_K_M.gguf") in runtime_env.read_text(encoding="utf-8")
 
 
 def test_launcher_sources_native_overrides_before_runtime_preflight(tmp_path):

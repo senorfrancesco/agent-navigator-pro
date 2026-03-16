@@ -22,6 +22,39 @@
 | Ubuntu Desktop | `./scripts/launcher.sh --install --platform ubuntu` | Переиспользует `scripts/setup_ubuntu.sh` через unified installer coordinator. |
 | Ubuntu Server | `./scripts/launcher.sh --install --platform ubuntu-server` | Тот же heavy install path, но с отдельным server-oriented wrapper. |
 
+## Model Download Quick Start
+
+```bash
+./scripts/models/install_models.sh --dry-run
+./scripts/models/install_models.sh --ensure-present
+./scripts/models/install_models.sh --ensure-present --asset-set=all
+./scripts/models/install_models.sh --ensure-present --models-root=/mnt/d/agent-models
+```
+
+Если модели нужно хранить вне `C:` в `WSL`, используйте `/mnt/d/...` и пропишите абсолютные пути в `backend/.env.native`:
+
+```bash
+MODEL_PATH_LLM="/mnt/d/agent-models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
+MODEL_PATH_VLM="/mnt/d/agent-models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
+MMPROJ_PATH="/mnt/d/agent-models/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf"
+MODEL_PATH_EMBEDDING_INTENT="/mnt/d/agent-models/st/Qwen3-Embedding-0.6B"
+MODEL_PATH_EMBEDDING_RETRIEVAL="/mnt/d/agent-models/st/LaBSE"
+```
+
+`launcher.sh` по умолчанию вызывает model downloader перед стартом runtime. Для полного набора с VLM:
+
+```bash
+./scripts/launcher.sh --target native --asset-set all --models-root /mnt/d/agent-models
+```
+
+`--models-root` применяет derived `MODEL_PATH_*` к текущему runtime-запуску. Для постоянной конфигурации зафиксируйте эти же absolute paths в `backend/.env.native`.
+
+Чтобы временно отключить этот шаг:
+
+```bash
+./scripts/launcher.sh --target native --skip-model-download
+```
+
 ## Inventory
 
 | Script | Classification | Mode | Когда использовать | Риски / side effects | Текущий статус |
@@ -37,7 +70,8 @@
 | `scripts/install/install.sh` | `canonical-installer` | installer | Guided install path за `launcher.sh --install` | Выбирает platform wrapper (`ubuntu`, `ubuntu-server`, `wsl`, `windows`); heavy Linux install всё ещё сводится к legacy `setup_ubuntu.sh` через wrapper layer | Canonical install coordinator |
 | `scripts/install/install_ubuntu.sh`, `install_ubuntu_server.sh`, `install_wsl.sh`, `install_windows.ps1` | `platform-wrapper` | installer-platform | Platform-specific install handoff за unified `install.sh` | Linux wrappers пока делегируют в legacy `setup_ubuntu.sh`; Windows path остаётся guided/manual | Platform-specific wrapper layer |
 | `scripts/install/*.sh` (кроме `install.sh`) | `planned` | installer-step | Не использовать как самостоятельный install path | Step scripts intentionally scaffold-only | Scaffold-only contracts |
-| `scripts/models/install_models.sh`, `scripts/utils/system_check.sh` | `planned` | installer-support | Не использовать напрямую как основной installer path | Helper/model install layer пока scaffold-only | Scaffold-only contracts |
+| `scripts/models/install_models.sh` | `canonical-model-provisioning` | model installer | Проверка и дозагрузка обязательных моделей в канонические `MODEL_PATH_*` | Может скачать большие файлы из Hugging Face; launcher по умолчанию проверяет `core` set | Canonical model provisioning |
+| `scripts/utils/system_check.sh` | `planned` | installer-support | Внутренние helper checks для installer path | Пока scaffold-only | Scaffold-only contract |
 
 ## Launcher Decision
 
@@ -177,7 +211,7 @@
 - Основные флаги: `--target`, `--platform`, `--dry-run`, `--help`.
 - Важные env vars: `AGENT_NAVIGATOR_TEST_MODE`, `WSL_DISTRO_NAME`.
 - Side effects: выбирает platform wrapper; Linux wrappers по-прежнему сводят heavy install к `scripts/setup_ubuntu.sh`, а Windows path печатает host-side guidance / bootstrap command.
-- Ограничения: модульные installer-step scripts пока scaffold-only; `install.sh` остаётся coordinator-wrapper, а не новым independent installer engine.
+- Ограничения: модульные installer-step scripts пока scaffold-only; `install.sh` остаётся coordinator-wrapper, а `scripts/models/install_models.sh` отвечает только за model provisioning, а не за весь installer engine.
 
 ### `scripts/install/install_windows.ps1`
 
@@ -245,7 +279,8 @@ powershell -ExecutionPolicy Bypass -File scripts/install/install_windows.ps1 -Mo
 
 - `scripts/install/install.sh` уже работает как installer coordinator;
 - `scripts/install/install_ubuntu.sh`, `install_ubuntu_server.sh`, `install_wsl.sh`, `install_windows.ps1` существуют как platform wrappers;
-- `scripts/install/*.sh` step scripts, `scripts/models/install_models.sh` и `scripts/utils/system_check.sh` пока scaffold-only;
+- `scripts/install/*.sh` step scripts и `scripts/utils/system_check.sh` пока scaffold-only;
+- `scripts/models/install_models.sh` уже рабочий coordinator для model provisioning;
 - heavy Linux install path всё ещё проходит через `scripts/setup_ubuntu.sh`, а `launcher.sh --install` ведёт в `scripts/install/install.sh -> platform wrapper`.
 
 Поддерживаемые platform-specific paths сейчас такие:

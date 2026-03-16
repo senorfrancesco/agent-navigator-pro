@@ -128,7 +128,7 @@ Unified install path использует platform-specific wrappers и для L
 ./scripts/install/install.sh
 ```
 
-Сейчас он выбирает platform wrapper (`ubuntu`, `ubuntu-server`, `wsl`, `windows`). Для Linux heavy install всё ещё делегируется в `scripts/setup_ubuntu.sh`, а модульные installer-step scripts остаются scaffold-only.
+Сейчас он выбирает platform wrapper (`ubuntu`, `ubuntu-server`, `wsl`, `windows`). Для Linux heavy install всё ещё делегируется в `scripts/setup_ubuntu.sh`; модульные installer-step scripts в основном остаются scaffold-only, а `scripts/models/install_models.sh` уже отвечает за model provisioning.
 
 Поддерживаемые platform-specific install paths:
 
@@ -223,6 +223,18 @@ CHAINLIT_ADMIN_PASSWORD="your-secure-password"
 CHAINLIT_AUTH_SECRET="your-secret-key"
 ```
 
+Для `WSL` и случаев, когда на системном диске не хватает места, модели можно хранить на другом диске и указывать абсолютные пути, например `/mnt/d/agent-models/...`:
+
+```bash
+MODEL_PATH_LLM="/mnt/d/agent-models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
+MODEL_PATH_VLM="/mnt/d/agent-models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
+MMPROJ_PATH="/mnt/d/agent-models/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf"
+MODEL_PATH_EMBEDDING_INTENT="/mnt/d/agent-models/st/Qwen3-Embedding-0.6B"
+MODEL_PATH_EMBEDDING_RETRIEVAL="/mnt/d/agent-models/st/LaBSE"
+```
+
+Windows-ярлыки не нужны: для `WSL` достаточно обычных путей `/mnt/d/...`.
+
 Legacy aliases в тексте и конфиге сохранены для обратной совместимости:
 `MODEL_PATH_QWEN14B` -> `MODEL_PATH_LLM`,
 `MODEL_PATH_QWENVL` -> `MODEL_PATH_VLM`,
@@ -250,6 +262,7 @@ docker compose build chainlit
 ```bash
 ./scripts/launcher.sh --target native --profile adaptive
 ./scripts/launcher.sh --install
+./scripts/launcher.sh --target native --models-root /mnt/d/agent-models
 ```
 
 Container-oriented path:
@@ -261,9 +274,43 @@ Container-oriented path:
 Launcher:
 
 - запускает controlled bootstrap/preflight слой
+- перед запуском делает `ensure-present` для обязательных моделей через `scripts/models/install_models.sh`
 - строит и применяет `backend/.env.runtime`
 - запускает нужный target (`native` или `container`)
 - печатает runtime summary через `UMS /status`
+
+По умолчанию launcher проверяет `core` набор:
+- `MODEL_PATH_LLM`
+- `MODEL_PATH_EMBEDDING_INTENT`
+- `MODEL_PATH_EMBEDDING_RETRIEVAL`
+
+Полный набор с VLM:
+
+```bash
+./scripts/launcher.sh --target native --asset-set all
+```
+
+Если фазу downloader нужно временно пропустить:
+
+```bash
+./scripts/launcher.sh --target native --skip-model-download
+```
+
+Отдельный model provisioning path:
+
+```bash
+./scripts/models/install_models.sh --dry-run
+./scripts/models/install_models.sh --ensure-present --models-root=/mnt/d/agent-models
+HF_HOME=/mnt/d/hf-cache ./scripts/models/install_models.sh --ensure-present --asset-set=all
+```
+
+`--models-root` в `launcher.sh` и `install_models.sh` строит канонический layout внутри указанного root. Для постоянной конфигурации всё равно лучше зафиксировать абсолютные пути в `backend/.env.native`.
+
+Используемые Hugging Face источники:
+- `Qwen/Qwen2.5-14B-Instruct-GGUF`
+- `Qwen/Qwen3-VL-8B-Instruct-GGUF`
+- `Qwen/Qwen3-Embedding-0.6B`
+- `sentence-transformers/LaBSE`
 
 Полная карта runtime-скриптов, их роли и ограничения описана в [docs/scripts/README.md](docs/scripts/README.md).
 
