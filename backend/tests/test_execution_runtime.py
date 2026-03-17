@@ -3,12 +3,15 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import asyncio
+from itertools import repeat
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from orchestrator.execution_runtime import (
     ExecutionDependencies,
+    _DOCUMENTS_SUMMARY_CACHE,
+    _execute_documents_summary,
     _run_graph,
     execute_orchestration,
 )
@@ -25,10 +28,12 @@ from services.observability import render_metrics_text, reset_observability_metr
 
 def setup_function():
     reset_observability_metrics()
+    _DOCUMENTS_SUMMARY_CACHE.clear()
 
 
 def teardown_function():
     reset_observability_metrics()
+    _DOCUMENTS_SUMMARY_CACHE.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -82,6 +87,8 @@ def _build_minimal_deps() -> ExecutionDependencies:
         to_host_path=lambda path: path,
         active_set_status_line=lambda: "Активный набор: 0 документов",
         attach_and_register_report=AsyncMock(),
+        update_progress_box=AsyncMock(),
+        clear_progress_box=AsyncMock(),
     )
 
 
@@ -1035,3 +1042,347 @@ def test_execute_orchestration_routes_kb_doc_question_through_unified_backend_co
     assert response["assistant_message"] == "Ответ по базе [1]"
     assert response["sources"][0]["source_origin"] == "knowledge_base"
     assert response["sources"][0]["collection_id"] == "legal"
+
+
+def test_execute_documents_summary_updates_single_progress_box_per_chunk():
+    deps = _build_minimal_deps()
+    deps.get_all_docs = lambda: [
+        {
+            "document_id": "doc-1",
+            "display_name": "contract.txt",
+            "text": ("Первый абзац. " * 180) + "\n\n" + ("Второй абзац. " * 180),
+        }
+    ]
+    deps.infer_assistant_text = AsyncMock(side_effect=["chunk-1", "chunk-2", "merged", "global"])
+
+    response = asyncio.run(
+        _execute_documents_summary(
+            query="Сделай сводку",
+            history=[],
+            deps=deps,
+        )
+    )
+
+    assert "## Сводка по документам" in response["assistant_message"]
+    assert deps.update_progress_box.await_count == 4
+    assert deps.update_progress_box.await_args_list[0].kwargs == {
+        "key": "documents_summary_progress",
+        "title": "Суммаризация чанков",
+        "content": "1/2",
+    }
+    assert deps.update_progress_box.await_args_list[1].kwargs == {
+        "key": "documents_summary_progress",
+        "title": "Суммаризация чанков",
+        "content": "2/2",
+    }
+    assert deps.update_progress_box.await_args_list[2].kwargs["title"] == "Промежуточная сводка"
+    assert "Готов документ: contract.txt" in deps.update_progress_box.await_args_list[2].kwargs["content"]
+    assert deps.update_progress_box.await_args_list[3].kwargs == {
+        "key": "documents_summary_progress",
+        "title": "Формирование итоговой сводки",
+        "content": "Формирую общую сводку по уже собранным промежуточным результатам.",
+    }
+    deps.clear_progress_box.assert_awaited_once_with(key="documents_summary_progress")
+
+
+def test_execute_documents_summary_uses_low_vram_stage_policy():
+    deps = _build_minimal_deps()
+    deps.get_all_docs = lambda: [
+        {
+            "document_id": "doc-1",
+            "display_name": "contract.txt",
+            "text": ("Первый абзац. " * 180) + "\n\n" + ("Второй абзац. " * 180),
+        }
+    ]
+    deps.infer_assistant_text = AsyncMock(side_effect=["chunk-1", "chunk-2", "merged", "global"])
+
+    asyncio.run(
+        _execute_documents_summary(
+            query="Сделай сводку",
+            history=[],
+            effective_settings={"device_mode": "low-vram"},
+            deps=deps,
+        )
+    )
+
+    first_call = deps.infer_assistant_text.await_args_list[0].kwargs
+    merge_call = deps.infer_assistant_text.await_args_list[2].kwargs
+    global_call = deps.infer_assistant_text.await_args_list[3].kwargs
+
+    assert first_call["device_mode"] == "cpu"
+    assert first_call["allow_sync_retry"] is False
+    assert first_call["raise_on_error"] is True
+    assert first_call["summary_stage"] == "chunk"
+    assert merge_call["summary_stage"] == "merge"
+    assert merge_call["enforced_overrides"]["max_tokens"] <= 320
+    assert global_call["summary_stage"] == "global"
+    assert global_call["enforced_overrides"]["max_tokens"] <= 384
+
+
+def test_execute_documents_summary_returns_partial_response_when_global_summary_fails():
+    deps = _build_minimal_deps()
+    deps.get_all_docs = lambda: [
+        {
+            "document_id": "doc-1",
+            "display_name": "contract.txt",
+            "text": ("Первый абзац. " * 180) + "\n\n" + ("Второй абзац. " * 180),
+        }
+    ]
+    deps.infer_assistant_text = AsyncMock(
+        side_effect=["chunk-1", "chunk-2", "merged-summary", RuntimeError("UMS timeout")]
+    )
+
+    response = asyncio.run(
+        _execute_documents_summary(
+            query="Сделай сводку",
+            history=[],
+            effective_settings={"device_mode": "prefer-gpu"},
+            deps=deps,
+        )
+    )
+
+    assert "merged-summary" in response["assistant_message"]
+    assert "Общая сводка недоступна" in response["assistant_message"]
+
+
+def test_execute_documents_summary_reuses_cached_chunk_summaries():
+    deps = _build_minimal_deps()
+    deps.get_all_docs = lambda: [
+        {
+            "document_id": "doc-1",
+            "display_name": "contract.txt",
+            "text": ("Первый абзац. " * 180) + "\n\n" + ("Второй абзац. " * 180),
+        }
+    ]
+    deps.infer_assistant_text = AsyncMock(side_effect=["chunk-1", "chunk-2", "merged", "global", "merged-2", "global-2"])
+
+    first = asyncio.run(
+        _execute_documents_summary(
+            query="Сделай сводку",
+            history=[],
+            effective_settings={"device_mode": "low-vram", "resolved_model_id": "test-model"},
+            deps=deps,
+        )
+    )
+    second = asyncio.run(
+        _execute_documents_summary(
+            query="Сделай сводку",
+            history=[],
+            effective_settings={"device_mode": "low-vram", "resolved_model_id": "test-model"},
+            deps=deps,
+        )
+    )
+
+    assert "merged" in first["assistant_message"]
+    assert "merged-2" in second["assistant_message"]
+    assert deps.infer_assistant_text.await_count == 6
+    first_two = [call.kwargs["summary_stage"] for call in deps.infer_assistant_text.await_args_list[:2]]
+    second_two = [call.kwargs["summary_stage"] for call in deps.infer_assistant_text.await_args_list[4:6]]
+    assert first_two == ["chunk", "chunk"]
+    assert second_two == ["merge", "global"]
+
+
+def test_execute_documents_summary_applies_budget_guard_before_merge_and_global():
+    deps = _build_minimal_deps()
+    paragraphs = ["Абзац %s. %s" % (idx, "Текст " * 260) for idx in range(1, 7)]
+    deps.get_all_docs = lambda: [
+        {
+            "document_id": "doc-1",
+            "display_name": "contract.txt",
+            "text": "\n\n".join(paragraphs),
+        }
+    ]
+    long_chunk_summary = "summary " * 220
+    deps.infer_assistant_text = AsyncMock(
+        side_effect=list(repeat(long_chunk_summary, 6)) + ["merge-1", "merge-2", "global-summary"]
+    )
+
+    asyncio.run(
+        _execute_documents_summary(
+            query="Сделай сводку",
+            history=[],
+            effective_settings={
+                "device_mode": "prefer-gpu",
+                "resolved_model_id": "test-model",
+                "runtime_admission": {"documents_summary": {"global": "requires_degraded"}},
+            },
+            deps=deps,
+        )
+    )
+
+    merge_calls = [call for call in deps.infer_assistant_text.await_args_list if call.kwargs["summary_stage"] == "merge"]
+    global_calls = [call for call in deps.infer_assistant_text.await_args_list if call.kwargs["summary_stage"] == "global"]
+
+    assert len(merge_calls) >= 2
+    assert len(global_calls) == 1
+    for call in merge_calls:
+        assert len(call.args[0]) < 5000
+    assert len(global_calls[0].args[0]) < 6000
+
+
+def test_execute_documents_summary_updates_progress_with_partial_results():
+    deps = _build_minimal_deps()
+    deps.get_all_docs = lambda: [
+        {
+            "document_id": "doc-1",
+            "display_name": "contract.txt",
+            "text": ("Первый абзац. " * 180) + "\n\n" + ("Второй абзац. " * 180),
+        }
+    ]
+    deps.infer_assistant_text = AsyncMock(side_effect=["chunk-1", "chunk-2", "merged", "global"])
+
+    asyncio.run(
+        _execute_documents_summary(
+            query="Сделай сводку",
+            history=[],
+            effective_settings={"device_mode": "prefer-gpu", "resolved_model_id": "test-model"},
+            deps=deps,
+        )
+    )
+
+    progress_titles = [call.kwargs["title"] for call in deps.update_progress_box.await_args_list]
+    progress_contents = [call.kwargs["content"] for call in deps.update_progress_box.await_args_list]
+
+    assert progress_titles[:2] == ["Суммаризация чанков", "Суммаризация чанков"]
+    assert "Готов документ: contract.txt" in progress_contents[2]
+    assert "merged" in progress_contents[2]
+    assert "Формирую общую сводку" in progress_contents[3]
+
+
+def test_execute_documents_summary_emits_degraded_notice_when_stage_requires_reduced_context():
+    deps = _build_minimal_deps()
+    paragraphs = ["Абзац %s. %s" % (idx, "Текст " * 320) for idx in range(1, 7)]
+    deps.get_all_docs = lambda: [
+        {
+            "document_id": "doc-1",
+            "display_name": "contract.txt",
+            "text": "\n\n".join(paragraphs),
+        }
+    ]
+    deps.infer_assistant_text = AsyncMock(
+        side_effect=list(repeat("chunk-summary", 6)) + ["merge-1", "merge-2", "merge-3", "global-summary"]
+    )
+
+    response = asyncio.run(
+        _execute_documents_summary(
+            query="Сделай сводку",
+            history=[],
+            effective_settings={
+                "device_mode": "prefer-gpu",
+                "resolved_model_id": "test-model",
+                "runtime_admission": {"documents_summary": {"global": "requires_degraded"}},
+            },
+            deps=deps,
+        )
+    )
+
+    assert response["execution_metadata"]["degraded"] is True
+    assert response["execution_metadata"]["policy"] == "reduced_context"
+    assert "ограничений ресурсов" in response["assistant_message"]
+
+
+def test_execute_documents_summary_retries_global_only_after_policy_change():
+    deps = _build_minimal_deps()
+    deps.get_all_docs = lambda: [
+        {
+            "document_id": "doc-1",
+            "display_name": "contract.txt",
+            "text": ("Первый абзац. " * 180) + "\n\n" + ("Второй абзац. " * 180),
+        }
+    ]
+    deps.infer_assistant_text = AsyncMock(
+        side_effect=["chunk-1", "chunk-2", "merged-summary", RuntimeError("OOM"), "global-summary-degraded"]
+    )
+
+    response = asyncio.run(
+        _execute_documents_summary(
+            query="Сделай сводку",
+            history=[],
+            effective_settings={"device_mode": "prefer-gpu", "resolved_model_id": "test-model"},
+            deps=deps,
+        )
+    )
+
+    global_calls = [call.kwargs for call in deps.infer_assistant_text.await_args_list if call.kwargs["summary_stage"] == "global"]
+
+    assert len(global_calls) == 2
+    assert global_calls[1]["enforced_overrides"]["max_tokens"] < global_calls[0]["enforced_overrides"]["max_tokens"]
+    assert response["execution_metadata"]["degraded"] is True
+    assert response["execution_metadata"]["stage"] == "global"
+    assert "global-summary-degraded" in response["assistant_message"]
+
+
+def test_execute_documents_summary_cache_entry_expires_by_ttl(monkeypatch):
+    deps = _build_minimal_deps()
+    deps.get_all_docs = lambda: [
+        {
+            "document_id": "doc-1",
+            "display_name": "contract.txt",
+            "text": ("Первый абзац. " * 180) + "\n\n" + ("Второй абзац. " * 180),
+        }
+    ]
+    deps.infer_assistant_text = AsyncMock(
+        side_effect=["chunk-1", "chunk-2", "merged", "global", "chunk-1b", "chunk-2b", "merged-2", "global-2"]
+    )
+    monkeypatch.setenv("DOCUMENTS_SUMMARY_CACHE_TTL_S", "1")
+
+    base_time = 1000.0
+    monkeypatch.setattr("orchestrator.execution_runtime.time.time", lambda: base_time)
+    asyncio.run(
+        _execute_documents_summary(
+            query="Сделай сводку",
+            history=[],
+            effective_settings={"device_mode": "low-vram", "resolved_model_id": "test-model"},
+            deps=deps,
+        )
+    )
+
+    monkeypatch.setattr("orchestrator.execution_runtime.time.time", lambda: base_time + 2.0)
+    asyncio.run(
+        _execute_documents_summary(
+            query="Сделай сводку",
+            history=[],
+            effective_settings={"device_mode": "low-vram", "resolved_model_id": "test-model"},
+            deps=deps,
+        )
+    )
+
+    stages = [call.kwargs["summary_stage"] for call in deps.infer_assistant_text.await_args_list]
+    assert stages[:4] == ["chunk", "chunk", "merge", "global"]
+    assert stages[4:8] == ["chunk", "chunk", "merge", "global"]
+
+
+def test_execute_documents_summary_records_stage_metrics_for_cache_and_degraded_paths():
+    deps = _build_minimal_deps()
+    deps.get_all_docs = lambda: [
+        {
+            "document_id": "doc-1",
+            "display_name": "contract.txt",
+            "text": ("Первый абзац. " * 180) + "\n\n" + ("Второй абзац. " * 180),
+        }
+    ]
+    deps.infer_assistant_text = AsyncMock(
+        side_effect=["chunk-1", "chunk-2", "merged-summary", RuntimeError("UMS timeout")]
+    )
+
+    asyncio.run(
+        _execute_documents_summary(
+            query="Сделай сводку",
+            history=[],
+            effective_settings={"device_mode": "prefer-gpu", "resolved_model_id": "test-model"},
+            deps=deps,
+        )
+    )
+    deps.infer_assistant_text = AsyncMock(side_effect=["merged-2", "global-2"])
+    asyncio.run(
+        _execute_documents_summary(
+            query="Сделай сводку",
+            history=[],
+            effective_settings={"device_mode": "prefer-gpu", "resolved_model_id": "test-model"},
+            deps=deps,
+        )
+    )
+
+    metrics = render_metrics_text()
+    assert 'fallback="documents_summary_global_degraded"' in metrics
+    assert 'fallback="documents_summary_chunk_cache_hit"' in metrics

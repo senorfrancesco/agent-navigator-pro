@@ -49,7 +49,11 @@ from orchestrator.doc_question_heuristics import (
     has_sufficient_evidence_v1,
 )
 from orchestrator.orchestration_runtime import decide_orchestration
-from orchestrator.ui_control_plane import get_prompt_profile_system_message, resolve_effective_settings
+from orchestrator.ui_control_plane import (
+    get_prompt_profile_system_message,
+    normalize_inference_device_mode,
+    resolve_effective_settings,
+)
 
 try:
     from services.resource_monitor import get_system_resources
@@ -194,6 +198,8 @@ async def _infer_with_effective_settings(
     prompt: str,
     *,
     enforced_overrides: Optional[Dict[str, Any]] = None,
+    device_mode: Optional[str] = None,
+    **_: Any,
 ) -> str:
     generation = dict((effective_settings.get("generation") or {}))
     if enforced_overrides:
@@ -205,7 +211,8 @@ async def _infer_with_effective_settings(
         "max_tokens": generation.get("max_tokens", 2048),
     }
     model_id = effective_settings.get("resolved_model_id") or "qwen-14b-llm"
-    response = await asyncio.to_thread(ums_client.infer, model_id, payload)
+    resolved_device_mode = normalize_inference_device_mode(device_mode or effective_settings.get("device_mode"))
+    response = await asyncio.to_thread(ums_client.infer, model_id, payload, resolved_device_mode)
     return _extract_content(response)
 
 
@@ -227,6 +234,10 @@ def _build_api_execution_dependencies(request: OrchestrationRequest, effective_s
             effective_settings,
             prompt,
             enforced_overrides=kwargs.get("enforced_overrides"),
+            device_mode=kwargs.get("device_mode"),
+            allow_sync_retry=kwargs.get("allow_sync_retry"),
+            raise_on_error=kwargs.get("raise_on_error"),
+            summary_stage=kwargs.get("summary_stage"),
         )
 
     async def _noop_async(*args: Any, **kwargs: Any) -> None:
@@ -331,6 +342,8 @@ def _build_api_execution_dependencies(request: OrchestrationRequest, effective_s
         to_host_path=lambda path: path,
         active_set_status_line=lambda: "",
         attach_and_register_report=_noop_async,
+        update_progress_box=_noop_async,
+        clear_progress_box=_noop_async,
     )
 
 def _compute_files_hash(file_paths: List[str]) -> str:

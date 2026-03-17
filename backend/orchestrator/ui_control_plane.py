@@ -537,6 +537,17 @@ def resolve_model_id(model_profile: Optional[str]) -> str:
     return os.getenv(definition["env_var"], definition["fallback_model_id"])
 
 
+def normalize_inference_device_mode(device_mode: Optional[str]) -> str:
+    normalized = _normalize_text(device_mode)
+    if normalized in {"cpu", "gpu", "hybrid"}:
+        return normalized
+    if normalized == "prefer-gpu":
+        return "gpu"
+    if normalized == "low-vram":
+        return "cpu"
+    return "hybrid"
+
+
 def resolve_intent_embedder_model_id(intent_embedder_profile: Optional[str]) -> str:
     normalized = str(intent_embedder_profile or CONTROL_PLANE_HARD_DEFAULTS["intent_embedder_profile"]).strip()
     definition = INTENT_EMBEDDER_PROFILE_DEFINITIONS.get(

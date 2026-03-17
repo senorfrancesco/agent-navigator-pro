@@ -354,7 +354,7 @@ async def test_execute_orchestration_api_reads_knowledge_base_via_unified_core(m
     monkeypatch.setattr("services.model_manager.ums_client.create_ums_embed_fn", lambda **kwargs: _stub_embed_fn)
     monkeypatch.setattr(
         "orchestrator.agent_api.ums_client.infer",
-        lambda model_id, payload: {"content": "Штраф составляет 3 процента [1]"},
+        lambda model_id, payload, device_mode="hybrid": {"content": "Штраф составляет 3 процента [1]"},
     )
 
     request = OrchestrationRequest(
@@ -377,9 +377,10 @@ async def test_execute_orchestration_api_reads_knowledge_base_via_unified_core(m
 async def test_infer_with_effective_settings_calls_ums_client(monkeypatch):
     called = {}
 
-    def fake_infer(model_id, payload):
+    def fake_infer(model_id, payload, device_mode="hybrid"):
         called["model_id"] = model_id
         called["payload"] = payload
+        called["device_mode"] = device_mode
         return {"content": "test response"}
 
     async def fake_to_thread(func, *args, **kwargs):
@@ -391,12 +392,13 @@ async def test_infer_with_effective_settings_calls_ums_client(monkeypatch):
     from orchestrator.agent_api import _infer_with_effective_settings
 
     result = await _infer_with_effective_settings(
-        {"resolved_model_id": "test-model", "generation": {"temperature": 0.5}},
+        {"resolved_model_id": "test-model", "generation": {"temperature": 0.5}, "device_mode": "low-vram"},
         "test prompt",
     )
 
     assert called["model_id"] == "test-model"
     assert called["payload"]["temperature"] == 0.5
+    assert called["device_mode"] == "cpu"
     assert result == "test response"
 
 

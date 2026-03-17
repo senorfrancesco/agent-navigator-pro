@@ -113,6 +113,33 @@ async def test_stream_response_retries_sync_on_threaded_infer_failure(chainlit_s
     assert history[-1]["content"] == "sync retry response"
 
 
+@pytest.mark.asyncio
+async def test_infer_assistant_text_skips_sync_retry_when_disabled(chainlit_stream_module):
+    module, _stream_response = chainlit_stream_module
+
+    async def fake_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    with patch.object(
+        module.asyncio,
+        "to_thread",
+        new=AsyncMock(side_effect=fake_to_thread),
+    ), patch.object(
+        module.ums_client,
+        "infer",
+        side_effect=RuntimeError("ums failed"),
+    ) as mock_infer:
+        with pytest.raises(RuntimeError, match="ums failed"):
+            await module._infer_assistant_text(
+                "prompt",
+                allow_sync_retry=False,
+                raise_on_error=True,
+                summary_stage="global",
+            )
+
+    mock_infer.assert_called_once()
+
+
 class TestAsyncInferStream:
     class _FakeResponse:
         def __init__(self, lines):

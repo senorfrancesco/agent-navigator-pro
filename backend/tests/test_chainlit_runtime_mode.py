@@ -510,6 +510,37 @@ class TestChainlitControlPlaneSettings:
         assert metadata["rag_mode_label"] == "corrective retrieval"
         assert self._store["runtime_budget_metadata"]["runtime_profile"] == "adaptive"
 
+    @pytest.mark.asyncio
+    async def test_update_progress_box_reuses_single_message_instance(self):
+        created_messages = []
+
+        class _FakeMessage:
+            def __init__(self, content):
+                self.content = content
+                self.send = AsyncMock()
+                self.update = AsyncMock()
+                created_messages.append(self)
+
+        self._mock_cl.Message.side_effect = lambda **kwargs: _FakeMessage(kwargs["content"])
+
+        await self._module._update_progress_box(
+            key="documents_summary_progress",
+            title="Суммаризация чанков",
+            content="1/10",
+        )
+        await self._module._update_progress_box(
+            key="documents_summary_progress",
+            title="Суммаризация чанков",
+            content="2/10",
+        )
+
+        assert len(created_messages) == 1
+        message = created_messages[0]
+        message.send.assert_awaited_once()
+        message.update.assert_awaited_once()
+        assert message.content == "**Суммаризация чанков**\n\n2/10"
+        assert self._store["documents_summary_progress"] is message
+
     def test_render_doc_question_markdown_includes_scope_and_provenance(self):
         markdown = self._module._render_doc_question_markdown(
             {

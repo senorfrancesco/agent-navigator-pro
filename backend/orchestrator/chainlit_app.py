@@ -73,6 +73,7 @@ from orchestrator.ui_control_plane import (
     clamp_generation_overrides,
     get_prompt_profile_system_message,
     merge_control_plane_state,
+    normalize_inference_device_mode,
     resolve_effective_settings,
     resolve_model_id,
 )
@@ -1120,7 +1121,40 @@ def _build_execution_dependencies() -> ExecutionDependencies:
         to_host_path=_to_host_path,
         active_set_status_line=_active_set_status_line,
         attach_and_register_report=_attach_and_register_report,
+        update_progress_box=_update_progress_box,
+        clear_progress_box=_clear_progress_box,
     )
+
+
+def _format_progress_box_content(title: str, content: str) -> str:
+    title_text = str(title or "").strip()
+    body = str(content or "").strip()
+    if title_text and body:
+        return f"**{title_text}**\n\n{body}"
+    return title_text or body
+
+
+async def _update_progress_box(*, key: str, title: str, content: str) -> None:
+    rendered = _format_progress_box_content(title, content)
+    message = cl.user_session.get(key)
+    if message is None:
+        message = cl.Message(content=rendered)
+        await message.send()
+        cl.user_session.set(key, message)
+        return
+    message.content = rendered
+    update = getattr(message, "update", None)
+    if callable(update):
+        await update()
+    else:
+        await message.send()
+
+
+async def _clear_progress_box(*, key: str) -> None:
+    message = cl.user_session.get(key)
+    if message is None:
+        return
+    cl.user_session.set(key, None)
 
 
 async def _render_execution_response(response: Dict[str, Any], history: List[Dict[str, str]]) -> None:
@@ -1649,6 +1683,7 @@ def _build_inference_request(
         generation = clamp_generation_overrides(enforced_overrides, base=generation)
     return {
         "model_id": effective.get("resolved_model_id") or resolve_model_id(effective.get("model_profile")),
+        "device_mode": normalize_inference_device_mode(effective.get("device_mode")),
         "payload": {
             "prompt": None,
             "temperature": generation["temperature"],
@@ -1680,6 +1715,10 @@ async def _infer_assistant_text(
     default_top_p: float = 0.9,
     default_max_tokens: int = 2048,
     enforced_overrides: Optional[Dict[str, Any]] = None,
+    device_mode: Optional[str] = None,
+    allow_sync_retry: bool = True,
+    raise_on_error: bool = False,
+    summary_stage: Optional[str] = None,
 ) -> str:
     request = _build_inference_request(
         default_temperature=temperature,
@@ -1690,19 +1729,35 @@ async def _infer_assistant_text(
     payload = dict(request["payload"])
     payload["prompt"] = prompt
     model_id = request["model_id"]
+    resolved_device_mode = normalize_inference_device_mode(device_mode or request.get("device_mode"))
     try:
         response = await asyncio.to_thread(
             ums_client.infer,
             model_id,
             payload,
+            resolved_device_mode,
         )
         return response.get("choices", [{}])[0].get("text", str(response))
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "Assistant infer failed stage=%s model=%s device_mode=%s retry=%s",
+            summary_stage or "default",
+            model_id,
+            resolved_device_mode,
+            allow_sync_retry,
+            exc_info=True,
+        )
+        if not allow_sync_retry:
+            if raise_on_error:
+                raise
+            return f"Ошибка генерации: {exc}"
         try:
             logger.warning("Direct chat infer failed, retrying sync inference", exc_info=True)
-            response = ums_client.infer(model_id, payload)
+            response = ums_client.infer(model_id, payload, resolved_device_mode)
             return response.get("choices", [{}])[0].get("text", str(response))
         except Exception as e:
+            if raise_on_error:
+                raise
             return f"Ошибка генерации: {e}"
 
 

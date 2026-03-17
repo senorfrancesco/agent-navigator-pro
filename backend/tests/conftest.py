@@ -49,6 +49,7 @@ def isolate_ums_runtime_state(monkeypatch):
         "active_model": ums_server.state.get("active_model"),
         "processes": dict(ums_server.state.get("processes") or {}),
         "placements": dict(ums_server.state.get("placements") or {}),
+        "admission": dict(ums_server.state.get("admission") or {}),
         "device_mode": ums_server.state.get("device_mode"),
         "runtime_budget": dict(ums_server.state.get("runtime_budget") or {}),
         "dynamic_ports": ums_server.state.get("dynamic_ports"),
@@ -59,6 +60,7 @@ def isolate_ums_runtime_state(monkeypatch):
     ums_server.state["active_model"] = None
     ums_server.state["processes"] = {}
     ums_server.state["placements"] = {}
+    ums_server.state["admission"] = {}
     ums_server.state["runtime_budget"] = {}
     ums_server.state["system_profile"] = None
     ums_server.state["tier_config"] = None

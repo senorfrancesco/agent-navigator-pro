@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import logging
 import os
 import re
@@ -19,7 +20,11 @@ from orchestrator.rag.classifier import (
     select_classifier_result,
 )
 from orchestrator.state_store import get_orchestration_state_store
-from orchestrator.ui_control_plane import get_prompt_profile_system_message, resolve_effective_settings
+from orchestrator.ui_control_plane import (
+    get_prompt_profile_system_message,
+    normalize_inference_device_mode,
+    resolve_effective_settings,
+)
 from orchestrator.workflows.equipment import detect_equipment_mode
 from services.observability import inc_metric_counter
 from services.model_manager.ums_client import create_ums_embed_fn, ums_client
@@ -47,6 +52,7 @@ INTENT_CLASSIFIER_EMBEDDER_MARGIN_THRESHOLD = float(
 )
 _INTENT_CLASSIFIER_CACHE: Dict[str, Any] = {}
 _INTENT_CLASSIFIER_LLM_CACHE: Dict[str, LLMIntentClassifier] = {}
+_DOCUMENTS_SUMMARY_CACHE: Dict[str, Dict[str, Any]] = {}
 _INTENT_CLASSIFIER_LOCK = threading.Lock()
 GENERAL_CHAT_LANGUAGE_GUARD_TEMPERATURE = float(
     os.getenv("GENERAL_CHAT_LANGUAGE_GUARD_TEMPERATURE", "0.2")
@@ -54,6 +60,23 @@ GENERAL_CHAT_LANGUAGE_GUARD_TEMPERATURE = float(
 GENERAL_CHAT_LANGUAGE_GUARD_TOP_P = float(
     os.getenv("GENERAL_CHAT_LANGUAGE_GUARD_TOP_P", "0.6")
 )
+SUMMARY_REDUCE_GROUP_SIZE = 4
+SUMMARY_DEGRADED_REDUCE_GROUP_SIZE = 2
+SUMMARY_STAGE_MAX_INPUT_CHARS = {
+    "chunk": 3200,
+    "merge": 2600,
+    "global": 3200,
+}
+SUMMARY_STAGE_DEGRADED_INPUT_CHARS = {
+    "chunk": 2200,
+    "merge": 1800,
+    "global": 2200,
+}
+SUMMARY_STAGE_MAX_TOKENS = {
+    "chunk": {"default": 384, "low_vram": 256},
+    "merge": {"default": 448, "low_vram": 320},
+    "global": {"default": 512, "low_vram": 384},
+}
 _CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
 _LATIN_RE = re.compile(r"[A-Za-z]")
 _CJK_RE = re.compile(r"[\u3400-\u4DBF\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]")
@@ -81,6 +104,215 @@ _RUSSIAN_NUMBER_WORDS = {
     "девят": "9",
     "десят": "10",
 }
+
+
+def _is_low_vram_device_mode(effective_settings: Optional[Dict[str, Any]]) -> bool:
+    return str((effective_settings or {}).get("device_mode") or "").strip().lower() == "low-vram"
+
+
+def _resolve_summary_device_mode(effective_settings: Optional[Dict[str, Any]]) -> str:
+    return normalize_inference_device_mode((effective_settings or {}).get("device_mode"))
+
+
+def _resolve_summary_stage_overrides(
+    stage: str,
+    effective_settings: Optional[Dict[str, Any]],
+    *,
+    degraded: bool = False,
+) -> Dict[str, Any]:
+    low_vram = _is_low_vram_device_mode(effective_settings)
+    max_tokens = SUMMARY_STAGE_MAX_TOKENS.get(stage, SUMMARY_STAGE_MAX_TOKENS["global"])
+    selected_max_tokens = max_tokens["low_vram"] if low_vram else max_tokens["default"]
+    if degraded:
+        selected_max_tokens = max(128, selected_max_tokens // 2)
+    return {
+        "temperature": 0.2,
+        "max_tokens": selected_max_tokens,
+    }
+
+
+def _estimate_prompt_tokens(text: str) -> int:
+    return max(1, len(str(text or "")) // 4)
+
+
+def _resolve_summary_stage_plan(
+    *,
+    stage: str,
+    prompt: str,
+    effective_settings: Optional[Dict[str, Any]],
+    degraded: bool = False,
+) -> Dict[str, Any]:
+    prompt_chars = len(str(prompt or ""))
+    prompt_tokens = _estimate_prompt_tokens(prompt)
+    default_cap = SUMMARY_STAGE_MAX_INPUT_CHARS.get(stage, SUMMARY_STAGE_MAX_INPUT_CHARS["global"])
+    degraded_cap = SUMMARY_STAGE_DEGRADED_INPUT_CHARS.get(stage, SUMMARY_STAGE_DEGRADED_INPUT_CHARS["global"])
+    low_vram = _is_low_vram_device_mode(effective_settings)
+    runtime_admission = (((effective_settings or {}).get("runtime_admission") or {}).get("documents_summary") or {})
+    explicit_stage_admission = str(runtime_admission.get(stage) or "").strip().lower()
+    requires_degraded = (
+        explicit_stage_admission == "requires_degraded"
+        or low_vram
+        or prompt_chars > int(default_cap * 0.85)
+        or prompt_tokens > max(128, default_cap // 4)
+    )
+    return {
+        "stage": stage,
+        "policy": "reduced_context" if degraded or requires_degraded else "normal",
+        "degraded": bool(degraded or requires_degraded),
+        "admission": "requires_degraded" if requires_degraded else "ok",
+        "reason": "low_vram" if low_vram else "runtime_admission" if explicit_stage_admission == "requires_degraded" else "token_budget",
+        "input_char_cap": degraded_cap if (degraded or requires_degraded) else default_cap,
+        "prompt_chars": prompt_chars,
+        "prompt_tokens": prompt_tokens,
+        "overrides": _resolve_summary_stage_overrides(stage, effective_settings, degraded=(degraded or requires_degraded)),
+    }
+
+
+def _join_summary_items(items: List[str], *, max_chars: int) -> str:
+    joined: List[str] = []
+    current_len = 0
+    for idx, item in enumerate(items, start=1):
+        normalized = str(item or "").strip()
+        if not normalized:
+            continue
+        candidate = f"[{idx}] {normalized}"
+        extra = len(candidate) + (2 if joined else 0)
+        if joined and current_len + extra > max_chars:
+            break
+        joined.append(candidate)
+        current_len += extra
+    return "\n\n".join(joined)
+
+
+def _group_summary_items_for_budget(items: List[str], *, max_chars: int, max_items: int) -> List[List[str]]:
+    groups: List[List[str]] = []
+    current: List[str] = []
+    current_len = 0
+    for item in items:
+        normalized = str(item or "").strip()
+        if not normalized:
+            continue
+        candidate_len = len(normalized) + (2 if current else 0)
+        if current and (current_len + candidate_len > max_chars or len(current) >= max_items):
+            groups.append(current)
+            current = []
+            current_len = 0
+        current.append(normalized[:max_chars])
+        current_len += len(current[-1]) + (2 if len(current) > 1 else 0)
+    if current:
+        groups.append(current)
+    return groups or [items[:max_items]]
+
+
+def _build_documents_summary_chunk_cache_key(
+    *,
+    document_id: str,
+    document_name: str,
+    chunk: str,
+    effective_settings: Optional[Dict[str, Any]],
+) -> str:
+    model_id = str((effective_settings or {}).get("resolved_model_id") or "")
+    profile = str((effective_settings or {}).get("model_profile") or "")
+    payload = "\n".join(
+        [
+            "documents_summary_chunk_v1",
+            document_id.strip(),
+            document_name.strip(),
+            model_id,
+            profile,
+            chunk.strip(),
+        ]
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _get_documents_summary_cache_ttl_s() -> float:
+    raw = os.getenv("DOCUMENTS_SUMMARY_CACHE_TTL_S", "1800")
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 1800.0
+
+
+def _get_cached_documents_summary_chunk(cache_key: str) -> Optional[str]:
+    entry = _DOCUMENTS_SUMMARY_CACHE.get(cache_key)
+    if not isinstance(entry, dict):
+        return None
+    cached_at = float(entry.get("cached_at") or 0.0)
+    if (time.time() - cached_at) > _get_documents_summary_cache_ttl_s():
+        _DOCUMENTS_SUMMARY_CACHE.pop(cache_key, None)
+        return None
+    summary = str(entry.get("summary") or "").strip()
+    return summary or None
+
+
+def _store_cached_documents_summary_chunk(cache_key: str, summary: str) -> None:
+    _DOCUMENTS_SUMMARY_CACHE[cache_key] = {
+        "summary": str(summary or "").strip(),
+        "cached_at": time.time(),
+    }
+
+
+async def _infer_documents_summary_stage(
+    *,
+    deps: ExecutionDependencies,
+    prompt: str,
+    stage: str,
+    effective_settings: Optional[Dict[str, Any]],
+) -> tuple[str, Dict[str, Any]]:
+    inc_metric_counter(
+        "agent_nav_fallback_events_total",
+        labels={
+            "component": "documents_summary",
+            "fallback": f"documents_summary_{stage}_attempt",
+            "source": "workflow",
+        },
+    )
+    stage_plan = _resolve_summary_stage_plan(
+        stage=stage,
+        prompt=prompt,
+        effective_settings=effective_settings,
+        degraded=False,
+    )
+    resolved_device_mode = _resolve_summary_device_mode(effective_settings)
+    if stage_plan["admission"] == "requires_degraded":
+        text = await deps.infer_assistant_text(
+            prompt,
+            enforced_overrides=stage_plan["overrides"],
+            device_mode=resolved_device_mode,
+            allow_sync_retry=False,
+            raise_on_error=True,
+            summary_stage=stage,
+        )
+        return text, stage_plan
+    try:
+        text = await deps.infer_assistant_text(
+            prompt,
+            enforced_overrides=stage_plan["overrides"],
+            device_mode=resolved_device_mode,
+            allow_sync_retry=False,
+            raise_on_error=True,
+            summary_stage=stage,
+        )
+        return text, stage_plan
+    except Exception as exc:
+        if isinstance(exc, (StopAsyncIteration, StopIteration)):
+            raise
+        degraded_plan = _resolve_summary_stage_plan(
+            stage=stage,
+            prompt=prompt,
+            effective_settings=effective_settings,
+            degraded=True,
+        )
+        text = await deps.infer_assistant_text(
+            prompt,
+            enforced_overrides=degraded_plan["overrides"],
+            device_mode=resolved_device_mode,
+            allow_sync_retry=False,
+            raise_on_error=True,
+            summary_stage=stage,
+        )
+        return text, degraded_plan
 
 
 @dataclass
@@ -113,6 +345,8 @@ class ExecutionDependencies:
     to_host_path: SyncAnyFn
     active_set_status_line: SyncAnyFn
     attach_and_register_report: AsyncAnyFn
+    update_progress_box: AsyncAnyFn
+    clear_progress_box: AsyncAnyFn
 
 
 def _infer_intent_via_llm(prompt: str) -> str:
@@ -781,51 +1015,278 @@ async def _execute_documents_summary(
     *,
     query: str,
     history: List[Dict[str, Any]],
+    effective_settings: Optional[Dict[str, Any]] = None,
     deps: ExecutionDependencies,
 ) -> Dict[str, Any]:
+    def _split_summary_chunks(text: str, *, max_chars: int = 3500) -> List[str]:
+        normalized = str(text or "").strip()
+        if not normalized:
+            return []
+        paragraphs = [part.strip() for part in re.split(r"\n\s*\n", normalized) if part.strip()]
+        if not paragraphs:
+            paragraphs = [normalized]
+        chunks: List[str] = []
+        current = ""
+        for paragraph in paragraphs:
+            candidate = f"{current}\n\n{paragraph}".strip() if current else paragraph
+            if len(candidate) <= max_chars:
+                current = candidate
+                continue
+            if current:
+                chunks.append(current)
+                current = ""
+            if len(paragraph) <= max_chars:
+                current = paragraph
+                continue
+            for start in range(0, len(paragraph), max_chars):
+                chunks.append(paragraph[start : start + max_chars].strip())
+        if current:
+            chunks.append(current)
+        return [chunk for chunk in chunks if chunk]
+
     docs = deps.get_all_docs() or []
     if not docs:
         return {"assistant_message": "Нет загруженных документов для суммаризации."}
 
-    per_doc: List[Dict[str, str]] = []
+    per_doc_chunks: List[Dict[str, Any]] = []
+    total_chunks = 0
     for doc in docs:
         doc_name = str(doc.get("display_name", "document"))
-        text = str(doc.get("text", ""))[:10000]
-        if not text.strip():
-            per_doc.append({"name": doc_name, "summary": "Документ пуст или текст не извлечён."})
+        doc_id = str(doc.get("document_id") or doc_name)
+        text = str(doc.get("text", "")).strip()
+        chunks = _split_summary_chunks(text[:30000]) if text else []
+        if not chunks:
+            per_doc_chunks.append({"document_id": doc_id, "name": doc_name, "chunks": []})
             continue
-        prompt = deps.build_prompt(
-            (
-                "Кратко суммаризируй документ в 4-6 пунктов: тема, цель, ключевые требования/положения, "
-                "сроки/ограничения (если есть), важные риски/последствия."
-            ),
-            [],
-            (
-                "Ты аналитик документов. Пиши строго по тексту, без домыслов. "
-                f"Документ: {doc_name}\n\nТЕКСТ:\n{text}"
+        per_doc_chunks.append({"document_id": doc_id, "name": doc_name, "chunks": chunks})
+        total_chunks += len(chunks)
+
+    per_doc: List[Dict[str, str]] = []
+    processed_chunks = 0
+    degraded_events: List[Dict[str, Any]] = []
+    try:
+        for doc_entry in per_doc_chunks:
+            doc_name = str(doc_entry["name"])
+            doc_id = str(doc_entry.get("document_id") or doc_name)
+            chunks = list(doc_entry.get("chunks") or [])
+            if not chunks:
+                per_doc.append({"name": doc_name, "summary": "Документ пуст или текст не извлечён."})
+                continue
+            chunk_summaries: List[str] = []
+            for chunk in chunks:
+                processed_chunks += 1
+                await deps.update_progress_box(
+                    key="documents_summary_progress",
+                    title="Суммаризация чанков",
+                    content=f"{processed_chunks}/{total_chunks}",
+                )
+                prompt = deps.build_prompt(
+                    (
+                        "Кратко суммаризируй фрагмент документа в 3-5 пунктов: тема, цель, ключевые "
+                        "требования/положения, сроки/ограничения (если есть), важные риски/последствия."
+                    ),
+                    [],
+                    (
+                        "Ты аналитик документов. Пиши строго по тексту, без домыслов. "
+                        f"Документ: {doc_name}\n\nФРАГМЕНТ:\n{chunk}"
+                    ),
+                )
+                cache_key = _build_documents_summary_chunk_cache_key(
+                    document_id=doc_id,
+                    document_name=doc_name,
+                    chunk=chunk,
+                    effective_settings=effective_settings,
+                )
+                chunk_summary = _get_cached_documents_summary_chunk(cache_key)
+                if chunk_summary is None:
+                    chunk_summary, stage_meta = await _infer_documents_summary_stage(
+                        deps=deps,
+                        prompt=prompt,
+                        stage="chunk",
+                        effective_settings=effective_settings,
+                    )
+                    if stage_meta.get("degraded"):
+                        degraded_events.append(stage_meta)
+                    _store_cached_documents_summary_chunk(cache_key, chunk_summary.strip())
+                else:
+                    inc_metric_counter(
+                        "agent_nav_fallback_events_total",
+                        labels={
+                            "component": "documents_summary",
+                            "fallback": "documents_summary_chunk_cache_hit",
+                            "source": "workflow",
+                        },
+                    )
+                    chunk_summary = chunk_summary.strip()
+                chunk_summaries.append(chunk_summary.strip())
+            if len(chunk_summaries) == 1:
+                per_doc.append({"name": doc_name, "summary": chunk_summaries[0]})
+                await deps.update_progress_box(
+                    key="documents_summary_progress",
+                    title="Промежуточная сводка",
+                    content=f"Готов документ: {doc_name}\n\n{chunk_summaries[0]}",
+                )
+                continue
+            reduce_items = chunk_summaries
+            try:
+                while len(reduce_items) > 1:
+                    next_reduce_items: List[str] = []
+                    reduce_group_size = (
+                        SUMMARY_DEGRADED_REDUCE_GROUP_SIZE
+                        if degraded_events or _is_low_vram_device_mode(effective_settings)
+                        else SUMMARY_REDUCE_GROUP_SIZE
+                    )
+                    merge_char_cap = (
+                        SUMMARY_STAGE_DEGRADED_INPUT_CHARS["merge"]
+                        if degraded_events or _is_low_vram_device_mode(effective_settings)
+                        else SUMMARY_STAGE_MAX_INPUT_CHARS["merge"]
+                    )
+                    for batch in _group_summary_items_for_budget(
+                        reduce_items,
+                        max_chars=merge_char_cap,
+                        max_items=reduce_group_size,
+                    ):
+                        merge_prompt = deps.build_prompt(
+                            (
+                                "Объедини суммаризации фрагментов одного документа в итоговую краткую сводку из 4-6 пунктов, "
+                                "без повторов и без домыслов."
+                            ),
+                            [],
+                            (
+                                "Ты аналитик документов. Собери единую сводку строго по промежуточным summary. "
+                                f"Документ: {doc_name}\n\nСУММАРИЗАЦИИ ФРАГМЕНТОВ:\n"
+                                + _join_summary_items(batch, max_chars=merge_char_cap)
+                            ),
+                        )
+                        merged_summary, stage_meta = await _infer_documents_summary_stage(
+                            deps=deps,
+                            prompt=merge_prompt,
+                            stage="merge",
+                            effective_settings=effective_settings,
+                        )
+                        if stage_meta.get("degraded"):
+                            degraded_events.append(stage_meta)
+                        next_reduce_items.append(merged_summary.strip())
+                    reduce_items = next_reduce_items
+                per_doc.append({"name": doc_name, "summary": reduce_items[0]})
+                await deps.update_progress_box(
+                    key="documents_summary_progress",
+                    title="Промежуточная сводка",
+                    content=f"Готов документ: {doc_name}\n\n{reduce_items[0]}",
+                )
+            except Exception as exc:
+                inc_metric_counter(
+                    "agent_nav_fallback_events_total",
+                    labels={
+                        "component": "documents_summary",
+                        "fallback": "documents_summary_merge_degraded",
+                        "source": "workflow",
+                    },
+                )
+                logger.warning(
+                    "documents_summary merge degraded doc=%s chunks=%s device_mode=%s: %s",
+                    doc_name,
+                    len(chunk_summaries),
+                    _resolve_summary_device_mode(effective_settings),
+                    exc,
+                    exc_info=True,
+                )
+                fallback_summary = _join_summary_items(
+                    chunk_summaries,
+                    max_chars=SUMMARY_STAGE_DEGRADED_INPUT_CHARS["global"],
+                )
+                per_doc.append(
+                    {
+                        "name": doc_name,
+                        "summary": (
+                            "Частичная сводка по документу; этап объединения summary не завершился.\n\n"
+                            f"{fallback_summary}"
+                        ).strip(),
+                    }
+                )
+                await deps.update_progress_box(
+                    key="documents_summary_progress",
+                    title="Промежуточная сводка",
+                    content=f"Готов документ: {doc_name}\n\n{per_doc[-1]['summary']}",
+                )
+
+        combined_input = _join_summary_items(
+            [f"{item['name']}\n{item['summary']}" for item in per_doc],
+            max_chars=(
+                SUMMARY_STAGE_DEGRADED_INPUT_CHARS["global"]
+                if degraded_events or _is_low_vram_device_mode(effective_settings)
+                else SUMMARY_STAGE_MAX_INPUT_CHARS["global"]
             ),
         )
-        summary = await deps.infer_assistant_text(prompt, enforced_overrides={"temperature": 0.2})
-        per_doc.append({"name": doc_name, "summary": summary.strip()})
-
-    combined_input = "\n\n".join(f"[{idx + 1}] {item['name']}\n{item['summary']}" for idx, item in enumerate(per_doc))
-    global_prompt = deps.build_prompt(
-        query,
-        history,
-        (
-            "Ты аналитик. На основе сводок по документам сформируй:\n"
-            "1) ОБЩАЯ СВОДКА (5-8 предложений)\n"
-            "2) КЛЮЧЕВЫЕ РАЗЛИЧИЯ/АКЦЕНТЫ (если документов больше одного) списком\n"
-            "Пиши только на основе входных сводок.\n\n"
-            f"СВОДКИ:\n{combined_input}"
-        ),
-    )
-    global_summary = await deps.infer_assistant_text(global_prompt, enforced_overrides={"temperature": 0.2})
-    lines = ["## Сводка по документам", "", "### По каждому документу"]
+        await deps.update_progress_box(
+            key="documents_summary_progress",
+            title="Формирование итоговой сводки",
+            content="Формирую общую сводку по уже собранным промежуточным результатам.",
+        )
+        global_prompt = deps.build_prompt(
+            query,
+            history,
+            (
+                "Ты аналитик. На основе сводок по документам сформируй:\n"
+                "1) ОБЩАЯ СВОДКА (5-8 предложений)\n"
+                "2) КЛЮЧЕВЫЕ РАЗЛИЧИЯ/АКЦЕНТЫ (если документов больше одного) списком\n"
+                "Пиши только на основе входных сводок.\n\n"
+                f"СВОДКИ:\n{combined_input}"
+            ),
+        )
+        try:
+            global_summary, stage_meta = await _infer_documents_summary_stage(
+                deps=deps,
+                prompt=global_prompt,
+                stage="global",
+                effective_settings=effective_settings,
+            )
+            if stage_meta.get("degraded"):
+                degraded_events.append(stage_meta)
+        except Exception as exc:
+            inc_metric_counter(
+                "agent_nav_fallback_events_total",
+                labels={
+                    "component": "documents_summary",
+                    "fallback": "documents_summary_global_degraded",
+                    "source": "workflow",
+                },
+            )
+            logger.warning(
+                "documents_summary global degraded docs=%s device_mode=%s: %s",
+                len(per_doc),
+                _resolve_summary_device_mode(effective_settings),
+                exc,
+                exc_info=True,
+            )
+            global_summary = (
+                "Общая сводка недоступна: финальный этап суммаризации не завершился. "
+                "Ниже сохранены промежуточные сводки по документам."
+            )
+    finally:
+        await deps.clear_progress_box(key="documents_summary_progress")
+    lines = ["## Сводка по документам", ""]
+    execution_metadata = None
+    if degraded_events:
+        final_event = degraded_events[-1]
+        execution_metadata = {
+            "degraded": True,
+            "reason": final_event.get("reason", "low_vram"),
+            "stage": final_event.get("stage", "global"),
+            "policy": final_event.get("policy", "reduced_context"),
+        }
+        lines.append(
+            "Примечание: ответ упрощён из-за ограничений ресурсов; применён reduced-context режим."
+        )
+        lines.append("")
+    lines.append("### По каждому документу")
     for item in per_doc:
         lines.extend([f"#### {item['name']}", item["summary"], ""])
     lines.extend(["### Общая сводка", global_summary.strip()])
-    return {"assistant_message": "\n".join(lines).strip()}
+    result = {"assistant_message": "\n".join(lines).strip()}
+    if execution_metadata is not None:
+        result["execution_metadata"] = execution_metadata
+    return result
 
 
 async def _execute_doc_question(
@@ -1256,6 +1717,7 @@ async def execute_orchestration(
             result = await _execute_documents_summary(
                 query=request.get("message", ""),
                 history=history,
+                effective_settings=effective_settings,
                 deps=deps,
             )
         else:
@@ -1273,6 +1735,8 @@ async def execute_orchestration(
         response["ui_effects"]["generated_report"] = result["generated_report"]
     response["assistant_message"] = result.get("assistant_message") or response.get("assistant_message")
     response["sources"] = result.get("sources", response.get("sources", []))
+    if result.get("execution_metadata"):
+        response["execution_metadata"] = result["execution_metadata"]
     status = _derive_run_status(response)
     updated = await state_store.save_run(
         run_id=run_record.run_id,
