@@ -353,6 +353,24 @@
   Pragmatic follow-up:
   - per-request dynamic runtime switching в `UMS` остаётся отдельным runtime/API шагом; в этой фазе profile selector даёт backend-resolved effective config и model routing, но не живое hot-switching железа на каждый запрос
 
+- [x] **T4.4 — documents_summary runtime degradation on weak hardware**
+  Закрыт минимальный stability slice для `documents_summary` в Chainlit/API path.
+  Что закрыто:
+  - `effective_settings.device_mode` теперь нормализуется в UMS-compatible `cpu|gpu|hybrid` и реально прокидывается в inference path, вместо purely UI-level hint
+  - для `documents_summary` добавлен stage-aware execution contour: `chunk`, `merge`, `global`
+  - merge path больше не строит один unbounded prompt из всех chunk summaries; используется bounded batched reduce
+  - в summary path отключён second full retry на уровне Chainlit adapter; при stage-level failure workflow переходит в partial response вместо двойного 300s провала
+  - при падении `merge`/`global` пользователь получает промежуточные сводки, а не пустой ответ
+  - добавлен pre-merge/global token budget guard через bounded batching и capped summary input
+  - chunk summaries кешируются между повторными вызовами `documents_summary`, если document chunk и profile/model не изменились; cache entry теперь имеет TTL через `DOCUMENTS_SUMMARY_CACHE_TTL_S`
+  - progress box теперь показывает progressive partial response: chunk progress -> per-doc summary -> global summary stage
+  - stage-level metrics публикуются через existing fallback counter contour: attempts, cache hits, degraded merge/global branches
+  Проверки:
+  - `pytest backend/tests/test_execution_runtime.py backend/tests/test_agent_api_orchestrate.py backend/tests/test_chainlit_streaming.py backend/tests/test_chainlit_runtime_mode.py -q`
+  - `python -m py_compile backend/orchestrator/execution_runtime.py backend/orchestrator/agent_api.py backend/orchestrator/chainlit_app.py backend/orchestrator/ui_control_plane.py`
+  Pragmatic follow-up:
+  - richer observability для summary stages (`prompt chars`, explicit `summary_stage` payload fields, effective device policy in metrics), smarter invalidation beyond TTL и adaptive timeout policy остаются отдельным hardening step, не смешивались с минимальным runtime-stability fix
+
 ---
 
 ## Отложенные задачи
@@ -362,15 +380,19 @@
 - [ ] T3.18 — Model delivery strategy (130 GB GGUF)
 - [x] T3.19 — Production secrets & auth hardening
   Закрыт minimal production-safe secrets/auth slice:
-  - `scripts/bootstrap_env.sh` читает `backend/.env` и fail-fast валидирует insecure defaults:
+  - `scripts/bootstrap_env.sh` читает `backend/.env`, при необходимости создаёт его из `backend/.env.example` и auto-heal обрабатывает `CHAINLIT_AUTH_SECRET`:
+    - если `backend/.env` отсутствует, bootstrap создаёт файл из шаблона;
+    - если `CHAINLIT_AUTH_SECRET` пустой или равен дефолтному шаблонному значению, bootstrap генерирует новый secret и записывает его обратно в `backend/.env`;
+  - после auto-heal bootstrap fail-fast валидирует insecure defaults для critical secrets:
     - `CHAINLIT_AUTH_SECRET`
     - `CHAINLIT_ADMIN_PASSWORD`
     - `GF_SECURITY_ADMIN_PASSWORD`
   - local/dev escape hatch только через явный `AGENT_NAVIGATOR_ALLOW_INSECURE_DEFAULTS=1`
   - `run_all.sh` больше не печатает пароль в stdout и не подсказывает `admin/admin`
-  - `backend/.env.example`, `README.md`, `docs/deploy-guide.md` синхронизированы под required secret rotation
+  - `backend/.env.example`, `README.md`, `docs/deploy-guide.md`, `docs/scripts/*` синхронизированы под required secret rotation
   Проверки:
   - `pytest backend/tests/test_runtime_launcher.py -q -k 'bootstrap or insecure or launcher'`
+  - `pytest backend/tests/test_install_scripts.py -q`
   - `bash -n scripts/bootstrap_env.sh scripts/launcher.sh scripts/run_all.sh`
   - `git diff --check`
   Follow-up:
@@ -934,6 +956,27 @@
     - `./scripts/stop_native.sh`
     - `ps -eo pid,ppid,cmd | rg "(llama-server|st_server.py|unified_model_server.py)"`
     - confirmed: orphaned `st_server.py` no longer remains after shutdown
+
+### Runtime performance follow-up
+
+- [ ] **B3.35 — Уменьшить embedding warm-up burst на первом коротком запросе**
+  Контекст:
+  - по живым логам `UMS` embedder runtimes стартуют корректно, но первый короткий запрос в `Chainlit` провоцирует пачку `POST /v1/embeddings` до/вокруг первого `infer`;
+  - это связано не с повторной загрузкой embedder-моделей, а с lazy warm-up intent-classifier:
+    - `create_ums_embed_fn()` делает probe в `/v1/embeddings`;
+    - `EmbeddingIntentClassifier.initialize()` считает centroids по всему `intent_examples.yaml`;
+    - при текущем наборе это 98 example phrases и несколько batched embedding calls.
+  Цель:
+  - сократить latency и число embedding-запросов на первом greeting/general-chat without changing routing semantics.
+  Кандидаты решения:
+  - кэшировать centroids classifier'а между запросами/сессиями;
+  - отделить lightweight greeting/general-chat fast-path от полного centroid warm-up;
+  - не делать eager classifier init, пока реально не нужен semantic routing;
+  - пересмотреть `UMS_EMBED_BATCH_SIZE` и probe behavior для cold-start path.
+  Acceptance:
+  - на первом коротком запросе количество `POST /v1/embeddings` заметно ниже текущего burst;
+  - routing contract и classifier quality не деградируют;
+  - в логах остаётся явное distinction между model preload и classifier warm-up.
 
 ---
 
