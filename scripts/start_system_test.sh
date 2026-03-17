@@ -13,7 +13,7 @@ cd "$PROJECT_ROOT" && docker compose up -d
 echo "Starting Backend Services in tmux..."
 
 SESSION_NAME="agent-navigator"
-CONDA_ENV="diploma_llm" # Hardcoded for test safety, or derive from .env
+CONDA_ENV="base" # Hardcoded for test safety, or derive from .env
 
 echo "Stopping existing tmux/runtime/docker processes..."
 "$SCRIPT_DIR/stop_all.sh" >/dev/null 2>&1 || true

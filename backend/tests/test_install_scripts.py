@@ -59,6 +59,57 @@ def test_windows_installer_contains_wsl_guidance():
     assert "launcher.sh --install" in script
 
 
+def test_wsl_installer_wrapper_mentions_docker_desktop_integration():
+    script = (SCRIPTS_DIR / "install" / "install_wsl.sh").read_text(encoding="utf-8")
+    assert "Docker Desktop is running on Windows host" in script
+    assert "skip the Docker step or stop" in script
+
+
+def test_setup_ubuntu_handles_wsl_docker_via_guidance_not_apt_install():
+    script = (SCRIPTS_DIR / "setup_ubuntu.sh").read_text(encoding="utf-8")
+    assert "Для WSL ожидается Docker Desktop на Windows host" in script
+    assert "Пропустить шаг Docker и продолжить остальные шаги установки?" in script
+    assert "не устанавливает Docker Engine внутрь дистрибутива автоматически" in script
+
+
+def test_setup_ubuntu_defines_project_root_and_preserves_user_tmux_config():
+    script = (SCRIPTS_DIR / "setup_ubuntu.sh").read_text(encoding="utf-8")
+    assert 'PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"' in script
+    assert 'cd "$PROJECT_ROOT"' in script
+    assert 'cmp -s "$source_path" "$target_path"' in script
+    assert 'Перезаписать $label репозиторной версией?' in script
+    assert 'tmux.conf уже установлен и совпадает с репозиторным шаблоном' not in script
+
+
+def test_setup_ubuntu_uses_canonical_runtime_and_model_steps_in_final_guidance():
+    script = (SCRIPTS_DIR / "setup_ubuntu.sh").read_text(encoding="utf-8")
+    assert "./scripts/bootstrap_env.sh --check --target=native" in script
+    assert "CHAINLIT_AUTH_SECRET будет сгенерирован автоматически" in script
+    assert "./scripts/models/install_models.sh --ensure-present" in script
+    assert "./scripts/launcher.sh --target native" in script
+    assert 'echo "   cd backend"' not in script
+    assert "tmux attach -t agent-navigator-native" in script
+    assert "./scripts/stop_native.sh" in script
+    assert "docker logs open-webui" not in script
+    assert "CLAUDE_MEMORY.md" not in script
+
+
+def test_setup_ubuntu_tracks_docker_relogin_without_stale_reply_variable():
+    script = (SCRIPTS_DIR / "setup_ubuntu.sh").read_text(encoding="utf-8")
+    assert "DOCKER_RELOGIN_REQUIRED=false" in script
+    assert "DOCKER_RELOGIN_REQUIRED=true" in script
+    assert 'if [ "$DOCKER_RELOGIN_REQUIRED" = true ]; then' in script
+
+
+def test_setup_ubuntu_uses_conda_base_instead_of_creating_diploma_env():
+    script = (SCRIPTS_DIR / "setup_ubuntu.sh").read_text(encoding="utf-8")
+    assert "conda create -n diploma_llm" not in script
+    assert "conda env remove -n diploma_llm" not in script
+    assert 'conda activate base' in script
+    assert "Conda base активирована" in script
+    assert "conda tos accept" in script
+
+
 def test_model_downloader_dry_run_supports_custom_models_root(tmp_path):
     result = _run_script(
         [

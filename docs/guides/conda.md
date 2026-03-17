@@ -1,6 +1,6 @@
 # Руководство по Conda
 
-Conda — менеджер окружений и пакетов. В проекте используется для изоляции Python 3.11 окружения `diploma_llm` со всеми зависимостями.
+Conda — менеджер окружений и пакетов. В текущем runtime-контуре проекта достаточно `conda base`: отдельное окружение `diploma_llm` больше не является обязательным.
 
 ---
 
@@ -45,20 +45,19 @@ channels:
 
 ---
 
-## Окружение `diploma_llm`
+## Рабочее окружение
 
-### Создание
+### Базовый путь
 
 ```bash
-conda create -n diploma_llm python=3.11 -y
-conda activate diploma_llm
+conda activate base
 pip install -r backend/requirements.txt
 ```
 
 ### Активация
 
 ```bash
-conda activate diploma_llm
+conda activate base
 ```
 
 Или через скрипт (создаётся `setup_ubuntu.sh`):
@@ -199,7 +198,7 @@ channels:
 
 ```bash
 # 1. Активировать окружение
-conda activate diploma_llm
+conda activate base
 
 # 2. Запустить систему
 ./scripts/launcher.sh --target native
@@ -216,6 +215,19 @@ pip freeze | grep some-package >> backend/requirements.txt
 ---
 
 ## Частые проблемы
+
+**ToSNonInteractiveError / Terms of Service:**
+
+```bash
+conda tos accept
+```
+
+или точечно по каналам:
+
+```bash
+conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+```
 
 **conda: command not found после установки:**
 ```bash

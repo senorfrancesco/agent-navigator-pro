@@ -450,7 +450,7 @@ def test_start_server_reaps_stale_listener_before_launch():
     ), patch.object(
         ums_server,
         "_find_listener_pids",
-        return_value=[11111],
+        side_effect=lambda port: [11111] if int(port) == 8093 else [],
     ), patch.object(
         ums_server,
         "_kill_process_tree",
@@ -462,8 +462,9 @@ def test_start_server_reaps_stale_listener_before_launch():
         ums_server.state["processes"].clear()
         ums_server._start_server("labse-embedding", ums_server.DeviceMode.HYBRID)
 
-    mock_kill.assert_called_once_with(11111)
+    mock_kill.assert_not_called()
     assert len(launch_calls) == 1
+    assert launch_calls[0][1] != 8093
     assert ums_server.state["processes"]["labse-embedding"] is fake_process
 
 
@@ -562,6 +563,92 @@ def test_status_exposes_current_placements():
     assert payload["placements"]["labse-embedding"]["device_arg"] == "cuda:2"
 
 
+def test_status_exposes_admission_contract_for_llm_and_embeddings(monkeypatch):
+    monkeypatch.setenv("LLM_DEVICE_MODE", "gpu")
+    monkeypatch.setenv("INTENT_EMBEDDER_DEVICE_MODE", "gpu")
+    monkeypatch.setenv("RETRIEVAL_EMBEDDER_DEVICE_MODE", "cpu")
+
+    previous_active = ums_server.state.get("active_model")
+    previous_processes = dict(ums_server.state.get("processes") or {})
+    previous_placements = dict(ums_server.state.get("placements") or {})
+    previous_tier = ums_server.state.get("tier_config")
+    previous_admission = dict(ums_server.state.get("admission") or {})
+    ums_server.state["active_model"] = "qwen-14b-llm"
+    ums_server.state["processes"] = {
+        "qwen-14b-llm": _FakeProcess(pid=111),
+        "labse-embedding": _FakeProcess(pid=222),
+        "qwen3-embedding-0.6b": _FakeProcess(pid=333),
+    }
+    ums_server.state["placements"] = {
+        "qwen-14b-llm": {
+            "placement_mode": "single-gpu",
+            "gpu_indices": [0],
+            "requested_device": "gpu",
+            "resolved_device": "hybrid",
+            "admission": "requires_degraded",
+        },
+        "labse-embedding": {
+            "placement_mode": "cpu",
+            "gpu_indices": [],
+            "requested_device": "cpu",
+            "resolved_device": "cpu",
+            "admission": "ok",
+        },
+        "qwen3-embedding-0.6b": {
+            "placement_mode": "single-gpu",
+            "gpu_indices": [0],
+            "device_arg": "cuda:0",
+            "requested_device": "gpu",
+            "resolved_device": "gpu",
+            "admission": "ok",
+        },
+    }
+    ums_server.state["tier_config"] = SimpleNamespace(tier=3, rag_mode="agentic", embedding_backend="pytorch")
+    ums_server.state["admission"] = {
+        "qwen-14b-llm": {
+            "component": "llm",
+            "requested_device": "gpu",
+            "resolved_device": "hybrid",
+            "admission": "requires_degraded",
+            "estimated_vram_gb": 14.5,
+            "available_vram_gb": 10.2,
+            "effective_token_budget": 8192,
+            "warnings": ["manual gpu request downgraded to hybrid"],
+        },
+        "labse-embedding": {
+            "component": "retrieval_embedder",
+            "requested_device": "cpu",
+            "resolved_device": "cpu",
+            "admission": "ok",
+            "fallback_applied": False,
+            "warnings": [],
+        },
+        "qwen3-embedding-0.6b": {
+            "component": "intent_embedder",
+            "requested_device": "gpu",
+            "resolved_device": "gpu",
+            "admission": "ok",
+            "fallback_applied": False,
+            "warnings": [],
+        },
+    }
+    try:
+        payload = asyncio.run(ums_server.get_status())
+    finally:
+        ums_server.state["active_model"] = previous_active
+        ums_server.state["processes"] = previous_processes
+        ums_server.state["placements"] = previous_placements
+        ums_server.state["tier_config"] = previous_tier
+        ums_server.state["admission"] = previous_admission
+
+    assert payload["admission"]["qwen-14b-llm"]["requested_device"] == "gpu"
+    assert payload["admission"]["qwen-14b-llm"]["resolved_device"] == "hybrid"
+    assert payload["admission"]["qwen-14b-llm"]["admission"] == "requires_degraded"
+    assert payload["admission"]["qwen-14b-llm"]["effective_token_budget"] == 8192
+    assert payload["admission"]["labse-embedding"]["component"] == "retrieval_embedder"
+    assert payload["admission"]["qwen3-embedding-0.6b"]["component"] == "intent_embedder"
+
+
 def test_status_prunes_dead_local_process_and_clears_active_model():
     previous_active = ums_server.state.get("active_model")
     previous_processes = dict(ums_server.state.get("processes") or {})
@@ -620,6 +707,36 @@ def test_status_exposes_concurrency_policy(monkeypatch):
     assert payload["concurrency_policy"]["embedding_inflight"] == 0
 
 
+def test_lifespan_preloads_llm_then_retrieval_then_intent(monkeypatch):
+    previous_device_mode = ums_server.state.get("device_mode")
+    call_order = []
+
+    with patch("services.hardware.HardwareProfiler.detect", return_value=SimpleNamespace(has_gpu=True, gpu_count=1)), patch(
+        "services.hardware.TierSelector.select",
+        return_value=SimpleNamespace(
+            tier=3,
+            rag_mode="agentic",
+            embedding_backend="pytorch",
+            embedding_device="cuda",
+            llm_ctx_size=16384,
+            llm_gpu_layers=-1,
+        ),
+    ), patch.object(
+        ums_server,
+        "_start_server",
+        side_effect=lambda model_id, device_mode: call_order.append(model_id),
+    ), patch.object(
+        ums_server,
+        "_stop_all_servers",
+    ):
+        asyncio.run(ums_server.lifespan(ums_server.app).__aenter__())
+
+    try:
+        assert call_order[:3] == ["qwen-14b-llm", "labse-embedding", "qwen3-embedding-0.6b"]
+    finally:
+        ums_server.state["device_mode"] = previous_device_mode
+
+
 def test_lifespan_honors_device_mode_override_for_cpu_tier(monkeypatch):
     monkeypatch.setenv("DEVICE_MODE", "gpu")
     previous_device_mode = ums_server.state.get("device_mode")
@@ -652,6 +769,53 @@ def test_lifespan_honors_device_mode_override_for_cpu_tier(monkeypatch):
         ums_server.state["device_mode"] = previous_device_mode
         ums_server.STATIC_MODELS_CONFIG["qwen-14b-llm"]["ctx_size"] = previous_ctx
         ums_server.STATIC_MODELS_CONFIG["qwen-14b-llm"]["gpu_layers"] = previous_gpu_layers
+
+
+def test_component_device_override_resolves_for_heavy_and_embedding_models(monkeypatch):
+    monkeypatch.setenv("LLM_DEVICE_MODE", "gpu")
+    monkeypatch.setenv("VLM_DEVICE_MODE", "cpu")
+    monkeypatch.setenv("INTENT_EMBEDDER_DEVICE_MODE", "gpu")
+    monkeypatch.setenv("RETRIEVAL_EMBEDDER_DEVICE_MODE", "cpu")
+
+    assert ums_server._resolve_component_device_mode("qwen-14b-llm", ums_server.DeviceMode.HYBRID) == ums_server.DeviceMode.GPU
+    assert ums_server._resolve_component_device_mode("qwen-vl-8b", ums_server.DeviceMode.HYBRID) == ums_server.DeviceMode.CPU
+    assert ums_server._resolve_component_device_mode("qwen3-embedding-0.6b", ums_server.DeviceMode.HYBRID) == ums_server.DeviceMode.GPU
+    assert ums_server._resolve_component_device_mode("labse-embedding", ums_server.DeviceMode.HYBRID) == ums_server.DeviceMode.CPU
+
+
+def test_explicit_embedding_component_override_beats_cpu_tier_preference(monkeypatch):
+    monkeypatch.setenv("INTENT_EMBEDDER_DEVICE_MODE", "gpu")
+    ums_server.state["tier_config"] = SimpleNamespace(embedding_device="cpu")
+
+    placement = ums_server._build_model_placement_plan(
+        model_id="qwen3-embedding-0.6b",
+        config={"type": "st"},
+        device_mode=ums_server.DeviceMode.HYBRID,
+        available_gpus=[{"index": 0, "free_gb": 8.0}],
+    )
+
+    assert placement["placement_mode"] == "single-gpu"
+    assert placement["device_arg"] == "cuda:0"
+
+
+def test_explicit_intent_embedder_gpu_override_allows_single_gpu_colocation(monkeypatch):
+    monkeypatch.setenv("INTENT_EMBEDDER_DEVICE_MODE", "gpu")
+    ums_server.state["active_model"] = "qwen-14b-llm"
+    ums_server.state["placements"]["qwen-14b-llm"] = {
+        "placement_mode": "single-gpu",
+        "gpu_indices": [0],
+    }
+
+    placement = ums_server._build_model_placement_plan(
+        model_id="qwen3-embedding-0.6b",
+        config={"type": "st"},
+        device_mode=ums_server.DeviceMode.HYBRID,
+        available_gpus=[{"index": 0, "free_gb": 8.0}],
+    )
+
+    assert placement["placement_mode"] == "single-gpu"
+    assert placement["device_arg"] == "cuda:0"
+    assert placement["gpu_indices"] == [0]
 
 
 def test_status_exposes_backend_mode_for_vllm(monkeypatch):

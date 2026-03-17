@@ -10,8 +10,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BACKEND_DIR="$PROJECT_ROOT/backend"
-ENV_FILE="$BACKEND_DIR/.env"
-NATIVE_ENV_FILE="$BACKEND_DIR/.env.native"
+ENV_FILE="${AGENT_NAVIGATOR_BACKEND_ENV_FILE:-$BACKEND_DIR/.env}"
+NATIVE_ENV_FILE="${AGENT_NAVIGATOR_BACKEND_NATIVE_ENV_FILE:-$BACKEND_DIR/.env.native}"
 RUNTIME_ENV_FILE="${AGENT_NAVIGATOR_RUNTIME_ENV_FILE:-$BACKEND_DIR/.env.runtime}"
 ATTACH_TMUX=true
 FROM_LAUNCHER=false
@@ -44,30 +44,112 @@ NC='\033[0m'
 
 echo -e "${GREEN}=== Native запуск Agent Navigator Pro (без Docker) ===${NC}"
 
-if [ -f "$ENV_FILE" ]; then
-  echo -e "${BLUE}Загрузка $ENV_FILE${NC}"
+die() {
+  echo -e "${RED}$1${NC}" >&2
+  exit 1
+}
+
+warn() {
+  echo -e "${YELLOW}$1${NC}"
+}
+
+source_env_file() {
+  local file="$1"
+  local label="$2"
+  if [ ! -e "$file" ]; then
+    return 0
+  fi
+  if [ ! -r "$file" ]; then
+    die "permission-denied:$label:$file"
+  fi
+  echo -e "${BLUE}Загрузка $label $file${NC}"
   set -a
-  source "$ENV_FILE"
+  source "$file"
   set +a
-fi
+}
+
+resolve_backend_relative_path() {
+  local raw_path="$1"
+  if [ -z "$raw_path" ]; then
+    return 0
+  fi
+  if [[ "$raw_path" = /* ]]; then
+    printf '%s\n' "$raw_path"
+    return 0
+  fi
+  printf '%s\n' "$BACKEND_DIR/${raw_path#./}"
+}
+
+validate_file_path_var() {
+  local var_name="$1"
+  local value="${!var_name:-}"
+  local resolved_value=""
+  [ -z "$value" ] && return 0
+  resolved_value="$(resolve_backend_relative_path "$value")"
+  printf -v "$var_name" '%s' "$resolved_value"
+  if [ ! -e "$resolved_value" ]; then
+    die "env-invalid:$var_name:missing-file:$value"
+  fi
+  if [ ! -f "$resolved_value" ]; then
+    die "env-invalid:$var_name:not-a-file:$value"
+  fi
+  if [ ! -r "$resolved_value" ]; then
+    die "permission-denied:$var_name:$value"
+  fi
+}
+
+validate_dir_path_var() {
+  local var_name="$1"
+  local value="${!var_name:-}"
+  local resolved_value=""
+  [ -z "$value" ] && return 0
+  resolved_value="$(resolve_backend_relative_path "$value")"
+  printf -v "$var_name" '%s' "$resolved_value"
+  if [ ! -e "$resolved_value" ]; then
+    die "env-invalid:$var_name:missing-dir:$value"
+  fi
+  if [ ! -d "$resolved_value" ]; then
+    die "env-invalid:$var_name:not-a-dir:$value"
+  fi
+  if [ ! -r "$resolved_value" ]; then
+    die "permission-denied:$var_name:$value"
+  fi
+}
+
+ensure_writable_dir() {
+  local dir_path="$1"
+  local label="$2"
+  if ! mkdir -p "$dir_path" 2>/dev/null; then
+    die "permission-denied:$label:create-dir:$dir_path"
+  fi
+  if [ ! -d "$dir_path" ]; then
+    die "env-invalid:$label:not-a-dir:$dir_path"
+  fi
+  if ! chmod u+rwx "$dir_path" 2>/dev/null; then
+    :
+  fi
+  local probe_file="$dir_path/.agent_navigator_write_check.$$"
+  if ! : > "$probe_file" 2>/dev/null; then
+    if chmod u+rwx "$dir_path" 2>/dev/null && : > "$probe_file" 2>/dev/null; then
+      :
+    else
+      die "permission-denied:$label:write-dir:$dir_path"
+    fi
+  fi
+  rm -f "$probe_file"
+}
+
+source_env_file "$ENV_FILE" "backend env"
 
 if [ -f "$NATIVE_ENV_FILE" ]; then
-  echo -e "${BLUE}Загрузка override $NATIVE_ENV_FILE${NC}"
-  set -a
-  source "$NATIVE_ENV_FILE"
-  set +a
+  source_env_file "$NATIVE_ENV_FILE" "native override"
 else
-  echo -e "${YELLOW}Файл $NATIVE_ENV_FILE не найден. Можно создать из .env.native.example${NC}"
+  warn "Файл $NATIVE_ENV_FILE не найден. Можно создать из .env.native.example"
 fi
 
-if [ -f "$RUNTIME_ENV_FILE" ]; then
-  echo -e "${BLUE}Загрузка runtime overrides $RUNTIME_ENV_FILE${NC}"
-  set -a
-  source "$RUNTIME_ENV_FILE"
-  set +a
-fi
+source_env_file "$RUNTIME_ENV_FILE" "runtime overrides"
 
-CONDA_ENV="${CONDA_ENV:-diploma_llm}"
+CONDA_ENV="${CONDA_ENV:-base}"
 CONDA_SH_PATH=""
 
 find_conda() {
@@ -104,15 +186,57 @@ find_conda() {
   return 1
 }
 
-echo -e "${YELLOW}Активация conda окружения: $CONDA_ENV${NC}"
-if ! find_conda; then
-  echo -e "${RED}Не удалось активировать conda env: $CONDA_ENV${NC}"
-  exit 1
+list_conda_envs() {
+  conda env list 2>/dev/null | awk 'NF > 0 && $1 !~ /^#/ {gsub(/\\*/, "", $1); print $1}'
+}
+
+resolve_conda_env() {
+  if list_conda_envs | grep -Fxq "$CONDA_ENV"; then
+    return 0
+  fi
+  if [ "$CONDA_ENV" != "base" ] && list_conda_envs | grep -Fxq "base"; then
+    warn "Conda env '$CONDA_ENV' не найден, использую base"
+    CONDA_ENV="base"
+    return 0
+  fi
+  return 1
+}
+
+validate_native_runtime_env() {
+  validate_file_path_var "MODEL_PATH_LLM"
+  validate_file_path_var "MODEL_PATH_VLM"
+  validate_file_path_var "MMPROJ_PATH"
+  validate_dir_path_var "MODEL_PATH_EMBEDDING_INTENT"
+  validate_dir_path_var "MODEL_PATH_EMBEDDING_RETRIEVAL"
+  UPLOADS_DIR="$(resolve_backend_relative_path "${UPLOADS_DIR:-$BACKEND_DIR/open_webui_uploads}")"
+  ensure_writable_dir "${UPLOADS_DIR:-$BACKEND_DIR/open_webui_uploads}" "UPLOADS_DIR"
+  ensure_writable_dir "$BACKEND_DIR/.data" "CHAINLIT_DATA_DIR"
+}
+
+UPLOADS_DIR="${UPLOADS_DIR:-$BACKEND_DIR/open_webui_uploads}"
+validate_native_runtime_env
+
+if [ "${AGENT_NAVIGATOR_SKIP_CONDA_CHECKS:-0}" != "1" ]; then
+  echo -e "${YELLOW}Активация conda окружения: $CONDA_ENV${NC}"
+  if ! command -v conda >/dev/null 2>&1 && [ ! -f "$HOME/miniconda3/etc/profile.d/conda.sh" ] && [ ! -f "$HOME/anaconda3/etc/profile.d/conda.sh" ]; then
+    die "env-invalid:CONDA:not-installed"
+  fi
+  if ! resolve_conda_env; then
+    AVAILABLE_ENVS="$(list_conda_envs | paste -sd ',' -)"
+    die "env-invalid:CONDA_ENV:not-found:$CONDA_ENV available=${AVAILABLE_ENVS:-none}"
+  fi
+  if ! find_conda; then
+    die "env-invalid:CONDA_ENV:activate-failed:$CONDA_ENV"
+  fi
+fi
+
+if [ "${AGENT_NAVIGATOR_TEST_MODE:-0}" = "1" ]; then
+  echo "run_native:test-mode validated conda_env=${CONDA_ENV} uploads_dir=${UPLOADS_DIR}"
+  exit 0
 fi
 
 if ! command -v tmux &> /dev/null; then
-  echo -e "${RED}tmux не найден. Установите tmux и повторите запуск.${NC}"
-  exit 1
+  die "missing:tmux"
 fi
 
 SESSION_NAME="agent-navigator-native"
@@ -136,13 +260,9 @@ CHAINLIT_PORT="${CHAINLIT_PORT:-3000}"
 MCP_DOCUMENT_SERVER_URL="${MCP_DOCUMENT_SERVER_URL:-http://localhost:8001}"
 MCP_LEGAL_SERVER_URL="${MCP_LEGAL_SERVER_URL:-http://localhost:8002}"
 UMS_URL="${UMS_URL:-http://localhost:8090}"
-UPLOADS_DIR="${UPLOADS_DIR:-$BACKEND_DIR/open_webui_uploads}"
 HOST_UPLOADS_DIR="${HOST_UPLOADS_DIR:-}"
 CHAINLIT_DB_URL="${CHAINLIT_DB_URL:-sqlite+aiosqlite:///$BACKEND_DIR/.data/chainlit.db}"
 CHAINLIT_ENABLE_DATA_LAYER="${CHAINLIT_ENABLE_DATA_LAYER:-true}"
-
-mkdir -p "$UPLOADS_DIR"
-mkdir -p "$BACKEND_DIR/.data"
 
 wait_for_service() {
   local name="$1"

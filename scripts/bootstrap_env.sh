@@ -5,7 +5,9 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BACKEND_ENV_FILE="${AGENT_NAVIGATOR_BACKEND_ENV_FILE:-$PROJECT_ROOT/backend/.env}"
+BACKEND_ENV_TEMPLATE_FILE="${AGENT_NAVIGATOR_BACKEND_ENV_TEMPLATE_FILE:-$PROJECT_ROOT/backend/.env.example}"
 INSTALL_COORDINATOR_SCRIPT="$SCRIPT_DIR/install/install.sh"
+DEFAULT_CHAINLIT_AUTH_SECRET="agent-navigator-secret-key-change-me"
 
 MODE="check"
 TARGET="native"
@@ -32,11 +34,92 @@ for arg in "$@"; do
   esac
 done
 
-if [ -f "$BACKEND_ENV_FILE" ]; then
-  set -a
-  source "$BACKEND_ENV_FILE"
-  set +a
+ensure_env_file() {
+  if [ -f "$BACKEND_ENV_FILE" ]; then
+    return 0
+  fi
+
+  if [ ! -f "$BACKEND_ENV_TEMPLATE_FILE" ]; then
+    echo "backend env template not found: $BACKEND_ENV_TEMPLATE_FILE" >&2
+    exit 1
+  fi
+
+  mkdir -p "$(dirname "$BACKEND_ENV_FILE")"
+  cp "$BACKEND_ENV_TEMPLATE_FILE" "$BACKEND_ENV_FILE"
+  echo "env-created:$BACKEND_ENV_FILE"
+}
+
+source_backend_env() {
+  if [ -f "$BACKEND_ENV_FILE" ]; then
+    set -a
+    source "$BACKEND_ENV_FILE"
+    set +a
+  fi
+}
+
+generate_chainlit_auth_secret() {
+  python -c 'import secrets; print(secrets.token_urlsafe(48))'
+}
+
+upsert_env_var() {
+  local key="$1"
+  local value="$2"
+  local tmp_file
+  tmp_file="$(mktemp)"
+
+  awk -v key="$key" -v value="$value" '
+    BEGIN { replaced = 0 }
+    $0 ~ ("^" key "=") {
+      print key "=\"" value "\""
+      replaced = 1
+      next
+    }
+    { print }
+    END {
+      if (!replaced) {
+        print key "=\"" value "\""
+      }
+    }
+  ' "$BACKEND_ENV_FILE" > "$tmp_file"
+
+  mv "$tmp_file" "$BACKEND_ENV_FILE"
+}
+
+ensure_chainlit_auth_secret() {
+  local env_created="$1"
+  local current="${CHAINLIT_AUTH_SECRET:-}"
+  local event=""
+
+  if [ -z "$current" ]; then
+    event="secret-generated"
+  elif [ "$current" = "$DEFAULT_CHAINLIT_AUTH_SECRET" ]; then
+    if [ "$env_created" = "1" ]; then
+      event="secret-generated"
+    else
+      event="secret-regenerated"
+    fi
+  fi
+
+  if [ -z "$event" ]; then
+    return 0
+  fi
+
+  local generated_secret
+  generated_secret="$(generate_chainlit_auth_secret)"
+  upsert_env_var "CHAINLIT_AUTH_SECRET" "$generated_secret"
+  export CHAINLIT_AUTH_SECRET="$generated_secret"
+  echo "$event:CHAINLIT_AUTH_SECRET"
+}
+
+env_created=0
+if [ ! -f "$BACKEND_ENV_FILE" ]; then
+  ensure_env_file
+  env_created=1
 fi
+
+source_backend_env
+ensure_chainlit_auth_secret "$env_created"
+source_backend_env
 
 if [ "${AGENT_NAVIGATOR_TEST_MODE:-0}" = "1" ] && [ "$MODE" != "install" ]; then
   echo "bootstrap:test-mode mode=$MODE target=$TARGET platform=$PLATFORM"

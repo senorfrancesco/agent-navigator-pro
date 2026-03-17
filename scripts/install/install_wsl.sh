@@ -31,6 +31,17 @@ if ! is_wsl; then
   exit 1
 fi
 
-echo "WSL detected. Ensure Docker Desktop WSL integration is enabled on the Windows host before continuing."
+cat <<EOF
+WSL detected.
+
+Expected Docker path for WSL:
+- Docker Desktop is running on Windows host
+- WSL integration is enabled for this distro
+- docker command is visible inside WSL
+
+If docker is not available inside WSL, the installer will not silently continue.
+It will print guidance and ask whether to skip the Docker step or stop.
+See: $DOC_PATH
+EOF
 export AGENT_NAVIGATOR_INSTALL_PROFILE="wsl"
 exec bash "$SCRIPT_DIR/install_ubuntu.sh"

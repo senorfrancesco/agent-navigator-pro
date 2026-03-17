@@ -12,6 +12,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BACKEND_DIR="$PROJECT_ROOT/backend"
 ENV_FILE="$BACKEND_DIR/.env"
+HARDWARE_OVERRIDE_ENV_FILE="${AGENT_NAVIGATOR_BACKEND_HARDWARE_OVERRIDE_FILE:-$BACKEND_DIR/.env.hardware.override}"
+RUNTIME_ENV_FILE="${AGENT_NAVIGATOR_RUNTIME_ENV_FILE:-$BACKEND_DIR/.env.runtime}"
 
 # Цвета для вывода
 RED='\033[0;31m'
@@ -35,10 +37,24 @@ else
     echo -e "${YELLOW}Создайте .env из .env.example: cp .env.example .env${NC}"
 fi
 
+if [ -f "$HARDWARE_OVERRIDE_ENV_FILE" ]; then
+    echo -e "${BLUE}Загрузка hardware overrides $HARDWARE_OVERRIDE_ENV_FILE...${NC}"
+    set -a
+    source "$HARDWARE_OVERRIDE_ENV_FILE"
+    set +a
+fi
+
+if [ -f "$RUNTIME_ENV_FILE" ]; then
+    echo -e "${BLUE}Загрузка runtime overrides $RUNTIME_ENV_FILE...${NC}"
+    set -a
+    source "$RUNTIME_ENV_FILE"
+    set +a
+fi
+
 # -------------------------------------------
 # Определение Conda окружения
 # -------------------------------------------
-CONDA_ENV="${CONDA_ENV:-diploma_llm}"
+CONDA_ENV="${CONDA_ENV:-base}"
 CONDA_SH_PATH=""
 
 # Функция для поиска и активации conda

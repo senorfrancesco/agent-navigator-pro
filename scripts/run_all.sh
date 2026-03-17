@@ -13,6 +13,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BACKEND_DIR="$PROJECT_ROOT/backend"
 ENV_FILE="$BACKEND_DIR/.env"
+HARDWARE_OVERRIDE_ENV_FILE="${AGENT_NAVIGATOR_BACKEND_HARDWARE_OVERRIDE_FILE:-$BACKEND_DIR/.env.hardware.override}"
 RUNTIME_ENV_FILE="${AGENT_NAVIGATOR_RUNTIME_ENV_FILE:-$BACKEND_DIR/.env.runtime}"
 ATTACH_TMUX=true
 FROM_LAUNCHER=false
@@ -62,6 +63,13 @@ if [ -f "$ENV_FILE" ]; then
 else
     echo -e "${YELLOW}Предупреждение: .env файл не найден. Используются значения по умолчанию.${NC}"
     echo -e "${YELLOW}Создайте .env из .env.example: cp .env.example .env${NC}"
+fi
+
+if [ -f "$HARDWARE_OVERRIDE_ENV_FILE" ]; then
+    echo -e "${BLUE}Загрузка hardware overrides $HARDWARE_OVERRIDE_ENV_FILE${NC}"
+    set -a
+    source "$HARDWARE_OVERRIDE_ENV_FILE"
+    set +a
 fi
 
 if [ -f "$RUNTIME_ENV_FILE" ]; then

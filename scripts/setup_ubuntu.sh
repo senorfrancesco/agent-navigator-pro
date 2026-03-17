@@ -7,12 +7,75 @@
 
 set -e  # Выход при ошибке
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+cd "$PROJECT_ROOT"
+
 # Цвета для вывода
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
+SKIP_CREATE=false
+DOCKER_RELOGIN_REQUIRED=false
+
+is_wsl() {
+    [[ -n "${WSL_DISTRO_NAME:-}" ]] || grep -qiE '(microsoft|wsl)' /proc/version 2>/dev/null
+}
+
+prompt_yes_no() {
+    local prompt="$1"
+    local default="${2:-n}"
+
+    if [[ "${AGENT_NAVIGATOR_ASSUME_YES:-0}" == "1" ]]; then
+        return 0
+    fi
+
+    local suffix="[y/N]"
+    if [[ "$default" == "y" ]]; then
+        suffix="[Y/n]"
+    fi
+
+    read -r -p "$prompt $suffix: " reply
+    if [[ -z "$reply" ]]; then
+        reply="$default"
+    fi
+    [[ "$reply" =~ ^[Yy]$ ]]
+}
+
+install_managed_config() {
+    local source_path="$1"
+    local target_path="$2"
+    local label="$3"
+
+    if [ ! -f "$source_path" ]; then
+        echo -e "${YELLOW}[!]${NC} Исходный файл $label не найден: $source_path"
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$target_path")"
+
+    if [ -f "$target_path" ]; then
+        if cmp -s "$source_path" "$target_path"; then
+            echo -e "${GREEN}[OK]${NC} $label уже установлен и совпадает с репозиторным шаблоном"
+            return 0
+        fi
+
+        echo -e "${YELLOW}[WARNING]${NC} $label уже существует и отличается от репозиторного шаблона:"
+        echo "  target: $target_path"
+        if prompt_yes_no "Перезаписать $label репозиторной версией?" "n"; then
+            cp "$source_path" "$target_path"
+            echo -e "${GREEN}[OK]${NC} $label обновлён"
+        else
+            echo -e "${YELLOW}[SKIP]${NC} $label оставлен без изменений"
+        fi
+        return 0
+    fi
+
+    cp "$source_path" "$target_path"
+    echo -e "${GREEN}[OK]${NC} $label установлен: $target_path"
+}
 
 echo -e "${BLUE}============================================================${NC}"
 echo -e "${BLUE}Agent Navigator Pro - Полная установка для Ubuntu${NC}"
@@ -20,6 +83,11 @@ echo -e "${BLUE}============================================================${NC
 echo ""
 echo -e "${YELLOW}После установки canonical runtime entrypoint: ./scripts/launcher.sh${NC}"
 echo ""
+
+if ! prompt_yes_no "Начать guided установку зависимостей для Agent Navigator?" "y"; then
+    echo -e "${YELLOW}[INFO]${NC} Установка отменена пользователем."
+    exit 0
+fi
 
 # Проверка что скрипт запущен на Ubuntu/Debian
 if [ ! -f /etc/os-release ]; then
@@ -86,15 +154,14 @@ else
     echo -e "${GREEN}[OK]${NC} tmux установлен"
 fi
 
-# Установка конфигурации tmux (Oh My Tmux) из репозитория
+# Установка конфигурации tmux из репозитория
 echo ""
 echo "Установка конфигурации tmux..."
 mkdir -p "$HOME/.config/tmux"
 
 if [ -f "$PROJECT_ROOT/config/tmux/tmux.conf" ]; then
-    cp "$PROJECT_ROOT/config/tmux/tmux.conf" "$HOME/.config/tmux/tmux.conf"
-    cp "$PROJECT_ROOT/config/tmux/tmux.conf.local" "$HOME/.config/tmux/tmux.conf.local"
-    echo -e "${GREEN}[OK]${NC} Конфигурация tmux установлена (~/.config/tmux/)"
+    install_managed_config "$PROJECT_ROOT/config/tmux/tmux.conf" "$HOME/.config/tmux/tmux.conf" "tmux.conf"
+    install_managed_config "$PROJECT_ROOT/config/tmux/tmux.conf.local" "$HOME/.config/tmux/tmux.conf.local" "tmux.conf.local"
 else
     echo -e "${YELLOW}[!]${NC} config/tmux/ не найден, пропускаю"
 fi
@@ -124,12 +191,17 @@ sudo apt-get install -y \
     libtiff-dev \
     libopenblas-dev \
     liblapack-dev \
+    libcairo2 \
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    libgdk-pixbuf-2.0-0 \
+    shared-mime-info \
     gfortran
 
 echo -e "${GREEN}[OK]${NC} Библиотеки для Python установлены"
 
 # ============================================================
-# Шаг 4: Установка Docker (для Open WebUI)
+# Шаг 4: Установка Docker
 # ============================================================
 
 echo ""
@@ -138,7 +210,40 @@ echo -e "${BLUE}Шаг 4: Установка Docker${NC}"
 echo -e "${BLUE}============================================================${NC}"
 echo ""
 
-if command -v docker &> /dev/null; then
+if is_wsl; then
+    echo -e "${BLUE}[WSL]${NC} Для WSL ожидается Docker Desktop на Windows host с включённой WSL integration."
+    if command -v docker &> /dev/null; then
+        DOCKER_VERSION=$(docker --version 2>/dev/null || true)
+        if docker info >/dev/null 2>&1; then
+            echo -e "${GREEN}[OK]${NC} Docker доступен внутри WSL: ${DOCKER_VERSION:-docker}"
+        else
+            echo -e "${RED}[ERROR]${NC} Команда docker видна, но daemon недоступен из WSL."
+            echo "Что проверить:"
+            echo "  1. Docker Desktop запущен на Windows"
+            echo "  2. Settings -> Resources -> WSL Integration -> текущий distro включён"
+            echo "  3. Внутри WSL команда 'docker info' должна работать"
+            if prompt_yes_no "Пропустить шаг Docker и продолжить остальные шаги установки?" "n"; then
+                echo -e "${YELLOW}[SKIP]${NC} Шаг Docker пропущен для WSL."
+            else
+                echo -e "${YELLOW}[INFO]${NC} Остановка установки до исправления Docker Desktop / WSL integration."
+                exit 1
+            fi
+        fi
+    else
+        echo -e "${RED}[ERROR]${NC} docker не найден внутри WSL."
+        echo "Для WSL этот проект не устанавливает Docker Engine внутрь дистрибутива автоматически."
+        echo "Ожидаемый путь:"
+        echo "  1. Запустить Docker Desktop на Windows"
+        echo "  2. Включить WSL integration для текущего distro"
+        echo "  3. Убедиться, что в WSL работает 'docker info'"
+        if prompt_yes_no "Пропустить шаг Docker и продолжить остальные шаги установки?" "n"; then
+            echo -e "${YELLOW}[SKIP]${NC} Шаг Docker пропущен для WSL."
+        else
+            echo -e "${YELLOW}[INFO]${NC} Остановка установки до появления Docker в WSL."
+            exit 1
+        fi
+    fi
+elif command -v docker &> /dev/null; then
     DOCKER_VERSION=$(docker --version)
     echo -e "${GREEN}[OK]${NC} Docker уже установлен: $DOCKER_VERSION"
 else
@@ -161,6 +266,7 @@ else
 
     # Добавление пользователя в группу docker
     sudo usermod -aG docker $USER
+    DOCKER_RELOGIN_REQUIRED=true
 
     echo -e "${GREEN}[OK]${NC} Docker установлен"
     echo -e "${YELLOW}[!]${NC} ВАЖНО: Выйдите и войдите заново для применения прав docker"
@@ -263,34 +369,34 @@ elif [ -f "$HOME/anaconda3/etc/profile.d/conda.sh" ]; then
     source "$HOME/anaconda3/etc/profile.d/conda.sh"
 fi
 
+if ! command -v conda >/dev/null 2>&1; then
+    echo -e "${RED}[ERROR]${NC} Conda не найдена после шага установки"
+    exit 1
+fi
+
+CONDA_BASE_PREFIX="$(conda info --base 2>/dev/null || true)"
+if [ -z "$CONDA_BASE_PREFIX" ]; then
+    echo -e "${RED}[ERROR]${NC} Не удалось определить conda base prefix"
+    exit 1
+fi
+
 # ============================================================
-# Шаг 7: Создание conda окружения
+# Шаг 7: Проверка conda base и Python env
 # ============================================================
 
 echo ""
 echo -e "${BLUE}============================================================${NC}"
-echo -e "${BLUE}Шаг 7: Создание conda окружения diploma_llm${NC}"
+echo -e "${BLUE}Шаг 7: Проверка conda base и Python env${NC}"
 echo -e "${BLUE}============================================================${NC}"
 echo ""
 
-# Проверка существования окружения
-if conda env list | grep -q "diploma_llm"; then
-    echo -e "${YELLOW}[!]${NC} Окружение diploma_llm уже существует"
-    read -p "Удалить и пересоздать? (y/n): " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        echo "Удаление существующего окружения..."
-        conda env remove -n diploma_llm -y
-    else
-        SKIP_CREATE=true
-    fi
+echo "Conda base: $CONDA_BASE_PREFIX"
+echo "Активация conda base..."
+if ! conda activate base; then
+    echo -e "${RED}[ERROR]${NC} Не удалось активировать conda base"
+    exit 1
 fi
-
-if [ "$SKIP_CREATE" != true ]; then
-    echo "Создание окружения с Python 3.11..."
-    conda create -n diploma_llm python=3.11 -y
-    echo -e "${GREEN}[OK]${NC} Окружение создано"
-fi
+echo -e "${GREEN}[OK]${NC} Conda base активирована"
 
 # ============================================================
 # Шаг 8: Установка Python зависимостей
@@ -302,9 +408,6 @@ echo -e "${BLUE}Шаг 8: Установка Python зависимостей${NC
 echo -e "${BLUE}============================================================${NC}"
 echo ""
 
-# Активация окружения
-conda activate diploma_llm
-
 # Обновление pip
 echo "Обновление pip..."
 python -m pip install --upgrade pip setuptools wheel
@@ -315,7 +418,17 @@ echo "Установка зависимостей из requirements.txt..."
 cd backend
 
 # Установка с детальным выводом
-pip install -r requirements.txt --no-cache-dir
+if ! pip install -r requirements.txt --no-cache-dir; then
+    echo ""
+    echo -e "${RED}[ERROR]${NC} Не удалось установить Python зависимости"
+    echo "Если ошибка связана с Conda Terms of Service, выполните официальные команды:"
+    echo "  conda tos accept"
+    echo "или точечно по каналам:"
+    echo "  conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main"
+    echo "  conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r"
+    echo "После этого повторите установку."
+    exit 1
+fi
 
 # Специальная установка llama-cpp-python с поддержкой CUDA (если доступна)
 if command -v nvcc &> /dev/null; then
@@ -346,8 +459,8 @@ mkdir -p for_cli
 
 # Установка прав доступа
 chmod 777 backend/open_webui_uploads
-chmod +x backend/run_all.sh
-chmod +x start_system_test.sh 2>/dev/null || true
+chmod +x scripts/run_all.sh 2>/dev/null || true
+chmod +x scripts/start_system_test.sh 2>/dev/null || true
 
 echo -e "${GREEN}[OK]${NC} Структура директорий создана"
 
@@ -365,7 +478,7 @@ if [ ! -f "backend/.env" ]; then
     echo "Создание файла .env из шаблона..."
     cp backend/.env.example backend/.env
     echo -e "${GREEN}[OK]${NC} Файл .env создан"
-    echo -e "${YELLOW}[!]${NC} Отредактируйте backend/.env и укажите пути к моделям"
+    echo -e "${YELLOW}[!]${NC} CHAINLIT_AUTH_SECRET будет сгенерирован автоматически через bootstrap; вручную нужно проверить пути к моделям и пароли"
 else
     echo -e "${YELLOW}[!]${NC} Файл backend/.env уже существует, пропускаю"
 fi
@@ -383,7 +496,7 @@ echo ""
 # Создание скрипта быстрой активации
 cat > activate_env.sh << 'EOF'
 #!/bin/bash
-# Быстрая активация окружения diploma_llm
+# Быстрая активация conda base
 
 if [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
     source "$HOME/miniconda3/etc/profile.d/conda.sh"
@@ -394,9 +507,9 @@ else
     exit 1
 fi
 
-conda activate diploma_llm
+conda activate base
 
-echo "Окружение diploma_llm активировано"
+echo "Conda base активирована"
 echo "Python: $(python --version)"
 echo "Путь: $(which python)"
 EOF
@@ -414,7 +527,7 @@ echo -e "${BLUE}Проверка установки${NC}"
 echo -e "${BLUE}============================================================${NC}"
 echo ""
 
-conda activate diploma_llm
+conda activate base
 
 echo "Python версия: $(python --version)"
 echo "Pip версия: $(pip --version)"
@@ -438,30 +551,28 @@ echo -e "${BLUE}============================================================${NC
 echo ""
 echo -e "${YELLOW}Следующие шаги:${NC}"
 echo ""
-echo "1. ${BLUE}Скачайте модели:${NC}"
-echo "   - GGUF модели (Qwen) → backend/models/gguf/"
-echo "   - SentenceTransformers → backend/models/st/"
+echo "1. ${BLUE}Скачайте модели или проверьте их наличие:${NC}"
+echo "   ./scripts/models/install_models.sh --dry-run"
+echo "   ./scripts/models/install_models.sh --ensure-present"
 echo ""
 echo "2. ${BLUE}Настройте конфигурацию:${NC}"
 echo "   nano backend/.env"
-echo "   # Укажите пути к моделям"
+echo "   # Укажите пути к моделям и при необходимости admin/grafana пароли"
+echo "   ./scripts/bootstrap_env.sh --check --target=native"
+echo "   # Если CHAINLIT_AUTH_SECRET пустой или дефолтный, bootstrap сам его сгенерирует/обновит"
 echo ""
 echo "3. ${BLUE}Активируйте окружение:${NC}"
 echo "   source activate_env.sh"
 echo "   # или"
-echo "   conda activate diploma_llm"
+echo "   conda activate base"
 echo ""
 echo "4. ${BLUE}Запустите систему:${NC}"
-echo "   cd backend"
-echo "   ./run_all.sh"
+echo "   ./scripts/launcher.sh --target native"
 echo ""
-echo "5. ${BLUE}Запустите Open WebUI:${NC}"
-echo "   docker run -d -p 3000:8080 \\"
-echo "     --add-host=host.docker.internal:host-gateway \\"
-echo "     -v open-webui:/app/backend/data \\"
-echo "     -v \$(pwd)/backend/open_webui_uploads:/app/backend/data/uploads \\"
-echo "     --name open-webui --restart always \\"
-echo "     ghcr.io/open-webui/open-webui:main"
+echo "5. ${BLUE}При необходимости используйте compatibility / legacy scripts:${NC}"
+echo "   ./scripts/run_native.sh"
+echo "   ./scripts/run_all.sh"
+echo "   ./scripts/run_openwebui.sh   # legacy path"
 echo ""
 echo "6. ${BLUE}Откройте браузер:${NC}"
 echo "   http://localhost:3000"
@@ -469,14 +580,13 @@ echo ""
 echo -e "${YELLOW}Документация:${NC}"
 echo "   - README.md - Основная документация"
 echo "   - INSTALLATION.md - Руководство по установке"
-echo "   - CLAUDE_MEMORY.md - Справочник для Claude AI"
 echo ""
 echo -e "${YELLOW}Полезные команды:${NC}"
-echo "   - tmux attach -t agent-navigator  # Подключиться к сессии"
-echo "   - tmux kill-session -t agent-navigator  # Остановить все сервисы"
-echo "   - docker logs open-webui  # Логи Open WebUI"
+echo "   - tmux attach -t agent-navigator-native  # Подключиться к native сессии"
+echo "   - ./scripts/stop_native.sh               # Остановить native runtime"
+echo "   - ./scripts/stop_all.sh                  # Остановить compose/container path"
 echo ""
-if [[ "$REPLY" =~ ^[Yy]$ ]]; then
+if [ "$DOCKER_RELOGIN_REQUIRED" = true ]; then
     echo -e "${YELLOW}[!] Не забудьте выйти и войти заново для применения прав docker!${NC}"
 fi
 echo ""

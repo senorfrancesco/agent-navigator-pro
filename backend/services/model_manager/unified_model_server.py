@@ -117,6 +117,7 @@ state = {
     "active_model": None, # Последняя запрошенная "тяжелая" модель
     "processes": {},      # model_id -> process
     "placements": {},     # model_id -> placement metadata
+    "admission": {},      # model_id -> admission metadata
     "device_mode": DeviceMode.HYBRID,
     "runtime_budget": {},
     "dynamic_ports": 8100, # Начальный порт для динамических моделей
@@ -130,6 +131,20 @@ state = {
 _model_start_locks: Dict[str, threading.Lock] = {}
 _model_start_locks_guard = threading.Lock()
 _heavy_model_lifecycle_lock = threading.RLock()
+
+_LLM_LAYER_GUESSES = {
+    "qwen-7b-llm": 28,
+    "qwen-14b-llm": 40,
+    "qwen-32b-llm": 64,
+    "qwen-72b-llm": 80,
+}
+_LLM_BASE_VRAM_GB = {
+    ("qwen-7b-llm", "Q4_K_M"): 5.0,
+    ("qwen-14b-llm", "Q4_K_M"): 9.8,
+    ("qwen-14b-llm", "Q8_0"): 16.0,
+    ("qwen-32b-llm", "Q4_K_M"): 20.0,
+    ("qwen-72b-llm", "Q4_K_M"): 42.0,
+}
 
 # === Resource Helpers ===
 
@@ -153,6 +168,157 @@ def _get_gpu_info() -> List[Dict[str, Any]]:
 
 def _get_available_vram() -> float:
     return sum(gpu["free_gb"] for gpu in _get_gpu_info())
+
+
+def _component_kind(model_id: str, config: Optional[Dict[str, Any]] = None) -> str:
+    cfg = config or get_model_config(model_id) or {}
+    cfg_type = str(cfg.get("type") or "")
+    if model_id == "qwen3-embedding-0.6b":
+        return "intent_embedder"
+    if model_id == "labse-embedding":
+        return "retrieval_embedder"
+    if cfg_type in {"gguf", "gguf-vl"}:
+        return "llm"
+    return "component"
+
+
+def _estimate_llm_vram_gb(model_id: str, quant: str, ctx_size: int) -> float:
+    base = _LLM_BASE_VRAM_GB.get((model_id, quant))
+    if base is None:
+        if "72b" in model_id:
+            base = 42.0
+        elif "32b" in model_id:
+            base = 20.0
+        elif "14b" in model_id:
+            base = 9.8
+        else:
+            base = 5.0
+    kv_cache = max(0.5, (max(1024, int(ctx_size or 4096)) / 4096.0) * 0.75)
+    activation = max(0.25, base * 0.08)
+    safety_margin = max(0.5, base * 0.05)
+    return round(base + kv_cache + activation + safety_margin, 3)
+
+
+def _estimate_hybrid_gpu_layers(model_id: str, available_vram_gb: float, estimated_vram_gb: float) -> int:
+    layer_guess = _LLM_LAYER_GUESSES.get(model_id, 40)
+    if estimated_vram_gb <= 0:
+        return max(1, layer_guess // 3)
+    ratio = max(0.0, min(1.0, available_vram_gb / estimated_vram_gb))
+    if ratio < 0.30:
+        return 0
+    return max(1, min(layer_guess - 1, int(round(layer_guess * ratio))))
+
+
+def _resolve_llm_admission(
+    *,
+    model_id: str,
+    config: Dict[str, Any],
+    requested_device: DeviceMode,
+    available_gpus: List[Dict[str, Any]],
+    token_budget: Optional[int] = None,
+) -> Dict[str, Any]:
+    component = _component_kind(model_id, config)
+    quant = str(config.get("quant") or config.get("llm_quant") or "Q4_K_M")
+    ctx_size = int(config.get("ctx_size") or _get_runtime_ctx_size())
+    estimated_vram_gb = _estimate_llm_vram_gb(model_id, quant, ctx_size)
+    available_vram_gb = sum(float(gpu.get("free_gb", 0.0)) for gpu in available_gpus)
+    warnings_list: List[str] = []
+
+    if requested_device == DeviceMode.CPU or not available_gpus:
+        return {
+            "component": component,
+            "requested_device": requested_device.value,
+            "resolved_device": DeviceMode.CPU.value,
+            "admission": "ok",
+            "estimated_vram_gb": estimated_vram_gb,
+            "available_vram_gb": available_vram_gb,
+            "effective_token_budget": token_budget or max(1024, ctx_size // 2),
+            "effective_gpu_layers": 0,
+            "warnings": warnings_list,
+        }
+
+    configured_gpu_layers = int(config.get("gpu_layers", -1))
+    if configured_gpu_layers == 0:
+        warnings_list.append("llm requested non-cpu placement but configured gpu_layers=0")
+        return {
+            "component": component,
+            "requested_device": requested_device.value,
+            "resolved_device": requested_device.value,
+            "admission": "requires_degraded",
+            "estimated_vram_gb": estimated_vram_gb,
+            "available_vram_gb": available_vram_gb,
+            "effective_token_budget": token_budget or max(1024, ctx_size // 2),
+            "effective_gpu_layers": 0,
+            "warnings": warnings_list,
+        }
+
+    full_fit = configured_gpu_layers == -1 and available_vram_gb >= estimated_vram_gb
+    estimated_hybrid_layers = configured_gpu_layers if configured_gpu_layers > 0 else _estimate_hybrid_gpu_layers(
+        model_id, available_vram_gb, estimated_vram_gb
+    )
+
+    if requested_device == DeviceMode.GPU:
+        if full_fit:
+            resolved_device = DeviceMode.GPU.value
+            admission = "ok"
+            effective_gpu_layers = configured_gpu_layers
+        elif estimated_hybrid_layers > 0:
+            resolved_device = DeviceMode.HYBRID.value
+            admission = "degraded_candidate"
+            effective_gpu_layers = estimated_hybrid_layers
+            warnings_list.append("manual gpu request downgraded to hybrid due to partial VRAM fit")
+        else:
+            resolved_device = DeviceMode.GPU.value
+            admission = "requires_degraded"
+            effective_gpu_layers = 0
+            warnings_list.append("manual gpu request requires_degraded due to insufficient VRAM")
+    else:
+        if estimated_hybrid_layers > 0:
+            resolved_device = DeviceMode.HYBRID.value
+            admission = "ok" if configured_gpu_layers > 0 or full_fit else "degraded_candidate"
+            effective_gpu_layers = estimated_hybrid_layers
+        else:
+            resolved_device = DeviceMode.HYBRID.value
+            admission = "requires_degraded"
+            effective_gpu_layers = 0
+            warnings_list.append("hybrid request requires_degraded because useful GPU layer placement is unavailable")
+
+    return {
+        "component": component,
+        "requested_device": requested_device.value,
+        "resolved_device": resolved_device,
+        "admission": admission,
+        "estimated_vram_gb": estimated_vram_gb,
+        "available_vram_gb": available_vram_gb,
+        "effective_token_budget": token_budget or max(1024, ctx_size // 2),
+        "effective_gpu_layers": effective_gpu_layers,
+        "warnings": warnings_list,
+    }
+
+
+def _resolve_embedding_admission(
+    *,
+    model_id: str,
+    requested_device: DeviceMode,
+    resolved_device: str,
+    available_gpus: List[Dict[str, Any]],
+    fallback_applied: bool = False,
+) -> Dict[str, Any]:
+    warnings_list: List[str] = []
+    if fallback_applied:
+        warnings_list.append("embedding component fell back to cpu")
+    admission = "ok" if requested_device.value == resolved_device else "degraded_candidate"
+    return {
+        "component": _component_kind(model_id),
+        "requested_device": requested_device.value,
+        "resolved_device": resolved_device,
+        "admission": admission,
+        "estimated_vram_gb": None,
+        "available_vram_gb": sum(float(gpu.get("free_gb", 0.0)) for gpu in available_gpus),
+        "effective_token_budget": None,
+        "fallback_applied": fallback_applied,
+        "warnings": warnings_list,
+    }
 
 
 def _parse_gpu_indices_env(name: str, available_gpus: List[Dict[str, Any]]) -> Optional[List[int]]:
@@ -223,6 +389,33 @@ def _resolve_runtime_device_mode() -> DeviceMode:
     return state.get("device_mode", DeviceMode.HYBRID)
 
 
+def _normalize_device_mode_value(raw: Optional[str]) -> Optional[DeviceMode]:
+    normalized = str(raw or "").strip().lower()
+    if normalized == "gpu":
+        return DeviceMode.GPU
+    if normalized == "cpu":
+        return DeviceMode.CPU
+    if normalized == "hybrid":
+        return DeviceMode.HYBRID
+    return None
+
+
+def _get_component_device_override(model_id: str) -> Optional[DeviceMode]:
+    if model_id == "qwen-vl-8b":
+        return _normalize_device_mode_value(os.getenv("VLM_DEVICE_MODE")) or _normalize_device_mode_value(os.getenv("LLM_DEVICE_MODE"))
+    if model_id in {"qwen-14b-llm", "qwen-7b-llm", "qwen-32b-llm", "qwen-72b-llm"}:
+        return _normalize_device_mode_value(os.getenv("LLM_DEVICE_MODE"))
+    if model_id == "qwen3-embedding-0.6b":
+        return _normalize_device_mode_value(os.getenv("INTENT_EMBEDDER_DEVICE_MODE"))
+    if model_id == "labse-embedding":
+        return _normalize_device_mode_value(os.getenv("RETRIEVAL_EMBEDDER_DEVICE_MODE"))
+    return None
+
+
+def _resolve_component_device_mode(model_id: str, fallback: DeviceMode) -> DeviceMode:
+    return _get_component_device_override(model_id) or fallback
+
+
 def _build_model_placement_plan(
     *,
     model_id: str,
@@ -230,9 +423,19 @@ def _build_model_placement_plan(
     device_mode: DeviceMode,
     available_gpus: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
+    device_mode = _resolve_component_device_mode(model_id, device_mode)
     if config["type"] == "st":
-        if device_mode == DeviceMode.CPU or not available_gpus or _resolve_embedding_tier_preference() == "cpu":
-            return {"placement_mode": "cpu", "device_arg": "cpu", "gpu_indices": []}
+        explicit_override = _get_component_device_override(model_id)
+        tier_prefers_cpu = _resolve_embedding_tier_preference() == "cpu"
+        if device_mode == DeviceMode.CPU or not available_gpus or (tier_prefers_cpu and explicit_override is None):
+            return {
+                "placement_mode": "cpu",
+                "device_arg": "cpu",
+                "gpu_indices": [],
+                "requested_device": device_mode.value,
+                "resolved_device": DeviceMode.CPU.value,
+                "admission": "ok" if device_mode == DeviceMode.CPU else "degraded_candidate",
+            }
         selected_gpu = _parse_gpu_indices_env("UMS_EMBEDDING_GPU_INDEX", available_gpus)
         if selected_gpu:
             gpu_index = selected_gpu[0]
@@ -242,8 +445,15 @@ def _build_model_placement_plan(
             if active_heavy_model:
                 llm_gpu_indices = set((state.get("placements", {}).get(active_heavy_model) or {}).get("gpu_indices") or [])
             candidate_gpus = [gpu for gpu in available_gpus if int(gpu["index"]) not in llm_gpu_indices]
-            if not candidate_gpus and llm_gpu_indices:
-                return {"placement_mode": "cpu", "device_arg": "cpu", "gpu_indices": []}
+            if not candidate_gpus and llm_gpu_indices and explicit_override is None:
+                return {
+                    "placement_mode": "cpu",
+                    "device_arg": "cpu",
+                    "gpu_indices": [],
+                    "requested_device": device_mode.value,
+                    "resolved_device": DeviceMode.CPU.value,
+                    "admission": "degraded_candidate",
+                }
             if not candidate_gpus:
                 candidate_gpus = available_gpus
             gpu_index = max(candidate_gpus, key=lambda gpu: float(gpu.get("free_gb", 0.0)))["index"]
@@ -251,25 +461,48 @@ def _build_model_placement_plan(
             "placement_mode": "single-gpu",
             "device_arg": f"cuda:{gpu_index}",
             "gpu_indices": [int(gpu_index)],
+            "requested_device": device_mode.value,
+            "resolved_device": DeviceMode.GPU.value,
+            "admission": "ok",
         }
 
     if device_mode == DeviceMode.CPU or not available_gpus:
-        return {"placement_mode": "cpu", "gpu_indices": [], "tensor_split": []}
+        return {
+            "placement_mode": "cpu",
+            "gpu_indices": [],
+            "tensor_split": [],
+            "requested_device": device_mode.value,
+            "resolved_device": DeviceMode.CPU.value,
+            "admission": "ok",
+        }
 
     selected_gpus = _select_llm_gpus(available_gpus)
     if not selected_gpus:
-        return {"placement_mode": "cpu", "gpu_indices": [], "tensor_split": []}
+        return {
+            "placement_mode": "cpu",
+            "gpu_indices": [],
+            "tensor_split": [],
+            "requested_device": device_mode.value,
+            "resolved_device": DeviceMode.CPU.value,
+            "admission": "requires_degraded",
+        }
     if len(selected_gpus) == 1:
         return {
             "placement_mode": "single-gpu",
             "gpu_indices": [int(selected_gpus[0]["index"])],
             "tensor_split": [1.0],
+            "requested_device": device_mode.value,
+            "resolved_device": device_mode.value,
+            "admission": "ok",
         }
     tensor_split = _normalize_tensor_split([float(gpu.get("free_gb", 0.0)) for gpu in selected_gpus])
     return {
         "placement_mode": "multi-gpu",
         "gpu_indices": [int(gpu["index"]) for gpu in selected_gpus],
         "tensor_split": tensor_split,
+        "requested_device": device_mode.value,
+        "resolved_device": device_mode.value,
+        "admission": "ok",
     }
 
 
@@ -728,6 +961,7 @@ def _prune_dead_processes() -> List[str]:
         logger.warning(f"Pruning dead managed process for {model_id}")
         processes.pop(model_id, None)
         state.setdefault("placements", {}).pop(model_id, None)
+        state.setdefault("admission", {}).pop(model_id, None)
         if state.get("active_model") == model_id:
             state["active_model"] = None
         removed.append(model_id)
@@ -781,6 +1015,7 @@ def _stop_model(model_id: str):
         with _heavy_model_lifecycle_lock:
             proc = state["processes"].pop(model_id)
             state["placements"].pop(model_id, None)
+            state.setdefault("admission", {}).pop(model_id, None)
             logger.info(f"Stopping server for {model_id}...")
             if isinstance(proc, _RemoteProcess):
                 logger.info(f"Remote runtime detached for {model_id}")
@@ -838,6 +1073,7 @@ def _launch_server_process(cmd: List[str], port: int, health_timeout_s: float = 
 
 def _start_server(model_id: str, device_mode: DeviceMode):
     with _get_model_start_lock(model_id):
+        device_mode = _resolve_component_device_mode(model_id, device_mode)
         config = get_model_config(model_id)
         if not config:
             raise HTTPException(status_code=404, detail=f"Model {model_id} not found in filesystem.")
@@ -865,6 +1101,53 @@ def _start_server(model_id: str, device_mode: DeviceMode):
         config["port"] = assigned_port
         placement = dict(placement)
         placement["port"] = assigned_port
+        state.setdefault("admission", {})
+
+        if is_heavy:
+            token_budget = int((state.get("runtime_budget") or {}).get("effective_context_tokens") or config.get("ctx_size") or 4096)
+            llm_admission = _resolve_llm_admission(
+                model_id=model_id,
+                config=config,
+                requested_device=device_mode,
+                available_gpus=available_gpus,
+                token_budget=token_budget,
+            )
+            state["admission"][model_id] = dict(llm_admission)
+            placement.update(
+                {
+                    "requested_device": llm_admission["requested_device"],
+                    "resolved_device": llm_admission["resolved_device"],
+                    "admission": llm_admission["admission"],
+                    "estimated_vram_gb": llm_admission["estimated_vram_gb"],
+                    "available_vram_gb": llm_admission["available_vram_gb"],
+                    "effective_token_budget": llm_admission["effective_token_budget"],
+                    "warnings": list(llm_admission.get("warnings") or []),
+                }
+            )
+            if llm_admission["admission"] == "requires_degraded":
+                state["placements"][model_id] = placement
+                raise RuntimeError(
+                    f"LLM admission requires_degraded for {model_id}: requested_device={llm_admission['requested_device']}"
+                )
+            config["gpu_layers"] = int(llm_admission.get("effective_gpu_layers", config.get("gpu_layers", -1)))
+            device_mode = DeviceMode(llm_admission["resolved_device"])
+        else:
+            embed_admission = _resolve_embedding_admission(
+                model_id=model_id,
+                requested_device=device_mode,
+                resolved_device=str(placement.get("resolved_device") or "cpu"),
+                available_gpus=available_gpus,
+                fallback_applied=False,
+            )
+            state["admission"][model_id] = dict(embed_admission)
+            placement.update(
+                {
+                    "requested_device": embed_admission["requested_device"],
+                    "resolved_device": embed_admission["resolved_device"],
+                    "admission": embed_admission["admission"],
+                    "warnings": list(embed_admission.get("warnings") or []),
+                }
+            )
 
         if _should_use_vllm_backend(config):
             with _heavy_model_lifecycle_lock:
@@ -957,6 +1240,13 @@ def _start_server(model_id: str, device_mode: DeviceMode):
                 process = _launch_server_process(cmd, config["port"])
                 state["processes"][model_id] = process
                 state["placements"][model_id] = _placement_with_device_arg(placement, device_arg)
+                state["admission"][model_id] = _resolve_embedding_admission(
+                    model_id=model_id,
+                    requested_device=device_mode,
+                    resolved_device="gpu" if str(device_arg).startswith("cuda") else "cpu",
+                    available_gpus=available_gpus,
+                    fallback_applied=(idx > 0 and str(device_arg) == "cpu"),
+                )
                 return
             except Exception as e:
                 detail = str(e)
@@ -975,6 +1265,13 @@ def _start_server(model_id: str, device_mode: DeviceMode):
                         process = _launch_server_process(retry_cmd, fallback_port)
                         state["processes"][model_id] = process
                         state["placements"][model_id] = _placement_with_device_arg(placement, device_arg)
+                        state["admission"][model_id] = _resolve_embedding_admission(
+                            model_id=model_id,
+                            requested_device=device_mode,
+                            resolved_device="gpu" if str(device_arg).startswith("cuda") else "cpu",
+                            available_gpus=available_gpus,
+                            fallback_applied=(idx > 0 and str(device_arg) == "cpu"),
+                        )
                         return
                     except Exception:
                         pass
@@ -1064,12 +1361,14 @@ async def lifespan(app: FastAPI):
         state["runtime_budget"] = resolve_runtime_budget()
 
     # Предзагрузка Qwen LLM — убирает задержку перед первым запросом
-    try:
-        logger.info("Preloading qwen-14b-llm...")
-        _start_server("qwen-14b-llm", state["device_mode"])
-        logger.info("qwen-14b-llm preloaded successfully")
-    except Exception as e:
-        logger.warning(f"Failed to preload qwen-14b-llm: {e}")
+    preload_sequence = ("qwen-14b-llm", "labse-embedding", "qwen3-embedding-0.6b")
+    for model_id in preload_sequence:
+        try:
+            logger.info("Preloading %s...", model_id)
+            _start_server(model_id, state["device_mode"])
+            logger.info("%s preloaded successfully", model_id)
+        except Exception as e:
+            logger.warning(f"Failed to preload {model_id}: {e}")
 
     yield
     _stop_all_servers()
@@ -1293,6 +1592,7 @@ def _build_model_view(model_id: str) -> Dict[str, Any]:
         "running": model_id in state["processes"],
         "active": state.get("active_model") == model_id,
         "placement": copy.deepcopy((state.get("placements") or {}).get(model_id)),
+        "admission": copy.deepcopy((state.get("admission") or {}).get(model_id)),
     }
 
 
@@ -1588,6 +1888,7 @@ async def get_status():
         "active_heavy_model": state["active_model"],
         "running": list(state["processes"].keys()),
         "placements": dict(state.get("placements") or {}),
+        "admission": copy.deepcopy(state.get("admission") or {}),
         "backend_mode": _resolve_backend_mode(),
         "prompt_cache_policy": _resolve_prompt_cache_policy(
             get_model_config(state.get("active_model") or "qwen-14b-llm")
