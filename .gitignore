@@ -46,6 +46,12 @@ sym_shape_infer_temp.onnx
 .agents/
 .chainlit/
 backend/.chainlit/
+!.chainlit/translations/
+!.chainlit/translations/ru.json
+!.chainlit/translations/ru-RU.json
+!backend/.chainlit/translations/
+!backend/.chainlit/translations/ru.json
+!backend/.chainlit/translations/ru-RU.json
 backend/orchestrator/.files/
 scripts/__pycache__/
 __pycache__/

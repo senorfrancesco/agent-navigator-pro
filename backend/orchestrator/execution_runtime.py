@@ -1064,151 +1064,150 @@ async def _execute_documents_summary(
     per_doc: List[Dict[str, str]] = []
     processed_chunks = 0
     degraded_events: List[Dict[str, Any]] = []
-    try:
-        for doc_entry in per_doc_chunks:
-            doc_name = str(doc_entry["name"])
-            doc_id = str(doc_entry.get("document_id") or doc_name)
-            chunks = list(doc_entry.get("chunks") or [])
-            if not chunks:
-                per_doc.append({"name": doc_name, "summary": "Документ пуст или текст не извлечён."})
-                continue
-            chunk_summaries: List[str] = []
-            for chunk in chunks:
-                processed_chunks += 1
-                await deps.update_progress_box(
-                    key="documents_summary_progress",
-                    title="Суммаризация чанков",
-                    content=f"{processed_chunks}/{total_chunks}",
-                )
-                prompt = deps.build_prompt(
-                    (
-                        "Кратко суммаризируй фрагмент документа в 3-5 пунктов: тема, цель, ключевые "
-                        "требования/положения, сроки/ограничения (если есть), важные риски/последствия."
-                    ),
-                    [],
-                    (
-                        "Ты аналитик документов. Пиши строго по тексту, без домыслов. "
-                        f"Документ: {doc_name}\n\nФРАГМЕНТ:\n{chunk}"
-                    ),
-                )
-                cache_key = _build_documents_summary_chunk_cache_key(
-                    document_id=doc_id,
-                    document_name=doc_name,
-                    chunk=chunk,
+    for doc_entry in per_doc_chunks:
+        doc_name = str(doc_entry["name"])
+        doc_id = str(doc_entry.get("document_id") or doc_name)
+        chunks = list(doc_entry.get("chunks") or [])
+        if not chunks:
+            per_doc.append({"name": doc_name, "summary": "Документ пуст или текст не извлечён."})
+            continue
+        chunk_summaries: List[str] = []
+        for chunk in chunks:
+            processed_chunks += 1
+            await deps.update_progress_box(
+                key="documents_summary_progress",
+                title="Суммаризация чанков",
+                content=f"{processed_chunks}/{total_chunks}",
+            )
+            prompt = deps.build_prompt(
+                (
+                    "Кратко суммаризируй фрагмент документа в 3-5 пунктов: тема, цель, ключевые "
+                    "требования/положения, сроки/ограничения (если есть), важные риски/последствия."
+                ),
+                [],
+                (
+                    "Ты аналитик документов. Пиши строго по тексту, без домыслов. "
+                    f"Документ: {doc_name}\n\nФРАГМЕНТ:\n{chunk}"
+                ),
+            )
+            cache_key = _build_documents_summary_chunk_cache_key(
+                document_id=doc_id,
+                document_name=doc_name,
+                chunk=chunk,
+                effective_settings=effective_settings,
+            )
+            chunk_summary = _get_cached_documents_summary_chunk(cache_key)
+            if chunk_summary is None:
+                chunk_summary, stage_meta = await _infer_documents_summary_stage(
+                    deps=deps,
+                    prompt=prompt,
+                    stage="chunk",
                     effective_settings=effective_settings,
                 )
-                chunk_summary = _get_cached_documents_summary_chunk(cache_key)
-                if chunk_summary is None:
-                    chunk_summary, stage_meta = await _infer_documents_summary_stage(
-                        deps=deps,
-                        prompt=prompt,
-                        stage="chunk",
-                        effective_settings=effective_settings,
-                    )
-                    if stage_meta.get("degraded"):
-                        degraded_events.append(stage_meta)
-                    _store_cached_documents_summary_chunk(cache_key, chunk_summary.strip())
-                else:
-                    inc_metric_counter(
-                        "agent_nav_fallback_events_total",
-                        labels={
-                            "component": "documents_summary",
-                            "fallback": "documents_summary_chunk_cache_hit",
-                            "source": "workflow",
-                        },
-                    )
-                    chunk_summary = chunk_summary.strip()
-                chunk_summaries.append(chunk_summary.strip())
-            if len(chunk_summaries) == 1:
-                per_doc.append({"name": doc_name, "summary": chunk_summaries[0]})
-                await deps.update_progress_box(
-                    key="documents_summary_progress",
-                    title="Промежуточная сводка",
-                    content=f"Готов документ: {doc_name}\n\n{chunk_summaries[0]}",
-                )
-                continue
-            reduce_items = chunk_summaries
-            try:
-                while len(reduce_items) > 1:
-                    next_reduce_items: List[str] = []
-                    reduce_group_size = (
-                        SUMMARY_DEGRADED_REDUCE_GROUP_SIZE
-                        if degraded_events or _is_low_vram_device_mode(effective_settings)
-                        else SUMMARY_REDUCE_GROUP_SIZE
-                    )
-                    merge_char_cap = (
-                        SUMMARY_STAGE_DEGRADED_INPUT_CHARS["merge"]
-                        if degraded_events or _is_low_vram_device_mode(effective_settings)
-                        else SUMMARY_STAGE_MAX_INPUT_CHARS["merge"]
-                    )
-                    for batch in _group_summary_items_for_budget(
-                        reduce_items,
-                        max_chars=merge_char_cap,
-                        max_items=reduce_group_size,
-                    ):
-                        merge_prompt = deps.build_prompt(
-                            (
-                                "Объедини суммаризации фрагментов одного документа в итоговую краткую сводку из 4-6 пунктов, "
-                                "без повторов и без домыслов."
-                            ),
-                            [],
-                            (
-                                "Ты аналитик документов. Собери единую сводку строго по промежуточным summary. "
-                                f"Документ: {doc_name}\n\nСУММАРИЗАЦИИ ФРАГМЕНТОВ:\n"
-                                + _join_summary_items(batch, max_chars=merge_char_cap)
-                            ),
-                        )
-                        merged_summary, stage_meta = await _infer_documents_summary_stage(
-                            deps=deps,
-                            prompt=merge_prompt,
-                            stage="merge",
-                            effective_settings=effective_settings,
-                        )
-                        if stage_meta.get("degraded"):
-                            degraded_events.append(stage_meta)
-                        next_reduce_items.append(merged_summary.strip())
-                    reduce_items = next_reduce_items
-                per_doc.append({"name": doc_name, "summary": reduce_items[0]})
-                await deps.update_progress_box(
-                    key="documents_summary_progress",
-                    title="Промежуточная сводка",
-                    content=f"Готов документ: {doc_name}\n\n{reduce_items[0]}",
-                )
-            except Exception as exc:
+                if stage_meta.get("degraded"):
+                    degraded_events.append(stage_meta)
+                _store_cached_documents_summary_chunk(cache_key, chunk_summary.strip())
+            else:
                 inc_metric_counter(
                     "agent_nav_fallback_events_total",
                     labels={
                         "component": "documents_summary",
-                        "fallback": "documents_summary_merge_degraded",
+                        "fallback": "documents_summary_chunk_cache_hit",
                         "source": "workflow",
                     },
                 )
-                logger.warning(
-                    "documents_summary merge degraded doc=%s chunks=%s device_mode=%s: %s",
-                    doc_name,
-                    len(chunk_summaries),
-                    _resolve_summary_device_mode(effective_settings),
-                    exc,
-                    exc_info=True,
+                chunk_summary = chunk_summary.strip()
+            chunk_summaries.append(chunk_summary.strip())
+        if len(chunk_summaries) == 1:
+            per_doc.append({"name": doc_name, "summary": chunk_summaries[0]})
+            await deps.update_progress_box(
+                key="documents_summary_progress",
+                title="Промежуточная сводка",
+                content=f"Готов документ: {doc_name}\n\n{chunk_summaries[0]}",
+            )
+            continue
+        reduce_items = chunk_summaries
+        try:
+            while len(reduce_items) > 1:
+                next_reduce_items: List[str] = []
+                reduce_group_size = (
+                    SUMMARY_DEGRADED_REDUCE_GROUP_SIZE
+                    if degraded_events or _is_low_vram_device_mode(effective_settings)
+                    else SUMMARY_REDUCE_GROUP_SIZE
                 )
-                fallback_summary = _join_summary_items(
-                    chunk_summaries,
-                    max_chars=SUMMARY_STAGE_DEGRADED_INPUT_CHARS["global"],
+                merge_char_cap = (
+                    SUMMARY_STAGE_DEGRADED_INPUT_CHARS["merge"]
+                    if degraded_events or _is_low_vram_device_mode(effective_settings)
+                    else SUMMARY_STAGE_MAX_INPUT_CHARS["merge"]
                 )
-                per_doc.append(
-                    {
-                        "name": doc_name,
-                        "summary": (
-                            "Частичная сводка по документу; этап объединения summary не завершился.\n\n"
-                            f"{fallback_summary}"
-                        ).strip(),
-                    }
-                )
-                await deps.update_progress_box(
-                    key="documents_summary_progress",
-                    title="Промежуточная сводка",
-                    content=f"Готов документ: {doc_name}\n\n{per_doc[-1]['summary']}",
-                )
+                for batch in _group_summary_items_for_budget(
+                    reduce_items,
+                    max_chars=merge_char_cap,
+                    max_items=reduce_group_size,
+                ):
+                    merge_prompt = deps.build_prompt(
+                        (
+                            "Объедини суммаризации фрагментов одного документа в итоговую краткую сводку из 4-6 пунктов, "
+                            "без повторов и без домыслов."
+                        ),
+                        [],
+                        (
+                            "Ты аналитик документов. Собери единую сводку строго по промежуточным summary. "
+                            f"Документ: {doc_name}\n\nСУММАРИЗАЦИИ ФРАГМЕНТОВ:\n"
+                            + _join_summary_items(batch, max_chars=merge_char_cap)
+                        ),
+                    )
+                    merged_summary, stage_meta = await _infer_documents_summary_stage(
+                        deps=deps,
+                        prompt=merge_prompt,
+                        stage="merge",
+                        effective_settings=effective_settings,
+                    )
+                    if stage_meta.get("degraded"):
+                        degraded_events.append(stage_meta)
+                    next_reduce_items.append(merged_summary.strip())
+                reduce_items = next_reduce_items
+            per_doc.append({"name": doc_name, "summary": reduce_items[0]})
+            await deps.update_progress_box(
+                key="documents_summary_progress",
+                title="Промежуточная сводка",
+                content=f"Готов документ: {doc_name}\n\n{reduce_items[0]}",
+            )
+        except Exception as exc:
+            inc_metric_counter(
+                "agent_nav_fallback_events_total",
+                labels={
+                    "component": "documents_summary",
+                    "fallback": "documents_summary_merge_degraded",
+                    "source": "workflow",
+                },
+            )
+            logger.warning(
+                "documents_summary merge degraded doc=%s chunks=%s device_mode=%s: %s",
+                doc_name,
+                len(chunk_summaries),
+                _resolve_summary_device_mode(effective_settings),
+                exc,
+                exc_info=True,
+            )
+            fallback_summary = _join_summary_items(
+                chunk_summaries,
+                max_chars=SUMMARY_STAGE_DEGRADED_INPUT_CHARS["global"],
+            )
+            per_doc.append(
+                {
+                    "name": doc_name,
+                    "summary": (
+                        "Частичная сводка по документу; этап объединения summary не завершился.\n\n"
+                        f"{fallback_summary}"
+                    ).strip(),
+                }
+            )
+            await deps.update_progress_box(
+                key="documents_summary_progress",
+                title="Промежуточная сводка",
+                content=f"Готов документ: {doc_name}\n\n{per_doc[-1]['summary']}",
+            )
 
         combined_input = _join_summary_items(
             [f"{item['name']}\n{item['summary']}" for item in per_doc],
@@ -1263,8 +1262,11 @@ async def _execute_documents_summary(
                 "Общая сводка недоступна: финальный этап суммаризации не завершился. "
                 "Ниже сохранены промежуточные сводки по документам."
             )
-    finally:
-        await deps.clear_progress_box(key="documents_summary_progress")
+    await deps.update_progress_box(
+        key="documents_summary_progress",
+        title="Суммаризация завершена",
+        content=f"Готово: обработано {processed_chunks}/{total_chunks} чанков.",
+    )
     lines = ["## Сводка по документам", ""]
     execution_metadata = None
     if degraded_events:

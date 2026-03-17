@@ -1064,7 +1064,7 @@ def test_execute_documents_summary_updates_single_progress_box_per_chunk():
     )
 
     assert "## Сводка по документам" in response["assistant_message"]
-    assert deps.update_progress_box.await_count == 4
+    assert deps.update_progress_box.await_count == 5
     assert deps.update_progress_box.await_args_list[0].kwargs == {
         "key": "documents_summary_progress",
         "title": "Суммаризация чанков",
@@ -1082,7 +1082,12 @@ def test_execute_documents_summary_updates_single_progress_box_per_chunk():
         "title": "Формирование итоговой сводки",
         "content": "Формирую общую сводку по уже собранным промежуточным результатам.",
     }
-    deps.clear_progress_box.assert_awaited_once_with(key="documents_summary_progress")
+    assert deps.update_progress_box.await_args_list[4].kwargs == {
+        "key": "documents_summary_progress",
+        "title": "Суммаризация завершена",
+        "content": "Готово: обработано 2/2 чанков.",
+    }
+    deps.clear_progress_box.assert_not_awaited()
 
 
 def test_execute_documents_summary_uses_low_vram_stage_policy():

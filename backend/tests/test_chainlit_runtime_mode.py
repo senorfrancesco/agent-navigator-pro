@@ -511,17 +511,19 @@ class TestChainlitControlPlaneSettings:
         assert self._store["runtime_budget_metadata"]["runtime_profile"] == "adaptive"
 
     @pytest.mark.asyncio
-    async def test_update_progress_box_reuses_single_message_instance(self):
-        created_messages = []
+    async def test_update_progress_box_reuses_single_step_instance(self):
+        created_steps = []
 
-        class _FakeMessage:
-            def __init__(self, content):
-                self.content = content
+        class _FakeStep:
+            def __init__(self, name, **kwargs):
+                self.name = name
+                self.output = ""
                 self.send = AsyncMock()
                 self.update = AsyncMock()
-                created_messages.append(self)
+                self.remove = AsyncMock()
+                created_steps.append(self)
 
-        self._mock_cl.Message.side_effect = lambda **kwargs: _FakeMessage(kwargs["content"])
+        self._mock_cl.Step.side_effect = lambda **kwargs: _FakeStep(**kwargs)
 
         await self._module._update_progress_box(
             key="documents_summary_progress",
@@ -534,12 +536,13 @@ class TestChainlitControlPlaneSettings:
             content="2/10",
         )
 
-        assert len(created_messages) == 1
-        message = created_messages[0]
-        message.send.assert_awaited_once()
-        message.update.assert_awaited_once()
-        assert message.content == "**Суммаризация чанков**\n\n2/10"
-        assert self._store["documents_summary_progress"] is message
+        assert len(created_steps) == 1
+        step = created_steps[0]
+        step.send.assert_awaited_once()
+        step.update.assert_awaited_once()
+        assert step.name == "Суммаризация чанков"
+        assert step.output == "2/10"
+        assert self._store["documents_summary_progress"] is step
 
     def test_render_doc_question_markdown_includes_scope_and_provenance(self):
         markdown = self._module._render_doc_question_markdown(

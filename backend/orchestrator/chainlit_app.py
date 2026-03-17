@@ -1126,34 +1126,35 @@ def _build_execution_dependencies() -> ExecutionDependencies:
     )
 
 
-def _format_progress_box_content(title: str, content: str) -> str:
-    title_text = str(title or "").strip()
-    body = str(content or "").strip()
-    if title_text and body:
-        return f"**{title_text}**\n\n{body}"
-    return title_text or body
-
-
 async def _update_progress_box(*, key: str, title: str, content: str) -> None:
-    rendered = _format_progress_box_content(title, content)
-    message = cl.user_session.get(key)
-    if message is None:
-        message = cl.Message(content=rendered)
-        await message.send()
-        cl.user_session.set(key, message)
+    step = cl.user_session.get(key)
+    rendered_title = str(title or "").strip() or "Прогресс"
+    rendered_content = str(content or "").strip()
+    if step is None:
+        step = cl.Step(
+            name=rendered_title,
+            type="run",
+            show_input=False,
+            default_open=True,
+        )
+        step.output = rendered_content
+        await step.send()
+        cl.user_session.set(key, step)
         return
-    message.content = rendered
-    update = getattr(message, "update", None)
+    step.name = rendered_title
+    step.output = rendered_content
+    update = getattr(step, "update", None)
     if callable(update):
         await update()
-    else:
-        await message.send()
 
 
 async def _clear_progress_box(*, key: str) -> None:
-    message = cl.user_session.get(key)
-    if message is None:
+    step = cl.user_session.get(key)
+    if step is None:
         return
+    remove = getattr(step, "remove", None)
+    if callable(remove):
+        await remove()
     cl.user_session.set(key, None)
 
 
@@ -1737,7 +1738,7 @@ async def _infer_assistant_text(
             payload,
             resolved_device_mode,
         )
-        return response.get("choices", [{}])[0].get("text", str(response))
+        return _sanitize_assistant_output(response.get("choices", [{}])[0].get("text", str(response)))
     except Exception as exc:
         logger.warning(
             "Assistant infer failed stage=%s model=%s device_mode=%s retry=%s",
@@ -1754,7 +1755,7 @@ async def _infer_assistant_text(
         try:
             logger.warning("Direct chat infer failed, retrying sync inference", exc_info=True)
             response = ums_client.infer(model_id, payload, resolved_device_mode)
-            return response.get("choices", [{}])[0].get("text", str(response))
+            return _sanitize_assistant_output(response.get("choices", [{}])[0].get("text", str(response)))
         except Exception as e:
             if raise_on_error:
                 raise
@@ -1904,6 +1905,45 @@ def _strip_model_source_sections(answer_text: str) -> str:
 
     cleaned = text[:cut_pos].rstrip()
     return cleaned if cleaned else text
+
+
+_LEAKED_SYSTEM_LINE_PREFIXES = (
+    "используй краткий ответ",
+    "не повторяйся",
+    "profile instructions:",
+    "custom system override:",
+    "catalog of sources:",
+    "<|im_start|>",
+    "<|im_end|>",
+)
+
+
+def _strip_leaked_system_instructions(answer_text: str) -> str:
+    text = (answer_text or "").strip()
+    if not text:
+        return text
+
+    kept_lines: List[str] = []
+    removed_any = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        lowered = line.lower()
+        if any(lowered.startswith(prefix) for prefix in _LEAKED_SYSTEM_LINE_PREFIXES):
+            removed_any = True
+            continue
+        kept_lines.append(raw_line)
+
+    cleaned = "\n".join(kept_lines).strip()
+    if cleaned:
+        return cleaned
+    if removed_any:
+        return "Чем могу помочь?"
+    return text
+
+
+def _sanitize_assistant_output(answer_text: str) -> str:
+    text = _strip_model_source_sections(answer_text)
+    return _strip_leaked_system_instructions(text)
 
 
 def _render_doc_question_markdown(resp: DocQuestionResponse) -> str:

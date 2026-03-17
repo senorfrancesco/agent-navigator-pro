@@ -416,6 +416,19 @@ def _resolve_component_device_mode(model_id: str, fallback: DeviceMode) -> Devic
     return _get_component_device_override(model_id) or fallback
 
 
+def _get_embedding_occupied_gpu_indices(*, exclude_model_id: Optional[str] = None) -> set[int]:
+    occupied: set[int] = set()
+    for running_model_id, placement in (state.get("placements") or {}).items():
+        if running_model_id == exclude_model_id:
+            continue
+        config = get_model_config(running_model_id) or {}
+        if str(config.get("type") or "") != "st":
+            continue
+        for gpu_index in list((placement or {}).get("gpu_indices") or []):
+            occupied.add(int(gpu_index))
+    return occupied
+
+
 def _build_model_placement_plan(
     *,
     model_id: str,
@@ -441,10 +454,16 @@ def _build_model_placement_plan(
             gpu_index = selected_gpu[0]
         else:
             llm_gpu_indices = set()
+            occupied_embedding_gpu_indices = _get_embedding_occupied_gpu_indices(exclude_model_id=model_id)
             active_heavy_model = state.get("active_model")
             if active_heavy_model:
                 llm_gpu_indices = set((state.get("placements", {}).get(active_heavy_model) or {}).get("gpu_indices") or [])
-            candidate_gpus = [gpu for gpu in available_gpus if int(gpu["index"]) not in llm_gpu_indices]
+            candidate_gpus = [
+                gpu
+                for gpu in available_gpus
+                if int(gpu["index"]) not in llm_gpu_indices
+                and int(gpu["index"]) not in occupied_embedding_gpu_indices
+            ]
             if not candidate_gpus and llm_gpu_indices and explicit_override is None:
                 return {
                     "placement_mode": "cpu",
@@ -455,7 +474,20 @@ def _build_model_placement_plan(
                     "admission": "degraded_candidate",
                 }
             if not candidate_gpus:
-                candidate_gpus = available_gpus
+                candidate_gpus = [
+                    gpu
+                    for gpu in available_gpus
+                    if int(gpu["index"]) not in occupied_embedding_gpu_indices
+                ]
+            if not candidate_gpus:
+                return {
+                    "placement_mode": "cpu",
+                    "device_arg": "cpu",
+                    "gpu_indices": [],
+                    "requested_device": device_mode.value,
+                    "resolved_device": DeviceMode.CPU.value,
+                    "admission": "degraded_candidate",
+                }
             gpu_index = max(candidate_gpus, key=lambda gpu: float(gpu.get("free_gb", 0.0)))["index"]
         return {
             "placement_mode": "single-gpu",

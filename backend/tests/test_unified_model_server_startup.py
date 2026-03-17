@@ -818,6 +818,34 @@ def test_explicit_intent_embedder_gpu_override_allows_single_gpu_colocation(monk
     assert placement["gpu_indices"] == [0]
 
 
+def test_second_embedding_prefers_distinct_gpu_before_cpu_fallback(monkeypatch):
+    monkeypatch.setenv("INTENT_EMBEDDER_DEVICE_MODE", "gpu")
+    monkeypatch.setenv("RETRIEVAL_EMBEDDER_DEVICE_MODE", "gpu")
+    ums_server.state["active_model"] = "qwen-14b-llm"
+    ums_server.state["placements"]["qwen-14b-llm"] = {
+        "placement_mode": "multi-gpu",
+        "gpu_indices": [0, 1],
+    }
+    ums_server.state["placements"]["labse-embedding"] = {
+        "placement_mode": "single-gpu",
+        "gpu_indices": [1],
+    }
+
+    placement = ums_server._build_model_placement_plan(
+        model_id="qwen3-embedding-0.6b",
+        config={"type": "st"},
+        device_mode=ums_server.DeviceMode.HYBRID,
+        available_gpus=[
+            {"index": 0, "free_gb": 6.0, "total_gb": 8.0},
+            {"index": 1, "free_gb": 7.0, "total_gb": 8.0},
+        ],
+    )
+
+    assert placement["placement_mode"] == "single-gpu"
+    assert placement["device_arg"] == "cuda:0"
+    assert placement["gpu_indices"] == [0]
+
+
 def test_status_exposes_backend_mode_for_vllm(monkeypatch):
     monkeypatch.setenv("BACKEND_MODE", "vllm")
     ums_server.state["processes"]["qwen-14b-llm"] = ums_server._RemoteProcess()

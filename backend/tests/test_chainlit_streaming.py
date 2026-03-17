@@ -140,6 +140,36 @@ async def test_infer_assistant_text_skips_sync_retry_when_disabled(chainlit_stre
     mock_infer.assert_called_once()
 
 
+@pytest.mark.asyncio
+async def test_infer_assistant_text_strips_leaked_system_lines(chainlit_stream_module):
+    module, _stream_response = chainlit_stream_module
+
+    async def fake_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    leaked_text = (
+        "Используй краткий ответ и переход к small talk, если это не приветствие.\n"
+        "Не повторяйся.\n"
+        "Привет! Как могу помочь тебе сегодня?"
+    )
+
+    with patch.object(
+        module.asyncio,
+        "to_thread",
+        new=AsyncMock(side_effect=fake_to_thread),
+    ), patch.object(
+        module.ums_client,
+        "infer",
+        return_value={"choices": [{"text": leaked_text}]},
+    ) as mock_infer:
+        result = await module._infer_assistant_text("prompt")
+
+    mock_infer.assert_called_once()
+    assert "Используй краткий ответ" not in result
+    assert "Не повторяйся" not in result
+    assert result == "Привет! Как могу помочь тебе сегодня?"
+
+
 class TestAsyncInferStream:
     class _FakeResponse:
         def __init__(self, lines):

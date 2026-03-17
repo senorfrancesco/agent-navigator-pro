@@ -339,6 +339,7 @@
   - thread title/metadata sync в Chainlit data layer для видимого списка тредов
   - явное отображение active docs / rag scope / runtime profile / pending action state в UX summary
   - `Chainlit` остался thin control surface: routing/policy decisions не возвращались в UI
+  - direct-chat output sanitization добавлена против prompt leak: leaked system/profile lines (`Используй...`, `Не повторяйся...`, `PROFILE INSTRUCTIONS`) больше не должны попадать в пользовательский ответ
   Pragmatic note:
   - кнопка «Новый чат» и список тредов по-прежнему опираются на built-in Chainlit shell; в этой фазе усиливался не shell itself, а app-level thread presentation и resume UX
 
@@ -977,6 +978,48 @@
   - на первом коротком запросе количество `POST /v1/embeddings` заметно ниже текущего burst;
   - routing contract и classifier quality не деградируют;
   - в логах остаётся явное distinction между model preload и classifier warm-up.
+
+- [ ] **B3.36 — Вынести runtime-policy `document_analysis` в env/prompt contour**
+  Контекст:
+  - live weak-PC прогон тяжёлого файла показал, что текущая регрессия с двойным `500`/`300s` для `documents_summary` закрыта, но у `document_analysis` остаётся отдельный длинный latency tail;
+  - по логам длинный хвост сидит не в PDF/Markdown report rendering, а в `summarize -> reduce` path внутри `backend/orchestrator/workflows/document_analysis.py`;
+  - после завершения chunk-stage workflow делает ещё один тяжёлый single-shot `reduce` infer, и именно он даёт самый длинный `/infer` в UMS;
+  - текущее поведение слишком зависит от Python literals и локальных констант, а не от единого policy/config слоя.
+  Наблюдаемые симптомы:
+  - тяжёлый документ проходит chunk summarization успешно, но затем надолго задерживается на final reduce step;
+  - даже без падения пользовательский latency хвост остаётся заметным на слабом железе;
+  - control-plane/runtime profile сейчас не даёт такого же управляемого degraded behavior для `document_analysis`, как уже даёт для `documents_summary`.
+  Что нужно исправить:
+  - перестать держать critical runtime knobs `document_analysis` только в коде workflow;
+  - отделить prompt concerns от execution-policy concerns;
+  - сделать weak-PC behavior предсказуемым и управляемым через `backend/.env`, а не через ручную правку констант.
+  Что вынести в env/config:
+  - лимиты `max_tokens` отдельно для `chunk`, `reduce` и при необходимости `report` stage;
+  - input budget limits для `chunk` и `reduce` stage;
+  - degraded/low-vram policy flags для `document_analysis`;
+  - optional timeout/retry hints для долгих summary stages;
+  - stage-specific toggles для bounded reduce и partial-result fallback.
+  Что вынести в prompt/policy templates:
+  - шаблон prompt для chunk summary;
+  - шаблон prompt для reduce summary;
+  - требуемую степень краткости итоговой сводки;
+  - правила удаления дублей и приоритизации фактов;
+  - разрешённый формат partial/degraded answer.
+  Что нужно изменить в execution contour:
+  - добавить для `document_analysis` stage-aware policy по аналогии с `documents_summary`;
+  - заменить single-shot reduce на bounded reduce или batched/tree-reduce path;
+  - добавить partial-result fallback, если финальный reduce не укладывается в budget или деградирует;
+  - обеспечить, чтобы slow tail после chunk-stage не оставался единственной безусловной веткой завершения workflow.
+  Почему это важно:
+  - сейчас `document_analysis` и `documents_summary` живут на разном уровне зрелости runtime hardening;
+  - из-за этого weak-PC сценарии остаются непредсказуемыми именно для анализа одного тяжёлого документа;
+  - без env-driven policy дальнейшая настройка под разные машины снова будет происходить через правку кода, а не через конфиг.
+  Acceptance:
+  - `document_analysis` stage budgets управляются через env/config, а не только локальные константы;
+  - reduce-stage больше не делает один неограниченный тяжёлый финальный infer для длинных документов;
+  - weak-PC профиль даёт предсказуемый degraded path;
+  - длинный document-analysis tail локализован и управляем без ручного редактирования workflow-кода;
+  - logs/metrics позволяют отличать `chunk` и `reduce` stages и видеть, какой policy branch реально сработал.
 
 ---
 
