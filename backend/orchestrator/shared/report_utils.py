@@ -4,6 +4,7 @@ import glob
 import logging
 import re
 import textwrap
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("report_utils")
@@ -21,7 +22,132 @@ def _get_pdf_font_path() -> Optional[str]:
     return None
 
 
-def _write_pdf_report(report_text: str, filepath: str) -> None:
+def _render_markdown_html(report_text: str) -> str:
+    try:
+        import markdown
+    except Exception as e:
+        raise RuntimeError(
+            "Python-Markdown не установлен. Добавьте зависимость Markdown в окружение."
+        ) from e
+
+    return markdown.markdown(
+        report_text or "",
+        extensions=["extra", "sane_lists", "nl2br"],
+        output_format="html5",
+    )
+
+
+def _build_pdf_html_document(report_text: str) -> str:
+    body_html = _render_markdown_html(report_text)
+    return f"""<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    @page {{
+      size: A4;
+      margin: 18mm 16mm 18mm 16mm;
+    }}
+    body {{
+      font-family: "DejaVu Sans", "Noto Sans", sans-serif;
+      font-size: 11pt;
+      line-height: 1.45;
+      color: #1f2937;
+    }}
+    h1, h2, h3, h4 {{
+      color: #111827;
+      font-weight: 700;
+      line-height: 1.2;
+      margin: 1.1em 0 0.45em;
+    }}
+    h1 {{
+      font-size: 22pt;
+      border-bottom: 2px solid #d1d5db;
+      padding-bottom: 8px;
+      margin-top: 0;
+    }}
+    h2 {{ font-size: 16pt; }}
+    h3 {{ font-size: 13pt; }}
+    p, ul, ol, blockquote, table, pre {{
+      margin: 0.45em 0 0.85em;
+    }}
+    ul, ol {{
+      padding-left: 1.4em;
+    }}
+    table {{
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+      font-size: 9.5pt;
+    }}
+    th, td {{
+      border: 1px solid #cbd5e1;
+      padding: 6px 8px;
+      vertical-align: top;
+      word-wrap: break-word;
+      overflow-wrap: anywhere;
+    }}
+    th {{
+      background: #f3f4f6;
+      font-weight: 700;
+    }}
+    code {{
+      font-family: "DejaVu Sans Mono", monospace;
+      font-size: 9.5pt;
+      background: #f3f4f6;
+      padding: 1px 4px;
+      border-radius: 3px;
+    }}
+    pre {{
+      background: #111827;
+      color: #f9fafb;
+      padding: 10px 12px;
+      border-radius: 6px;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }}
+    pre code {{
+      background: transparent;
+      color: inherit;
+      padding: 0;
+    }}
+    blockquote {{
+      margin-left: 0;
+      padding: 10px 14px;
+      border-left: 4px solid #60a5fa;
+      background: #eff6ff;
+      color: #1e3a8a;
+    }}
+    hr {{
+      border: 0;
+      border-top: 1px solid #d1d5db;
+      margin: 1.2em 0;
+    }}
+    strong {{
+      color: #111827;
+    }}
+  </style>
+</head>
+<body>
+{body_html}
+</body>
+</html>
+"""
+
+
+def _write_weasyprint_pdf_report(report_text: str, filepath: str) -> None:
+    try:
+        from weasyprint import HTML
+    except Exception as e:
+        raise RuntimeError(
+            "WeasyPrint не установлен. Добавьте зависимость WeasyPrint и системные библиотеки cairo/pango/gdk-pixbuf."
+        ) from e
+
+    document_html = _build_pdf_html_document(report_text)
+    HTML(string=document_html, base_url=os.getcwd()).write_pdf(filepath)
+
+
+def _write_plain_text_pdf_report(report_text: str, filepath: str) -> None:
     try:
         import fitz  # PyMuPDF
     except Exception as e:
@@ -67,6 +193,19 @@ def _write_pdf_report(report_text: str, filepath: str) -> None:
 
     doc.save(filepath, deflate=True, garbage=4)
     doc.close()
+
+
+def _write_pdf_report(report_text: str, filepath: str) -> None:
+    try:
+        _write_weasyprint_pdf_report(report_text, filepath)
+        logger.info("report-renderer:weasyprint path=%s", filepath)
+    except Exception as exc:
+        logger.warning("report-renderer:pymupdf-fallback reason=%s", exc)
+        _write_plain_text_pdf_report(report_text, filepath)
+
+
+def _write_markdown_report(report_text: str, filepath: str) -> None:
+    Path(filepath).write_text(report_text, encoding="utf-8")
 
 
 def _read_report_text(filepath: str) -> str:
@@ -125,7 +264,12 @@ def save_report_with_dedup(
             os.makedirs(uploads_dir, exist_ok=True)
 
         now = time.time()
-        existing_reports = glob.glob(os.path.join(uploads_dir, f"{prefix}_*.pdf"))
+        existing_markdown_reports = glob.glob(os.path.join(uploads_dir, f"{prefix}_*.md"))
+        existing_reports = list(existing_markdown_reports)
+        for pdf_path in glob.glob(os.path.join(uploads_dir, f"{prefix}_*.pdf")):
+            markdown_pair = f"{os.path.splitext(pdf_path)[0]}.md"
+            if markdown_pair not in existing_reports and not os.path.exists(markdown_pair):
+                existing_reports.append(pdf_path)
         
         # Проверяем недавние отчеты
         for existing in existing_reports:
@@ -140,21 +284,28 @@ def save_report_with_dedup(
                             clean_count = re.sub(r'[^\d]', '', old_count_str)
                             if clean_count.isdigit() and int(clean_count) >= current_metric:
                                 logger.info(f"Duplicate report skipped (existing is better/equal). Existing: {existing}")
-                                return report_text + f"\n---\n**Отчет уже сохранен:** `{os.path.basename(existing)}`"
+                                existing_pdf = f"{os.path.splitext(existing)[0]}.pdf"
+                                return report_text + f"\n---\n**Отчет уже сохранен:** `{os.path.basename(existing_pdf if os.path.exists(existing_pdf) else existing)}`"
 
                         # Если новый отчет лучше (metric больше), удаляем старый
-                        os.remove(existing)
-                        logger.info(f"Removed older/worse report duplicate: {existing}")
+                        existing_base = os.path.splitext(existing)[0]
+                        for artifact in (f"{existing_base}.md", f"{existing_base}.pdf"):
+                            if os.path.exists(artifact):
+                                os.remove(artifact)
+                        logger.info(f"Removed older/worse report duplicate: {existing_base}")
                 except Exception as e:
                     logger.warning(f"Error reading existing report {existing}: {e}")
 
         # Сохраняем новый
-        filename = f"{prefix}_{int(now)}.pdf"
-        filepath = os.path.join(uploads_dir, filename)
-        _write_pdf_report(report_text, filepath)
+        basename = f"{prefix}_{int(now)}"
+        pdf_filename = f"{basename}.pdf"
+        pdf_filepath = os.path.join(uploads_dir, pdf_filename)
+        markdown_filepath = os.path.join(uploads_dir, f"{basename}.md")
+        _write_markdown_report(report_text, markdown_filepath)
+        _write_pdf_report(report_text, pdf_filepath)
             
-        logger.info(f"Saved new report: {filepath}")
-        return report_text + f"\n---\n**Отчет сохранен:** `{filename}`"
+        logger.info(f"Saved new report: pdf=%s markdown=%s", pdf_filepath, markdown_filepath)
+        return report_text + f"\n---\n**Отчет сохранен:** `{pdf_filename}`"
 
     except Exception as e:
         logger.error(f"Failed to save report: {e}")
