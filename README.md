@@ -111,7 +111,7 @@ git clone <repo-url> agent-navigator-pro && cd agent-navigator-pro
 Для Windows host:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/install/install_windows.ps1 -Mode Guide
+powershell -ExecutionPolicy Bypass -File scripts/install/install_windows.ps1 -CheckOnly
 ```
 
 Unified install path использует platform-specific wrappers и для Linux по-прежнему переиспользует heavy bootstrap через `scripts/setup_ubuntu.sh`.
@@ -142,7 +142,7 @@ Unified install path использует platform-specific wrappers и для L
 
 ```powershell
 # Windows host bootstrap for WSL-based development path
-powershell -ExecutionPolicy Bypass -File scripts/install/install_windows.ps1 -Mode Guide
+powershell -ExecutionPolicy Bypass -File scripts/install/install_windows.ps1 -CheckOnly
 ```
 
 Windows host path подготавливает WSL/Docker Desktop, а сам рабочий dev runtime для проекта остаётся Linux/WSL-first.
@@ -162,7 +162,8 @@ curl -fsSL https://raw.githubusercontent.com/<org>/agent-navigator-pro/v3.0/scri
 
 ```bash
 # 1. Системные зависимости
-sudo apt-get install -y tmux git curl wget docker.io docker-compose-plugin
+sudo apt-get install -y tmux git curl wget docker.io docker-compose-plugin \
+  libcairo2 libpango-1.0-0 libpangocairo-1.0-0 libgdk-pixbuf-2.0-0 shared-mime-info
 
 # 2. Miniconda
 wget -O miniconda.sh https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
@@ -170,9 +171,14 @@ bash miniconda.sh -b -p ~/miniconda3
 source ~/miniconda3/etc/profile.d/conda.sh
 
 # 3. Python env
-conda create -n diploma_llm python=3.11 -y
-conda activate diploma_llm
+conda activate base
 pip install -r backend/requirements.txt
+
+# Важно: requirements включают SQL/persistence-зависимости
+# (SQLAlchemy, aiosqlite, asyncpg). Без них Chainlit history/state
+# и backend persistence могут падать с неочевидными ошибками.
+# Для красивого markdown->PDF рендера отчётов также нужны Markdown + WeasyPrint
+# и системные библиотеки cairo/pango/gdk-pixbuf.
 
 # 4. Docker (если GPU)
 distribution=$(. /etc/os-release; echo $ID$VERSION_ID)
@@ -204,7 +210,13 @@ sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart doc
 ```bash
 cd backend
 cp .env.example .env
+cd ..
+./scripts/bootstrap_env.sh --check --target=native
 ```
+
+`bootstrap_env.sh` теперь делает базовую self-heal подготовку для `backend/.env`:
+- если `backend/.env` отсутствует, создаёт его из `backend/.env.example`;
+- если `CHAINLIT_AUTH_SECRET` пустой или оставлен дефолтным, автоматически генерирует новое значение и записывает его в `backend/.env`.
 
 Обязательно задать пути к моделям:
 
@@ -218,7 +230,8 @@ MODEL_PATH_EMBEDDING_RETRIEVAL="/path/to/models/st/LaBSE"
 # GPU: -1 = все слои на GPU, 0 = CPU only
 N_GPU_LAYERS_QWEN14B=-1
 
-# Сменить для production
+# Bootstrap сам сгенерирует CHAINLIT_AUTH_SECRET, если он пустой/дефолтный.
+# Для production всё равно проверьте и смените пароли ниже.
 CHAINLIT_ADMIN_PASSWORD="your-secure-password"
 CHAINLIT_AUTH_SECRET="your-secret-key"
 ```
@@ -247,7 +260,7 @@ Legacy aliases в тексте и конфиге сохранены для об�
 AGENT_NAVIGATOR_ALLOW_INSECURE_DEFAULTS=1
 ```
 
-Но в production bootstrap считает дефолтные `CHAINLIT_AUTH_SECRET`, `CHAINLIT_ADMIN_PASSWORD` и `GF_SECURITY_ADMIN_PASSWORD` недопустимыми.
+Но в production bootstrap считает дефолтные `CHAINLIT_ADMIN_PASSWORD` и `GF_SECURITY_ADMIN_PASSWORD` недопустимыми, а `CHAINLIT_AUTH_SECRET` при пустом/дефолтном значении ротирует автоматически в `backend/.env`.
 
 ### 3. Сборка Docker-образа
 
@@ -306,6 +319,98 @@ HF_HOME=/mnt/d/hf-cache ./scripts/models/install_models.sh --ensure-present --as
 
 `--models-root` в `launcher.sh` и `install_models.sh` строит канонический layout внутри указанного root. Для постоянной конфигурации всё равно лучше зафиксировать абсолютные пути в `backend/.env.native`.
 
+Runtime preflight теперь прозрачно показывает placement plan:
+
+```bash
+python scripts/runtime_preflight.py detect
+python scripts/runtime_preflight.py plan --profile adaptive
+python scripts/runtime_preflight.py apply --profile adaptive --report-only
+```
+
+В `plan/report` теперь видны:
+- `llm_model_id`
+- `llm_quant`
+- `llm_ctx_size`
+- `llm_gpu_layers`
+- `embedding_backend`
+- `embedding_device`
+- `admission` по компонентам: `ok | degraded_candidate | requires_degraded | blocked`
+- `placements.llm`
+- `placements.vlm`
+- `placements.intent_embedder`
+- `placements.retrieval_embedder`
+- `warnings`, если auto выбрал CPU-only path при наличии GPU или если manual GPU request требует `hybrid` / `requires_degraded`
+
+Важно: общий `device_mode` не означает, что все компоненты обязательно идут одинаково. Сейчас plan отдельно показывает, куда размещаются:
+- большая LLM
+- VLM
+- classifier intent embedder
+- retrieval embedder
+
+Для LLM `hybrid` считается отдельным execution mode, а не fallback. Если full GPU placement невозможен, preflight/launcher теперь явно показывают:
+- `requested_device`
+- `resolved_device`
+- `admission`
+
+Это нужно, чтобы до старта было видно, пойдёт ли runtime по normal path, по `hybrid`, или потребует `reduced-context` / degraded execution.
+
+Для GPU layers используется канонический public contract:
+
+```bash
+GPU_LAYERS_MODE=auto|max|manual
+N_GPU_LAYERS_OVERRIDE=24
+LLM_DEVICE_MODE=cpu|gpu|hybrid
+VLM_DEVICE_MODE=cpu|gpu|hybrid
+INTENT_EMBEDDER_DEVICE_MODE=cpu|gpu|hybrid
+RETRIEVAL_EMBEDDER_DEVICE_MODE=cpu|gpu|hybrid
+```
+
+Через launcher:
+
+```bash
+./scripts/launcher.sh --target native --gpu-layers-mode max
+./scripts/launcher.sh --target native --gpu-layers-mode manual --gpu-layers 24
+./scripts/launcher.sh --target native --device-mode gpu
+```
+
+Для постоянных user-owned overrides используйте `backend/.env.hardware.override`, а не applied `backend/.env.runtime`.
+`DEVICE_MODE` остаётся общим fallback для heavy runtime path, а component-specific переменные позволяют явно задать placement для LLM, VLM, intent embedder и retrieval embedder.
+
+Можно работать двумя способами:
+- через флаги `launcher.sh`
+- через файл overrides
+
+Примеры:
+
+```bash
+./scripts/launcher.sh --target native --llm-device-mode gpu --gpu-layers-mode max
+./scripts/launcher.sh --target native --hardware-override-file /mnt/d/agent-models/runtime.override.env
+cp backend/.env.hardware.override.example backend/.env.hardware.override
+```
+
+Если проект обновлялся поверх старого окружения или раньше ставился неполный набор пакетов, безопасно повторно выполнить:
+
+```bash
+cd backend && pip install -r requirements.txt
+```
+
+Это особенно важно для SQL/persistence-зависимостей:
+- `SQLAlchemy`
+- `aiosqlite`
+- `asyncpg`
+
+Если `conda` ругается на `ToSNonInteractiveError`, это не runtime-баг проекта, а непринятые Terms of Service для каналов Anaconda. Официальный способ:
+
+```bash
+conda tos accept
+```
+
+или точечно:
+
+```bash
+conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+```
+
 Используемые Hugging Face источники:
 - `Qwen/Qwen2.5-14B-Instruct-GGUF`
 - `Qwen/Qwen3-VL-8B-Instruct-GGUF`
@@ -313,6 +418,25 @@ HF_HOME=/mnt/d/hf-cache ./scripts/models/install_models.sh --ensure-present --as
 - `sentence-transformers/LaBSE`
 
 Полная карта runtime-скриптов, их роли и ограничения описана в [docs/scripts/README.md](docs/scripts/README.md).
+
+## TIERS 1|2|3|4
+
+Tier выбирается автоматически по железу через `TierSelector`; для ручной фиксации можно использовать `TIER_OVERRIDE=1|2|3|4`.
+Это не marketing label, а честное описание того, какой retrieval/runtime path система реально может поддержать на текущем железе.
+
+| Tier | Типичный профиль | Что включается | Что можно делать | Что нельзя ожидать |
+| --- | --- | --- | --- | --- |
+| `Tier 1` | CPU-only, базовый RAM profile | `basic retrieval`, `Qwen 7B Q4`, `ctx=4096`, embeddings на `cpu`, `BM25`, без reranker | обычный чат, простые RAG-вопросы по загруженным документам, базовый `document_analysis`, небольшие сравнения документов, сохранение отчётов | нет `corrective retrieval`, нет reranker, нет iterative loop, нет multi-agent path; хуже работает на длинных/шумных документах и больших батчах |
+| `Tier 2` | RAM-heavy CPU или слабый GPU, mixed CPU/GPU path | `corrective retrieval`, `Qwen 14B Q4`, `ctx=8192`, `BM25`, embeddings на `cpu` или `cuda` по бюджету VRAM | более стабильный document QA, `compare_documents`, `equipment_analysis`, работа с более длинным контекстом, лучшее восстановление после слабого первого retrieval | нет reranker, нет `iterative retrieval`, нет `planned multi-agent`; параллелизм LLM остаётся ограниченным |
+| `Tier 3` | Single-GPU runtime, начиная примерно с `12 GB` usable VRAM; лучший path от `24 GB+` | `iterative retrieval`, reranker, `ctx=16384`, `Qwen 14B/32B`, embeddings на `cuda`, `BM25` | сложные RAG-вопросы, более качественная работа с неоднозначными запросами, длинный контекст, тяжёлый `equipment_analysis`, более уверенный retrieval на больших документах | это не полноценный autonomous multi-agent runtime; нет обещания общего planner/tool swarm, `max_concurrent_llm` по-прежнему консервативен |
+| `Tier 4` | Multi-GPU или high-end VRAM profile | `planned multi-agent`, `Qwen 72B Q4`, `ctx=32768`, reranker, `BGE-M3`, embeddings на `cuda`, повышенный concurrency | максимальный throughput, самые большие batch/scenario для сравнения и document QA, лучший запас по контексту и retrieval quality, более агрессивный high-end runtime | label `planned multi-agent` не означает, что в текущем public runtime уже доступен полноценный general-purpose multi-agent orchestration; это подготовленный high-end path, а не обещание полного agent swarm |
+
+Коротко по фичам:
+
+- На всех tiers доступны чат, RAG по загруженным документам, `document_analysis`, `compare_documents`, `equipment_analysis`, `BM25` и сохранение markdown-отчётов.
+- Начиная с `Tier 2`, система лучше выдерживает длинные документы и ошибки первого retrieval pass.
+- Начиная с `Tier 3`, включаются reranker и iterative retrieval, что заметно важнее для сложного document QA, чем просто рост размера модели.
+- `Tier 4` сейчас нужно читать как high-end runtime preparation layer. До появления отдельного planner/tool-use runtime не стоит продавать его как уже реализованный полноценный multi-agent режим.
 
 Совместимые wrapper scripts сохранены:
 
@@ -342,6 +466,12 @@ powershell -ExecutionPolicy Bypass -File scripts/install/install_windows.ps1
 ```
 
 Windows host path подготавливает WSL/Docker Desktop, а сам рабочий dev runtime для проекта остаётся Linux/WSL-first.
+
+Для `WSL` installer ведёт себя guided-образом:
+- сначала печатает ожидания по Docker Desktop / WSL integration;
+- если `docker` внутри `WSL` не виден или daemon недоступен, не пытается молча ставить Docker Engine в дистрибутив;
+- вместо этого выводит явную причину и спрашивает, пропустить ли Docker step или остановиться.
+- repo-managed `tmux` конфиги тоже ставятся аккуратно: если файл уже совпадает с шаблоном, он не трогается; если отличается, installer спрашивает перед overwrite.
 
 ### 5. Отдельный запуск Chainlit
 

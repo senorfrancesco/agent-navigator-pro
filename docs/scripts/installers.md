@@ -17,7 +17,7 @@
 
 | Platform | Entry point | Current behavior | Official references |
 | --- | --- | --- | --- |
-| Windows host | `powershell -ExecutionPolicy Bypass -File scripts/install/install_windows.ps1 -Mode Guide` | Проверяет WSL / `winget`; в safe mode печатает guided steps и направляет в WSL-based path | Microsoft WSL install docs, Docker Desktop docs |
+| Windows host | `powershell -ExecutionPolicy Bypass -File scripts/install/install_windows.ps1 -CheckOnly` | Проверяет WSL / `winget`; в safe mode печатает guided steps и направляет в WSL-based path | Microsoft WSL install docs, Docker Desktop docs |
 | WSL Ubuntu | `./scripts/install/install.sh --platform=wsl` | Делегирует в heavy Ubuntu install flow внутри WSL | Microsoft WSL docs, Ubuntu on WSL docs |
 | Ubuntu Desktop | `./scripts/install/install.sh --platform=ubuntu` | Делегирует в `scripts/setup_ubuntu.sh` | Docker Engine on Ubuntu, Python venv, llama.cpp |
 | Ubuntu Server | `./scripts/install/install.sh --platform=ubuntu-server` | Делегирует в `scripts/setup_ubuntu.sh` | Ubuntu Server docs, Docker Engine on Ubuntu, NVIDIA CUDA Linux |
@@ -67,10 +67,10 @@ scripts/
 
 ### `scripts/install/install_wsl.sh`
 
-- Делает: валидирует запуск внутри WSL и делегирует в существующий Ubuntu installer flow.
+- Делает: валидирует запуск внутри WSL, печатает expected Docker Desktop / WSL integration contract и делегирует в существующий Ubuntu installer flow.
 - Не делает: не ставит WSL на Windows host и не настраивает Docker Desktop integration на стороне Windows.
 - Зависимости: WSL environment, `scripts/setup_ubuntu.sh`.
-- Успех проверяется через: запуск из WSL и успешный exit code legacy installer flow.
+- Успех проверяется через: запуск из WSL и явный guided flow без silent failure на Docker step.
 - Official docs: Microsoft WSL install docs, Ubuntu on WSL docs.
 
 ### `scripts/install/install_ubuntu.sh`
@@ -80,6 +80,21 @@ scripts/
 - Зависимости: `scripts/setup_ubuntu.sh`.
 - Успех проверяется через: успешный exit code legacy installer flow.
 - Official docs: Docker Engine on Ubuntu, Python venv, llama.cpp.
+
+### `scripts/setup_ubuntu.sh`
+
+- Делает: heavy Ubuntu/WSL installer path для зависимостей, Python env и runtime prerequisites.
+- Для `WSL`: Docker step теперь работает как guided check, а не как silent attempt to install Docker Engine inside distro.
+- Если `docker` не виден в `WSL` или daemon недоступен, скрипт:
+  - печатает, что ожидается Docker Desktop на Windows host;
+  - подсказывает проверить WSL integration;
+  - спрашивает, пропустить Docker step или остановиться.
+- Для repo-managed конфигов:
+  - определяет `PROJECT_ROOT` явно;
+  - не перезаписывает существующие пользовательские `tmux` конфиги вслепую;
+  - если файл уже совпадает с репозиторным шаблоном, пропускает его;
+  - если файл отличается, спрашивает перед overwrite.
+- Не делает: не пытается непрозрачно лечить Docker Desktop / WSL integration на стороне Windows.
 
 ### `scripts/install/install_ubuntu_server.sh`
 
@@ -132,7 +147,7 @@ scripts/
 ### `scripts/models/install_models.sh`
 
 - Делает: скачивает или валидирует наличие model artifacts в канонических `MODEL_PATH_*`, разделяя `core` set (`LLM + intent + retrieval`) и `all` (`core + VLM + mmproj`).
-- Не делает: не переписывает `.env` автоматически и не меняет runtime profile; если модели лежат на другом диске, пользователь фиксирует absolute paths в `backend/.env.native`.
+- Не делает: не меняет runtime profile; если модели лежат на другом диске, пользователь фиксирует absolute paths в `backend/.env.native`. При этом bootstrap/install path может создать `backend/.env` из шаблона и автоматически записать `CHAINLIT_AUTH_SECRET`, если он отсутствует или остался дефолтным.
 - Зависимости: `huggingface_hub`, доступ к model source, свободное место на диске, явные target directories.
 - Успех проверяется через: наличие ожидаемых файлов/директорий, контроль путей и печать канонического env block для `MODEL_PATH_LLM`, `MODEL_PATH_VLM`, `MMPROJ_PATH`, `MODEL_PATH_EMBEDDING_INTENT`, `MODEL_PATH_EMBEDDING_RETRIEVAL`.
 - Official docs and source ids:
@@ -175,3 +190,92 @@ scripts/
 - `build_llamacpp.sh` описан по текущему upstream `ggml-org/llama.cpp`: upstream рекомендует build from source и использует `llama-server` как OpenAI-compatible HTTP server.
 - `install_models.sh` привязан к Hugging Face docs, где официально описан `hf download`.
 - Windows/WSL path дополнительно опирается на Microsoft WSL docs, Docker Desktop WSL docs и Python-on-Windows docs.
+
+## Python Dependencies Note
+
+`backend/requirements.txt` считается каноническим списком Python-зависимостей не только для ML/runtime, но и для SQL/persistence слоя.
+
+Для корректной работы `Chainlit` history/state и backend persistence должны быть установлены как минимум:
+
+- `SQLAlchemy`
+- `aiosqlite`
+- `asyncpg`
+- `Markdown`
+- `WeasyPrint`
+
+Для красивого markdown->PDF рендера отчётов на Ubuntu/WSL нужны и системные библиотеки:
+
+- `libcairo2`
+- `libpango-1.0-0`
+- `libpangocairo-1.0-0`
+- `libgdk-pixbuf-2.0-0`
+- `shared-mime-info`
+
+Если проект уже разворачивался раньше на частичном наборе пакетов, повторите:
+
+```bash
+cd backend && pip install -r requirements.txt
+```
+
+Это безопаснее, чем точечно лечить runtime-ошибки после падения `Chainlit` или state store.
+
+## Conda Note
+
+В текущем installer/runtime contract проект больше не требует обязательного отдельного env `diploma_llm`. Safe path:
+
+```bash
+conda activate base
+cd backend && pip install -r requirements.txt
+```
+
+Если `conda` падает с `ToSNonInteractiveError`, используйте официальные команды принятия условий:
+
+```bash
+conda tos accept
+```
+
+или точечно:
+
+```bash
+conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+```
+
+## Runtime placement note
+
+После установки system/runtime path больше не скрывает hardware placement decision. Перед стартом можно посмотреть:
+
+```bash
+python scripts/runtime_preflight.py detect
+python scripts/runtime_preflight.py plan --profile adaptive
+```
+
+И при необходимости переопределить:
+
+```bash
+./scripts/launcher.sh --target native --gpu-layers-mode max
+./scripts/launcher.sh --target native --gpu-layers-mode manual --gpu-layers 24
+./scripts/launcher.sh --target native --device-mode gpu
+```
+
+Для постоянных user-owned overrides используйте `backend/.env.hardware.override`, а не `backend/.env.runtime`.
+
+`runtime_preflight plan` теперь показывает placement summary по компонентам, а не только один общий `device_mode`:
+- `llm`
+- `vlm`
+- `intent_embedder`
+- `retrieval_embedder`
+
+Для точечного override используйте:
+- `LLM_DEVICE_MODE=cpu|gpu|hybrid`
+- `VLM_DEVICE_MODE=cpu|gpu|hybrid`
+- `INTENT_EMBEDDER_DEVICE_MODE=cpu|gpu|hybrid`
+- `RETRIEVAL_EMBEDDER_DEVICE_MODE=cpu|gpu|hybrid`
+
+`DEVICE_MODE` остаётся fallback для heavy runtime path и не означает автоматически, что embeddings тоже пойдут в тот же placement.
+
+Launcher поддерживает оба режима:
+- через флаги, например `--llm-device-mode gpu --gpu-layers-mode max`
+- через файл, например `--hardware-override-file /path/to/runtime.override.env`
+
+Базовый шаблон лежит в:
+- `backend/.env.hardware.override.example`
