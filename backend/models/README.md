@@ -17,9 +17,12 @@
 Разместите ваши файлы моделей в соответствующих подпапках.
 
 ### 2. Конфигурация
-Настройте переменные окружения, чтобы указать пути к вашим моделям. Канонический env contract использует универсальные имена, а старые переменные сохранены как legacy aliases. Пути должны указывать на содержимое внутри `models/gguf/` или `models/st/`.
+Настройте переменные окружения, чтобы указать путь к каноническому registry и пути к model artifacts. Role bindings и fallback policy теперь живут в `backend/config/models.yaml`. Env contract использует универсальные имена для путей, а старые переменные сохранены как legacy aliases. Пути должны указывать на содержимое внутри `models/gguf/` или `models/st/`.
 
 ```bash
+# Канонический registry моделей и ролей
+export MODEL_REGISTRY_CONFIG_PATH="./config/models.yaml"
+
 # Канонические переменные для GGUF моделей
 export MODEL_PATH_LLM="./models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
 export MODEL_PATH_VLM="./models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
@@ -33,6 +36,7 @@ export MODEL_PATH_EMBEDDING_RETRIEVAL="./models/st/LaBSE" # Путь к папк
 Если модели лежат на другом диске, используйте абсолютные пути. Для `WSL` это обычно `/mnt/d/...`, например:
 
 ```bash
+export MODEL_REGISTRY_CONFIG_PATH="/mnt/d/agent-navigator-pro/backend/config/models.yaml"
 export MODEL_PATH_LLM="/mnt/d/agent-models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
 export MODEL_PATH_VLM="/mnt/d/agent-models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
 export MMPROJ_PATH="/mnt/d/agent-models/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf"

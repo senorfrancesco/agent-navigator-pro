@@ -16,9 +16,21 @@
 
 Для локального `llama-server` prompt-cache policy управляется отдельно через `UMS_LLAMA_CACHE_PROMPT=true|false`. Effective policy публикуется в `UMS /status -> prompt_cache_policy` и используется benchmark probe `prompt_cache_probe`.
 
+## Model registry contract
+
+Канонический source of truth для model registry, role bindings и preload policy теперь находится в:
+
+- `backend/config/models.yaml`
+
+Env больше не считается основным местом выбора model id для workflow/runtime. Он используется для:
+- пути к registry (`MODEL_REGISTRY_CONFIG_PATH`, если нужен override);
+- путей к model artifacts;
+- operator/runtime overrides;
+- секретов и service URLs.
+
 ## Model path contract
 
-Для путей моделей канонический env contract теперь такой:
+Для путей к артефактам моделей канонический env contract такой:
 
 - `MODEL_PATH_LLM`
 - `MODEL_PATH_VLM`
@@ -62,7 +74,9 @@ Runtime profiles не меняют этот contract. Они управляют 
   - `device_mode=low-vram`
   - `context_budget_profile=compact`
 
-UI отправляет только `model_profile`, а backend резолвит effective config через env-backed mapping:
+UI отправляет только `model_profile`, а backend резолвит effective config через `models.yaml`.
+
+Legacy env overrides для совместимости ещё допустимы, но считаются deprecated:
 
 - `CHAINLIT_MODEL_PROFILE_DEFAULT_CHAT_MODEL`
 - `CHAINLIT_MODEL_PROFILE_LONG_CONTEXT_MODEL`
@@ -73,11 +87,11 @@ Embedder routing тоже backend-owned и сейчас резолвится б�
 
 - intent embedder:
   - `CHAINLIT_INTENT_EMBEDDER_PROFILE_DEFAULT_MODEL`
-  - default -> `qwen3-embedding-0.6b`
+  - canonical primary/fallback берутся из `models.yaml`
 - retrieval/legal embedder:
   - `CHAINLIT_RETRIEVAL_EMBEDDER_PROFILE_LEGAL_DEFAULT_MODEL`
   - `CHAINLIT_RETRIEVAL_EMBEDDER_PROFILE_LOW_VRAM_MODEL`
-  - current baseline stays `labse-embedding` until retrieval verdict changes
+  - canonical primary/fallback берутся из `models.yaml`
 
 Итоговый effective config публикует:
 - `resolved_model_id`

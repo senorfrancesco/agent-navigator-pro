@@ -13,39 +13,59 @@
 
 ```mermaid
 graph TD
-    subgraph Docker ["Docker"]
-        CL["Chainlit UI :3000"]
-        OW["Open WebUI (legacy) :3001"]
-    end
+    classDef ui fill:#0f766e,color:#ffffff,stroke:#134e4a,stroke-width:2px;
+    classDef runtime fill:#334155,color:#ffffff,stroke:#1e293b,stroke-width:2px;
+    classDef service fill:#c2410c,color:#ffffff,stroke:#9a3412,stroke-width:2px;
+    classDef data fill:#64748b,color:#ffffff,stroke:#475569,stroke-width:2px;
+    classDef legacy fill:#f3f4f6,color:#111827,stroke:#94a3b8,stroke-width:2px,stroke-dasharray: 6 4;
 
-    subgraph Host ["Local Host"]
-        AG["Agent API :8000"]
-        ORCH["LangGraph Workflows"]
+    subgraph RUNTIME ["Runtime Path"]
+        USER["Пользователь"]
+        CL["Chainlit :3000<br/>основной UI"]
+        OW["Open WebUI :3001<br/>legacy UI"]
+        AG["Agent API :8000<br/>OpenAI-compatible API"]
+        CORE["Execution core<br/>routing + workflows + doc QA"]
         DS["Document Server :8001"]
         LS["Legal Server :8002"]
-        UMS["Unified Model Server :8090"]
-        LLM["llama-server (Qwen)"]
-        ST["st_server (LaBSE)"]
+        UMS["UMS :8090<br/>infer + status + embeddings"]
+        LLM["llama-server<br/>локальный gguf"]
+        EMB["st_server<br/>LaBSE / Qwen3 Embedding"]
+        VLLM["remote vLLM<br/>optional upstream"]
+
+        USER --> CL
+        USER -. optional .-> OW
+        CL --> AG
+        OW -. legacy path .-> AG
+        AG --> CORE
+        CORE --> DS
+        CORE --> LS
+        CORE --> UMS
+        DS --> UMS
+        LS --> UMS
+        UMS --> LLM
+        UMS --> EMB
+        UMS -. BACKEND_MODE=vllm .-> VLLM
     end
 
-    subgraph Storage ["Shared Storage"]
-        UP["backend/open_webui_uploads"]
-        DB["Chainlit SQLite history"]
+    subgraph DATA ["Data Path"]
+        UP["open_webui_uploads"]
+        CHDB["Chainlit SQLite"]
+        STDB["orchestrator_state.db"]
+        KB["orchestrator_kb.db"]
+
+        CL --> CHDB
+        CL --> UP
+        OW --> UP
+        CORE --> UP
+        CORE --> STDB
+        CORE --> KB
     end
 
-    CL --> AG
-    OW --> AG
-    AG --> ORCH
-    ORCH --> DS
-    ORCH --> LS
-    DS --> UMS
-    LS --> UMS
-    UMS --> LLM
-    UMS --> ST
-    CL --> UP
-    OW --> UP
-    AG --> UP
-    CL --> DB
+    class CL,USER ui;
+    class AG,CORE,UMS,LLM,EMB,VLLM runtime;
+    class DS,LS service;
+    class UP,CHDB,STDB,KB data;
+    class OW legacy;
 ```
 
 ## Основные компоненты
@@ -218,10 +238,13 @@ cd ..
 - если `backend/.env` отсутствует, создаёт его из `backend/.env.example`;
 - если `CHAINLIT_AUTH_SECRET` пустой или оставлен дефолтным, автоматически генерирует новое значение и записывает его в `backend/.env`.
 
-Обязательно задать пути к моделям:
+Обязательно задать канонический registry и пути к model artifacts:
 
 ```bash
-# Канонический env contract: пути задаём через универсальные имена
+# Канонический source of truth для model/role bindings
+MODEL_REGISTRY_CONFIG_PATH="/path/to/repo/backend/config/models.yaml"
+
+# Пути к артефактам моделей
 MODEL_PATH_LLM="/path/to/models/gguf/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
 MODEL_PATH_VLM="/path/to/models/gguf/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
 MODEL_PATH_EMBEDDING_INTENT="/path/to/models/st/Qwen3-Embedding-0.6B"
@@ -236,9 +259,12 @@ CHAINLIT_ADMIN_PASSWORD="your-secure-password"
 CHAINLIT_AUTH_SECRET="your-secret-key"
 ```
 
+`backend/config/models.yaml` теперь хранит registry моделей, role bindings (`primary` / `fallback`), tier policy и preload sequence для `UMS`.
+
 Для `WSL` и случаев, когда на системном диске не хватает места, модели можно хранить на другом диске и указывать абсолютные пути, например `/mnt/d/agent-models/...`:
 
 ```bash
+MODEL_REGISTRY_CONFIG_PATH="/mnt/d/agent-navigator-pro/backend/config/models.yaml"
 MODEL_PATH_LLM="/mnt/d/agent-models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
 MODEL_PATH_VLM="/mnt/d/agent-models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
 MMPROJ_PATH="/mnt/d/agent-models/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf"
@@ -248,11 +274,13 @@ MODEL_PATH_EMBEDDING_RETRIEVAL="/mnt/d/agent-models/st/LaBSE"
 
 Windows-ярлыки не нужны: для `WSL` достаточно обычных путей `/mnt/d/...`.
 
-Legacy aliases в тексте и конфиге сохранены для обратной совместимости:
+Legacy aliases для путей сохранены только для compatibility rollout:
 `MODEL_PATH_QWEN14B` -> `MODEL_PATH_LLM`,
 `MODEL_PATH_QWENVL` -> `MODEL_PATH_VLM`,
 `MODEL_PATH_QWEN3_EMBEDDING_06B` -> `MODEL_PATH_EMBEDDING_INTENT`,
 `MODEL_PATH_LABSE` -> `MODEL_PATH_EMBEDDING_RETRIEVAL`.
+
+Выбор primary/fallback модели через env больше не считается каноническим путём. Для новых конфигураций binding ролей задаётся в `models.yaml`, а env используется только как override layer и path/secrets contract.
 
 Для local/dev launcher допускает override:
 

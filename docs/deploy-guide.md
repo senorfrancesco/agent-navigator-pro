@@ -164,7 +164,8 @@ cp backend/.env.example backend/.env
 Отредактировать `backend/.env`:
 
 ```bash
-# Канонический env contract для путей моделей: значения должны быть АБСОЛЮТНЫМИ на сервере
+# Канонический registry и env contract для путей моделей: значения должны быть АБСОЛЮТНЫМИ на сервере
+MODEL_REGISTRY_CONFIG_PATH="/opt/agent-navigator-pro/backend/config/models.yaml"
 MODEL_PATH_LLM="/opt/agent-navigator-pro/backend/models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
 MODEL_PATH_VLM="/opt/agent-navigator-pro/backend/models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
 MODEL_PATH_EMBEDDING_INTENT="/opt/agent-navigator-pro/backend/models/st/Qwen3-Embedding-0.6B"
@@ -194,10 +195,11 @@ AGENT_NAVIGATOR_ALLOW_INSECURE_DEFAULTS=1
 
 # Intent classifier
 INTENT_CLASSIFIER_MODE="embedder"
-INTENT_CLASSIFIER_EMBEDDER_MODEL="qwen3-embedding-0.6b"
 INTENT_CLASSIFIER_EMBEDDER_CONFIDENCE_THRESHOLD="0.60"
 INTENT_CLASSIFIER_EMBEDDER_MARGIN_THRESHOLD="0.10"
 ```
+
+Role bindings (`primary` / `fallback`) и preload policy теперь берутся из `backend/config/models.yaml`. Legacy env overrides для model id допускаются только как compatibility layer.
 
 Legacy aliases для rollout и старых инсталляций всё ещё допустимы:
 `MODEL_PATH_QWEN14B` -> `MODEL_PATH_LLM`,
