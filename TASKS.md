@@ -1217,12 +1217,16 @@
 
 ### H8 — LangGraph Studio: конфигурация (T5.2)
 
-- [ ] **T5.2 — langgraph.json для визуальной отладки в LangGraph Studio**
+- [x] **T5.2 — langgraph.json для визуальной отладки в LangGraph Studio**
   Контекст: наши workflows (`compare.py`, `equipment.py`, `document_analysis.py`) используют стандартный LangGraph `StateGraph` и полностью совместимы с LangGraph Studio. Studio позволяет визуально отлаживать граф без изменений в коде.
   Что сделать:
   - Создать `backend/langgraph.json` с регистрацией трёх workflows
   - Документировать запуск: `cd backend && langgraph dev`
   - Добавить в `docs/` краткую инструкцию по отладке через Studio
+  Сделано:
+  - добавлен `backend/langgraph.json` с entrypoints для `compare`, `equipment`, `document_analysis`
+  - добавлена инструкция `docs/langgraph-studio.md`
+  - статически проверено, что все три factory entrypoint импортируются и строят `CompiledStateGraph`
   Примечание: Open WebUI совместим через `agent_api.py` (OpenAI-compat), но теряет `cl.Step` визуализацию. LangFlow — несовместим без переписывания. LangGraph Studio — рекомендуется для дебага.
 
 ### H9 — Full-Stack Test Contour (T6.x)
@@ -1335,6 +1339,199 @@
   - Зафиксировать минимальный observability contract для `agent-api` и `ums`
   Verification:
   - `pytest backend/tests/test_observability_contract.py -q`
+
+#### Practical rollout plan for T6.1-T6.3
+
+- [x] **T6.1a — E2E harness scaffold для Chainlit browser tests**
+  Что сделать:
+  - завести структуру:
+    - `tests/e2e/chainlit/`
+    - `tests/e2e/fixtures/`
+    - `tests/e2e/pages/`
+    - `playwright.config.ts`
+  - определить один canonical browser project для CI (`chromium`) и optional local projects для ручного прогона
+  - выбрать единый способ поднятия окружения:
+    - либо через `webServer`/shell command,
+    - либо через отдельный pre-start script для compose stack
+  - зафиксировать output/artifacts policy:
+    - trace on first retry
+    - screenshot on failure
+    - video retain on failure
+  Рекомендуемый first slice:
+  - пока без multi-browser; только `chromium`
+  Verification:
+  - `npx playwright test --list`
+  Сделано:
+  - добавлены `package.json`, `playwright.config.ts`, `tests/e2e/chainlit/`, `tests/e2e/fixtures/`, `tests/e2e/pages/`
+  - зафиксирован один canonical project `chromium`
+  - policy артефактов: `trace=on-first-retry`, `screenshot=only-on-failure`, `video=retain-on-failure`
+  - проверка `npm run test:e2e:list` проходит и видит `2` теста
+
+- [x] **T6.1b — Stable test hooks для Chainlit UI**
+  Контекст: без стабильных locator hooks Playwright suite быстро станет flaky.
+  Что сделать:
+  - определить minimal set test hooks / stable selectors для:
+    - login form
+    - main chat input
+    - upload trigger
+    - thread list / current thread title
+    - message bubble / assistant response container
+    - download/report link
+  - избегать привязки только к локализованному тексту UI
+  Verification:
+  - smoke locator test в `tests/e2e/chainlit/ui-smoke.spec.ts`
+  Сделано:
+  - hooks подключены через `Chainlit` `custom_js/custom_css`, без правок frontend bundle
+  - добавлены стабильные селекторы для login form, main chat input, upload trigger, thread list/current thread, assistant response container, report download link
+  - добавлен smoke locator test `tests/e2e/chainlit/ui-smoke.spec.ts`
+  - pytest-проверка wiring/hooks проходит в `backend/tests/test_chainlit_runtime_mode.py`
+
+- [ ] **T6.1c — Canonical browser scenarios v1**
+  Что сделать:
+  - реализовать первые 4 browser tests:
+    - `chat-smoke.spec.ts`
+    - `doc-question-upload.spec.ts`
+    - `compare-two-docs.spec.ts`
+    - `thread-reload-persistence.spec.ts`
+  - все тесты должны использовать общие fixtures/page objects, а не ad-hoc selectors в каждом файле
+  - upload fixtures держать в репозитории как маленькие deterministic test documents
+  Verification:
+  - `npx playwright test tests/e2e/chainlit/chat-smoke.spec.ts`
+  - `npx playwright test tests/e2e/chainlit/thread-reload-persistence.spec.ts`
+
+- [x] **T6.2a — Compose smoke harness**
+  Что сделать:
+  - создать pytest/shell harness для full-stack smoke:
+    - up stack
+    - wait for readiness
+    - collect status on failure
+    - teardown
+  - в случае падения печатать:
+    - `docker compose ps`
+    - target service logs tail
+    - failing probe endpoint
+  - не смешивать это с browser E2E; harness должен быть reusable и для API smoke, и для Playwright
+  Предлагаемые файлы:
+  - `backend/tests/test_full_stack_smoke.py`
+  - `backend/tests/utils/full_stack.py`
+  Verification:
+  - `pytest backend/tests/test_full_stack_smoke.py -q`
+  Сделано:
+  - добавлены `backend/tests/utils/full_stack.py` и `backend/tests/test_full_stack_smoke.py`
+  - harness умеет поднимать compose stack, ждать readiness, собирать `docker compose ps`, logs tail и failing probe diagnostics
+  - readiness probes покрывают `agent-api`, `document-server`, `legal-server`, `ums`, `chainlit`
+  - локальная проверка: `pytest backend/tests/test_full_stack_smoke.py -q`
+
+- [ ] **T6.2b — Canonical full-stack smoke scenarios**
+  Что сделать:
+  - минимум 3 smoke tests:
+    - `all services healthy`
+    - `ums status exposes runtime metadata`
+    - `agent-api basic request path works against live stack`
+  - отдельно подтвердить что `chainlit` endpoint отвечает как UI, а не просто контейнер существует
+  Verification:
+  - `docker compose up -d`
+  - `pytest backend/tests/test_full_stack_smoke.py -q`
+
+- [ ] **T6.3a — SQLite migration fixture set**
+  Что сделать:
+  - подготовить deterministic legacy SQLite fixtures:
+    - schema before `command/defaultOpen/autoCollapse`
+    - schema with partial migration
+    - schema with existing rows
+  - хранить их как минимальные reproducible fixtures, а не копии реальной живой БД
+  Предлагаемые файлы:
+  - `backend/tests/fixtures/chainlit_sqlite/legacy_steps_v1.db`
+  - `backend/tests/fixtures/chainlit_sqlite/legacy_steps_partial.db`
+  Verification:
+  - fixture load test в `backend/tests/test_chainlit_persistence_e2e.py`
+
+- [ ] **T6.3b — Restart + migration persistence test**
+  Что сделать:
+  - реализовать E2E сценарий:
+    - поднять app на legacy DB fixture
+    - дождаться миграции
+    - создать thread / step / element
+    - остановить и поднять app снова
+    - убедиться, что данные читаются и schema не деградировала
+  - проверять отдельно:
+    - columns exist
+    - rows preserved
+    - новый write path не падает после migration
+  Verification:
+  - `pytest backend/tests/test_chainlit_persistence_e2e.py -q`
+
+- [ ] **T6.3c — No-delete operational contract**
+  Контекст: важно явно зафиксировать, что обычный remediation path для Chainlit SQLite — это migration/repair, а не удаление БД.
+  Что сделать:
+  - задокументировать в `README.md` или `docs/scripts/README.md`:
+    - когда БД удалять не нужно
+    - когда допустим backup + recreate
+    - как проверить текущую schema версии/колонки
+  - добавить operator note рядом с persistence tests
+  Verification:
+  - docs review + ссылка из `README.md`
+
+- [ ] **T6.1-T6.3 execution order**
+  Рекомендуемый порядок:
+  - `T6.1a` `DONE`
+  - `T6.1b` `DONE`
+  - `T6.2a` `DONE`
+  - `T6.2b`
+  - `T6.1c`
+  - `T6.3a`
+  - `T6.3b`
+  - `T6.3c`
+  Принцип:
+  - сначала stable harness и observability failure output,
+  - потом короткие smoke paths,
+  - затем persistence/restart scenarios,
+  - только после этого расширять suite в concurrency/perf/permissions.
+
+### H10 — Model Path Contract Simplification (TD10)
+
+- [x] **TD10 — Упростить contract путей моделей: registry для model_id/roles, env для filesystem paths**
+  Контекст: сейчас filesystem paths частично дублируются между `backend/config/models.yaml` и `backend/.env*`. Это создаёт лишнюю неоднозначность: логический `model_id` и runtime role должны жить в registry, а реальные пути файлов на машине — только в env.
+  Цель:
+  - не делать большой архитектурный rewrite;
+  - сделать простой и чистый env-first contract для model paths.
+  Что сделать:
+  - оставить в `models.yaml`:
+    - `model_id`
+    - `kind`
+    - `runtime_type`
+    - `canonical_env`
+    - `legacy_envs`
+    - runtime metadata (`ctx_size_env`, `gpu_layers_env`, `quant_default`, roles, tiers)
+  - убрать для runtime-моделей reliance на `path.default` как на обычный source of truth
+  - считать canonical filesystem source of truth только через env:
+    - `MODEL_PATH_LLM`
+    - `MODEL_PATH_VLM`
+    - `MODEL_PATH_EMBEDDING_INTENT`
+    - `MODEL_PATH_EMBEDDING_RETRIEVAL`
+    - при необходимости `MODEL_PATH_RERANKER`
+  - если canonical env не задан или путь невалиден, давать явную ошибку вместо молчаливого fallback на registry path
+  - документацию синхронизировать под правило:
+    - registry = logical model registry
+    - env = real machine-specific paths
+  Не делать:
+  - не вводить новый сложный config layer;
+  - не размножать новые fallback flags без явной необходимости;
+  - не трогать model ids/roles/tier selection шире, чем нужно для cleanup contract.
+  Verification:
+  - `pytest backend/tests/test_models_config.py backend/tests/test_model_selection.py backend/tests/test_unified_model_server_startup.py -q`
+  - `pytest backend/tests/test_runtime_launcher.py backend/tests/test_runtime_preflight.py -q`
+  - ручная проверка: unset canonical path env -> runtime падает с явной ошибкой
+  - ручная проверка: valid `.env` path -> `UMS /status` и launcher работают без regressions
+  Статус 2026-03-18:
+  - `backend/services/model_manager/models_config.py` переведён на env-first resolution без fallback на registry `path.default`.
+  - `backend/services/model_manager/unified_model_server.py` теперь даёт явный `422`, если canonical model path env не задан.
+  - Для `qwen-vl-8b` `mmproj` тоже больше не берётся из registry default; требуется `MODEL_MMPROJ_PATH_VLM` или `MMPROJ_PATH`.
+  - Из `backend/config/models.yaml` удалены `default`/`mmproj_default` для основных runtime-моделей, чтобы registry не выглядел вторым source of truth для filesystem paths.
+  - `scripts/models/download_models.py` отвязан от старого приватного `_MODEL_PATH_SPECS` и выровнен под новый contract.
+  - Итоговый contract:
+    - registry = `model_id`, roles, tiers, runtime metadata
+    - env = реальные machine-specific пути к файлам моделей
 
 ---
 
