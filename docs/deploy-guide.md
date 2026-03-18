@@ -201,6 +201,15 @@ INTENT_CLASSIFIER_EMBEDDER_MARGIN_THRESHOLD="0.10"
 
 Role bindings (`primary` / `fallback`) и preload policy теперь берутся из `backend/config/models.yaml`. Legacy env overrides для model id допускаются только как compatibility layer.
 
+После ввода registry-backed failover операционный контракт такой:
+- primary/fallback модели задаются в `models.yaml`, а не в workflow-коде;
+- client и `UMS` делают не больше одного model failover retry;
+- `429 busy` и user cancel не триггерят fallback;
+- диагностику нужно проверять в:
+  - `GET /status` -> `last_fallback_event`
+  - orchestration response -> `model_execution`
+  - Prometheus metric `agent_nav_fallback_events_total`
+
 Legacy aliases для rollout и старых инсталляций всё ещё допустимы:
 `MODEL_PATH_QWEN14B` -> `MODEL_PATH_LLM`,
 `MODEL_PATH_QWENVL` -> `MODEL_PATH_VLM`,

@@ -28,6 +28,20 @@ Env больше не считается основным местом выбо�
 - operator/runtime overrides;
 - секретов и service URLs.
 
+## Universal failover contract
+
+Universal model failover теперь backend-owned и registry-backed:
+
+- для каждой runtime-critical role в `models.yaml` задаются `primary` и `fallback`;
+- `ums_client` и `UMS` используют один и тот же execution plan;
+- failover выполняется один раз по схеме `primary -> fallback`;
+- failover разрешён только для model-failure веток (`startup/load/probe/infer`);
+- `429 busy` и cancellation не переводят execution на fallback модель;
+- diagnostics публикуются как:
+  - `model_execution` в client/workflow responses;
+  - `last_fallback_event` в `UMS /status`;
+  - `agent_nav_fallback_events_total` в metrics.
+
 ## Model path contract
 
 Для путей к артефактам моделей канонический env contract такой:

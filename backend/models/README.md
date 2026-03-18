@@ -19,6 +19,8 @@
 ### 2. Конфигурация
 Настройте переменные окружения, чтобы указать путь к каноническому registry и пути к model artifacts. Role bindings и fallback policy теперь живут в `backend/config/models.yaml`. Env contract использует универсальные имена для путей, а старые переменные сохранены как legacy aliases. Пути должны указывать на содержимое внутри `models/gguf/` или `models/st/`.
 
+Model failover тоже описывается не кодом, а registry: для каждой роли в `models.yaml` задаются `primary` и `fallback`. Runtime делает только один retry `primary -> fallback`, а `busy/cancel` не переводятся на другую модель.
+
 ```bash
 # Канонический registry моделей и ролей
 export MODEL_REGISTRY_CONFIG_PATH="./config/models.yaml"

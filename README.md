@@ -261,6 +261,12 @@ CHAINLIT_AUTH_SECRET="your-secret-key"
 
 `backend/config/models.yaml` теперь хранит registry моделей, role bindings (`primary` / `fallback`), tier policy и preload sequence для `UMS`.
 
+Universal failover теперь тоже опирается на этот registry:
+- client/runtime path сначала использует `primary` модель роли;
+- при `load` / `probe` / `infer` model-failure делает ровно один retry на `fallback`;
+- `429 busy` и user-cancel не считаются поводом для model failover;
+- structured metadata сохраняется в `model_execution`, а `UMS /status` публикует `last_fallback_event`.
+
 Для `WSL` и случаев, когда на системном диске не хватает места, модели можно хранить на другом диске и указывать абсолютные пути, например `/mnt/d/agent-models/...`:
 
 ```bash

@@ -1021,6 +1021,321 @@
   - длинный document-analysis tail локализован и управляем без ручного редактирования workflow-кода;
   - logs/metrics позволяют отличать `chunk` и `reduce` stages и видеть, какой policy branch реально сработал.
 
+- [x] **B3.45 — Адаптировать тяжёлый document-analysis path под слабый ПК без грубого ухудшения качества отчёта**
+  Контекст:
+  - живой прогон на слабом ПК с одним `GTX 1070 8GB` и большим PDF (`~20` страниц) показал составную проблему, а не один локальный timeout;
+  - по логам из `all_logs/` одновременно наблюдаются:
+    - тяжёлый placement на одной GPU: `LLM + intent embedder + retrieval embedder`;
+    - длинные `/infer` на summary/reduce path: `~109s`, `~124s`, `~132s`, `~267s`;
+    - `429 Too Many Requests` на втором запросе, пока первый ещё удерживает runtime slot;
+    - отсутствие быстрой отмены после `Stop`;
+    - `KV/cache pressure` в `llama-server` (`failed to find a memory slot`, prompt cache `~6.5-7.3 GiB`);
+  - user concern: нельзя решать это грубым сокращением итогового отчёта или простой прибавкой timeout.
+  Принцип решения:
+  - не ухудшать смысловую полноту отчёта грубым урезанием;
+  - адаптировать execution path под слабое железо:
+    - bounded stages;
+    - hierarchical synthesis;
+    - component-aware placement;
+    - быстрая отмена и release слота.
+  Admission contract:
+  - перед стартом heavy `document_analysis` / `documents_summary` вычислять stage-aware admission;
+  - admission обязан учитывать:
+    - hardware profile;
+    - placement result;
+    - estimated input/output token budget;
+    - размер документа;
+    - chunk/group count;
+    - cancellation state;
+  - если `full final reduce` или другой heavy stage не проходит admission, pipeline не должен сначала пытаться выполнить полный path;
+  - вместо этого execution должен сразу переходить в bounded/grouped branch.
+  Что нужно исправить:
+  - добавить настоящую cancel propagation:
+    - `Chainlit Stop` должен помечать run как cancelled;
+    - `execution_runtime` должен проверять cancel между chunk/group/reduce stages;
+    - `UMS` slot должен освобождаться быстро после cancel, а не после полного timeout;
+  - добавить weak-PC placement policy:
+    - для single-GPU `8GB` профиля не держать по умолчанию `LLM + 2 embedders` на одной карте;
+    - default weak-PC policy должна предпочитать:
+      - `LLM: hybrid`
+      - `intent embedder: cpu`
+      - `retrieval embedder: cpu`;
+    - при этом policy не должна быть абсолютно жёсткой:
+      - один GPU embedder допустим только если `LLM admission` остаётся safe и preflight показывает headroom;
+    - сохранить возможность manual override через hardware/runtime env;
+  - заменить unbounded final reduce на bounded hierarchical synthesis:
+    - `chunk summaries`;
+    - `group summaries`;
+    - `final synthesis` по уже сжатым group summaries;
+  - ввести обязательный token-budget guard:
+    - каждая heavy stage перед `infer` обязана проверять estimated input/output budget;
+    - если budget превышен:
+      - либо уменьшать payload;
+      - либо делать дополнительный group split;
+      - либо переходить в partial/degraded branch;
+    - budget не должен оставаться только declarative env/config knob;
+  - уменьшать не полезность отчёта, а вычислительную стоимость каждой стадии:
+    - smaller chunk size;
+    - smaller merge group size;
+    - stage-specific token/input budgets;
+    - compact intermediate prompt templates;
+    - partial-result fallback только как controlled degraded branch;
+  - зафиксировать retry semantics для heavy summary stages:
+    - запрещён blind full retry того же `group/final reduce` после timeout/429/500;
+    - разрешён только policy-changing retry:
+      - меньший budget;
+      - меньший group size;
+      - более компактный prompt template;
+    - после этого execution обязан перейти в partial/degraded result, а не повторять тот же тяжёлый вызов бесконечно;
+  - ввести явный partial-success contract:
+    - если final synthesis не завершён, пользователю возвращается structured partial report;
+    - per-group/per-document summaries не теряются;
+    - intermediate artifacts не выбрасываются при failed/skip final stage;
+    - UI / response metadata должны различать:
+      - `completed_stages`
+      - `degraded=true`
+      - `final_synthesis_status=skipped|failed|cancelled`;
+  - улучшить saturation UX:
+    - вместо opaque `429` показывать, что runtime занят предыдущим тяжёлым run;
+    - distinguish between `busy`, `cancel-in-progress`, `timeout`, `hard failure`.
+  Что не считать решением:
+  - простое увеличение timeout как основной фикс;
+  - простое “сделать итоговый отчёт короче”;
+  - ручная правка кода под каждую машину вместо env/config-driven policy.
+  Acceptance:
+  - на слабом single-GPU ПК тяжёлый `document_analysis` не уходит по умолчанию в path `LLM + 2 embedders on same GPU`;
+  - `Stop` действительно прерывает дальнейшие summary/reduce stages и быстро освобождает slot для следующего запроса;
+  - второй чат после отмены не остаётся надолго заблокированным `429` из-за старого run;
+  - длинный документ собирается через hierarchical synthesis, а не через один unbounded final merge;
+  - final/group stages не запускаются без пройденного stage admission и token-budget guard;
+  - blind retry тяжёлого `reduce/final` не используется;
+  - при срыве final synthesis пользователь получает structured partial report, а не generic failure;
+  - итоговый отчёт остаётся содержательным, а не грубо обрезанным;
+  - performance targets:
+    - после `Stop` runtime slot освобождается не позже чем за bounded interval между стадиями;
+    - второй запрос после cancel не должен долго получать opaque `429`;
+    - large-document tail bounded числом стадий, а не одним hanging infer;
+  - logs/metrics явно показывают:
+    - placement branch;
+    - cancellation branch;
+    - chunk/group/final synthesis stages;
+    - причину degraded mode, если он сработал.
+
+---
+
+## Блок H — UX & Equipment Fixes (2026-03-18)
+
+### H1 — Время выполнения в отчёте (B3.38)
+
+- [x] **B3.38 — Вернуть вывод времени выполнения в финальный отчёт**
+  Контекст: раньше в конце каждого ответа выводилось итоговое время выполнения задачи. После рефакторинга T4.4/TD-6 это исчезло — `time` импортирован, но замер нигде не используется.
+  Что сделать:
+  - `document_analysis.py`: `start = time.monotonic()` в начале `classify_node`, передать в state, вывести `elapsed` в `final_report`
+  - `execution_runtime.py` (`documents_summary`): аналогичный замер от старта executor'а до финального `assistant_message`
+  - Формат: `⏱ Время выполнения: X мин Y сек` в конце отчёта/ответа
+  Verification:
+  - `python -m py_compile backend/orchestrator/workflows/document_analysis.py backend/orchestrator/execution_runtime.py`
+
+### H2 — Русификация UI-строк (B3.39)
+
+- [x] **B3.39 — Заменить англоязычные/кальки в UI-строках на русский**
+  Контекст: в UI пользователь видит слово "чанков" и связанные строки, которые не являются корректным русским.
+  Что сделать:
+  - `execution_runtime.py:1194`: `title="Суммаризация чанков"` → `title="Обработка фрагментов"`
+  - `execution_runtime.py:1386`: `"чанков"` → `"фрагментов"`
+  - Логи в консоли (`[Chunk 1/10]` и т.п.) оставить как есть — это dev-facing, не пользовательский UI
+  Verification:
+  - `python -m py_compile backend/orchestrator/execution_runtime.py`
+
+### H3 — Порядок вывода шагов в UI (B3.40)
+
+- [x] **B3.40 — Прогресс workflow должен быть виден выше финального ответа**
+  Контекст: суммаризация документа пишется ниже блока ответа, тогда как должна быть в верхней последовательности шагов. Все промежуточные состояния должны быть в `cl.Step` до отправки `assistant_message`.
+  Что сделать:
+  - Ревизия порядка `cl.Step` в `chainlit_app.py` для `document_analysis` и `documents_summary`: все Step'ы открываются и закрываются до отправки финального `assistant_message`
+  - Суммаризация не должна дублироваться в потоке ответа — только через прогресс-бокс
+  Verification:
+  - Живой smoke: загрузить PDF, убедиться что шаги видны выше ответа
+
+### H4 — SQLite миграция: колонка autoCollapse (B3.41)
+
+- [x] **B3.41 — Добавить миграцию существующей Chainlit SQLite БД для autoCollapse**
+  Контекст: в `kp_tz_equip/chainlit.log` сотни ошибок `sqlite3.OperationalError: table steps has no column named autoCollapse`. Это ломает запись Step'ов в БД и объясняет почему equipment workflow не вернул результат на том ПК. `_bootstrap_chainlit_sqlite_schema` создаёт колонку только при создании новой БД, но не мигрирует существующую.
+  Что сделать:
+  - В `_bootstrap_chainlit_sqlite_schema` (или отдельной `_migrate_chainlit_sqlite_schema`) добавить idempotent `ALTER TABLE steps ADD COLUMN autoCollapse INTEGER` с проверкой `PRAGMA table_info(steps)`
+  - По аналогии с уже реализованной миграцией `steps.command` и `steps.defaultOpen`
+  Verification:
+  - `pytest backend/tests/test_chainlit_persistence_schema.py -q`
+  - Живой тест: запустить с существующей старой `.data/chainlit.db`, убедиться что ошибок `autoCollapse` нет в логах
+
+### H5 — document_analysis: убрать секцию позиций для legal/other (B3.42)
+
+- [x] **B3.42 — Не выводить "Позиции оборудования/товаров не обнаружены" для нерелевантных типов документов**
+  Контекст: для юридических законов (`legal`, `other`) секция `## Извлеченные позиции` бессмысленна и вводит пользователя в заблуждение.
+  Что сделать:
+  - В `document_analysis.py` в функции формирования `final_report`: рендерить секцию `## Извлеченные позиции` только если `doc_type in {"tz", "smeta", "kp"}`
+  - Для `legal` / `other` — раздел пропускается полностью
+  Verification:
+  - `pytest backend/tests/test_document_analysis.py -q`
+  - Живой smoke с юридическим документом: секции "позиции" нет в отчёте
+
+### H6 — Equipment: fallback-экстракция из КП без таблиц (B3.43)
+
+- [x] **B3.43 — Улучшить экстракцию позиций из КП/ТЗ без стандартных таблиц**
+  Контекст: в `kp_tz_equip` оба документа дали `Tables: 0` и `LLM text: 0`. КП содержало 1302 символа чистого текста без таблиц — LLM-промпт для извлечения позиций не сработал. ТЗ имело 6247 символов с нестандартной структурой.
+  Что сделать:
+  - Если `extract_tables_docx` → 0 AND LLM chunk extraction → 0: добавить fallback — передать полный текст документа в LLM с явным промптом "найди все позиции/товары/услуги/оборудование с характеристиками и ценами, даже если они представлены текстом, а не таблицей"
+  - Для ТЗ с нестандартными таблицами: попробовать `extract_tables` (PDF-путь) как fallback к `extract_tables_docx`
+  - Логировать какой path сработал
+  Verification:
+  - Живой тест с `КОММЕРЧЕСКОЕ ПРЕДЛОЖЕНИЕ.docx` и `2._KSU_1_4_24_tz-V2.docx`
+  Статус 2026-03-18:
+  - Реализован structured DOCX fallback через `word/document.xml` для линейризованных строк КП/ТЗ.
+  - Smoke на логовых файлах дал `3` позиции из КП и `2` позиции из ТЗ вместо прежних `0/0`.
+
+### H7 — Equipment: структура отчёта ТЗ vs КП (B3.44)
+
+- [x] **B3.44 — Правильная структура отчёта при сравнении ТЗ и КП**
+  Контекст: при подаче ТЗ + КП система должна строить таблицу на основе позиций ТЗ и показывать их покрытие в КП — а не просто выводить что "позиций не найдено".
+  Логика отчёта:
+  - Основа таблицы — позиции из ТЗ (требования заказчика)
+  - Для каждой позиции ТЗ: есть ли в КП (да / аналог + цена / нет)
+  - Если в КП есть позиции которых нет в ТЗ — отдельный раздел "Дополнительные позиции КП"
+  - Если совпадений 0 — явно написать что структуры документов не совпали + показать оба списка отдельно
+  - Если списки пусты (экстракция не сработала) — сообщить об этом явно, не выводить пустую таблицу
+  Что сделать:
+  - Пересмотреть `generate_report_node` в `equipment.py` под эту логику
+  - Добавить детектор ролей (какой документ ТЗ, какой КП) через `classify_doc_type` из `document_analysis.py`
+  Verification:
+  - Живой тест с `kp_tz_equip` документами после фикса B3.43
+  Статус 2026-03-18:
+  - Для `tz_vs_smeta` основная таблица теперь строится по позициям ТЗ.
+  - Лишние позиции из КП вынесены в отдельный раздел `Дополнительные позиции из КП`.
+  - Компромисс: role-detection пока остаётся на существующей content/name heuristic в `equipment.py`; reuse `classify_doc_type` можно оставить как follow-up refactor, если понадобится единая классификация.
+  - Matching усилен двухступенчатым candidate generation + rerank/fusion scoring в legal server.
+  - Компромисс: neural reranker подключается опционально через `MODEL_PATH_RERANKER`; без него используется heuristic rerank fallback по lexical/numeric compatibility.
+
+### H8 — LangGraph Studio: конфигурация (T5.2)
+
+- [ ] **T5.2 — langgraph.json для визуальной отладки в LangGraph Studio**
+  Контекст: наши workflows (`compare.py`, `equipment.py`, `document_analysis.py`) используют стандартный LangGraph `StateGraph` и полностью совместимы с LangGraph Studio. Studio позволяет визуально отлаживать граф без изменений в коде.
+  Что сделать:
+  - Создать `backend/langgraph.json` с регистрацией трёх workflows
+  - Документировать запуск: `cd backend && langgraph dev`
+  - Добавить в `docs/` краткую инструкцию по отладке через Studio
+  Примечание: Open WebUI совместим через `agent_api.py` (OpenAI-compat), но теряет `cl.Step` визуализацию. LangFlow — несовместим без переписывания. LangGraph Studio — рекомендуется для дебага.
+
+### H9 — Full-Stack Test Contour (T6.x)
+
+- [ ] **T6.1 P0 — Browser E2E для основного Chainlit path**
+  Контекст: backend unit/integration слой уже сильный, но основной пользовательский путь через `Chainlit` почти не закрыт настоящими browser tests. Сейчас главный риск — регрессии в upload/UI/session/history, которые не ловятся pure pytest-моками.
+  Что сделать:
+  - Поднять `Playwright`-контур для `Chainlit` как основного UI
+  - Добавить canonical browser flows:
+    - login / basic chat smoke
+    - single upload + `doc_question`
+    - two uploads + `compare`
+    - `equipment` path для ТЗ/КП
+    - reload page -> thread/history/steps persist
+    - generated report download/open smoke
+  - По возможности использовать стабильные test hooks / selectors вместо brittle text-only locators
+  Verification:
+  - локально: `npx playwright test tests/e2e/chainlit`
+  - CI smoke: хотя бы `chromium` project для `chat + upload + reload persistence`
+
+- [ ] **T6.2 P0 — Compose full-stack smoke tests**
+  Контекст: runtime/scripts и `docker-compose.yaml` часто меняются, но нет единого black-box gate, который подтверждает что весь stack действительно поднялся и отвечает не только на уровне unit mocks.
+  Что сделать:
+  - Добавить full-stack smoke suite для `docker compose up -d`
+  - Проверять readiness для:
+    - `agent-api`
+    - `document-server`
+    - `legal-server`
+    - `ums`
+    - `chainlit`
+  - Проверять `healthcheck`/`/health`/`/status`/`/models` на уровне живого стека
+  - Зафиксировать operator-friendly failure output: какой сервис не поднялся и на каком probe упал
+  Verification:
+  - `docker compose up -d`
+  - `pytest backend/tests/test_full_stack_smoke.py -q`
+
+- [ ] **T6.3 P0 — Persistence + SQLite migration E2E**
+  Контекст: уже был реальный инцидент со schema drift (`steps.autoCollapse`). Нужен не только unit-тест мигратора, но и end-to-end сценарий с реальным restart lifecycle и сохранением history.
+  Что сделать:
+  - Добавить E2E test path:
+    - старт со старой SQLite schema fixture
+    - автодомиграция без удаления БД
+    - создание thread/steps/elements
+    - рестарт приложения
+    - проверка, что история и schema совместимы после рестарта
+  - Проверять, что migration path не теряет существующие rows
+  Verification:
+  - `pytest backend/tests/test_chainlit_persistence_e2e.py -q`
+
+- [ ] **T6.4 P1 — Concurrency / cancel / busy black-box tests**
+  Контекст: UMS concurrency policy и `429 busy` уже покрыты unit-тестами, но нет настоящего пользовательского regression gate на path `long run -> second request -> cancel -> retry`.
+  Что сделать:
+  - Добавить black-box тесты для сценариев:
+    - long-running request saturates slot
+    - second request получает `busy` / ожидаемую деградацию
+    - cancel первого run освобождает slot
+    - второй запрос после cancel проходит без долгого stuck-state
+  - Проверять не только HTTP status, но и `status/metadata`, если они публикуются в `UMS /status`
+  Verification:
+  - `pytest backend/tests/test_runtime_busy_e2e.py -q`
+
+- [ ] **T6.5 P1 — Cross-backend parity tests (`llama-server` vs `vllm`)**
+  Контекст: система уже поддерживает минимум два backend mode (`llama-server`, `vllm`), но нет единого contract test, который гарантирует что ключевые пользовательские сценарии не ломаются асимметрично.
+  Что сделать:
+  - Добавить parity suite для одинаковых smoke scenarios под разными `BACKEND_MODE`
+  - Проверять совместимость:
+    - chat
+    - simple doc-question
+    - streaming response contract
+    - `/status` и `/models` metadata
+  - Зафиксировать какие различия допустимы, а какие считаются регрессией
+  Verification:
+  - `BACKEND_MODE=llama-server pytest backend/tests/test_backend_parity.py -q`
+  - `BACKEND_MODE=vllm pytest backend/tests/test_backend_parity.py -q`
+
+- [ ] **T6.6 P1 — Filesystem / permissions regression suite**
+  Контекст: уже были реальные проблемы с созданием каталогов и mixed ownership после container/native paths. Сейчас `run_native.sh` это частично проверяет, но нет единого regression suite для permission edge cases.
+  Что сделать:
+  - Добавить сценарии:
+    - `UPLOADS_DIR` отсутствует
+    - `UPLOADS_DIR` readonly
+    - `backend/.data` readonly
+    - root-owned leftover / non-writable target file
+    - container path и native path дают предсказуемую и явную ошибку или safe self-heal
+  - Отдельно проверить path для Chainlit elements/report persistence
+  Verification:
+  - `pytest backend/tests/test_filesystem_permissions.py -q`
+
+- [ ] **T6.7 P2 — Nightly benchmark regression gate**
+  Контекст: функциональные тесты не ловят latency/resource regressions в LLM/RAG path. Для этого уже есть `scripts/benchmark.py` и `scripts/benchmark_compare.py`, но нет formal nightly gate.
+  Что сделать:
+  - Ввести nightly benchmark baseline/candidate workflow
+  - Сравнивать хотя бы:
+    - `health`
+    - `embedding`
+    - `chat`
+    - `doc_question`
+    - `compare`
+    - `equipment`
+  - Добавить пороги на грубые regressions по latency/error-rate вместо overly strict deterministic numbers
+  Verification:
+  - `python scripts/benchmark.py --output results/baseline.json`
+  - `python scripts/benchmark_compare.py results/baseline.json results/candidate.json`
+
+- [ ] **T6.8 P2 — Observability contract tests**
+  Контекст: чем больше появляется full-stack/E2E тестов, тем важнее чтобы telemetry/trace headers/metrics оставались стабильными. Иначе падения сложно локализовать.
+  Что сделать:
+  - Проверять наличие trace header propagation на critical endpoints
+  - Проверять, что metrics endpoints и базовые observability labels не ломаются после runtime/docker refactor
+  - Зафиксировать минимальный observability contract для `agent-api` и `ums`
+  Verification:
+  - `pytest backend/tests/test_observability_contract.py -q`
+
 ---
 
 ## PR Inventory (20 draft PR)
@@ -1067,6 +1382,61 @@
 - Остаётся cleanup: routing-дубликаты в chainlit_app.py, uncommitted changes
 - `agent_api.py` рефакторинг: legacy code удалён, unified execution core
 
+### 2026-03-18 — CPU-тест и таймауты (анализ logs_cpu)
+
+**Контекст:** тест проводился намеренно без GPU — симуляция слабого железа. Физически RTX 2070 × 2 присутствовали, но llama.cpp собран без CUDA (`ggml_cuda_init: failed to initialize CUDA`). Модель Qwen-14B Q4_K_M (8.37 GiB) загружена полностью на CPU.
+
+**Производительность на CPU:**
+- Prefill: ~12 tok/s, ~80 ms/token
+- Generation: ~4-5 tok/s, ~200-400 ms/token
+- Чанк ~2000 токенов → промпт eval ~165 сек, generation ~1-3 мин
+- Суммаризация 20-страничного документа (455-z.pdf, 56 720 симв.) → ~2 часа суммарно
+
+**Проблема таймаутов:** часть запросов прерывалась по `UMS_INFER_TIMEOUT_S=300` (5 мин) с `[UMS_CLIENT] Async error (attempt X/4)`. Система восстанавливалась через retry, задача завершилась в degraded/bounded режиме.
+
+**Рекомендуемые env-переменные для CPU-режима** (добавить в `.env.hardware.override`):
+```
+UMS_INFER_TIMEOUT_S=600
+UMS_CLIENT_TIMEOUT_S=600
+UMS_RETRY_MAX_DELAY_S=30
+DOCUMENT_ANALYSIS_SUMMARIZE_MAX_TOKENS=512
+```
+
+**Для полноценного GPU-инференса:** пересобрать llama.cpp с `-DGGML_CUDA=ON`. Ожидаемый прирост: 10–15× (до 40–60 tok/s). Prebuild-варианты: `pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124`.
+
+### 2026-03-18 — Registry-backed universal model failover
+
+- Введён единый execution contract поверх `backend/config/models.yaml`: `primary -> fallback` для client-side и server-side runtime paths.
+- `ums_client` и `UMS` теперь используют один и тот же registry-backed execution plan вместо локальных hardcoded retry loops.
+- Failover не срабатывает на `429 busy` и cancellation; эти ветки считаются saturation/cancel semantics, а не model-failure.
+- Structured diagnostics публикуются в `model_execution`, metrics `agent_nav_fallback_events_total` и `UMS /status -> last_fallback_event`.
+- Follow-up cleanup:
+  - удалить оставшиеся неиспользуемые local failover helper'ы из `chainlit_app.py` / `agent_api.py`, если после verification они больше нигде не нужны как compatibility shims;
+  - при необходимости добавить operator-facing UI surface для `last_fallback_event` без просмотра raw `/status`.
+
+### 2026-03-18 — B3.41: SQLite autoCollapse — причина и диагноз
+
+**Вопрос:** была ли это плохая инициализация системы?
+**Ответ: нет.** Это не ошибка запуска. Причина — схемный дрейф Chainlit.
+
+**Что произошло:** существующая `.data/chainlit.db` была создана старой версией Chainlit, в которой у таблицы `steps` не было колонки `autoCollapse`. Новая версия Chainlit обращается к этой колонке при записи каждого Step.
+
+**Почему не починилось само:** функция `_bootstrap_chainlit_sqlite_schema()` использует `CREATE TABLE IF NOT EXISTS` — она полностью пропускает создание таблицы, если та уже существует, и не добавляет новые колонки. Мигратор для `steps.command` и `steps.defaultOpen` уже реализован (через `PRAGMA table_info` + `ALTER TABLE`), но `autoCollapse` в него не добавлен.
+
+**Следствие:** все Step-записи в ходе equipment-сессии (`kp_tz_equip`) падали с `OperationalError` → пользователь не увидел ни прогресса, ни результата, хотя workflow технически отработал (извлёк 0 позиций — отдельная проблема B3.43).
+
+**Фикс описан в B3.41:** добавить `ALTER TABLE steps ADD COLUMN autoCollapse INTEGER` с проверкой через `PRAGMA table_info(steps)` в существующий цикл миграции.
+
+### 2026-03-18 — Ревизия scripts/: найденный техдолг и follow-up
+
+- `scripts/start_system_test.sh` фактически сломан как executable orchestration wrapper: ключевые `tmux` команды отсутствуют в исполняемом коде и остались только внутри comment-строк с `mux ...`; текущий файл печатает, что tmux session поднята, но сам её не создаёт.
+- `scripts/run_all.sh` содержит хрупкий `curl -sf` внутри command substitution под `set -e` в `wait_for_model()`. Если `/status` временно недоступен, shell завершится раньше retry-loop. В `run_native.sh` этот же путь уже защищён через `|| true`, значит поведение между native/container paths сейчас расходится.
+- `launcher.sh`, `run_native.sh`, `run_all.sh`, `stop_native.sh`, `stop_all.sh`, `run_openwebui.sh`, `models/install_models.sh`, `bootstrap_env.sh` исполняют `source` на `.env*`/override файлах как shell-код, а не как безопасный `KEY=VALUE` parser. Это допустимо только при fully trusted local files; для user-owned override path это отдельный риск и его нужно явно документировать либо заменить на безопасный parser.
+- `backend/tests/test_runtime_launcher.py::test_launcher_sources_native_overrides_before_runtime_preflight` не hermetic: результат зависит от содержимого реального `backend/.env.hardware.override`. При текущем локальном `DEVICE_MODE="cpu"` тест падает, хотя launcher детерминированно применяет приоритет `.env -> .env.native -> .env.hardware.override`.
+- `scripts/setup_ubuntu.sh` скачивает CUDA keyring/Miniconda installer и Docker GPG material по сети без отдельной checksum/integrity verification в самом скрипте. Для interactive installer это workable path, но как supply-chain baseline слабое место.
+- permission-path всё ещё несимметричен: `scripts/run_native.sh` делает реальный writable preflight для `UPLOADS_DIR` и `backend/.data`, но container/runtime Python path в `chainlit_app.py`, `report_utils.py`, `knowledge_base_store.py`, `state_store.py` в основном ограничен `os.makedirs(..., exist_ok=True)` без отдельной ранней диагностики permission-denied/root-owned state. Нужен единый writable-dir preflight и более явные ошибки для compose/container path.
+- `scripts/setup_ubuntu.sh` до сих пор выставляет `chmod 777 backend/open_webui_uploads`; это помогает “чтобы работало”, но слишком грубая модель прав. Нужен более узкий ownership/permission contract вместо world-writable uploads dir.
+
 ### Антикризисные правила
 1. Не добавлять новые workflow до B3.31 cleanup
 2. Не делать full rewrite на LangChain
@@ -1076,4 +1446,5 @@
 
 ## Session Log
 
+- [x] **[2026-03-18 13:54]** Task #1: (без названия) — ✅ completed
 - [x] **[2026-03-12 22:09]** Task #1: (без названия) — ✅ completed
