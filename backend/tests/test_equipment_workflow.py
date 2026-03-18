@@ -1456,13 +1456,14 @@ class TestExtractFromSingleChunk:
         }
         with patch("orchestrator.workflows.equipment.ums_client") as mock_ums:
             mock_ums.async_infer = AsyncMock(return_value=mock_response)
-            items = await _extract_from_single_chunk(
+            items, model_execution = await _extract_from_single_chunk(
                 chunk_text="Поставить коммутатор Cisco 48 портов 10 шт",
                 chunk_idx=0,
                 total_chunks=1,
                 already_found=[],
             )
             assert len(items) == 1
+            assert model_execution is not None
             assert items[0]["name"] == "Коммутатор Cisco"
             assert items[0]["source"] == "text"
 
@@ -1589,3 +1590,66 @@ class TestChunkedExtraction:
                 items = await _extract_items_llm("/fake/doc.pdf", [])
                 assert len(items) == 1
                 assert items[0]["name"] == "Item OK"
+
+
+class TestEquipmentModelExecutionMetadata:
+
+    @pytest.mark.asyncio
+    async def test_extract_items_llm_records_single_model_execution_event_per_chunk(self):
+        async def _fake_single_chunk(
+            chunk_text,
+            chunk_idx,
+            total_chunks,
+            already_found,
+            model_execution_events=None,
+        ):
+            event = {
+                "role_key": "llm.legal_compare",
+                "primary_model_id": "qwen-14b-llm",
+                "fallback_model_id": "qwen-14b-llm",
+                "used_model_id": "qwen-14b-llm",
+                "fallback_used": False,
+                "attempt_count": 1,
+            }
+            if model_execution_events is not None:
+                model_execution_events.append(dict(event))
+            return (
+                [
+                    {
+                        "name": "Сервер HP",
+                        "specs": "2x Xeon",
+                        "quantity": "2",
+                        "price": "100000",
+                        "unit": "шт",
+                        "source": "text",
+                        "page": None,
+                    }
+                ],
+                event,
+            )
+
+        load_resp = MagicMock()
+        load_resp.status_code = 200
+        load_resp.raise_for_status = MagicMock()
+        load_resp.json.return_value = {"text": "Сервер HP 2x Xeon"}
+
+        async def route_post(url, **kwargs):
+            if "/load_document" in url:
+                return load_resp
+            raise ValueError(f"Unexpected URL: {url}")
+
+        events: list[dict] = []
+        with patch("orchestrator.workflows.equipment.get_shared_client") as mock_get_client, \
+             patch("orchestrator.workflows.equipment._chunk_text", new_callable=AsyncMock) as mock_chunk, \
+             patch("orchestrator.workflows.equipment._extract_from_single_chunk", side_effect=_fake_single_chunk) as mock_single_chunk:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(side_effect=route_post)
+            mock_get_client.return_value = mock_client
+            mock_chunk.return_value = ["chunk-1"]
+
+            items = await _extract_items_llm("/fake/doc.docx", [], model_execution_events=events)
+
+        assert len(items) == 1
+        assert len(events) == 1
+        assert events[0]["used_model_id"] == "qwen-14b-llm"
+        mock_single_chunk.assert_awaited_once()

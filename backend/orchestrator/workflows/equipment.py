@@ -71,8 +71,66 @@ _KP_TEXT_KEYWORDS = [
 logger = logging.getLogger("equipment_workflow")
 
 
-def _resolve_equipment_llm_model_id() -> str:
-    return resolve_model_selection("llm.legal_compare").resolved_model_id
+def _is_model_failover_blocked(exc: Exception) -> bool:
+    if isinstance(exc, asyncio.CancelledError):
+        return True
+    if isinstance(exc, UMSBusyError):
+        return True
+    message = str(exc).lower()
+    return "429" in message or "busy" in message or "cancel" in message
+
+
+def _build_model_execution_event(
+    *,
+    selection: Any,
+    used_model_id: str,
+    fallback_used: bool,
+    fallback_reason: Optional[str],
+    attempt_count: int,
+    stage: Optional[str] = None,
+) -> Dict[str, Any]:
+    payload = dict(selection.to_dict() if hasattr(selection, "to_dict") else selection or {})
+    payload.update(
+        {
+            "primary_model_id": payload.get("resolved_model_id") or payload.get("primary_model_id"),
+            "fallback_model_id": payload.get("fallback_model_id") if payload.get("fallback_available") else None,
+            "used_model_id": used_model_id,
+            "fallback_used": bool(fallback_used),
+            "fallback_reason": fallback_reason,
+            "fallback_stage": stage,
+            "attempt_count": max(1, int(attempt_count)),
+            "status": "fallback_completed" if fallback_used else "completed",
+        }
+    )
+    return payload
+
+
+async def _infer_equipment_llm_with_failover(
+    *,
+    stage: str,
+    prompt: str,
+    payload: Dict[str, Any],
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    response = await ums_client.async_infer(
+        "llm.legal_compare",
+        {
+            **payload,
+            "prompt": prompt,
+        },
+    )
+    model_execution = response.get("model_execution") if isinstance(response, dict) else None
+    if not isinstance(model_execution, dict):
+        model_execution = {
+            "role_key": "llm.legal_compare",
+            "used_model_id": "llm.legal_compare",
+            "fallback_stage": stage,
+            "fallback_used": False,
+            "status": "completed",
+            "source": "workflow",
+        }
+    elif stage and not model_execution.get("fallback_stage"):
+        model_execution = {**model_execution, "fallback_stage": stage}
+    return response, model_execution
 
 
 def detect_equipment_mode(
@@ -146,6 +204,7 @@ class EquipmentState(TypedDict):
     # Output
     final_report: str
     extraction_metadata: Dict[str, Any]
+    model_execution: Annotated[List[Dict[str, Any]], operator.add]
     errors: Annotated[List[str], operator.add]  # Накопление через reducer
     session_id: str
 
@@ -363,7 +422,10 @@ def _render_polish_input_xml(batch: List[Dict[str, Any]]) -> str:
     return "<input>\n" + "\n".join(rendered_items) + "\n</input>"
 
 
-async def _polish_items_specs_llm(items: List[Dict[str, Any]]):
+async def _polish_items_specs_llm(
+    items: List[Dict[str, Any]],
+    model_execution_events: Optional[List[Dict[str, Any]]] = None,
+):
     """
     Уровень 3: LLM Polisher.
     Превращает сырые списки характеристик в чистый технический текст.
@@ -401,9 +463,13 @@ async def _polish_items_specs_llm(items: List[Dict[str, Any]]):
                 f"  [DEBUG-POLISH] Batch {batch_idx + 1}/{len(batches)}: "
                 f"items={len(batch)}, payload_chars={batch_chars}, ids={expected_ids}"
             )
-            resp = await ums_client.async_infer(_resolve_equipment_llm_model_id(), {
-                "prompt": prompt, "temperature": 0.1, "max_tokens": 2000
-            })
+            resp, model_execution = await _infer_equipment_llm_with_failover(
+                stage="polisher",
+                prompt=prompt,
+                payload={"temperature": 0.1, "max_tokens": 2000},
+            )
+            if model_execution_events is not None and model_execution:
+                model_execution_events.append(model_execution)
             
             content = extract_model_text(resp)
             print(f"  [DEBUG-POLISH] LLM Response (200 chars): {content[:200]}...")
@@ -745,7 +811,8 @@ async def _extract_from_single_chunk(
     chunk_idx: int,
     total_chunks: int,
     already_found: List[str],
-) -> List[Dict[str, Any]]:
+    model_execution_events: Optional[List[Dict[str, Any]]] = None,
+) -> tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """Извлекает позиции из одного текстового чанка через LLM."""
     exclude_hint = ""
     if already_found:
@@ -769,9 +836,13 @@ async def _extract_from_single_chunk(
 {chunk_text}<|im_end|>
 <|im_start|>assistant
 """
-    response = await ums_client.async_infer(_resolve_equipment_llm_model_id(), {
-        "prompt": prompt, "temperature": 0.1, "max_tokens": 2000
-    })
+    response, model_execution = await _infer_equipment_llm_with_failover(
+        stage="extract_chunk",
+        prompt=prompt,
+        payload={"temperature": 0.1, "max_tokens": 2000},
+    )
+    if model_execution_events is not None and model_execution:
+        model_execution_events.append(model_execution)
     content = response.get("content", "")
     if not content and "choices" in response:
         content = response["choices"][0].get("text", "")
@@ -790,7 +861,7 @@ async def _extract_from_single_chunk(
                     "source": "text",
                     "page": None,
                 })
-    return items
+    return items, model_execution if model_execution else None
 
 
 # === Node 1: Extract ===
@@ -881,6 +952,7 @@ async def _extract_items_llm(
     path: str,
     already_found: List[str],
     progress_callback: Optional[Callable[[int, int], Awaitable[None]]] = None,
+    model_execution_events: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """Извлекает позиции из текста документа через LLM (Pass 2, Map-Reduce)."""
     client = await get_shared_client()
@@ -904,11 +976,12 @@ async def _extract_items_llm(
         try:
             if progress_callback is not None:
                 await progress_callback(idx + 1, len(chunks))
-            chunk_items = await _extract_from_single_chunk(
+            chunk_items, model_execution = await _extract_from_single_chunk(
                 chunk_text=chunk,
                 chunk_idx=idx,
                 total_chunks=len(chunks),
                 already_found=accumulated_names,
+                model_execution_events=model_execution_events,
             )
             all_items.extend(chunk_items)
             accumulated_names.extend(it["name"] for it in chunk_items)
@@ -924,6 +997,7 @@ async def load_and_extract_node(state: EquipmentState) -> dict:
     print(f"[Equipment] Extracting items from: {state['input_1']} and {state['input_2']}")
     errors = []
     extraction_metadata: Dict[str, Any] = {}
+    model_execution_events: List[Dict[str, Any]] = []
 
     # === Документ 1 ===
     items_1_table = []
@@ -957,7 +1031,11 @@ async def load_and_extract_node(state: EquipmentState) -> dict:
             if len(items_1_fallback) >= 2:
                 print(f"  [Doc1] Skipping LLM text extraction: {len(items_1_fallback)} items already found in DOCX fallback.")
             else:
-                items_1_text = await _extract_items_llm(state["input_1"], already_names)
+                items_1_text = await _extract_items_llm(
+                    state["input_1"],
+                    already_names,
+                    model_execution_events=model_execution_events,
+                )
                 print(f"  [Doc1] LLM text: {len(items_1_text)} items")
         except Exception as e:
             errors.append(f"LLM extraction doc1 failed: {e}")
@@ -994,7 +1072,11 @@ async def load_and_extract_node(state: EquipmentState) -> dict:
             if len(items_2_fallback) >= 2:
                 print(f"  [Doc2] Skipping LLM text extraction: {len(items_2_fallback)} items already found in DOCX fallback.")
             else:
-                items_2_text = await _extract_items_llm(state["input_2"], already_names)
+                items_2_text = await _extract_items_llm(
+                    state["input_2"],
+                    already_names,
+                    model_execution_events=model_execution_events,
+                )
                 print(f"  [Doc2] LLM text: {len(items_2_text)} items")
         except Exception as e:
             errors.append(f"LLM extraction doc2 failed: {e}")
@@ -1002,14 +1084,15 @@ async def load_and_extract_node(state: EquipmentState) -> dict:
     items_2 = _dedup_items(items_2_table + items_2_fallback + items_2_text)
 
     # TD-LLM-Polisher: Очищаем сырые характеристики через LLM
-    await _polish_items_specs_llm(items_1)
-    await _polish_items_specs_llm(items_2)
+    await _polish_items_specs_llm(items_1, model_execution_events=model_execution_events)
+    await _polish_items_specs_llm(items_2, model_execution_events=model_execution_events)
 
     print(f"  [Equipment] Total: doc1={len(items_1)}, doc2={len(items_2)}")
     return {
         "items_1": items_1,
         "items_2": items_2,
         "extraction_metadata": extraction_metadata,
+        **({"model_execution": model_execution_events} if model_execution_events else {}),
         "errors": errors,
     }
 
@@ -1157,6 +1240,7 @@ async def evaluate_compliance_node(state: EquipmentState) -> dict:
 
     # Batch LLM evaluation
     total_batches = (len(to_analyze) + BATCH_SIZE - 1) // BATCH_SIZE if to_analyze else 0
+    model_execution_events: List[Dict[str, Any]] = []
 
     for batch_idx, batch_start in enumerate(range(0, len(to_analyze), BATCH_SIZE)):
         batch = to_analyze[batch_start:batch_start + BATCH_SIZE]
@@ -1193,9 +1277,13 @@ SAME — без изменений, PRICE_CHANGE — изменилась цен
 <|im_start|>assistant
 """
         try:
-            response = await ums_client.async_infer(_resolve_equipment_llm_model_id(), {
-                "prompt": prompt, "max_tokens": 600, "temperature": 0.1, "echo": False,
-            })
+            response, model_execution = await _infer_equipment_llm_with_failover(
+                stage="evaluate",
+                prompt=prompt,
+                payload={"max_tokens": 600, "temperature": 0.1, "echo": False},
+            )
+            if model_execution:
+                model_execution_events.append(model_execution)
             content = response.get("content", "")
             if not content and "choices" in response:
                 content = response["choices"][0].get("text", "")
@@ -1235,7 +1323,10 @@ SAME — без изменений, PRICE_CHANGE — изменилась цен
                     "type": m.get("type", "MODIFIED"),
                 })
 
-    return {"analysis_results": results}
+    result = {"analysis_results": results}
+    if model_execution_events:
+        result["model_execution"] = model_execution_events
+    return result
 
 
 # === Node 4: Report ===

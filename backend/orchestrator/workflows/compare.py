@@ -7,13 +7,13 @@ import json
 import logging
 import os
 import re
+import asyncio
 import httpx
 from typing import TypedDict, List, Dict, Any, Annotated, Optional
 import operator
 from langgraph.graph import StateGraph, END
 
 # Абсолютные импорты пакета (TD-5 Fix)
-from services.model_manager.model_selection import resolve_model_selection
 from services.model_manager.ums_client import ums_client
 from services.observability import inc_metric_counter
 from orchestrator.utils import parse_json_garbage
@@ -33,8 +33,25 @@ COMPARE_ANALYSIS_TEMPERATURE = float(os.getenv("COMPARE_ANALYSIS_TEMPERATURE", "
 logger = logging.getLogger("compare_workflow")
 
 
-def _resolve_compare_llm_model_id() -> str:
-    return resolve_model_selection("llm.legal_compare").resolved_model_id
+async def _infer_compare_llm(prompt: str, payload: Dict[str, Any]) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+    response = await ums_client.async_infer(
+        "llm.legal_compare",
+        {
+            **payload,
+            "prompt": prompt,
+        },
+    )
+    model_execution = response.get("model_execution") if isinstance(response, dict) else None
+    if not isinstance(model_execution, dict):
+        model_execution = {
+            "role_key": "llm.legal_compare",
+            "used_model_id": "llm.legal_compare",
+            "fallback_stage": "compare_analysis",
+            "fallback_used": False,
+            "status": "completed",
+            "source": "workflow",
+        }
+    return response, model_execution
 
 # === State Definition ===
 
@@ -49,6 +66,7 @@ class CompareState(TypedDict):
     analysis_results: List[Any]
     final_report: str
     errors: List[str]
+    model_execution: Annotated[List[Dict[str, Any]], operator.add]
     session_id: str  # Привязка workflow к сессии (для дедупликации)
 
 # === Nodes ===
@@ -163,6 +181,7 @@ async def analyze_differences_node(state: CompareState):
     print(f"[Workflow] Analyzing {len(state['matches'])} differences (batch_size={BATCH_SIZE})")
 
     results = []
+    model_execution_events: List[Dict[str, Any]] = []
     critical_kw = ["обязан", "штраф", "срок", "рублей", "не вправе", "запрещено"]
 
     # Разделяем на структурные (ADDED/DELETED) и требующие LLM анализа (MODIFIED)
@@ -210,7 +229,7 @@ async def analyze_differences_node(state: CompareState):
                 "temperature": COMPARE_ANALYSIS_TEMPERATURE,
                 "echo": False,
             }
-            response = await ums_client.async_infer(_resolve_compare_llm_model_id(), payload)
+            response, model_execution = await _infer_compare_llm(prompt, payload)
 
             content = response.get("content", "")
             if not content and "choices" in response:
@@ -244,6 +263,9 @@ async def analyze_differences_node(state: CompareState):
                         "new_text": m.get('new_text', '')
                     })
 
+            if model_execution:
+                model_execution_events.append(model_execution)
+
         except Exception as e:
             print(f"[Workflow] Error in batch {batch_idx+1}: {e}")
             logger.warning("Compare analyze fallback in batch %s: %s", batch_idx + 1, e, exc_info=True)
@@ -261,7 +283,7 @@ async def analyze_differences_node(state: CompareState):
                     "new_text": m.get('new_text', '')
                 })
 
-    return {"analysis_results": results}
+    return {"analysis_results": results, "model_execution": model_execution_events}
 
 async def generate_report_node(state: CompareState):
     """Формирует финальный Markdown отчет и сохраняет его."""

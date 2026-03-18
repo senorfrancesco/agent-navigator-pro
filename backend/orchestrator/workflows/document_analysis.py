@@ -24,7 +24,6 @@ import operator
 from langgraph.graph import StateGraph, END
 
 # Абсолютные импорты пакета (TD-5 Fix)
-from services.model_manager.model_selection import resolve_model_selection
 from services.model_manager.ums_client import ums_client
 from services.observability import inc_metric_counter
 from orchestrator.utils import parse_json_garbage
@@ -58,8 +57,32 @@ DOCUMENT_ANALYSIS_SUMMARIZE_SLEEP_S = float(
 logger = logging.getLogger("document_analysis_workflow")
 
 
-def _resolve_document_analysis_llm_model_id() -> str:
-    return resolve_model_selection("llm.legal_compare").resolved_model_id
+async def _infer_document_analysis_with_failover(
+    *,
+    stage: str,
+    prompt: str,
+    payload: Dict[str, Any],
+) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+    response = await ums_client.async_infer(
+        "llm.legal_compare",
+        {
+            **payload,
+            "prompt": prompt,
+        },
+    )
+    model_execution = response.get("model_execution") if isinstance(response, dict) else None
+    if not isinstance(model_execution, dict):
+        model_execution = {
+            "role_key": "llm.legal_compare",
+            "used_model_id": "llm.legal_compare",
+            "fallback_stage": stage,
+            "fallback_used": False,
+            "status": "completed",
+            "source": "workflow",
+        }
+    elif stage and not model_execution.get("fallback_stage"):
+        model_execution = {**model_execution, "fallback_stage": stage}
+    return response, model_execution
 
 
 # === State Definition ===
@@ -75,6 +98,7 @@ class DocumentAnalysisState(TypedDict):
     summary_metadata: Dict[str, Any]
     final_report: str
     runtime_context: Dict[str, Any]
+    model_execution: Annotated[List[Dict[str, Any]], operator.add]
     errors: Annotated[List[str], operator.add]
 
 
@@ -358,10 +382,10 @@ async def _infer_stage_with_policy_retry(
     )
     prompt_payload = truncate_text(payload, input_char_cap)
     try:
-        response = await ums_client.async_infer(
-            _resolve_document_analysis_llm_model_id(),
-            {
-                "prompt": prompt_factory(prompt_payload),
+        response, model_execution = await _infer_document_analysis_with_failover(
+            stage=stage,
+            prompt=prompt_factory(prompt_payload),
+            payload={
                 "temperature": DOCUMENT_ANALYSIS_SUMMARIZE_TEMPERATURE,
                 "max_tokens": output_token_cap,
             },
@@ -370,6 +394,7 @@ async def _infer_stage_with_policy_retry(
             "text": _extract_llm_content(response).strip(),
             "admission": admission,
             "retry_used": False,
+            "model_execution": model_execution,
         }
     except Exception as first_exc:
         compact_char_cap = max(256, input_char_cap // 2)
@@ -382,10 +407,10 @@ async def _infer_stage_with_policy_retry(
             output_token_cap=compact_token_cap,
         )
         try:
-            response = await ums_client.async_infer(
-                _resolve_document_analysis_llm_model_id(),
-                {
-                    "prompt": prompt_factory(compact_payload),
+            response, model_execution = await _infer_document_analysis_with_failover(
+                stage=stage,
+                prompt=prompt_factory(compact_payload),
+                payload={
                     "temperature": DOCUMENT_ANALYSIS_SUMMARIZE_TEMPERATURE,
                     "max_tokens": compact_token_cap,
                 },
@@ -394,6 +419,7 @@ async def _infer_stage_with_policy_retry(
                 "text": _extract_llm_content(response).strip(),
                 "admission": compact_admission,
                 "retry_used": True,
+                "model_execution": model_execution,
             }
         except Exception as retry_exc:
             raise RuntimeError(f"{stage} failed after policy-changing retry: {retry_exc}") from first_exc
@@ -497,6 +523,7 @@ async def extract_positions_node(state: DocumentAnalysisState) -> dict:
     """Node 2: Двухпроходная экстракция позиций (таблицы + LLM)."""
     path = state["input_path"]
     errors = []
+    model_execution_events: List[Dict[str, Any]] = []
 
     print(f"[DocAnalysis] Extracting positions from: {os.path.basename(path)}")
 
@@ -531,6 +558,7 @@ async def extract_positions_node(state: DocumentAnalysisState) -> dict:
                 path,
                 already_names,
                 progress_callback=_on_extract_chunk_progress,
+                model_execution_events=model_execution_events,
             )
             print(f"  [DocAnalysis] LLM text: {len(items_text)} items")
             await _update_summary_progress(
@@ -549,11 +577,14 @@ async def extract_positions_node(state: DocumentAnalysisState) -> dict:
     items = _dedup_items(items_table + items_text)
     
     # TD-LLM-Polisher: Очищаем сырые характеристики через LLM
-    await _polish_items_specs_llm(items)
+    await _polish_items_specs_llm(items, model_execution_events=model_execution_events)
     
     print(f"  [DocAnalysis] Total after dedup: {len(items)}")
 
-    return {"items": items, "errors": errors}
+    result = {"items": items, "errors": errors}
+    if model_execution_events:
+        result["model_execution"] = model_execution_events
+    return result
 
 
 # === Node 3: Summarize ===
@@ -623,6 +654,7 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
     print(f"  [DocAnalysis] {len(chunks)} chunk(s) for summarization")
 
     chunk_summaries = []
+    model_execution_events: List[Dict[str, Any]] = []
     for idx, chunk in enumerate(chunks):
         await _raise_if_cancelled(state)
         chunk_admission = _resolve_stage_admission(
@@ -647,12 +679,15 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
                 title="Суммаризация документа",
                 content=f"Chunk {idx+1}/{len(chunks)}",
             )
-            response = await ums_client.async_infer(_resolve_document_analysis_llm_model_id(), {
-                "prompt": prompt,
-                "temperature": DOCUMENT_ANALYSIS_SUMMARIZE_TEMPERATURE,
-                "max_tokens": DOCUMENT_ANALYSIS_SUMMARIZE_MAX_TOKENS,
-            })
-
+            response, model_execution = await _infer_document_analysis_with_failover(
+                stage="chunk_summary",
+                prompt=prompt,
+                payload={
+                    "temperature": DOCUMENT_ANALYSIS_SUMMARIZE_TEMPERATURE,
+                    "max_tokens": DOCUMENT_ANALYSIS_SUMMARIZE_MAX_TOKENS,
+                },
+            )
+            model_execution_events.append(model_execution)
             content = _extract_llm_content(response)
             if content.strip():
                 chunk_summaries.append(content.strip())
@@ -716,6 +751,8 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
                         input_char_cap=summary_policy["group_input_chars"],
                         output_token_cap=summary_policy["final_max_tokens"],
                     )
+                    if stage_result.get("model_execution"):
+                        model_execution_events.append(stage_result["model_execution"])
                     if stage_result["retry_used"]:
                         _mark_degraded(summary_metadata, stage="group_merge", reason="policy_retry")
                     merged_text = stage_result["text"] or truncate_text(combined, summary_policy["group_input_chars"])
@@ -765,6 +802,8 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
                     input_char_cap=summary_policy["final_input_chars"],
                     output_token_cap=summary_policy["final_max_tokens"],
                 )
+                if stage_result.get("model_execution"):
+                    model_execution_events.append(stage_result["model_execution"])
                 if stage_result["retry_used"]:
                     _mark_degraded(summary_metadata, stage="final_synthesis", reason="policy_retry")
                 summary = stage_result["text"] or _build_partial_summary(
@@ -790,7 +829,10 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
         content=f"Готово: обработано {len(chunk_summaries)}/{len(chunks)} фрагментов.",
     )
 
-    return {"summary": summary, "errors": errors, "summary_metadata": summary_metadata}
+    result = {"summary": summary, "errors": errors, "summary_metadata": summary_metadata}
+    if model_execution_events:
+        result["model_execution"] = model_execution_events
+    return result
 
 
 # === Node 4: Generate Report ===

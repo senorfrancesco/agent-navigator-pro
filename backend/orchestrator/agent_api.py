@@ -15,6 +15,7 @@ import logging
 import warnings
 from typing import Dict, Any, Optional, List, AsyncGenerator, Literal
 from dotenv import load_dotenv
+import numpy as np
 
 # Подавление предупреждений pynvml
 warnings.filterwarnings("ignore", category=FutureWarning, module="pynvml")
@@ -27,7 +28,7 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from services.model_manager.ums_client import ums_client
-from services.model_manager.model_selection import resolve_model_selection
+from services.model_manager.model_selection import resolve_execution_plan, resolve_model_selection
 from services.observability import (
     inc_metric_counter,
     ObservabilityMiddleware,
@@ -200,6 +201,7 @@ async def _infer_with_effective_settings(
     *,
     enforced_overrides: Optional[Dict[str, Any]] = None,
     device_mode: Optional[str] = None,
+    record_model_execution: Optional[Any] = None,
     **_: Any,
 ) -> str:
     generation = dict((effective_settings.get("generation") or {}))
@@ -211,18 +213,136 @@ async def _infer_with_effective_settings(
         "top_p": generation.get("top_p", 0.9),
         "max_tokens": generation.get("max_tokens", 2048),
     }
-    model_id = (
+    model_id = str(
         effective_settings.get("resolved_model_id")
         or resolve_model_selection("llm.default_chat").resolved_model_id
     )
     resolved_device_mode = normalize_inference_device_mode(device_mode or effective_settings.get("device_mode"))
     response = await asyncio.to_thread(ums_client.infer, model_id, payload, resolved_device_mode)
+    if callable(record_model_execution):
+        try:
+            if isinstance(response, dict) and isinstance(response.get("model_execution"), dict):
+                record_model_execution(response["model_execution"])
+        except Exception:
+            logger.debug("Model execution recorder failed", exc_info=True)
     return _extract_content(response)
+
+
+def _is_model_failover_blocked(exc: Exception) -> bool:
+    if isinstance(exc, asyncio.CancelledError):
+        return True
+    if isinstance(exc, UMSBusyError):
+        return True
+    message = str(exc).lower()
+    return "429" in message or "busy" in message or "cancel" in message
+
+
+def _build_model_execution_event(
+    *,
+    selection: Any,
+    used_model_id: str,
+    fallback_used: bool,
+    fallback_reason: Optional[str],
+    attempt_count: int,
+) -> Dict[str, Any]:
+    payload = dict(selection.to_dict() if hasattr(selection, "to_dict") else selection or {})
+    payload.update(
+        {
+            "primary_model_id": payload.get("resolved_model_id") or payload.get("primary_model_id"),
+            "fallback_model_id": payload.get("fallback_model_id") if payload.get("fallback_available") else None,
+            "used_model_id": used_model_id,
+            "fallback_used": bool(fallback_used),
+            "fallback_reason": fallback_reason,
+            "attempt_count": max(1, int(attempt_count)),
+            "status": "fallback_completed" if fallback_used else "completed",
+        }
+    )
+    return payload
+
+
+def _infer_with_model_failover(
+    selection: Any,
+    payload: Dict[str, Any],
+    device_mode: str,
+    prompt: Optional[str] = None,
+) -> Dict[str, Any]:
+    primary_model_id = str(getattr(selection, "resolved_model_id", "") or "")
+    fallback_model_id = str(getattr(selection, "fallback_model_id", "") or "")
+    if not fallback_model_id or fallback_model_id == primary_model_id:
+        fallback_model_id = ""
+    attempts = [primary_model_id] + ([fallback_model_id] if fallback_model_id else [])
+    last_error: Optional[Exception] = None
+    for attempt_idx, model_id in enumerate(attempts, start=1):
+        try:
+            request_payload = dict(payload)
+            if prompt is not None:
+                request_payload["prompt"] = prompt
+            response = ums_client.infer(model_id, request_payload, device_mode)
+            return {
+                "response": response,
+                "model_execution": _build_model_execution_event(
+                    selection=selection,
+                    used_model_id=model_id,
+                    fallback_used=attempt_idx > 1,
+                    fallback_reason=str(last_error) if attempt_idx > 1 and last_error is not None else None,
+                    attempt_count=attempt_idx,
+                ),
+            }
+        except Exception as exc:
+            if _is_model_failover_blocked(exc):
+                raise
+            last_error = exc
+            if attempt_idx < len(attempts):
+                logger.warning(
+                    "Model failover retry model=%s fallback=%s error=%s",
+                    primary_model_id,
+                    fallback_model_id or None,
+                    exc,
+                    exc_info=True,
+                )
+                inc_metric_counter(
+                    "agent_nav_fallback_events_total",
+                    labels={
+                        "component": "agent_api",
+                        "fallback": "model_failover_retry",
+                        "source": "orchestrator",
+                    },
+                )
+                continue
+            raise
+
+
+def _create_failover_embed_fn(
+    selection: Any,
+    *,
+    record_model_execution: Optional[Any] = None,
+) -> Optional[Any]:
+    model_id = str(getattr(selection, "resolved_model_id", "") or "")
+    if not model_id:
+        return None
+    embed_fn = create_ums_embed_fn(model_id=model_id)
+    if embed_fn is None or not callable(record_model_execution):
+        return embed_fn
+
+    def _wrapped(texts: List[str]) -> np.ndarray:
+        result = embed_fn(texts)
+        event = getattr(embed_fn, "last_model_execution", None)
+        if isinstance(event, dict):
+            try:
+                record_model_execution(event)
+            except Exception:
+                logger.debug("Model execution recorder failed", exc_info=True)
+        setattr(_wrapped, "last_model_execution", event)
+        return result
+
+    setattr(_wrapped, "last_model_execution", getattr(embed_fn, "last_model_execution", None))
+    return _wrapped
 
 
 def _build_api_execution_dependencies(request: OrchestrationRequest, effective_settings: Dict[str, Any]) -> ExecutionDependencies:
     session_docs = request.session_docs or {}
     retrieval_embed_fn: Optional[Any] = None
+    model_execution_events: List[Dict[str, Any]] = []
 
     def _docs_list() -> List[Dict[str, Any]]:
         return _build_session_doc_list(session_docs)
@@ -239,10 +359,18 @@ def _build_api_execution_dependencies(request: OrchestrationRequest, effective_s
             prompt,
             enforced_overrides=kwargs.get("enforced_overrides"),
             device_mode=kwargs.get("device_mode"),
+            record_model_execution=_record_model_execution,
             allow_sync_retry=kwargs.get("allow_sync_retry"),
             raise_on_error=kwargs.get("raise_on_error"),
             summary_stage=kwargs.get("summary_stage"),
         )
+
+    def _record_model_execution(event: Dict[str, Any]) -> None:
+        if isinstance(event, dict):
+            model_execution_events.append(dict(event))
+
+    def _get_model_execution_events() -> List[Dict[str, Any]]:
+        return [dict(event) for event in model_execution_events]
 
     async def _noop_async(*args: Any, **kwargs: Any) -> None:
         return None
@@ -251,16 +379,17 @@ def _build_api_execution_dependencies(request: OrchestrationRequest, effective_s
         nonlocal retrieval_embed_fn
         if retrieval_embed_fn is not None:
             return retrieval_embed_fn
-        retrieval_embedder_model_id = str(
-            effective_settings.get("resolved_retrieval_embedder_model_id")
-            or resolve_model_selection("legal.embedder").resolved_model_id
+        retrieval_resolution = effective_settings.get("resolved_retrieval_embedder_resolution")
+        if retrieval_resolution is None and effective_settings.get("resolved_retrieval_embedder_model_id"):
+            retrieval_resolution = resolve_execution_plan(
+                requested_model_id=str(effective_settings.get("resolved_retrieval_embedder_model_id"))
+            )
+        if retrieval_resolution is None:
+            retrieval_resolution = resolve_model_selection("legal.embedder")
+        retrieval_embed_fn = _create_failover_embed_fn(
+            retrieval_resolution,
+            record_model_execution=_record_model_execution,
         )
-        try:
-            from services.model_manager.ums_client import create_ums_embed_fn
-
-            retrieval_embed_fn = create_ums_embed_fn(model_id=retrieval_embedder_model_id)
-        except Exception:
-            retrieval_embed_fn = None
         return retrieval_embed_fn
 
     def _has_sufficient_evidence(**kwargs: Any) -> bool:
@@ -350,6 +479,8 @@ def _build_api_execution_dependencies(request: OrchestrationRequest, effective_s
         update_progress_box=_noop_async,
         clear_progress_box=_noop_async,
         is_cancelled=lambda: False,
+        record_model_execution=_record_model_execution,
+        get_model_execution_events=_get_model_execution_events,
     )
 
 def _compute_files_hash(file_paths: List[str]) -> str:

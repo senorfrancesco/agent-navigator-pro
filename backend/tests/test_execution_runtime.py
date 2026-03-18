@@ -152,6 +152,37 @@ def test_execute_orchestration_runs_chat_handler_via_backend_dependencies():
     deps.infer_assistant_text.assert_awaited_once()
 
 
+def test_execute_orchestration_attaches_model_execution_metadata_from_dependencies():
+    deps = _build_minimal_deps()
+    deps.get_model_execution_events = lambda: [
+        {
+            "role_key": "llm.default_chat",
+            "primary_model_id": "qwen-14b-llm",
+            "fallback_model_id": "qwen-14b-llm",
+            "used_model_id": "qwen-14b-llm",
+            "fallback_used": False,
+            "attempt_count": 1,
+            "status": "completed",
+        }
+    ]
+
+    response = asyncio.run(
+        execute_orchestration(
+            {
+                "message": "Привет",
+                "session_id": "session-model-execution",
+                "runtime_mode": "chat_only",
+                "history": [],
+            },
+            deps=deps,
+        )
+    )
+
+    assert response["assistant_message"] == "Привет!"
+    assert response["model_execution"]["fallback_used"] is False
+    assert response["model_execution"]["events"][0]["used_model_id"] == "qwen-14b-llm"
+
+
 def test_execute_orchestration_general_chat_regenerates_on_language_contamination():
     deps = _build_minimal_deps()
     deps.infer_assistant_text = AsyncMock(

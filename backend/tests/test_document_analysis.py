@@ -328,6 +328,44 @@ class TestExtractPositionsNode:
         _, kwargs = mock_llm.call_args
         assert "progress_callback" in kwargs
         assert callable(kwargs["progress_callback"])
+        assert "model_execution_events" in kwargs
+
+    @pytest.mark.asyncio
+    async def test_extract_collects_model_execution_metadata_from_llm_paths(self, base_state):
+        async def _fake_extract_items_llm(path, already_names, progress_callback=None, model_execution_events=None):
+            if model_execution_events is not None:
+                model_execution_events.append(
+                    {
+                        "role_key": "llm.legal_compare",
+                        "primary_model_id": "qwen-14b-llm",
+                        "fallback_model_id": "qwen-14b-llm",
+                        "used_model_id": "qwen-14b-llm",
+                        "fallback_used": False,
+                        "attempt_count": 1,
+                    }
+                )
+            return [
+                {
+                    "name": "Ноутбук MSI",
+                    "specs": "i7, 32GB",
+                    "quantity": "5",
+                    "price": "",
+                    "unit": "",
+                    "source": "text",
+                    "page": None,
+                }
+            ]
+
+        with patch("orchestrator.workflows.document_analysis._extract_tables_from_doc", new_callable=AsyncMock) as mock_tables, \
+             patch("orchestrator.workflows.document_analysis._extract_items_llm", side_effect=_fake_extract_items_llm) as mock_llm, \
+             patch("orchestrator.workflows.document_analysis._polish_items_specs_llm", new_callable=AsyncMock) as mock_polish:
+            mock_tables.return_value = []
+            mock_polish.return_value = None
+
+            result = await extract_positions_node(base_state)
+
+        assert len(result["items"]) == 1
+        assert result["model_execution"][0]["used_model_id"] == "qwen-14b-llm"
 
 
 # ============================================================================

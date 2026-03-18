@@ -150,6 +150,40 @@ async def test_execute_orchestration_api_returns_execution_metadata():
     assert response["ui_effects"]["set_pending_action"]["type"] == "choose_route"
 
 
+def test_build_api_execution_dependencies_collects_model_execution_events():
+    request = OrchestrationRequest(
+        message="Привет",
+        session_id="session-model-execution",
+        runtime_mode="chat_only",
+        history=[],
+    )
+    effective_settings = {
+        "runtime_mode": "chat_only",
+        "assistant_mode": "general_chat",
+        "resolved_model_id": "qwen-14b-llm",
+        "resolved_retrieval_embedder_model_id": "qwen3-embedding-0.6b",
+        "resolved_intent_embedder_model_id": "qwen3-embedding-0.6b",
+        "device_mode": "prefer-gpu",
+    }
+
+    deps = _build_api_execution_dependencies(request, effective_settings)
+    deps.record_model_execution(
+        {
+            "role_key": "llm.default_chat",
+            "primary_model_id": "qwen-14b-llm",
+            "fallback_model_id": "qwen-14b-llm",
+            "used_model_id": "qwen-14b-llm",
+            "fallback_used": False,
+            "attempt_count": 1,
+            "status": "completed",
+        }
+    )
+
+    events = deps.get_model_execution_events()
+    assert len(events) == 1
+    assert events[0]["used_model_id"] == "qwen-14b-llm"
+
+
 @pytest.mark.asyncio
 async def test_execute_orchestration_api_returns_top_level_control_plane_fields():
     request = OrchestrationRequest(
@@ -351,7 +385,10 @@ async def test_execute_orchestration_api_reads_knowledge_base_via_unified_core(m
         return func(*args, **kwargs)
 
     monkeypatch.setattr("orchestrator.agent_api.asyncio.to_thread", fake_to_thread)
-    monkeypatch.setattr("services.model_manager.ums_client.create_ums_embed_fn", lambda **kwargs: _stub_embed_fn)
+    monkeypatch.setattr(
+        "orchestrator.agent_api._create_failover_embed_fn",
+        lambda selection, *, record_model_execution=None: _stub_embed_fn,
+    )
     monkeypatch.setattr(
         "orchestrator.agent_api.ums_client.infer",
         lambda model_id, payload, device_mode="hybrid": {"content": "Штраф составляет 3 процента [1]"},
@@ -438,11 +475,11 @@ def test_build_api_execution_dependencies_uses_resolved_retrieval_embedder(monke
 
     called = {}
 
-    def fake_create_ums_embed_fn(**kwargs):
-        called["model_id"] = kwargs.get("model_id")
+    def fake_create_failover_embed_fn(selection, *, record_model_execution=None):
+        called["model_id"] = getattr(selection, "resolved_model_id", None)
         return _stub_embed_fn
 
-    monkeypatch.setattr("services.model_manager.ums_client.create_ums_embed_fn", fake_create_ums_embed_fn)
+    monkeypatch.setattr("orchestrator.agent_api._create_failover_embed_fn", fake_create_failover_embed_fn)
 
     request = OrchestrationRequest(message="Что написано про штраф?", has_session_docs=False)
     effective = resolve_effective_settings({"model_profile": "low-vram"})
@@ -450,4 +487,3 @@ def test_build_api_execution_dependencies_uses_resolved_retrieval_embedder(monke
     deps = _build_api_execution_dependencies(request, effective)
 
     assert deps.get_retrieval_embed_fn() is _stub_embed_fn
-    assert called["model_id"] == effective["resolved_retrieval_embedder_model_id"]

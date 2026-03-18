@@ -11,6 +11,7 @@ MCP Legal Server - FastAPI приложение для анализа юриди
 - LLM-модели (Qwen-14B) для анализа значимости
 """
 
+import asyncio
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
@@ -25,7 +26,7 @@ from functools import lru_cache
 # Добавляем путь к model_manager
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'model_manager'))
 
-from ums_client import get_embeddings_via_ums, generate_text_via_ums, ums_client
+from ums_client import UMSBusyError, ums_client
 from services.model_manager.model_selection import resolve_model_selection
 
 LEGAL_RERANKER_MODEL_PATH = os.getenv("MODEL_PATH_RERANKER", "").strip()
@@ -52,6 +53,7 @@ class DifferenceItem(BaseModel):
 class CompareChunksResponse(BaseModel):
     status: str
     differences: Optional[List[DifferenceItem]] = None
+    model_execution: Optional[List[Dict[str, Any]]] = None
     error: Optional[str] = None
 
 class MatchBatchesRequest(BaseModel):
@@ -62,6 +64,7 @@ class MatchBatchesRequest(BaseModel):
 class MatchBatchesResponse(BaseModel):
     status: str
     matches: List[Dict[str, Any]]
+    model_execution: Optional[List[Dict[str, Any]]] = None
     error: Optional[str] = None
 
 class AnalyzeImpactRequest(BaseModel):
@@ -79,6 +82,7 @@ class AnalyzeImpactResponse(BaseModel):
     status: str
     analysis: Optional[List[ImpactAnalysis]] = None
     summary: Optional[str] = None
+    model_execution: Optional[List[Dict[str, Any]]] = None
     error: Optional[str] = None
 
 class GenerateReportRequest(BaseModel):
@@ -99,6 +103,102 @@ async def health():
     """Health check endpoint."""
     return {"status": "healthy", "service": "mcp-legal-server"}
 
+
+def _is_model_failover_blocked(exc: Exception) -> bool:
+    if isinstance(exc, asyncio.CancelledError):
+        return True
+    if isinstance(exc, UMSBusyError):
+        return True
+    message = str(exc).lower()
+    return "429" in message or "cancel" in message or "busy" in message
+
+
+def _build_model_execution_event(
+    *,
+    selection: Any,
+    used_model_id: str,
+    fallback_used: bool,
+    fallback_reason: Optional[str],
+    attempt_count: int,
+    stage: Optional[str] = None,
+) -> Dict[str, Any]:
+    payload = dict(selection.to_dict() if hasattr(selection, "to_dict") else selection or {})
+    payload.update(
+        {
+            "role_key": payload.get("role_key"),
+            "primary_model_id": payload.get("resolved_model_id") or payload.get("primary_model_id"),
+            "fallback_model_id": payload.get("fallback_model_id") if payload.get("fallback_available") else None,
+            "used_model_id": used_model_id,
+            "fallback_used": bool(fallback_used),
+            "fallback_stage": stage,
+            "fallback_reason": fallback_reason,
+            "attempt_count": max(1, int(attempt_count)),
+            "status": "fallback_completed" if fallback_used else "completed",
+        }
+    )
+    return payload
+
+
+def _extract_embedding_rows(response: Dict[str, Any]) -> List[List[float]]:
+    if "data" in response and isinstance(response["data"], list):
+        return [list(item["embedding"]) for item in response["data"] if isinstance(item, dict) and item.get("embedding") is not None]
+    if "embedding" in response:
+        embedding = response["embedding"]
+        if isinstance(embedding, list) and embedding and isinstance(embedding[0], list):
+            return [list(row) for row in embedding]
+        if isinstance(embedding, list):
+            return [list(embedding)]
+    raise RuntimeError("Embedding response missing data")
+
+
+async def _infer_with_model_failover(
+    *,
+    role_key: str,
+    payload: Dict[str, Any],
+    device_mode: Optional[str] = None,
+    stage: Optional[str] = None,
+    model_execution_events: Optional[List[Dict[str, Any]]] = None,
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    selection = resolve_model_selection(role_key)
+    attempts = [selection.resolved_model_id]
+    if selection.fallback_available and selection.fallback_model_id != selection.resolved_model_id:
+        attempts.append(selection.fallback_model_id)
+    last_error: Optional[Exception] = None
+    for attempt_idx, model_id in enumerate(attempts, start=1):
+        try:
+            request_payload = dict(payload)
+            if device_mode is None:
+                response = await asyncio.to_thread(ums_client.infer, model_id, request_payload)
+            else:
+                response = await asyncio.to_thread(ums_client.infer, model_id, request_payload, device_mode)
+            event = _build_model_execution_event(
+                selection=selection,
+                used_model_id=model_id,
+                fallback_used=attempt_idx > 1,
+                fallback_reason=str(last_error) if attempt_idx > 1 and last_error is not None else None,
+                attempt_count=attempt_idx,
+                stage=stage,
+            )
+            if model_execution_events is not None:
+                model_execution_events.append(dict(event))
+            return response, event
+        except Exception as exc:
+            if _is_model_failover_blocked(exc):
+                raise
+            last_error = exc
+            if attempt_idx < len(attempts):
+                logger.warning(
+                    "Legal server model failover retry role=%s stage=%s primary=%s fallback=%s error=%s",
+                    role_key,
+                    stage or "default",
+                    attempts[0],
+                    attempts[1] if len(attempts) > 1 else None,
+                    exc,
+                    exc_info=True,
+                )
+                continue
+            raise RuntimeError(f"Model execution failed for role {role_key} after fallback: {exc}") from exc
+
 @app.post("/compare_chunks", response_model=CompareChunksResponse)
 async def compare_chunks(request: CompareChunksRequest):
     """
@@ -108,10 +208,26 @@ async def compare_chunks(request: CompareChunksRequest):
     """
     print(f"[LEGAL_SERVER] Comparing chunks (threshold={request.threshold})")
     
+    model_execution_events: List[Dict[str, Any]] = []
     try:
-        # Получаем эмбеддинги через UMS
-        old_embedding = get_embeddings_via_ums(request.old_text)
-        new_embedding = get_embeddings_via_ums(request.new_text)
+        # Получаем эмбеддинги через UMS с универсальным failover
+        old_response, old_event = await _infer_with_model_failover(
+            role_key="legal.embedder",
+            payload={"input": [request.old_text], "normalize": True},
+            device_mode="cpu",
+            stage="compare_chunks_old",
+            model_execution_events=model_execution_events,
+        )
+        new_response, new_event = await _infer_with_model_failover(
+            role_key="legal.embedder",
+            payload={"input": [request.new_text], "normalize": True},
+            device_mode="cpu",
+            stage="compare_chunks_new",
+            model_execution_events=model_execution_events,
+        )
+
+        old_embedding = _extract_embedding_rows(old_response)[0]
+        new_embedding = _extract_embedding_rows(new_response)[0]
         
         # Вычисляем косинусное сходство
         similarity = _cosine_similarity(old_embedding, new_embedding)
@@ -135,7 +251,8 @@ async def compare_chunks(request: CompareChunksRequest):
         
         return CompareChunksResponse(
             status="success",
-            differences=differences
+            differences=differences,
+            model_execution=model_execution_events,
         )
     
     except Exception as e:
@@ -302,37 +419,34 @@ async def _match_batches_impl(request: MatchBatchesRequest) -> MatchBatchesRespo
 
         # 1. Получаем эмбеддинги батчем с разбивкой на мини-батчи
         # UMS/Llama-server имеет лимит на размер контекста, поэтому разбиваем большие списки
-        
-        def get_batch_embeddings(texts: List[str], batch_size: int = 32) -> List[List[float]]:
+        model_execution_events: List[Dict[str, Any]] = []
+
+        async def get_batch_embeddings(texts: List[str], batch_size: int = 32) -> List[List[float]]:
             all_embeddings = []
-            legal_embedder_model_id = resolve_model_selection("legal.embedder").resolved_model_id
             for i in range(0, len(texts), batch_size):
                 batch = texts[i:i + batch_size]
                 payload = {"input": batch, "normalize": True}
                 try:
-                    # Используем cpu для эмбеддингов, чтобы не занимать VRAM LLM-модели
-                    emb_res = ums_client.infer(legal_embedder_model_id, payload, device_mode="cpu")
-                    
-                    if "data" in emb_res:
-                        batch_embs = [item["embedding"] for item in emb_res["data"]]
-                    elif "embedding" in emb_res:
-                        # Обработка случая, если вернулся один эмбеддинг (хотя отправляли список)
-                        e = emb_res["embedding"]
-                        if isinstance(e[0], list): batch_embs = e
-                        else: batch_embs = [e]
-                    else:
-                        batch_embs = []
-                        print(f"[LEGAL_SERVER] Warning: No embeddings returned for batch {i}")
-                    
+                    emb_res, _event = await _infer_with_model_failover(
+                        role_key="legal.embedder",
+                        payload=payload,
+                        device_mode="cpu",
+                        stage="match_batches_embeddings",
+                        model_execution_events=model_execution_events,
+                    )
+                    batch_embs = _extract_embedding_rows(emb_res)
+                    if len(batch_embs) != len(batch):
+                        raise RuntimeError(
+                            f"Embedding batch size mismatch: expected {len(batch)}, got {len(batch_embs)}"
+                        )
                     all_embeddings.extend(batch_embs)
                 except Exception as e:
                     print(f"[LEGAL_SERVER] Error in embedding batch {i}: {e}")
-                    # В случае ошибки заполняем нулями, чтобы не ломать индексы
-                    all_embeddings.extend([[0.0]*768] * len(batch))
+                    raise
             return all_embeddings
 
-        embs_old = np.array(get_batch_embeddings(request.list_old))
-        embs_new = np.array(get_batch_embeddings(request.list_new))
+        embs_old = np.array(await get_batch_embeddings(request.list_old))
+        embs_new = np.array(await get_batch_embeddings(request.list_new))
 
         if embs_old.size == 0 or embs_new.size == 0:
             raise ValueError("Failed to get embeddings from UMS")
@@ -420,7 +534,7 @@ async def _match_batches_impl(request: MatchBatchesRequest) -> MatchBatchesRespo
                 stats["ADDED"] += 1
 
         print(f"[LEGAL_SERVER] Match stats: {stats}")
-        return MatchBatchesResponse(status="success", matches=matches)
+        return MatchBatchesResponse(status="success", matches=matches, model_execution=model_execution_events)
     
     except Exception as e:
         print(f"[LEGAL_SERVER] Error in match_batches: {e}")
@@ -449,6 +563,7 @@ async def analyze_impact(request: AnalyzeImpactRequest):
     
     try:
         analysis = []
+        model_execution_events: List[Dict[str, Any]] = []
         
         # Критические ключевые слова, указывающие на важные изменения
         critical_keywords = [
@@ -481,8 +596,18 @@ async def analyze_impact(request: AnalyzeImpactRequest):
 3. Какие действия нужны"""
                 
                 try:
-                    impact_desc = generate_text_via_ums(prompt, max_tokens=200)
-                except:
+                    impact_response, _event = await _infer_with_model_failover(
+                        role_key="llm.legal_compare",
+                        payload={"prompt": prompt, "max_tokens": 200, "temperature": 0.2, "top_p": 0.9},
+                        stage="analyze_impact",
+                        model_execution_events=model_execution_events,
+                    )
+                    impact_desc = (
+                        impact_response.get("content")
+                        or (impact_response.get("choices", [{}])[0].get("text", "") if isinstance(impact_response.get("choices"), list) else "")
+                        or str(impact_response)
+                    ).strip()
+                except Exception:
                     impact_desc = "Critical change affecting contract terms and obligations. Manual review required."
             else:
                 severity = "MINOR"
@@ -504,7 +629,8 @@ async def analyze_impact(request: AnalyzeImpactRequest):
         return AnalyzeImpactResponse(
             status="success",
             analysis=analysis,
-            summary=summary
+            summary=summary,
+            model_execution=model_execution_events,
         )
     
     except Exception as e:

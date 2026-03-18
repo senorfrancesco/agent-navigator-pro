@@ -354,6 +354,8 @@ class ExecutionDependencies:
     update_progress_box: AsyncAnyFn
     clear_progress_box: AsyncAnyFn
     is_cancelled: SyncAnyFn
+    record_model_execution: Optional[SyncAnyFn] = None
+    get_model_execution_events: Optional[SyncAnyFn] = None
 
 
 def _is_execution_cancelled(deps: ExecutionDependencies) -> bool:
@@ -366,6 +368,171 @@ def _is_execution_cancelled(deps: ExecutionDependencies) -> bool:
 def _raise_if_execution_cancelled(deps: ExecutionDependencies) -> None:
     if _is_execution_cancelled(deps):
         raise asyncio.CancelledError
+
+
+def _is_model_failover_blocked(exc: Exception) -> bool:
+    if isinstance(exc, asyncio.CancelledError):
+        return True
+    if isinstance(exc, UMSBusyError):
+        return True
+    message = str(exc).lower()
+    return "429" in message or "cancel" in message or "busy" in message
+
+
+def _build_model_execution_event(
+    *,
+    role_key: str,
+    selection: Any,
+    used_model_id: str,
+    fallback_used: bool,
+    fallback_stage: Optional[str] = None,
+    fallback_reason: Optional[str] = None,
+    attempt_count: int = 1,
+) -> Dict[str, Any]:
+    payload = dict(selection.to_dict() if hasattr(selection, "to_dict") else selection or {})
+    payload.update(
+        {
+            "role_key": role_key,
+            "primary_model_id": payload.get("resolved_model_id") or payload.get("primary_model_id"),
+            "fallback_model_id": payload.get("fallback_model_id") if payload.get("fallback_available") else None,
+            "used_model_id": used_model_id,
+            "fallback_used": bool(fallback_used),
+            "fallback_stage": fallback_stage,
+            "fallback_reason": fallback_reason,
+            "attempt_count": max(1, int(attempt_count)),
+            "status": "fallback_completed" if fallback_used else "completed",
+        }
+    )
+    return payload
+
+
+def _record_model_execution_event(
+    deps: ExecutionDependencies,
+    event: Optional[Dict[str, Any]],
+) -> None:
+    if not event:
+        return
+    recorder = getattr(deps, "record_model_execution", None)
+    if callable(recorder):
+        try:
+            recorder(copy.deepcopy(event))
+        except Exception:
+            logger.debug("Model execution recorder failed", exc_info=True)
+
+
+def _collect_model_execution_events(deps: ExecutionDependencies) -> List[Dict[str, Any]]:
+    getter = getattr(deps, "get_model_execution_events", None)
+    if callable(getter):
+        try:
+            events = getter()
+            if isinstance(events, list):
+                return [copy.deepcopy(event) for event in events if isinstance(event, dict)]
+        except Exception:
+            logger.debug("Model execution getter failed", exc_info=True)
+    return []
+
+
+def _summarize_model_execution_events(events: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    clean_events = [copy.deepcopy(event) for event in events if isinstance(event, dict)]
+    if not clean_events:
+        return None
+    fallback_events = [event for event in clean_events if bool(event.get("fallback_used"))]
+    return {
+        "status": "fallback_completed" if fallback_events else "completed",
+        "fallback_used": bool(fallback_events),
+        "attempt_count": sum(int(event.get("attempt_count") or 1) for event in clean_events),
+        "primary_model_ids": [str(event.get("primary_model_id") or "") for event in clean_events if event.get("primary_model_id")],
+        "fallback_model_ids": [str(event.get("fallback_model_id") or "") for event in clean_events if event.get("fallback_model_id")],
+        "used_model_ids": [str(event.get("used_model_id") or "") for event in clean_events if event.get("used_model_id")],
+        "events": clean_events,
+    }
+
+
+def _extract_model_text(response: Any) -> str:
+    if not isinstance(response, dict):
+        return str(response).strip()
+    choices = response.get("choices")
+    if isinstance(choices, list) and choices:
+        choice = choices[0] or {}
+        return (
+            choice.get("text", "")
+            or choice.get("message", {}).get("content", "")
+            or choice.get("delta", {}).get("content", "")
+        ).strip()
+    content = response.get("content")
+    if isinstance(content, str):
+        return content.strip()
+    return str(response).strip()
+
+
+async def _infer_with_model_failover(
+    *,
+    deps: ExecutionDependencies,
+    role_key: str,
+    prompt: str,
+    payload: Dict[str, Any],
+    device_mode: str,
+    fallback_stage: Optional[str] = None,
+) -> tuple[str, Dict[str, Any]]:
+    selection = resolve_model_selection(role_key)
+    primary_model_id = str(selection.resolved_model_id)
+    fallback_model_id = str(selection.fallback_model_id or "").strip() or None
+    if fallback_model_id == primary_model_id:
+        fallback_model_id = None
+
+    attempts = [primary_model_id]
+    if fallback_model_id:
+        attempts.append(fallback_model_id)
+
+    last_error: Optional[Exception] = None
+    for attempt_idx, model_id in enumerate(attempts, start=1):
+        try:
+            response = await ums_client.async_infer(
+                model_id,
+                {
+                    **payload,
+                    "prompt": prompt,
+                },
+                device_mode=device_mode,
+            )
+            event = _build_model_execution_event(
+                role_key=role_key,
+                selection=selection,
+                used_model_id=model_id,
+                fallback_used=attempt_idx > 1,
+                fallback_stage=fallback_stage,
+                fallback_reason=str(last_error) if attempt_idx > 1 and last_error is not None else None,
+                attempt_count=attempt_idx,
+            )
+            _record_model_execution_event(deps, event)
+            return _extract_model_text(response), event
+        except Exception as exc:
+            if _is_model_failover_blocked(exc):
+                raise
+            last_error = exc
+            if attempt_idx < len(attempts):
+                logger.warning(
+                    "Model failover retry role=%s stage=%s primary=%s fallback=%s error=%s",
+                    role_key,
+                    fallback_stage or "default",
+                    primary_model_id,
+                    fallback_model_id,
+                    exc,
+                    exc_info=True,
+                )
+                inc_metric_counter(
+                    "agent_nav_fallback_events_total",
+                    labels={
+                        "component": "model_execution",
+                        "fallback": "model_failover_retry",
+                        "source": "execution_runtime",
+                        "stage": fallback_stage or "default",
+                    },
+                )
+                continue
+            raise RuntimeError(
+                f"Model execution failed for role {role_key} after fallback: {exc}"
+            ) from exc
 
 
 def _resolve_runtime_budget_metadata(
@@ -993,6 +1160,9 @@ async def _execute_compare(
     report = final_state.get("final_report", "")
     errors = final_state.get("errors", [])
     summary_metadata = final_state.get("summary_metadata") or {}
+    model_execution = final_state.get("model_execution") or _summarize_model_execution_events(
+        _collect_model_execution_events(deps)
+    )
     if report:
         await deps.attach_and_register_report(report)
         execution_metadata = {
@@ -1009,6 +1179,7 @@ async def _execute_compare(
             "assistant_message": report,
             "generated_report": report,
             "execution_metadata": execution_metadata,
+            **({"model_execution": model_execution} if model_execution is not None else {}),
         }
     if errors:
         return {"assistant_message": "Ошибки:\n" + "\n".join(f"- {e}" for e in errors)}
@@ -1057,6 +1228,9 @@ async def _execute_equipment(
     report = final_state.get("final_report", "")
     errors = final_state.get("errors", [])
     summary_metadata = final_state.get("summary_metadata") or {}
+    model_execution = final_state.get("model_execution") or _summarize_model_execution_events(
+        _collect_model_execution_events(deps)
+    )
     if report:
         await deps.attach_and_register_report(report)
         execution_metadata = {
@@ -1073,6 +1247,7 @@ async def _execute_equipment(
             "assistant_message": report,
             "generated_report": report,
             "execution_metadata": execution_metadata,
+            **({"model_execution": model_execution} if model_execution is not None else {}),
         }
     if errors:
         return {"assistant_message": "Ошибки:\n" + "\n".join(f"- {e}" for e in errors)}
@@ -1118,6 +1293,9 @@ async def _execute_document_analysis(
     report = final_state.get("final_report", "")
     errors = final_state.get("errors", [])
     summary_metadata = final_state.get("summary_metadata") or {}
+    model_execution = final_state.get("model_execution") or _summarize_model_execution_events(
+        _collect_model_execution_events(deps)
+    )
     if report:
         await deps.attach_and_register_report(report)
         execution_metadata = {
@@ -1134,6 +1312,7 @@ async def _execute_document_analysis(
             "assistant_message": report,
             "generated_report": report,
             "execution_metadata": execution_metadata,
+            **({"model_execution": model_execution} if model_execution is not None else {}),
         }
     if errors:
         return {"assistant_message": "Ошибки:\n" + "\n".join(f"- {e}" for e in errors)}
@@ -1431,6 +1610,9 @@ async def _execute_documents_summary(
     result = {"assistant_message": "\n".join(lines).strip()}
     if execution_metadata is not None:
         result["execution_metadata"] = execution_metadata
+    model_execution = _summarize_model_execution_events(_collect_model_execution_events(deps))
+    if model_execution is not None:
+        result["model_execution"] = model_execution
     return result
 
 
@@ -1579,6 +1761,7 @@ async def _execute_doc_question(
         return {
             "assistant_message": deps.render_doc_question_markdown(payload),
             "sources": payload.get("sources", []),
+            **({"model_execution": _summarize_model_execution_events(_collect_model_execution_events(deps))} if _collect_model_execution_events(deps) else {}),
         }
 
     prompt = deps.build_doc_question_prompt_with_sources(query, history, sources)
@@ -1629,6 +1812,7 @@ async def _execute_doc_question(
         return {
             "assistant_message": deps.render_doc_question_markdown(payload),
             "sources": payload.get("sources", []),
+            **({"model_execution": _summarize_model_execution_events(_collect_model_execution_events(deps))} if _collect_model_execution_events(deps) else {}),
         }
 
     cited_ids = deps.extract_citation_ids(response_text)
@@ -1714,6 +1898,7 @@ async def _execute_doc_question(
     return {
         "assistant_message": deps.render_doc_question_markdown(payload),
         "sources": payload.get("sources", []),
+        **({"model_execution": _summarize_model_execution_events(_collect_model_execution_events(deps))} if _collect_model_execution_events(deps) else {}),
     }
 
 
@@ -1764,7 +1949,11 @@ async def _execute_general_chat(
         )
         if _should_regenerate_for_language_consistency(query, answer):
             answer = _extract_clean_sentence_for_script(answer, _detect_dominant_script(query))
-    return {"assistant_message": answer}
+    model_execution = _summarize_model_execution_events(_collect_model_execution_events(deps))
+    response = {"assistant_message": answer}
+    if model_execution is not None:
+        response["model_execution"] = model_execution
+    return response
 
 
 async def execute_orchestration(
@@ -1900,6 +2089,12 @@ async def execute_orchestration(
     response["sources"] = result.get("sources", response.get("sources", []))
     if result.get("execution_metadata"):
         response["execution_metadata"] = result["execution_metadata"]
+    if result.get("model_execution"):
+        response["model_execution"] = result["model_execution"]
+    elif deps is not None:
+        collected_model_execution = _summarize_model_execution_events(_collect_model_execution_events(deps))
+        if collected_model_execution is not None:
+            response["model_execution"] = collected_model_execution
     status = _derive_run_status(response)
     updated = await state_store.save_run(
         run_id=run_record.run_id,

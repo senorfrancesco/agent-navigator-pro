@@ -16,6 +16,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from services.legal_server import mcp_legal_server
 from services.legal_server.mcp_legal_server import (
+    AnalyzeImpactRequest,
+    CompareChunksRequest,
     MatchBatchesRequest,
     MatchBatchesResponse,
     _build_final_score_matrix,
@@ -34,6 +36,28 @@ async def test_batch_match_alias_delegates_to_shared_impl():
 
     mock_impl.assert_awaited_once_with(request)
     assert result == expected
+
+
+@pytest.mark.asyncio
+async def test_compare_chunks_includes_model_execution_metadata():
+    request = CompareChunksRequest(
+        old_text="Старый текст договора",
+        new_text="Новый текст договора",
+        threshold=0.72,
+    )
+
+    def fake_infer(model: str, payload: dict, device_mode: str = "cpu"):
+        texts = payload["input"]
+        return {
+            "data": [{"embedding": [1.0, 0.0, 0.0]} for _ in texts]
+        }
+
+    with patch.object(mcp_legal_server.ums_client, "infer", side_effect=fake_infer):
+        result = await mcp_legal_server.compare_chunks(request)
+
+    assert result.status == "success"
+    assert result.model_execution is not None
+    assert len(result.model_execution) >= 2
 
 
 def test_build_final_score_matrix_prefers_structurally_consistent_candidate():
@@ -84,8 +108,35 @@ async def test_match_batches_reports_unmatched_old_rows_as_deleted():
         result = await mcp_legal_server._match_batches_impl(request)
 
     assert result.status == "success"
+    assert result.model_execution is not None
+    assert len(result.model_execution) >= 1
     assert sum(1 for item in result.matches if item["type"] == "DELETED") == 2
     assert any(
         item["type"] in {"MODIFIED", "UNCHANGED"} and item["old_text"] == "Позиция 1"
         for item in result.matches
     )
+
+
+@pytest.mark.asyncio
+async def test_analyze_impact_includes_model_execution_metadata():
+    request = AnalyzeImpactRequest(
+        differences=[
+            mcp_legal_server.DifferenceItem(
+                type="MODIFIED",
+                old_text="penalty 5%",
+                new_text="penalty 10%",
+                similarity_score=0.82,
+            )
+        ]
+    )
+
+    def fake_infer(model: str, payload: dict, device_mode: str = "cpu"):
+        return {"content": "Critical change affecting obligations."}
+
+    with patch.object(mcp_legal_server.ums_client, "infer", side_effect=fake_infer):
+        result = await mcp_legal_server.analyze_impact(request)
+
+    assert result.status == "success"
+    assert result.model_execution is not None
+    assert len(result.model_execution) >= 1
+    assert result.analysis is not None and result.analysis[0].is_critical is True

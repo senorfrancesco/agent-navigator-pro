@@ -27,6 +27,7 @@ import uuid
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from urllib.parse import quote
+import numpy as np
 
 # Добавляем пути (оставляем для обратной совместимости, но используем абсолютные)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -39,7 +40,8 @@ from fastapi import HTTPException
 from fastapi.responses import FileResponse
 
 from services.model_manager.model_selection import resolve_model_selection
-from services.model_manager.ums_client import ums_client
+from services.model_manager.model_selection import resolve_execution_plan
+from services.model_manager.ums_client import UMSBusyError, ums_client
 from services.hardware.tier_selector import describe_rag_mode
 from orchestrator.shared.http_client import get_shared_client
 from orchestrator.orchestration_runtime import (
@@ -817,6 +819,8 @@ def _sync_run_metadata_from_response(response: Optional[Dict[str, Any]]) -> None
         cl.user_session.set("state_ref", response.get("state_ref"))
     if "state_version" in response:
         cl.user_session.set("state_version", response.get("state_version"))
+    if "model_execution" in response:
+        cl.user_session.set("last_model_execution", copy.deepcopy(response.get("model_execution")))
 
 
 def _build_backend_resume_snapshot() -> Dict[str, Any]:
@@ -918,6 +922,7 @@ def _build_thread_metadata() -> Dict[str, Any]:
         "has_pending_action": bool(pending_action),
         "last_route": cl.user_session.get("last_route"),
         "last_executor": cl.user_session.get("last_executor"),
+        "last_model_execution": cl.user_session.get("last_model_execution"),
     }
 
 
@@ -1064,13 +1069,13 @@ async def _persist_current_backend_state(*, status: str = "active", last_error: 
 
 
 def _build_execution_dependencies() -> ExecutionDependencies:
-    legal_embedder_model_id = resolve_model_selection("legal.embedder").resolved_model_id
+    model_execution_events = cl.user_session.get("model_execution_events")
+    if not isinstance(model_execution_events, list):
+        model_execution_events = []
+        cl.user_session.set("model_execution_events", model_execution_events)
 
     def _get_retrieval_embed_fn():
         effective = _get_effective_settings()
-        retrieval_embedder_model_id = str(
-            effective.get("resolved_retrieval_embedder_model_id") or legal_embedder_model_id
-        )
         rag_pipeline = cl.user_session.get("rag_pipeline")
         retriever = getattr(rag_pipeline, "retriever", None)
         embed_fn = getattr(retriever, "embed_fn", None)
@@ -1078,24 +1083,30 @@ def _build_execution_dependencies() -> ExecutionDependencies:
             return embed_fn
 
         cache_entry = cl.user_session.get("retrieval_embed_fn")
-        if isinstance(cache_entry, dict) and cache_entry.get("model_id") == retrieval_embedder_model_id:
+        resolved_retrieval_model_id = str(effective.get("resolved_retrieval_embedder_model_id") or "")
+        if isinstance(cache_entry, dict) and cache_entry.get("model_id") == resolved_retrieval_model_id:
             cached = cache_entry.get("embed_fn")
             if cached is not None:
                 return cached
-        elif cache_entry is not None and retrieval_embedder_model_id == legal_embedder_model_id:
-            return cache_entry
 
-        try:
-            from services.model_manager.ums_client import create_ums_embed_fn
-
-            embed_fn = create_ums_embed_fn(model_id=retrieval_embedder_model_id)
-        except Exception:
-            embed_fn = None
+        retrieval_resolution = effective.get("resolved_retrieval_embedder_resolution")
+        if retrieval_resolution is None and resolved_retrieval_model_id:
+            retrieval_resolution = resolve_execution_plan(requested_model_id=resolved_retrieval_model_id)
+        if retrieval_resolution is None:
+            retrieval_resolution = resolve_model_selection("legal.embedder")
+        embed_fn = _create_failover_embed_fn(retrieval_resolution, record_model_execution=_record_model_execution)
         cl.user_session.set(
             "retrieval_embed_fn",
-            {"model_id": retrieval_embedder_model_id, "embed_fn": embed_fn},
+            {"model_id": getattr(retrieval_resolution, "resolved_model_id", None), "embed_fn": embed_fn},
         )
         return embed_fn
+
+    def _record_model_execution(event: Dict[str, Any]) -> None:
+        if isinstance(event, dict):
+            model_execution_events.append(dict(event))
+
+    def _get_model_execution_events() -> List[Dict[str, Any]]:
+        return [dict(event) for event in model_execution_events]
 
     return ExecutionDependencies(
         infer_assistant_text=_infer_assistant_text,
@@ -1131,6 +1142,8 @@ def _build_execution_dependencies() -> ExecutionDependencies:
         update_progress_box=_update_progress_box,
         clear_progress_box=_clear_progress_box,
         is_cancelled=lambda: bool(cl.user_session.get("cancel_requested")),
+        record_model_execution=_record_model_execution,
+        get_model_execution_events=_get_model_execution_events,
     )
 
 
@@ -1144,6 +1157,7 @@ def _reset_cancel_state() -> None:
 
 async def _await_backend_execution(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     _reset_cancel_state()
+    cl.user_session.set("model_execution_events", [])
     task = asyncio.create_task(
         _backend_execute_orchestration(request, deps=_build_execution_dependencies()),
         name=f"chainlit-exec:{request.get('trace_id', '-')}",
@@ -1710,6 +1724,160 @@ def _compose_doc_question_system_prompt(catalog: str) -> str:
     return "\n\n".join(system_parts)
 
 
+def _is_model_failover_blocked(exc: Exception) -> bool:
+    if isinstance(exc, asyncio.CancelledError):
+        return True
+    if isinstance(exc, UMSBusyError):
+        return True
+    message = str(exc).lower()
+    return "429" in message or "busy" in message or "cancel" in message
+
+
+def _build_model_execution_event(
+    *,
+    selection: Any,
+    used_model_id: str,
+    fallback_used: bool,
+    fallback_reason: Optional[str],
+    attempt_count: int,
+) -> Dict[str, Any]:
+    payload = dict(selection.to_dict() if hasattr(selection, "to_dict") else selection or {})
+    payload.update(
+        {
+            "primary_model_id": payload.get("resolved_model_id") or payload.get("primary_model_id"),
+            "fallback_model_id": payload.get("fallback_model_id") if payload.get("fallback_available") else None,
+            "used_model_id": used_model_id,
+            "fallback_used": bool(fallback_used),
+            "fallback_reason": fallback_reason,
+            "attempt_count": max(1, int(attempt_count)),
+            "status": "fallback_completed" if fallback_used else "completed",
+        }
+    )
+    return payload
+
+
+def _infer_with_model_failover(
+    selection: Any,
+    payload: Dict[str, Any],
+    device_mode: str,
+    prompt: Optional[str] = None,
+) -> Dict[str, Any]:
+    primary_model_id = str(getattr(selection, "resolved_model_id", "") or "")
+    fallback_model_id = str(getattr(selection, "fallback_model_id", "") or "")
+    if not fallback_model_id or fallback_model_id == primary_model_id:
+        fallback_model_id = ""
+    attempts = [primary_model_id] + ([fallback_model_id] if fallback_model_id else [])
+    last_error: Optional[Exception] = None
+    for attempt_idx, model_id in enumerate(attempts, start=1):
+        try:
+            request_payload = dict(payload)
+            if prompt is not None:
+                request_payload["prompt"] = prompt
+            response = ums_client.infer(model_id, request_payload, device_mode)
+            return {
+                "response": response,
+                "model_execution": _build_model_execution_event(
+                    selection=selection,
+                    used_model_id=model_id,
+                    fallback_used=attempt_idx > 1,
+                    fallback_reason=str(last_error) if attempt_idx > 1 and last_error is not None else None,
+                    attempt_count=attempt_idx,
+                ),
+            }
+        except Exception as exc:
+            if _is_model_failover_blocked(exc):
+                raise
+            last_error = exc
+            if attempt_idx < len(attempts):
+                logger.warning(
+                    "Model failover retry model=%s fallback=%s error=%s",
+                    primary_model_id,
+                    fallback_model_id or None,
+                    exc,
+                    exc_info=True,
+                )
+                inc_metric_counter(
+                    "agent_nav_fallback_events_total",
+                    labels={
+                        "component": "chainlit",
+                        "fallback": "model_failover_retry",
+                        "source": "ui",
+                    },
+                )
+                continue
+            raise
+
+
+def _create_failover_embed_fn(
+    selection: Any,
+    *,
+    record_model_execution: Optional[Any] = None,
+) -> Optional[Any]:
+    primary_model_id = str(getattr(selection, "resolved_model_id", "") or "")
+    fallback_model_id = str(getattr(selection, "fallback_model_id", "") or "")
+    if not primary_model_id:
+        return None
+    attempts = [primary_model_id] + ([fallback_model_id] if fallback_model_id and fallback_model_id != primary_model_id else [])
+
+    def _record(event: Dict[str, Any]) -> None:
+        if callable(record_model_execution):
+            try:
+                record_model_execution(event)
+            except Exception:
+                logger.debug("Model execution recorder failed", exc_info=True)
+
+    def _embed(texts: List[str]) -> np.ndarray:
+        if not texts:
+            return np.array([], dtype=np.float32)
+        batch_size = int(os.getenv("UMS_EMBED_BATCH_SIZE", "10"))
+        all_embeddings: List[List[float]] = []
+        for batch_start in range(0, len(texts), batch_size):
+            batch = texts[batch_start : batch_start + batch_size]
+            last_error: Optional[Exception] = None
+            for attempt_idx, model_id in enumerate(attempts, start=1):
+                try:
+                    response = ums_client.infer(model_id, {"input": batch, "normalize": True}, device_mode="cpu")
+                    if "data" in response:
+                        batch_embs = [item["embedding"] for item in response["data"]]
+                    elif "embedding" in response:
+                        embedding = response["embedding"]
+                        batch_embs = embedding if isinstance(embedding[0], list) else [embedding]
+                    else:
+                        raise RuntimeError("Embedding response missing data")
+                    all_embeddings.extend(batch_embs)
+                    _record(
+                        _build_model_execution_event(
+                            selection=selection,
+                            used_model_id=model_id,
+                            fallback_used=attempt_idx > 1,
+                            fallback_reason=str(last_error) if attempt_idx > 1 and last_error is not None else None,
+                            attempt_count=attempt_idx,
+                        )
+                    )
+                    break
+                except Exception as exc:
+                    if _is_model_failover_blocked(exc):
+                        raise
+                    last_error = exc
+                    if attempt_idx < len(attempts):
+                        logger.warning(
+                            "Model failover retry embedding model=%s fallback=%s error=%s",
+                            primary_model_id,
+                            fallback_model_id or None,
+                            exc,
+                            exc_info=True,
+                        )
+                        continue
+                    raise
+        return np.array(all_embeddings, dtype=np.float32)
+
+    try:
+        _embed(["probe"])
+    except Exception:
+        return None
+    return _embed
+
+
 def _build_inference_request(
     *,
     default_temperature: float = 0.7,
@@ -1767,6 +1935,10 @@ async def _infer_assistant_text(
     raise_on_error: bool = False,
     summary_stage: Optional[str] = None,
 ) -> str:
+    model_execution_events = cl.user_session.get("model_execution_events")
+    if not isinstance(model_execution_events, list):
+        model_execution_events = []
+        cl.user_session.set("model_execution_events", model_execution_events)
     request = _build_inference_request(
         default_temperature=temperature,
         default_top_p=default_top_p,
@@ -1775,16 +1947,18 @@ async def _infer_assistant_text(
     )
     payload = dict(request["payload"])
     payload["prompt"] = prompt
-    model_id = request["model_id"]
+    effective = _get_effective_settings()
+    model_id = str(
+        effective.get("resolved_model_id")
+        or resolve_model_selection("llm.default_chat").resolved_model_id
+    )
     resolved_device_mode = normalize_inference_device_mode(device_mode or request.get("device_mode"))
     try:
-        response = await asyncio.to_thread(
-            ums_client.infer,
-            model_id,
-            payload,
-            resolved_device_mode,
-        )
-        return _sanitize_assistant_output(response.get("choices", [{}])[0].get("text", str(response)))
+        response_payload = await asyncio.to_thread(ums_client.infer, model_id, payload, resolved_device_mode)
+        if isinstance(response_payload, dict) and isinstance(response_payload.get("model_execution"), dict):
+            model_execution_events.append(dict(response_payload["model_execution"]))
+            cl.user_session.set("last_model_execution", dict(response_payload["model_execution"]))
+        return _sanitize_assistant_output(response_payload.get("choices", [{}])[0].get("text", str(response_payload)))
     except Exception as exc:
         logger.warning(
             "Assistant infer failed stage=%s model=%s device_mode=%s retry=%s",
@@ -1800,8 +1974,11 @@ async def _infer_assistant_text(
             return f"Ошибка генерации: {exc}"
         try:
             logger.warning("Direct chat infer failed, retrying sync inference", exc_info=True)
-            response = ums_client.infer(model_id, payload, resolved_device_mode)
-            return _sanitize_assistant_output(response.get("choices", [{}])[0].get("text", str(response)))
+            response_payload = ums_client.infer(model_id, payload, resolved_device_mode)
+            if isinstance(response_payload, dict) and isinstance(response_payload.get("model_execution"), dict):
+                model_execution_events.append(dict(response_payload["model_execution"]))
+                cl.user_session.set("last_model_execution", dict(response_payload["model_execution"]))
+            return _sanitize_assistant_output(response_payload.get("choices", [{}])[0].get("text", str(response_payload)))
         except Exception as e:
             if raise_on_error:
                 raise
@@ -2134,12 +2311,19 @@ async def _ensure_rag_index_for_active_docs(step_name: Optional[str] = None) -> 
         return False
 
     from orchestrator.rag.pipeline import AdaptiveRAGPipeline
-    from services.model_manager.ums_client import create_ums_embed_fn
 
     async def _reindex() -> tuple[AdaptiveRAGPipeline, int, Dict[str, Any]]:
         nonlocal rag
-        embed_fn = create_ums_embed_fn()
         runtime_budget = await _get_runtime_budget_metadata()
+        effective = _get_effective_settings()
+        retrieval_resolution = effective.get("resolved_retrieval_embedder_resolution")
+        if retrieval_resolution is None and effective.get("resolved_retrieval_embedder_model_id"):
+            retrieval_resolution = resolve_execution_plan(
+                requested_model_id=str(effective.get("resolved_retrieval_embedder_model_id"))
+            )
+        if retrieval_resolution is None:
+            retrieval_resolution = resolve_model_selection("legal.embedder")
+        embed_fn = _create_failover_embed_fn(retrieval_resolution)
         rag_mode = runtime_budget["rag_mode"]
         if rag is None:
             rag = AdaptiveRAGPipeline(
