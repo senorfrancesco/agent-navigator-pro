@@ -71,5 +71,4 @@ backend/.env.native
 backend/.env.runtime
 
 # Local ad-hoc Node/Playwright bootstrap
-package.json
 package-lock.json
