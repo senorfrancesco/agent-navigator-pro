@@ -1330,8 +1330,10 @@ def _start_server_once(model_id: str, device_mode: DeviceMode):
         if not config:
             raise HTTPException(status_code=404, detail=f"Model {model_id} not found in filesystem.")
         config = dict(config)
-
-        model_path = resolve_model_path(_require_configured_model_path(model_id, config))
+        use_vllm_backend = _should_use_vllm_backend(config)
+        model_path = ""
+        if not use_vllm_backend:
+            model_path = resolve_model_path(_require_configured_model_path(model_id, config))
         is_heavy = config["type"] in ["gguf", "gguf-vl"]
 
         existing_proc = state["processes"].get(model_id)
@@ -1401,7 +1403,7 @@ def _start_server_once(model_id: str, device_mode: DeviceMode):
                 }
             )
 
-        if _should_use_vllm_backend(config):
+        if use_vllm_backend:
             with _heavy_model_lifecycle_lock:
                 active_heavy = None
                 for pid in state["processes"]:

@@ -147,6 +147,7 @@ def _reset_ums_state(monkeypatch, tmp_path):
     ums_server.state["port_owners"] = {}
     ums_server.state["released_dynamic_ports"] = []
     ums_server.state["concurrency_policy"] = {}
+    monkeypatch.setattr(ums_server, "_find_listener_pids", lambda port: [])
     ums_server._llm_semaphore = asyncio.Semaphore(1)
     ums_server._embed_semaphore = asyncio.Semaphore(4)
     ums_server._concurrency_controls["llm_limit"] = 1
