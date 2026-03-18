@@ -1004,6 +1004,36 @@ def test_get_model_config_falls_back_to_legacy_runtime_path_aliases(monkeypatch)
     assert ums_server.get_model_config("labse-embedding")["path"] == "/legacy/retrieval"
 
 
+def test_get_model_config_requires_env_path_when_no_canonical_or_legacy_override_present(monkeypatch):
+    for env_name in (
+        "MODEL_PATH_LLM",
+        "MODEL_PATH_VLM",
+        "MODEL_PATH_EMBEDDING_INTENT",
+        "MODEL_PATH_EMBEDDING_RETRIEVAL",
+        "MODEL_PATH_QWEN14B",
+        "MODEL_PATH_QWENVL",
+        "MODEL_PATH_QWEN3_EMBEDDING_06B",
+        "MODEL_PATH_LABSE",
+    ):
+        monkeypatch.delenv(env_name, raising=False)
+
+    assert ums_server.get_model_config("qwen-14b-llm")["path"] == ""
+
+
+def test_start_server_rejects_missing_canonical_model_path_env(monkeypatch):
+    for env_name in (
+        "MODEL_PATH_LLM",
+        "MODEL_PATH_QWEN14B",
+    ):
+        monkeypatch.delenv(env_name, raising=False)
+
+    with pytest.raises(ums_server.HTTPException) as exc_info:
+        ums_server._start_server_once("qwen-14b-llm", ums_server.DeviceMode.CPU)
+
+    assert exc_info.value.status_code == 422
+    assert "MODEL_PATH_LLM" in exc_info.value.detail
+
+
 def test_models_running_api_lists_running_models_and_placements():
     ums_server.state["active_model"] = "qwen-14b-llm"
     ums_server.state["processes"] = {

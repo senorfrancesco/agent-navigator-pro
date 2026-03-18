@@ -67,6 +67,7 @@ from services.model_manager.model_selection import resolve_model_selection
 from services.model_manager.models_config import (
     get_all_models as get_registered_models,
     get_model_config as get_registry_model_config,
+    get_model_path_env_contract,
     resolve_model_path as resolve_runtime_model_path,
 )
 
@@ -840,6 +841,22 @@ def resolve_model_path(path_str: str) -> str:
     return str(path.resolve())
 
 
+def _require_configured_model_path(model_id: str, config: Dict[str, Any], *, field_name: str = "path") -> str:
+    raw_value = str(config.get(field_name) or "").strip()
+    if raw_value:
+        return raw_value
+
+    contract = get_model_path_env_contract(model_id)
+    canonical_env = str(contract.get("canonical_env") or "").strip()
+    legacy_envs = [str(name).strip() for name in (contract.get("legacy_envs") or []) if str(name).strip()]
+    expected_envs = [name for name in [canonical_env, *legacy_envs] if name]
+    expected_text = ", ".join(expected_envs) if expected_envs else "configured env path"
+    raise HTTPException(
+        status_code=422,
+        detail=f"Model path is not configured for {model_id}. Set {expected_text}.",
+    )
+
+
 def _dynamic_models_registry_path() -> Path:
     return Path(
         os.getenv("UMS_DYNAMIC_MODELS_REGISTRY_PATH", str(BACKEND_ROOT / ".data" / "ums_dynamic_models.json"))
@@ -1314,7 +1331,7 @@ def _start_server_once(model_id: str, device_mode: DeviceMode):
             raise HTTPException(status_code=404, detail=f"Model {model_id} not found in filesystem.")
         config = dict(config)
 
-        model_path = resolve_model_path(config["path"])
+        model_path = resolve_model_path(_require_configured_model_path(model_id, config))
         is_heavy = config["type"] in ["gguf", "gguf-vl"]
 
         existing_proc = state["processes"].get(model_id)
@@ -1422,8 +1439,14 @@ def _start_server_once(model_id: str, device_mode: DeviceMode):
                 if placement.get("placement_mode") == "multi-gpu":
                     tensor_split = placement.get("tensor_split") or []
                     cmd.extend(["--tensor-split", ",".join(str(weight) for weight in tensor_split)])
-                if config["type"] == "gguf-vl" and "mmproj" in config:
-                    cmd.extend(["--mmproj", resolve_model_path(config["mmproj"])])
+                if config["type"] == "gguf-vl":
+                    mmproj_path = str(config.get("mmproj") or "").strip()
+                    if not mmproj_path:
+                        raise HTTPException(
+                            status_code=422,
+                            detail="Model path is not configured for qwen-vl-8b. Set MODEL_MMPROJ_PATH_VLM or MMPROJ_PATH.",
+                        )
+                    cmd.extend(["--mmproj", resolve_model_path(mmproj_path)])
 
                 child_env = _build_cpu_isolated_env() if device_mode == DeviceMode.CPU else None
                 logger.info(f"Executing: {' '.join(cmd)}")
@@ -1832,7 +1855,7 @@ def _build_model_view(model_id: str) -> Dict[str, Any]:
     config = get_model_config(model_id)
     if not config:
         raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
-    resolved_path = resolve_model_path(config["path"])
+    resolved_path = resolve_model_path(config["path"]) if str(config.get("path") or "").strip() else ""
     backend = "vllm" if _should_use_vllm_backend(config) else "local"
     return {
         "model_id": model_id,

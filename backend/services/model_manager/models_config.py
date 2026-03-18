@@ -31,12 +31,23 @@ def resolve_model_path(model_id: str, *, env: Optional[Mapping[str, str]] = None
     path_spec = dict(spec.get("path") or {})
     canonical_env = str(path_spec.get("canonical_env") or "").strip()
     legacy_envs = [str(name).strip() for name in (path_spec.get("legacy_envs") or []) if str(name).strip()]
-    default_path = str(path_spec.get("default") or "").strip()
 
     resolved = _pick_env_value(source, canonical_env, *legacy_envs)
     if resolved:
         return resolved
-    return default_path
+    return ""
+
+
+def get_model_path_env_contract(model_id: str, *, env: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
+    source = env if env is not None else os.environ
+    spec = get_model_spec_by_id(model_id, env=source)
+    path_spec = dict(spec.get("path") or {})
+    canonical_env = str(path_spec.get("canonical_env") or "").strip()
+    legacy_envs = [str(name).strip() for name in (path_spec.get("legacy_envs") or []) if str(name).strip()]
+    return {
+        "canonical_env": canonical_env,
+        "legacy_envs": legacy_envs,
+    }
 
 
 def _build_model_config(*, env: Optional[Mapping[str, str]] = None) -> Dict[str, Dict[str, Any]]:
@@ -76,7 +87,7 @@ def _build_model_config(*, env: Optional[Mapping[str, str]] = None) -> Dict[str,
             config["context_size"] = config["ctx_size"]
             config["n_gpu_layers"] = config["gpu_layers"]
             mmproj_envs = [str(item) for item in (runtime.get("mmproj_envs") or [])]
-            config["mmproj_path"] = _pick_env_value(source, *mmproj_envs) or runtime.get("mmproj_default")
+            config["mmproj_path"] = _pick_env_value(source, *mmproj_envs) or ""
         elif "embedder" in model_kind or model_kind == "reranker":
             config["type"] = "embedding" if model_kind != "reranker" else "reranker"
             config["context_size"] = config["ctx_size"]

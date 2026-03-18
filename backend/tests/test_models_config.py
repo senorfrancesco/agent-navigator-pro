@@ -49,3 +49,10 @@ def test_models_config_falls_back_to_legacy_model_path_aliases(monkeypatch):
     assert models_config.get_model_config("qwen-vl-8b")["path"] == "/legacy/vlm.gguf"
     assert models_config.get_model_config("qwen3-embedding-0.6b")["path"] == "/legacy/intent"
     assert models_config.get_model_config("labse-embedding")["path"] == "/legacy/retrieval"
+
+
+def test_models_config_does_not_fall_back_to_registry_default_path_when_env_missing():
+    assert models_config.get_model_config("qwen-14b-llm")["path"] == ""
+    assert models_config.get_model_config("qwen-vl-8b")["path"] == ""
+    assert models_config.get_model_config("qwen3-embedding-0.6b")["path"] == ""
+    assert models_config.get_model_config("labse-embedding")["path"] == ""

@@ -154,6 +154,31 @@ def _resolve_component_device_modes(
     }
 
 
+def _has_component_override(cli_value: Optional[str], env_key: str) -> bool:
+    return _normalize_component_device_mode(cli_value) is not None or _normalize_component_device_mode(os.getenv(env_key)) is not None
+
+
+def _apply_weak_pc_embedding_policy(
+    component_modes: Dict[str, str],
+    hardware_snapshot: Dict[str, Any],
+    warnings: List[str],
+    *,
+    intent_embedder_device_mode: Optional[str],
+    retrieval_embedder_device_mode: Optional[str],
+) -> Dict[str, str]:
+    has_gpu = bool(hardware_snapshot.get("has_gpu"))
+    gpu_count = int(hardware_snapshot.get("gpu_count") or 0)
+    total_vram_gb = _safe_float(hardware_snapshot.get("total_vram_gb"), 0.0)
+    if not has_gpu or gpu_count != 1 or total_vram_gb <= 0.0 or total_vram_gb > 8.5:
+        return component_modes
+    if not _has_component_override(intent_embedder_device_mode, "INTENT_EMBEDDER_DEVICE_MODE"):
+        component_modes["intent_embedder"] = "cpu"
+    if not _has_component_override(retrieval_embedder_device_mode, "RETRIEVAL_EMBEDDER_DEVICE_MODE"):
+        component_modes["retrieval_embedder"] = "cpu"
+    warnings.append("weak-pc policy moved embedders to cpu for single-gpu 8GB profile")
+    return component_modes
+
+
 def detect_hardware_snapshot() -> Dict[str, Any]:
     try:
         from services.hardware import HardwareProfiler
@@ -291,6 +316,13 @@ def build_runtime_plan(
         retrieval_embedder_device_mode=retrieval_embedder_device_mode,
         fallback_llm_device_mode=selected_device_mode,
         fallback_embedding_device_mode="gpu" if tier_info["embedding_device"] == "cuda" else "cpu",
+    )
+    component_modes = _apply_weak_pc_embedding_policy(
+        component_modes,
+        hardware_snapshot,
+        warnings,
+        intent_embedder_device_mode=intent_embedder_device_mode,
+        retrieval_embedder_device_mode=retrieval_embedder_device_mode,
     )
     available_gpus = [_normalize_runtime_gpu_snapshot(gpu) for gpu in list(hardware_snapshot.get("gpus") or [])]
     if not available_gpus and hardware_snapshot.get("gpu_count"):

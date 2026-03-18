@@ -9,7 +9,6 @@ models:
       canonical_env: MODEL_PATH_LLM
       legacy_envs:
         - MODEL_PATH_QWEN14B
-      default: ./models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf
     runtime:
       api_endpoint: /v1/completions
       port: 8091
@@ -47,7 +46,6 @@ models:
       canonical_env: MODEL_PATH_VLM
       legacy_envs:
         - MODEL_PATH_QWENVL
-      default: ./models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf
     runtime:
       api_endpoint: /v1/chat/completions
       port: 8092
@@ -58,7 +56,6 @@ models:
       mmproj_envs:
         - MODEL_MMPROJ_PATH_VLM
         - MMPROJ_PATH
-      mmproj_default: ./models/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf
   labse_embedding:
     model_id: labse-embedding
     kind: retrieval_embedder
@@ -67,7 +64,6 @@ models:
       canonical_env: MODEL_PATH_EMBEDDING_RETRIEVAL
       legacy_envs:
         - MODEL_PATH_LABSE
-      default: ./models/st/LaBSE
     runtime:
       api_endpoint: /v1/embeddings
       port: 8093
@@ -83,7 +79,6 @@ models:
       canonical_env: MODEL_PATH_EMBEDDING_INTENT
       legacy_envs:
         - MODEL_PATH_QWEN3_EMBEDDING_06B
-      default: ./models/st/Qwen3-Embedding-0.6B
     runtime:
       api_endpoint: /v1/embeddings
       port: 8094
