@@ -94,8 +94,8 @@
     },
     "messages": {
       "status": {
-        "using": "Используется",
-        "used": "Использовано"
+        "using": "",
+        "used": ""
       },
       "actions": {
         "copy": {

@@ -52,9 +52,50 @@ def test_bootstrap_chainlit_sqlite_schema_upgrades_existing_steps_table(tmp_path
 
     assert "command" in step_columns
     assert "defaultOpen" in step_columns
+    assert "autoCollapse" in step_columns
     assert "tags" in thread_columns
     assert "metadata" in thread_columns
     assert str(journal_mode).lower() == "wal"
+
+
+def test_bootstrap_chainlit_sqlite_schema_preserves_existing_step_rows_during_upgrade(tmp_path, chainlit_persistence_module):
+    db_path = tmp_path / "chainlit.db"
+    conninfo = f"sqlite+aiosqlite:///{db_path}"
+
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE "steps" (
+                "id" TEXT PRIMARY KEY,
+                "name" TEXT,
+                "type" TEXT,
+                "threadId" TEXT
+            );
+            INSERT INTO "steps" ("id", "name", "type", "threadId")
+            VALUES ('step-1', 'old step', 'run', 'thread-1');
+            CREATE TABLE "threads" (
+                "id" TEXT PRIMARY KEY,
+                "createdAt" TEXT,
+                "name" TEXT
+            );
+            INSERT INTO "threads" ("id", "createdAt", "name")
+            VALUES ('thread-1', '2026-03-18T00:00:00Z', 'legacy');
+            CREATE TABLE "elements" (
+                "id" TEXT PRIMARY KEY
+            );
+            """
+        )
+        conn.commit()
+
+    chainlit_persistence_module._bootstrap_chainlit_sqlite_schema(conninfo)
+
+    with sqlite3.connect(db_path) as conn:
+        upgraded_row = conn.execute(
+            'SELECT "id", "name", "threadId", "autoCollapse" FROM "steps" WHERE "id" = ?',
+            ("step-1",),
+        ).fetchone()
+
+    assert upgraded_row == ("step-1", "old step", "thread-1", None)
 
 
 @pytest.mark.asyncio
