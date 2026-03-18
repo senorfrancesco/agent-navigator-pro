@@ -163,13 +163,13 @@ def test_start_server_falls_back_to_cpu_for_st_model():
     fake_process = _FakeProcess()
     launch_calls = []
 
-    def fake_launch(cmd, port, health_timeout_s=120.0):
+    def fake_launch(cmd, port, health_timeout_s=120.0, env=None):
         launch_calls.append(cmd)
         if "--device" in cmd and cmd[cmd.index("--device") + 1].startswith("cuda"):
             raise RuntimeError("CUDA out of memory")
         return fake_process
 
-    with patch.object(
+    with patch.dict(os.environ, {"RETRIEVAL_EMBEDDER_DEVICE_MODE": "gpu"}, clear=False), patch.object(
         ums_server,
         "get_model_config",
         return_value={"type": "st", "path": "./models/st/LaBSE", "port": 8093},
@@ -195,7 +195,7 @@ def test_start_server_keeps_cpu_for_st_model_when_requested():
     fake_process = _FakeProcess()
     launch_calls = []
 
-    def fake_launch(cmd, port, health_timeout_s=120.0):
+    def fake_launch(cmd, port, health_timeout_s=120.0, env=None):
         launch_calls.append(cmd)
         return fake_process
 
@@ -223,13 +223,13 @@ def test_start_server_records_cpu_placement_after_st_fallback():
     fake_process = _FakeProcess()
     launch_calls = []
 
-    def fake_launch(cmd, port, health_timeout_s=120.0):
+    def fake_launch(cmd, port, health_timeout_s=120.0, env=None):
         launch_calls.append(cmd)
         if "--device" in cmd and cmd[cmd.index("--device") + 1] == "cuda:0":
             raise RuntimeError("CUDA out of memory")
         return fake_process
 
-    with patch.object(
+    with patch.dict(os.environ, {"RETRIEVAL_EMBEDDER_DEVICE_MODE": "gpu"}, clear=False), patch.object(
         ums_server,
         "get_model_config",
         return_value={"type": "st", "path": "./models/st/LaBSE", "port": 8093},
@@ -258,7 +258,7 @@ def test_start_server_uses_weighted_tensor_split_for_multi_gpu_gguf(monkeypatch)
     fake_process = _FakeProcess()
     launch_calls = []
 
-    def fake_launch(cmd, port, health_timeout_s=120.0):
+    def fake_launch(cmd, port, health_timeout_s=120.0, env=None):
         launch_calls.append(cmd)
         return fake_process
 
@@ -293,7 +293,7 @@ def test_start_server_keeps_cpu_path_for_gguf_when_cpu_requested():
     fake_process = _FakeProcess()
     launch_calls = []
 
-    def fake_launch(cmd, port, health_timeout_s=120.0):
+    def fake_launch(cmd, port, health_timeout_s=120.0, env=None):
         launch_calls.append(cmd)
         return fake_process
 
@@ -323,7 +323,7 @@ def test_start_server_honors_tier_cpu_preference_for_embeddings():
     fake_process = _FakeProcess()
     launch_calls = []
 
-    def fake_launch(cmd, port, health_timeout_s=120.0):
+    def fake_launch(cmd, port, health_timeout_s=120.0, env=None):
         launch_calls.append(cmd)
         return fake_process
 
@@ -352,7 +352,7 @@ def test_start_server_places_embeddings_on_non_llm_gpu_when_available():
     fake_process = _FakeProcess()
     launch_calls = []
 
-    def fake_launch(cmd, port, health_timeout_s=120.0):
+    def fake_launch(cmd, port, health_timeout_s=120.0, env=None):
         launch_calls.append(cmd)
         return fake_process
 
@@ -389,7 +389,7 @@ def test_start_server_serializes_concurrent_model_startup():
     launch_calls = []
     ready = threading.Event()
 
-    def fake_launch(cmd, port, health_timeout_s=120.0):
+    def fake_launch(cmd, port, health_timeout_s=120.0, env=None):
         launch_calls.append(cmd)
         ready.wait(timeout=1.0)
         return fake_process
@@ -435,7 +435,7 @@ def test_start_server_reaps_stale_listener_before_launch():
     fake_process = _FakeProcess(pid=22222)
     launch_calls = []
 
-    def fake_launch(cmd, port, health_timeout_s=120.0):
+    def fake_launch(cmd, port, health_timeout_s=120.0, env=None):
         launch_calls.append((cmd, port))
         return fake_process
 
@@ -732,7 +732,7 @@ def test_lifespan_preloads_llm_then_retrieval_then_intent(monkeypatch):
         asyncio.run(ums_server.lifespan(ums_server.app).__aenter__())
 
     try:
-        assert call_order[:3] == ["qwen-14b-llm", "labse-embedding", "qwen3-embedding-0.6b"]
+        assert call_order[:2] == ["qwen-14b-llm", "qwen3-embedding-0.6b"]
     finally:
         ums_server.state["device_mode"] = previous_device_mode
 
@@ -796,6 +796,24 @@ def test_explicit_embedding_component_override_beats_cpu_tier_preference(monkeyp
 
     assert placement["placement_mode"] == "single-gpu"
     assert placement["device_arg"] == "cuda:0"
+
+
+def test_weak_pc_runtime_prefers_cpu_for_embedding_without_override(monkeypatch):
+    monkeypatch.delenv("INTENT_EMBEDDER_DEVICE_MODE", raising=False)
+    monkeypatch.delenv("RETRIEVAL_EMBEDDER_DEVICE_MODE", raising=False)
+    ums_server.state["tier_config"] = SimpleNamespace(embedding_device="cuda")
+
+    placement = ums_server._build_model_placement_plan(
+        model_id="qwen3-embedding-0.6b",
+        config={"type": "st"},
+        device_mode=ums_server.DeviceMode.HYBRID,
+        available_gpus=[{"index": 0, "free_gb": 7.5, "total_gb": 8.0}],
+    )
+
+    assert placement["placement_mode"] == "cpu"
+    assert placement["device_arg"] == "cpu"
+    assert placement["gpu_indices"] == []
+    assert placement["resolved_device"] == "cpu"
 
 
 def test_explicit_intent_embedder_gpu_override_allows_single_gpu_colocation(monkeypatch):
@@ -1397,7 +1415,7 @@ def test_start_server_falls_back_when_static_requested_port_is_occupied(monkeypa
     fake_process = _FakeProcess()
     launch_calls = []
 
-    def fake_launch(cmd, port, health_timeout_s=120.0):
+    def fake_launch(cmd, port, health_timeout_s=120.0, env=None):
         launch_calls.append((cmd, port))
         return fake_process
 
@@ -1428,7 +1446,7 @@ def test_start_server_retries_on_bind_failure_with_fallback_port():
     fake_process = _FakeProcess()
     launch_calls = []
 
-    def fake_launch(cmd, port, health_timeout_s=120.0):
+    def fake_launch(cmd, port, health_timeout_s=120.0, env=None):
         launch_calls.append((list(cmd), port))
         if int(port) == 8091:
             raise RuntimeError("Server exited with code 1: couldn't bind HTTP server socket")

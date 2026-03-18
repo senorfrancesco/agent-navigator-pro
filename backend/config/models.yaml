@@ -1,0 +1,230 @@
+version: 1
+
+models:
+  qwen14b_llm:
+    model_id: qwen-14b-llm
+    kind: llm
+    runtime_type: gguf
+    path:
+      canonical_env: MODEL_PATH_LLM
+      legacy_envs:
+        - MODEL_PATH_QWEN14B
+      default: ./models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf
+    runtime:
+      api_endpoint: /v1/completions
+      port: 8091
+      ctx_size_env: CONTEXT_SIZE_QWEN14B
+      ctx_size_default: 16384
+      gpu_layers_env: N_GPU_LAYERS_QWEN14B
+      gpu_layers_default: -1
+      quant_default: Q4_K_M
+  qwen7b_llm:
+    model_id: qwen-7b-llm
+    kind: llm
+    runtime_type: dynamic
+    runtime:
+      quant_default: Q4_K_M
+      ctx_size_default: 4096
+  qwen32b_llm:
+    model_id: qwen-32b-llm
+    kind: llm
+    runtime_type: dynamic
+    runtime:
+      quant_default: Q4_K_M
+      ctx_size_default: 16384
+  qwen72b_llm:
+    model_id: qwen-72b-llm
+    kind: llm
+    runtime_type: dynamic
+    runtime:
+      quant_default: Q4_K_M
+      ctx_size_default: 32768
+  qwen_vl_8b:
+    model_id: qwen-vl-8b
+    kind: vision
+    runtime_type: gguf-vl
+    path:
+      canonical_env: MODEL_PATH_VLM
+      legacy_envs:
+        - MODEL_PATH_QWENVL
+      default: ./models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf
+    runtime:
+      api_endpoint: /v1/chat/completions
+      port: 8092
+      ctx_size_env: CONTEXT_SIZE_QWENVL
+      ctx_size_default: 16384
+      gpu_layers_env: N_GPU_LAYERS_QWENVL
+      gpu_layers_default: -1
+      mmproj_envs:
+        - MODEL_MMPROJ_PATH_VLM
+        - MMPROJ_PATH
+      mmproj_default: ./models/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf
+  labse_embedding:
+    model_id: labse-embedding
+    kind: retrieval_embedder
+    runtime_type: st
+    path:
+      canonical_env: MODEL_PATH_EMBEDDING_RETRIEVAL
+      legacy_envs:
+        - MODEL_PATH_LABSE
+      default: ./models/st/LaBSE
+    runtime:
+      api_endpoint: /v1/embeddings
+      port: 8093
+      ctx_size_env: CONTEXT_SIZE_LABSE
+      ctx_size_default: 512
+      gpu_layers_env: N_GPU_LAYERS_LABSE
+      gpu_layers_default: 10
+  qwen3_embedding_06b:
+    model_id: qwen3-embedding-0.6b
+    kind: intent_embedder
+    runtime_type: st
+    path:
+      canonical_env: MODEL_PATH_EMBEDDING_INTENT
+      legacy_envs:
+        - MODEL_PATH_QWEN3_EMBEDDING_06B
+      default: ./models/st/Qwen3-Embedding-0.6B
+    runtime:
+      api_endpoint: /v1/embeddings
+      port: 8094
+      ctx_size_env: CONTEXT_SIZE_QWEN3_EMBEDDING_06B
+      ctx_size_default: 512
+      gpu_layers_env: N_GPU_LAYERS_QWEN3_EMBEDDING_06B
+      gpu_layers_default: 0
+  qwen3_reranker_06b:
+    model_id: qwen3-reranker-0.6b
+    kind: reranker
+    runtime_type: external
+    path:
+      canonical_env: MODEL_PATH_RERANKER
+      legacy_envs: []
+      default: ""
+
+roles:
+  llm.default_chat:
+    role_label: default chat llm
+    primary_model: qwen14b_llm
+    fallback_model: qwen14b_llm
+    primary_override_env: CHAINLIT_MODEL_PROFILE_DEFAULT_CHAT_MODEL
+    fallback_override_env: CHAINLIT_FALLBACK_LLM_MODEL
+  llm.long_context:
+    role_label: long context llm
+    primary_model: qwen14b_llm
+    fallback_model: qwen14b_llm
+    primary_override_env: CHAINLIT_MODEL_PROFILE_LONG_CONTEXT_MODEL
+    fallback_override_env: CHAINLIT_FALLBACK_LLM_MODEL
+  llm.legal_compare:
+    role_label: legal compare llm
+    primary_model: qwen14b_llm
+    fallback_model: qwen14b_llm
+    primary_override_env: CHAINLIT_MODEL_PROFILE_LEGAL_COMPARE_MODEL
+    fallback_override_env: CHAINLIT_FALLBACK_LLM_MODEL
+  llm.low_vram:
+    role_label: low vram llm
+    primary_model: qwen14b_llm
+    fallback_model: qwen14b_llm
+    primary_override_env: CHAINLIT_MODEL_PROFILE_LOW_VRAM_MODEL
+    fallback_override_env: CHAINLIT_FALLBACK_LLM_MODEL
+  embedder.intent.default:
+    role_label: default intent embedder
+    primary_model: qwen3_embedding_06b
+    fallback_model: qwen3_embedding_06b
+    primary_override_env: CHAINLIT_INTENT_EMBEDDER_PROFILE_DEFAULT_MODEL
+    fallback_override_env: CHAINLIT_FALLBACK_INTENT_EMBEDDER_MODEL
+  embedder.retrieval.legal_default:
+    role_label: default retrieval embedder
+    primary_model: qwen3_embedding_06b
+    fallback_model: qwen3_embedding_06b
+    primary_override_env: CHAINLIT_RETRIEVAL_EMBEDDER_PROFILE_LEGAL_DEFAULT_MODEL
+    fallback_override_env: CHAINLIT_FALLBACK_RETRIEVAL_EMBEDDER_MODEL
+  embedder.retrieval.low_vram:
+    role_label: low vram retrieval embedder
+    primary_model: qwen3_embedding_06b
+    fallback_model: qwen3_embedding_06b
+    primary_override_env: CHAINLIT_RETRIEVAL_EMBEDDER_PROFILE_LOW_VRAM_MODEL
+    fallback_override_env: CHAINLIT_FALLBACK_RETRIEVAL_EMBEDDER_MODEL
+  classifier.intent.embedder:
+    role_label: intent classifier embedder
+    primary_model: qwen3_embedding_06b
+    fallback_model: qwen3_embedding_06b
+    primary_override_env: INTENT_CLASSIFIER_EMBEDDER_MODEL
+    fallback_override_env: CHAINLIT_FALLBACK_INTENT_EMBEDDER_MODEL
+  classifier.intent.llm:
+    role_label: intent classifier llm
+    primary_model: qwen14b_llm
+    fallback_model: qwen14b_llm
+    primary_override_env: INTENT_CLASSIFIER_LLM_MODEL
+    fallback_override_env: CHAINLIT_FALLBACK_LLM_MODEL
+  legal.embedder:
+    role_label: legal comparison embedder
+    primary_model: qwen3_embedding_06b
+    fallback_model: qwen3_embedding_06b
+    primary_override_env: LEGAL_EMBEDDER_MODEL
+    fallback_override_env: CHAINLIT_FALLBACK_RETRIEVAL_EMBEDDER_MODEL
+  reranker.legal_default:
+    role_label: legal reranker
+    primary_model: qwen3_reranker_06b
+    fallback_model: qwen3_reranker_06b
+    primary_override_env: LEGAL_RERANKER_MODEL
+    fallback_override_env: CHAINLIT_FALLBACK_RERANKER_MODEL
+
+tiers:
+  tier_1:
+    llm_model_id: qwen-7b-llm
+    embedding_backend: onnx
+    embedding_device: cpu
+    embedding_model_label: LaBSE
+    rag_mode: simple
+    retrieval_top_k: 5
+    use_reranker: false
+    use_bm25: true
+    workflow_batch_size: 2
+    max_concurrent_llm: 1
+  tier_2:
+    llm_model_id: qwen-14b-llm
+    embedding_backend: onnx
+    embedding_device: cpu
+    embedding_model_label: Qwen3-Embedding-0.6B
+    rag_mode: corrective
+    retrieval_top_k: 7
+    use_reranker: false
+    use_bm25: true
+    workflow_batch_size: 5
+    max_concurrent_llm: 1
+  tier_3:
+    llm_model_id: qwen-14b-llm
+    llm_large_vram_model_id: qwen-32b-llm
+    llm_large_vram_threshold_gb: 24
+    llm_mid_vram_quant: Q8_0
+    embedding_backend: pytorch
+    embedding_device: cuda
+    embedding_model_label: Qwen3-Embedding-0.6B
+    rag_mode: agentic
+    retrieval_top_k: 10
+    use_reranker: true
+    use_bm25: true
+    workflow_batch_size: 10
+    max_concurrent_llm: 1
+  tier_4:
+    llm_model_id: qwen-72b-llm
+    embedding_backend: pytorch
+    embedding_device: cuda
+    embedding_model_label: BGE-M3
+    rag_mode: multi-agent
+    retrieval_top_k: 15
+    use_reranker: true
+    use_bm25: true
+    workflow_batch_size: 20
+    max_concurrent_llm: 4
+
+runtime:
+  default_active_heavy_role: llm.default_chat
+  preload_sequence:
+    - llm.default_chat
+    - embedder.retrieval.legal_default
+    - embedder.intent.default
+  component_kinds:
+    qwen-14b-llm: llm
+    qwen-vl-8b: llm
+    labse-embedding: retrieval_embedder
+    qwen3-embedding-0.6b: intent_embedder

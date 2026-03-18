@@ -61,7 +61,13 @@ from services.observability import (
     render_metrics_text,
     set_ums_runtime_metrics,
 )
-from services.model_manager.models_config import resolve_model_path as resolve_runtime_model_path
+from services.model_manager.model_registry import get_runtime_config
+from services.model_manager.model_selection import resolve_model_selection
+from services.model_manager.models_config import (
+    get_all_models as get_registered_models,
+    get_model_config as get_registry_model_config,
+    resolve_model_path as resolve_runtime_model_path,
+)
 
 # === Configuration ===
 
@@ -84,34 +90,68 @@ class _RemoteProcess:
 
 MODELS_DIR = BACKEND_ROOT / "models" / "gguf"
 
-# Хардкодные конфиги для системных моделей
-STATIC_MODELS_CONFIG = {
-    "qwen-14b-llm": {
-        "type": "gguf",
-        "path": resolve_runtime_model_path("qwen-14b-llm"),
-        "ctx_size": 16384,
-        "gpu_layers": -1,
-        "port": 8091
-    },
-    "qwen-vl-8b": {
-        "type": "gguf-vl",
-        "path": resolve_runtime_model_path("qwen-vl-8b"),
-        "mmproj": os.getenv("MODEL_MMPROJ_PATH_VLM", os.getenv("MMPROJ_PATH", "./models/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf")),
-        "ctx_size": 8192,
-        "gpu_layers": 20,
-        "port": 8092
-    },
-    "labse-embedding": {
-        "type": "st",
-        "path": resolve_runtime_model_path("labse-embedding"),
-        "port": 8093
-    },
-    "qwen3-embedding-0.6b": {
-        "type": "st",
-        "path": resolve_runtime_model_path("qwen3-embedding-0.6b"),
-        "port": 8094
+def _build_static_model_entry(model_id: str) -> Optional[Dict[str, Any]]:
+    try:
+        config = get_registry_model_config(model_id)
+    except Exception:
+        return None
+    runtime_type = str(config.get("runtime_type") or "")
+    if runtime_type not in {"gguf", "gguf-vl", "st"} or not config.get("port"):
+        return None
+    entry: Dict[str, Any] = {
+        "type": runtime_type,
+        "path": config.get("path"),
+        "port": config.get("port"),
     }
-}
+    if runtime_type in {"gguf", "gguf-vl"}:
+        entry["ctx_size"] = int(config.get("ctx_size") or 0)
+        entry["gpu_layers"] = int(config.get("gpu_layers") or 0)
+    if runtime_type == "gguf-vl":
+        entry["mmproj"] = config.get("mmproj_path")
+    return entry
+
+
+def _build_static_models_config() -> Dict[str, Dict[str, Any]]:
+    payload: Dict[str, Dict[str, Any]] = {}
+    for model_id in get_registered_models().keys():
+        entry = _build_static_model_entry(model_id)
+        if entry is not None:
+            payload[model_id] = entry
+    return payload
+
+
+def _default_heavy_model_id() -> str:
+    runtime_config = get_runtime_config()
+    role_key = str(runtime_config.get("default_active_heavy_role") or "llm.default_chat")
+    return resolve_model_selection(role_key).resolved_model_id
+
+
+def _preload_sequence() -> List[str]:
+    runtime_config = get_runtime_config()
+    payload: List[str] = []
+    seen: set[str] = set()
+    for item in list(runtime_config.get("preload_sequence") or []):
+        candidate = str(item or "").strip()
+        if not candidate:
+            continue
+        if candidate in STATIC_MODELS_CONFIG:
+            if candidate not in seen:
+                payload.append(candidate)
+                seen.add(candidate)
+            continue
+        try:
+            resolved_model_id = resolve_model_selection(candidate).resolved_model_id
+            if resolved_model_id not in seen:
+                payload.append(resolved_model_id)
+                seen.add(resolved_model_id)
+        except Exception:
+            if candidate not in seen:
+                payload.append(candidate)
+                seen.add(candidate)
+    return payload
+
+
+STATIC_MODELS_CONFIG = _build_static_models_config()
 
 state = {
     "active_model": None, # Последняя запрошенная "тяжелая" модель
@@ -171,6 +211,10 @@ def _get_available_vram() -> float:
 
 
 def _component_kind(model_id: str, config: Optional[Dict[str, Any]] = None) -> str:
+    runtime_config = get_runtime_config()
+    component_kinds = dict(runtime_config.get("component_kinds") or {})
+    if model_id in component_kinds:
+        return str(component_kinds[model_id])
     cfg = config or get_model_config(model_id) or {}
     cfg_type = str(cfg.get("type") or "")
     if model_id == "qwen3-embedding-0.6b":
@@ -416,6 +460,13 @@ def _resolve_component_device_mode(model_id: str, fallback: DeviceMode) -> Devic
     return _get_component_device_override(model_id) or fallback
 
 
+def _is_weak_pc_single_gpu_profile(available_gpus: List[Dict[str, Any]]) -> bool:
+    if len(available_gpus) != 1:
+        return False
+    total_gb = float((available_gpus[0] or {}).get("total_gb", 0.0) or 0.0)
+    return 0.0 < total_gb <= 8.5
+
+
 def _get_embedding_occupied_gpu_indices(*, exclude_model_id: Optional[str] = None) -> set[int]:
     occupied: set[int] = set()
     for running_model_id, placement in (state.get("placements") or {}).items():
@@ -440,6 +491,9 @@ def _build_model_placement_plan(
     if config["type"] == "st":
         explicit_override = _get_component_device_override(model_id)
         tier_prefers_cpu = _resolve_embedding_tier_preference() == "cpu"
+        weak_pc_prefers_cpu = _is_weak_pc_single_gpu_profile(available_gpus) and explicit_override is None
+        if weak_pc_prefers_cpu:
+            tier_prefers_cpu = True
         if device_mode == DeviceMode.CPU or not available_gpus or (tier_prefers_cpu and explicit_override is None):
             return {
                 "placement_mode": "cpu",
@@ -1004,18 +1058,9 @@ def _prune_dead_processes() -> List[str]:
 def get_model_config(model_id: str) -> Optional[Dict[str, Any]]:
     """Возвращает конфиг модели, либо из статики, либо из файловой системы."""
     if model_id in STATIC_MODELS_CONFIG:
-        if model_id == "qwen-14b-llm":
-            STATIC_MODELS_CONFIG[model_id]["path"] = resolve_runtime_model_path("qwen-14b-llm")
-        elif model_id == "qwen-vl-8b":
-            STATIC_MODELS_CONFIG[model_id]["path"] = resolve_runtime_model_path("qwen-vl-8b")
-            STATIC_MODELS_CONFIG[model_id]["mmproj"] = os.getenv(
-                "MODEL_MMPROJ_PATH_VLM",
-                os.getenv("MMPROJ_PATH", "./models/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf"),
-            )
-        elif model_id == "labse-embedding":
-            STATIC_MODELS_CONFIG[model_id]["path"] = resolve_runtime_model_path("labse-embedding")
-        elif model_id == "qwen3-embedding-0.6b":
-            STATIC_MODELS_CONFIG[model_id]["path"] = resolve_runtime_model_path("qwen3-embedding-0.6b")
+        refreshed = _build_static_model_entry(model_id)
+        if refreshed is not None:
+            STATIC_MODELS_CONFIG[model_id].update(refreshed)
         return STATIC_MODELS_CONFIG[model_id]
     dynamic_models = state.get("dynamic_models") or {}
     if model_id in dynamic_models:
@@ -1082,9 +1127,22 @@ def _terminate_process(proc: subprocess.Popen) -> None:
             pass
 
 
-def _launch_server_process(cmd: List[str], port: int, health_timeout_s: float = 120.0) -> subprocess.Popen:
+def _build_cpu_isolated_env() -> Dict[str, str]:
+    env = os.environ.copy()
+    # Ensure CPU-only child processes do not initialize CUDA contexts.
+    env["CUDA_VISIBLE_DEVICES"] = ""
+    env["NVIDIA_VISIBLE_DEVICES"] = ""
+    return env
+
+
+def _launch_server_process(
+    cmd: List[str],
+    port: int,
+    health_timeout_s: float = 120.0,
+    env: Optional[Dict[str, str]] = None,
+) -> subprocess.Popen:
     """Запускает сервер и ждет его readiness по /health."""
-    process = subprocess.Popen(cmd, preexec_fn=os.setsid)
+    process = subprocess.Popen(cmd, preexec_fn=os.setsid, env=env)
     try:
         start_time = time.time()
         while time.time() - start_time < health_timeout_s:
@@ -1222,9 +1280,10 @@ def _start_server(model_id: str, device_mode: DeviceMode):
                 if config["type"] == "gguf-vl" and "mmproj" in config:
                     cmd.extend(["--mmproj", resolve_model_path(config["mmproj"])])
 
+                child_env = _build_cpu_isolated_env() if device_mode == DeviceMode.CPU else None
                 logger.info(f"Executing: {' '.join(cmd)}")
                 try:
-                    process = _launch_server_process(cmd, config["port"])
+                    process = _launch_server_process(cmd, config["port"], env=child_env)
                     state["processes"][model_id] = process
                     state["placements"][model_id] = placement
                     state["active_model"] = model_id
@@ -1243,7 +1302,7 @@ def _start_server(model_id: str, device_mode: DeviceMode):
                         detail,
                     )
                     try:
-                        process = _launch_server_process(retry_cmd, fallback_port)
+                        process = _launch_server_process(retry_cmd, fallback_port, env=child_env)
                         state["processes"][model_id] = process
                         state["placements"][model_id] = placement
                         state["active_model"] = model_id
@@ -1260,6 +1319,7 @@ def _start_server(model_id: str, device_mode: DeviceMode):
 
         last_error = None
         for idx, device_arg in enumerate(device_candidates):
+            child_env = _build_cpu_isolated_env() if str(device_arg) == "cpu" else None
             cmd = [
                 sys.executable,
                 str(Path(__file__).parent / "st_server.py"),
@@ -1269,7 +1329,7 @@ def _start_server(model_id: str, device_mode: DeviceMode):
             ]
             logger.info(f"Executing: {' '.join(cmd)}")
             try:
-                process = _launch_server_process(cmd, config["port"])
+                process = _launch_server_process(cmd, config["port"], env=child_env)
                 state["processes"][model_id] = process
                 state["placements"][model_id] = _placement_with_device_arg(placement, device_arg)
                 state["admission"][model_id] = _resolve_embedding_admission(
@@ -1294,7 +1354,7 @@ def _start_server(model_id: str, device_mode: DeviceMode):
                     retry_cmd = list(cmd)
                     retry_cmd[retry_cmd.index("--port") + 1] = str(fallback_port)
                     try:
-                        process = _launch_server_process(retry_cmd, fallback_port)
+                        process = _launch_server_process(retry_cmd, fallback_port, env=child_env)
                         state["processes"][model_id] = process
                         state["placements"][model_id] = _placement_with_device_arg(placement, device_arg)
                         state["admission"][model_id] = _resolve_embedding_admission(
@@ -1375,17 +1435,29 @@ async def lifespan(app: FastAPI):
         logger.info(f"Runtime budget: {state['runtime_budget']}")
 
         # Обновляем конфиг модели из tier_config
-        if "qwen-14b-llm" in STATIC_MODELS_CONFIG:
-            STATIC_MODELS_CONFIG["qwen-14b-llm"]["ctx_size"] = tier_config.llm_ctx_size
-            if tier_config.llm_gpu_layers != -1:
-                STATIC_MODELS_CONFIG["qwen-14b-llm"]["gpu_layers"] = tier_config.llm_gpu_layers
-            if state["device_mode"] != DeviceMode.CPU and STATIC_MODELS_CONFIG["qwen-14b-llm"]["gpu_layers"] == 0:
+        configured_tier_model_id = str(getattr(tier_config, "llm_model_id", "") or "").strip()
+        target_llm_model_id = (
+            configured_tier_model_id if configured_tier_model_id in STATIC_MODELS_CONFIG else _default_heavy_model_id()
+        )
+        if target_llm_model_id in STATIC_MODELS_CONFIG:
+            tier_ctx_size = int(getattr(tier_config, "llm_ctx_size", STATIC_MODELS_CONFIG[target_llm_model_id]["ctx_size"]))
+            tier_gpu_layers = int(getattr(tier_config, "llm_gpu_layers", STATIC_MODELS_CONFIG[target_llm_model_id]["gpu_layers"]))
+            STATIC_MODELS_CONFIG[target_llm_model_id]["ctx_size"] = tier_ctx_size
+            if tier_gpu_layers != -1:
+                STATIC_MODELS_CONFIG[target_llm_model_id]["gpu_layers"] = tier_gpu_layers
+            if state["device_mode"] != DeviceMode.CPU and STATIC_MODELS_CONFIG[target_llm_model_id]["gpu_layers"] == 0:
                 logger.warning(
-                    "DEVICE_MODE=%s overrides tier-selected cpu-only gpu_layers=0; forcing qwen-14b-llm gpu_layers=-1",
+                    "DEVICE_MODE=%s overrides tier-selected cpu-only gpu_layers=0; forcing %s gpu_layers=-1",
                     state["device_mode"].value,
+                    target_llm_model_id,
                 )
-                STATIC_MODELS_CONFIG["qwen-14b-llm"]["gpu_layers"] = -1
-            logger.info(f"Updated qwen-14b-llm: ctx={tier_config.llm_ctx_size}, gpu_layers={tier_config.llm_gpu_layers}")
+                STATIC_MODELS_CONFIG[target_llm_model_id]["gpu_layers"] = -1
+            logger.info(
+                "Updated %s: ctx=%s, gpu_layers=%s",
+                target_llm_model_id,
+                tier_ctx_size,
+                tier_gpu_layers,
+            )
     except Exception as e:
         logger.warning(f"Hardware profiling failed, using defaults: {e}")
         state["system_profile"] = None
@@ -1393,8 +1465,7 @@ async def lifespan(app: FastAPI):
         state["runtime_budget"] = resolve_runtime_budget()
 
     # Предзагрузка Qwen LLM — убирает задержку перед первым запросом
-    preload_sequence = ("qwen-14b-llm", "labse-embedding", "qwen3-embedding-0.6b")
-    for model_id in preload_sequence:
+    for model_id in _preload_sequence():
         try:
             logger.info("Preloading %s...", model_id)
             _start_server(model_id, state["device_mode"])
@@ -1923,8 +1994,8 @@ async def get_status():
         "admission": copy.deepcopy(state.get("admission") or {}),
         "backend_mode": _resolve_backend_mode(),
         "prompt_cache_policy": _resolve_prompt_cache_policy(
-            get_model_config(state.get("active_model") or "qwen-14b-llm")
-            or STATIC_MODELS_CONFIG.get("qwen-14b-llm", {})
+            get_model_config(state.get("active_model") or _default_heavy_model_id())
+            or STATIC_MODELS_CONFIG.get(_default_heavy_model_id(), {})
         ),
         "vram_free_gb": _get_available_vram(),
         "tier": tier_info,
@@ -1941,7 +2012,7 @@ async def openai_embeddings(request: EmbeddingRequest):
     """OpenAI-compatible embeddings endpoint. Proxies to LaBSE st_server."""
     model_id = request.model
     if model_id not in STATIC_MODELS_CONFIG:
-        model_id = "labse-embedding"
+        model_id = resolve_model_selection("embedder.retrieval.legal_default").resolved_model_id
 
     try:
         config = get_model_config(model_id)

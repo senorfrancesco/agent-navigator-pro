@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Optional
 
+from services.model_manager.model_registry import get_tier_spec
+
 from .profiler import SystemProfile
 from .vram_calculator import VRAMCalculator
 
@@ -43,7 +45,7 @@ class TierConfig:
     tier: Tier
 
     # LLM config
-    llm_model_id: str = "qwen-14b-llm"
+    llm_model_id: str = ""
     llm_quant: str = "Q4_K_M"
     llm_ctx_size: int = 8192
     llm_gpu_layers: int = -1
@@ -52,7 +54,7 @@ class TierConfig:
     # Embedding config
     embedding_backend: str = "pytorch"  # "pytorch" | "onnx" | "onnx-int8"
     embedding_device: str = "cuda"       # "cuda" | "cpu"
-    embedding_model: str = "LaBSE"
+    embedding_model: str = ""
 
     # RAG config
     rag_mode: str = "simple"  # "simple" | "corrective" | "agentic" | "multi-agent"
@@ -119,29 +121,32 @@ class TierSelector:
 
     def _tier1(self, profile: SystemProfile, usable_vram: float = 0) -> TierConfig:
         """CPU + 32-64GB RAM: Qwen-7B Q4, basic retrieval."""
+        tier_spec = get_tier_spec("tier_1")
         gpu_layers = self._get_gpu_layers_override()
         if gpu_layers is None:
             gpu_layers = 0  # CPU only
 
         return TierConfig(
             tier=Tier.TIER_1,
-            llm_model_id="qwen-7b-llm",
+            llm_model_id=str(tier_spec["llm_model_id"]),
             llm_quant="Q4_K_M",
             llm_ctx_size=4096,
             llm_gpu_layers=gpu_layers,
             llm_batch_size=256,
-            embedding_backend="onnx",
-            embedding_device="cpu",
-            rag_mode="simple",
-            retrieval_top_k=5,
-            use_reranker=False,
-            use_bm25=True,
-            workflow_batch_size=2,
-            max_concurrent_llm=1,
+            embedding_backend=str(tier_spec["embedding_backend"]),
+            embedding_device=str(tier_spec["embedding_device"]),
+            embedding_model=str(tier_spec["embedding_model_label"]),
+            rag_mode=str(tier_spec["rag_mode"]),
+            retrieval_top_k=int(tier_spec["retrieval_top_k"]),
+            use_reranker=bool(tier_spec["use_reranker"]),
+            use_bm25=bool(tier_spec["use_bm25"]),
+            workflow_batch_size=int(tier_spec["workflow_batch_size"]),
+            max_concurrent_llm=int(tier_spec["max_concurrent_llm"]),
         )
 
     def _tier2(self, profile: SystemProfile, usable_vram: float = 0) -> TierConfig:
         """CPU 128GB или слабый GPU: Qwen-14B Q4, corrective retrieval."""
+        tier_spec = get_tier_spec("tier_2")
         gpu_layers = self._get_gpu_layers_override()
         if gpu_layers is None:
             if usable_vram >= 4:
@@ -152,46 +157,47 @@ class TierSelector:
                 gpu_layers = 0
 
         # Embedding: GPU если есть хотя бы 2GB свободного после модели
-        embedding_device = "cpu"
-        embedding_backend = "onnx"
-        if usable_vram > 6:  # Хватит и на модель и на LaBSE (~0.5GB)
+        embedding_device = str(tier_spec["embedding_device"])
+        embedding_backend = str(tier_spec["embedding_backend"])
+        if usable_vram > 6:
             embedding_device = "cuda"
             embedding_backend = "pytorch"
 
         return TierConfig(
             tier=Tier.TIER_2,
-            llm_model_id="qwen-14b-llm",
+            llm_model_id=str(tier_spec["llm_model_id"]),
             llm_quant="Q4_K_M",
             llm_ctx_size=8192,
             llm_gpu_layers=gpu_layers,
             llm_batch_size=512,
             embedding_backend=embedding_backend,
             embedding_device=embedding_device,
-            rag_mode="corrective",
-            retrieval_top_k=7,
-            use_reranker=False,
-            use_bm25=True,
-            workflow_batch_size=5,
-            max_concurrent_llm=1,
+            embedding_model=str(tier_spec["embedding_model_label"]),
+            rag_mode=str(tier_spec["rag_mode"]),
+            retrieval_top_k=int(tier_spec["retrieval_top_k"]),
+            use_reranker=bool(tier_spec["use_reranker"]),
+            use_bm25=bool(tier_spec["use_bm25"]),
+            workflow_batch_size=int(tier_spec["workflow_batch_size"]),
+            max_concurrent_llm=int(tier_spec["max_concurrent_llm"]),
         )
 
     def _tier3(self, profile: SystemProfile, usable_vram: float = 0) -> TierConfig:
         """GPU 24GB+: Qwen-14B/Qwen-32B, iterative retrieval (compat key: agentic)."""
+        tier_spec = get_tier_spec("tier_3")
         gpu_layers = self._get_gpu_layers_override()
 
         # Выбор модели по VRAM
         if usable_vram >= 20:
-            # Хватит на Qwen-14B Q8 (~16GB) или Qwen-32B Q4 (~20GB)
-            if usable_vram >= 24:
-                model_id = "qwen-32b-llm"
+            if usable_vram >= float(tier_spec.get("llm_large_vram_threshold_gb") or 24):
+                model_id = str(tier_spec.get("llm_large_vram_model_id") or tier_spec["llm_model_id"])
                 quant = "Q4_K_M"
                 ctx = 16384
             else:
-                model_id = "qwen-14b-llm"
-                quant = "Q8_0"
+                model_id = str(tier_spec["llm_model_id"])
+                quant = str(tier_spec.get("llm_mid_vram_quant") or "Q8_0")
                 ctx = 16384
         else:
-            model_id = "qwen-14b-llm"
+            model_id = str(tier_spec["llm_model_id"])
             quant = "Q4_K_M"
             ctx = 16384
 
@@ -205,38 +211,40 @@ class TierSelector:
             llm_ctx_size=ctx,
             llm_gpu_layers=gpu_layers,
             llm_batch_size=1024,
-            embedding_backend="pytorch",
-            embedding_device="cuda",
-            rag_mode="agentic",
-            retrieval_top_k=10,
-            use_reranker=True,
-            use_bm25=True,
-            workflow_batch_size=10,
-            max_concurrent_llm=1,
+            embedding_backend=str(tier_spec["embedding_backend"]),
+            embedding_device=str(tier_spec["embedding_device"]),
+            embedding_model=str(tier_spec["embedding_model_label"]),
+            rag_mode=str(tier_spec["rag_mode"]),
+            retrieval_top_k=int(tier_spec["retrieval_top_k"]),
+            use_reranker=bool(tier_spec["use_reranker"]),
+            use_bm25=bool(tier_spec["use_bm25"]),
+            workflow_batch_size=int(tier_spec["workflow_batch_size"]),
+            max_concurrent_llm=int(tier_spec["max_concurrent_llm"]),
         )
 
     def _tier4(self, profile: SystemProfile, usable_vram: float = 0) -> TierConfig:
         """Multi-GPU / H100: large-model path, planned multi-agent (compat key: multi-agent)."""
+        tier_spec = get_tier_spec("tier_4")
         gpu_layers = self._get_gpu_layers_override()
         if gpu_layers is None:
             gpu_layers = -1
 
         return TierConfig(
             tier=Tier.TIER_4,
-            llm_model_id="qwen-72b-llm",
+            llm_model_id=str(tier_spec["llm_model_id"]),
             llm_quant="Q4_K_M",
             llm_ctx_size=32768,
             llm_gpu_layers=gpu_layers,
             llm_batch_size=2048,
-            embedding_backend="pytorch",
-            embedding_device="cuda",
-            embedding_model="BGE-M3",
-            rag_mode="multi-agent",
-            retrieval_top_k=15,
-            use_reranker=True,
-            use_bm25=True,
-            workflow_batch_size=20,
-            max_concurrent_llm=4,
+            embedding_backend=str(tier_spec["embedding_backend"]),
+            embedding_device=str(tier_spec["embedding_device"]),
+            embedding_model=str(tier_spec["embedding_model_label"]),
+            rag_mode=str(tier_spec["rag_mode"]),
+            retrieval_top_k=int(tier_spec["retrieval_top_k"]),
+            use_reranker=bool(tier_spec["use_reranker"]),
+            use_bm25=bool(tier_spec["use_bm25"]),
+            workflow_batch_size=int(tier_spec["workflow_batch_size"]),
+            max_concurrent_llm=int(tier_spec["max_concurrent_llm"]),
         )
 
     @staticmethod

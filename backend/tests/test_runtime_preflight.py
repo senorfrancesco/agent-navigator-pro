@@ -285,6 +285,49 @@ def test_build_runtime_plan_supports_max_gpu_layers_override():
     assert plan["placements"]["llm"]["gpu_layers"] == -1
 
 
+def test_build_runtime_plan_moves_embedders_to_cpu_for_single_gpu_8gb_profile():
+    fake_profile = SimpleNamespace(
+        has_gpu=True,
+        gpu_count=1,
+        gpus=[
+            SimpleNamespace(
+                index=0,
+                name="GTX 1070",
+                total_vram_gb=8.0,
+                free_vram_gb=7.5,
+                compute_capability=(6, 1),
+                driver_version="560",
+            )
+        ],
+        best_gpu=SimpleNamespace(index=0, name="GTX 1070", total_vram_gb=8.0, free_vram_gb=7.5),
+        total_vram_gb=8.0,
+        free_vram_gb=7.5,
+        ram_gb=16,
+        cpu_cores=8,
+        platform_name="Linux",
+    )
+    fake_tier = SimpleNamespace(
+        tier=2,
+        rag_mode="corrective",
+        embedding_backend="pytorch",
+        embedding_device="cuda",
+        llm_ctx_size=8192,
+        llm_gpu_layers=-1,
+        llm_model_id="qwen-14b-llm",
+        llm_quant="Q4_K_M",
+    )
+
+    with patch("services.hardware.HardwareProfiler.detect", return_value=fake_profile), patch(
+        "services.hardware.TierSelector.select",
+        return_value=fake_tier,
+    ):
+        plan = runtime_preflight.build_runtime_plan(runtime_profile="adaptive")
+
+    assert plan["component_device_modes"]["intent_embedder"] == "cpu"
+    assert plan["component_device_modes"]["retrieval_embedder"] == "cpu"
+    assert "weak-pc policy moved embedders to cpu" in " ".join(plan["warnings"])
+
+
 def test_build_runtime_plan_exposes_component_level_placement_summary():
     with patch(
         "services.hardware.HardwareProfiler.detect",
