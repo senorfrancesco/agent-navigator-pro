@@ -63,6 +63,11 @@ Flags:
   --no-attach
   --report-only
   --install
+
+Interactive review:
+  1. launcher показывает runtime plan только для текущего запуска
+  2. launcher записывает applied backend/.env.runtime
+  3. launcher сохраняет backend/.env.hardware.override только по отдельному подтверждению
 EOF
 }
 
@@ -322,6 +327,29 @@ for warning in warnings:
 PY
 }
 
+render_applied_env_preview() {
+  local plan_json="$1"
+  python - "$plan_json" <<'PY'
+import json, sys
+plan = json.loads(sys.argv[1])
+component_modes = plan.get("component_device_modes") or {}
+component_sources = plan.get("component_device_mode_sources") or {}
+items = [
+    ("DEVICE_MODE", plan.get("device_mode"), plan.get("decision_source", "auto")),
+    ("GPU_LAYERS_MODE", plan.get("gpu_layers_mode"), plan.get("gpu_layers_mode_source", "auto")),
+    ("N_GPU_LAYERS_OVERRIDE", plan.get("llm_gpu_layers"), plan.get("gpu_layers_source", "tier_auto")),
+    ("LLM_DEVICE_MODE", component_modes.get("llm"), component_sources.get("llm", "auto")),
+    ("VLM_DEVICE_MODE", component_modes.get("vlm"), component_sources.get("vlm", "auto")),
+    ("INTENT_EMBEDDER_DEVICE_MODE", component_modes.get("intent_embedder"), component_sources.get("intent_embedder", "auto")),
+    ("RETRIEVAL_EMBEDDER_DEVICE_MODE", component_modes.get("retrieval_embedder"), component_sources.get("retrieval_embedder", "auto")),
+]
+print("Applied env for this run (.env.runtime):")
+for key, value, source in items:
+    print(f"  {key}={value} (source={source})")
+print("Persistent save (.env.hardware.override) is a separate step.")
+PY
+}
+
 save_hardware_override_file() {
   local file="$1"
   mkdir -p "$(dirname "$file")"
@@ -378,8 +406,10 @@ if [ -z "$RETRIEVAL_EMBEDDER_DEVICE_MODE_OVERRIDE" ]; then
 fi
 
 INTERACTIVE_REVIEW=false
-if [ "$TARGET" = "native" ] && [ "$REPORT_ONLY" = false ] && [ "${AGENT_NAVIGATOR_TEST_MODE:-0}" != "1" ]; then
-  if [ "$REVIEW_RUNTIME" = true ] || { [ "$NON_INTERACTIVE" = false ] && [ -t 0 ] && [ -t 1 ]; }; then
+if [ "$TARGET" = "native" ] && [ "$REPORT_ONLY" = false ]; then
+  if [ "$REVIEW_RUNTIME" = true ]; then
+    INTERACTIVE_REVIEW=true
+  elif [ "${AGENT_NAVIGATOR_TEST_MODE:-0}" != "1" ] && [ "$NON_INTERACTIVE" = false ] && [ -t 0 ] && [ -t 1 ]; then
     INTERACTIVE_REVIEW=true
   fi
 fi
@@ -389,12 +419,11 @@ if [ "$INTERACTIVE_REVIEW" = true ]; then
   echo "$PLAN_PREVIEW"
   render_runtime_review_summary "$PLAN_PREVIEW"
   echo ""
-  read -r -p "Применить auto plan? [Y/n/m=max/u=manual/d=device/c=components/s=save/q=cancel]: " REVIEW_CHOICE
+  render_applied_env_preview "$PLAN_PREVIEW"
+  echo ""
+  read -r -p "Настроить план для текущего запуска? [Y/m=max/u=manual/d=device/c=components/q=cancel]: " REVIEW_CHOICE
   case "$(printf '%s' "$REVIEW_CHOICE" | tr '[:upper:]' '[:lower:]')" in
     ""|"y"|"yes")
-      ;;
-    "n")
-      NON_INTERACTIVE=true
       ;;
     "m"|"max")
       GPU_LAYERS_MODE_OVERRIDE="max"
@@ -413,22 +442,23 @@ if [ "$INTERACTIVE_REVIEW" = true ]; then
       read -r -p "intent_embedder_device_mode [cpu/gpu/hybrid, Enter=skip]: " INTENT_EMBEDDER_DEVICE_MODE_OVERRIDE
       read -r -p "retrieval_embedder_device_mode [cpu/gpu/hybrid, Enter=skip]: " RETRIEVAL_EMBEDDER_DEVICE_MODE_OVERRIDE
       ;;
-    "s"|"save")
-      save_hardware_override_file "$HARDWARE_OVERRIDE_ENV_FILE"
-      ;;
     "q"|"quit")
       echo "launcher:cancelled"
       exit 1
       ;;
   esac
-  if [ "${REVIEW_CHOICE:-}" != "s" ]; then
-    read -r -p "Сохранить текущие hardware overrides в $HARDWARE_OVERRIDE_ENV_FILE? [y/N]: " SAVE_OVERRIDE
-    case "$(printf '%s' "$SAVE_OVERRIDE" | tr '[:upper:]' '[:lower:]')" in
-      "y"|"yes")
-        save_hardware_override_file "$HARDWARE_OVERRIDE_ENV_FILE"
-        ;;
-    esac
-  fi
+  PLAN_PREVIEW="$(run_preflight_json "plan")"
+  echo ""
+  render_runtime_review_summary "$PLAN_PREVIEW"
+  echo ""
+  render_applied_env_preview "$PLAN_PREVIEW"
+  echo ""
+  read -r -p "Сохранить текущие current-run overrides в $HARDWARE_OVERRIDE_ENV_FILE для будущих запусков? [y/N]: " SAVE_OVERRIDE
+  case "$(printf '%s' "$SAVE_OVERRIDE" | tr '[:upper:]' '[:lower:]')" in
+    "y"|"yes")
+      save_hardware_override_file "$HARDWARE_OVERRIDE_ENV_FILE"
+      ;;
+  esac
 fi
 
 PREFLIGHT_OUTPUT="$(run_preflight_json "apply" "$RUNTIME_ENV_FILE")"

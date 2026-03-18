@@ -92,6 +92,29 @@ Persistent user-owned overrides:
 
 Это важно, потому что общий `DEVICE_MODE` влияет прежде всего на heavy LLM/VLM path, а embeddings могут жить по отдельной tier policy.
 
+Interactive review в `launcher.sh` теперь разделён на два шага:
+- сначала настраивается план только для текущего запуска;
+- затем launcher показывает, что именно будет записано в `backend/.env.runtime`;
+- только после этого отдельно спрашивается, нужно ли сохранить текущие overrides в `backend/.env.hardware.override`.
+
+Это означает:
+- `backend/.env.runtime` всегда считается applied current-run файлом;
+- `backend/.env.hardware.override` остаётся persistent user-owned файлом и не должен silently перезаписываться launcher'ом.
+
+Практический mixed-profile для 2x8GB класса машин:
+
+```bash
+./scripts/launcher.sh --target native --review-runtime
+```
+
+В review оставляйте:
+- `LLM_DEVICE_MODE=gpu`
+- `VLM_DEVICE_MODE=gpu`
+- `INTENT_EMBEDDER_DEVICE_MODE=cpu`
+- `RETRIEVAL_EMBEDDER_DEVICE_MODE=cpu`
+
+Такой профиль обычно стабильнее, чем полный GPU для embeddings, потому что избегает `CUDA OOM` на preloading embedder'ов.
+
 ## Env Files
 
 | Файл | Роль | Кто редактирует | Комментарий |
@@ -99,7 +122,7 @@ Persistent user-owned overrides:
 | `backend/.env` | основной shared config | пользователь | базовые пути моделей, UI/auth, backend mode, classifier/retrieval policy |
 | `backend/.env.native` | host-only overrides | пользователь | native dev path: порты, uploads, conda env, absolute paths в WSL |
 | `backend/.env.hardware.override` | persistent runtime placement overrides | пользователь | `DEVICE_MODE`, component device modes, `GPU_LAYERS_MODE`, `N_GPU_LAYERS_OVERRIDE` |
-| `backend/.env.runtime` | applied output | launcher/preflight | generated file; руками не редактировать |
+| `backend/.env.runtime` | applied output for current run | launcher/preflight | generated file; руками не редактировать; launcher перегенерирует его на каждом запуске |
 
 Шаблоны:
 - `backend/.env.example`

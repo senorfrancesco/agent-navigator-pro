@@ -410,6 +410,33 @@ RETRIEVAL_EMBEDDER_DEVICE_MODE=cpu|gpu|hybrid
 Для постоянных user-owned overrides используйте `backend/.env.hardware.override`, а не applied `backend/.env.runtime`.
 `DEVICE_MODE` остаётся общим fallback для heavy runtime path, а component-specific переменные позволяют явно задать placement для LLM, VLM, intent embedder и retrieval embedder.
 
+Launcher review теперь работает в два шага:
+- сначала применяется план только для текущего запуска;
+- затем отдельно спрашивается, нужно ли сохранить выбранные overrides в `backend/.env.hardware.override`.
+
+Это важный контракт:
+- `backend/.env.hardware.override` — persistent user-owned overrides;
+- `backend/.env.runtime` — generated applied env только для текущего запуска.
+
+Если нужно оставить LLM/VLM на GPU, а embeddings на CPU, это теперь лучше задавать явно:
+
+```bash
+./scripts/launcher.sh --target native \
+  --llm-device-mode gpu \
+  --vlm-device-mode gpu \
+  --intent-embedder-device-mode cpu \
+  --retrieval-embedder-device-mode cpu \
+  --gpu-layers-mode max
+```
+
+Для интерактивной настройки того же профиля:
+
+```bash
+./scripts/launcher.sh --target native --review-runtime
+```
+
+После review launcher покажет, что уйдёт в `.env.runtime`, и только потом отдельно спросит, сохранять ли эти значения в `.env.hardware.override`.
+
 Можно работать двумя способами:
 - через флаги `launcher.sh`
 - через файл overrides

@@ -65,7 +65,7 @@ else
     echo -e "${YELLOW}Создайте .env из .env.example: cp .env.example .env${NC}"
 fi
 
-if [ -f "$HARDWARE_OVERRIDE_ENV_FILE" ]; then
+if [ "$FROM_LAUNCHER" = false ] && [ -f "$HARDWARE_OVERRIDE_ENV_FILE" ]; then
     echo -e "${BLUE}Загрузка hardware overrides $HARDWARE_OVERRIDE_ENV_FILE${NC}"
     set -a
     source "$HARDWARE_OVERRIDE_ENV_FILE"

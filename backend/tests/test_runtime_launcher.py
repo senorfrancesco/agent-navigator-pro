@@ -20,6 +20,23 @@ def _run_script(script_name: str, *args: str, env: dict[str, str]) -> subprocess
     )
 
 
+def _run_script_with_input(
+    script_name: str,
+    *args: str,
+    env: dict[str, str],
+    user_input: str,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", str(SCRIPTS_DIR / script_name), *args],
+        cwd=str(PROJECT_ROOT),
+        env=env,
+        text=True,
+        input=user_input,
+        capture_output=True,
+        check=False,
+    )
+
+
 def test_launcher_report_only_outputs_runtime_plan(tmp_path):
     runtime_env = tmp_path / ".env.runtime"
     env = os.environ.copy()
@@ -237,6 +254,63 @@ def test_launcher_can_use_custom_hardware_override_file_flag(tmp_path):
     assert result.returncode == 0
     contents = runtime_env.read_text(encoding="utf-8")
     assert "LLM_DEVICE_MODE=cpu" in contents
+
+
+def test_launcher_review_runtime_applies_current_run_override_without_persisting(tmp_path):
+    runtime_env = tmp_path / ".env.runtime"
+    hardware_env = tmp_path / ".env.hardware.override"
+    hardware_env.write_text('INTENT_EMBEDDER_DEVICE_MODE="cpu"\nRETRIEVAL_EMBEDDER_DEVICE_MODE="cpu"\n', encoding="utf-8")
+    env = os.environ.copy()
+    env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
+    env["AGENT_NAVIGATOR_RUNTIME_ENV_FILE"] = str(runtime_env)
+    env["AGENT_NAVIGATOR_BACKEND_HARDWARE_OVERRIDE_FILE"] = str(hardware_env)
+
+    result = _run_script_with_input(
+        "launcher.sh",
+        "--target",
+        "native",
+        "--profile",
+        "adaptive",
+        "--review-runtime",
+        env=env,
+        user_input="c\n\n\ngpu\ngpu\nn\n",
+    )
+
+    assert result.returncode == 0
+    runtime_contents = runtime_env.read_text(encoding="utf-8")
+    assert "INTENT_EMBEDDER_DEVICE_MODE=gpu" in runtime_contents
+    assert "RETRIEVAL_EMBEDDER_DEVICE_MODE=gpu" in runtime_contents
+    hardware_contents = hardware_env.read_text(encoding="utf-8")
+    assert 'INTENT_EMBEDDER_DEVICE_MODE="cpu"' in hardware_contents
+    assert 'RETRIEVAL_EMBEDDER_DEVICE_MODE="cpu"' in hardware_contents
+    assert "Persistent save (.env.hardware.override) is a separate step." in result.stdout
+
+
+def test_launcher_review_runtime_can_persist_current_run_override(tmp_path):
+    runtime_env = tmp_path / ".env.runtime"
+    hardware_env = tmp_path / ".env.hardware.override"
+    hardware_env.write_text("", encoding="utf-8")
+    env = os.environ.copy()
+    env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
+    env["AGENT_NAVIGATOR_RUNTIME_ENV_FILE"] = str(runtime_env)
+    env["AGENT_NAVIGATOR_BACKEND_HARDWARE_OVERRIDE_FILE"] = str(hardware_env)
+
+    result = _run_script_with_input(
+        "launcher.sh",
+        "--target",
+        "native",
+        "--profile",
+        "adaptive",
+        "--review-runtime",
+        env=env,
+        user_input="c\n\n\ncpu\ncpu\ny\n",
+    )
+
+    assert result.returncode == 0
+    hardware_contents = hardware_env.read_text(encoding="utf-8")
+    assert 'INTENT_EMBEDDER_DEVICE_MODE="cpu"' in hardware_contents
+    assert 'RETRIEVAL_EMBEDDER_DEVICE_MODE="cpu"' in hardware_contents
+    assert 'UMS_RUNTIME_PROFILE="adaptive"' in hardware_contents
 
 
 def test_run_native_is_wrapper_to_launcher(tmp_path):

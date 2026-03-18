@@ -145,13 +145,45 @@ def _resolve_component_device_modes(
     retrieval_embedder_device_mode: Optional[str],
     fallback_llm_device_mode: str,
     fallback_embedding_device_mode: str,
-) -> Dict[str, str]:
-    return {
-        "llm": _normalize_component_device_mode(llm_device_mode) or _normalize_component_device_mode(os.getenv("LLM_DEVICE_MODE")) or fallback_llm_device_mode,
-        "vlm": _normalize_component_device_mode(vlm_device_mode) or _normalize_component_device_mode(os.getenv("VLM_DEVICE_MODE")) or fallback_llm_device_mode,
-        "intent_embedder": _normalize_component_device_mode(intent_embedder_device_mode) or _normalize_component_device_mode(os.getenv("INTENT_EMBEDDER_DEVICE_MODE")) or fallback_embedding_device_mode,
-        "retrieval_embedder": _normalize_component_device_mode(retrieval_embedder_device_mode) or _normalize_component_device_mode(os.getenv("RETRIEVAL_EMBEDDER_DEVICE_MODE")) or fallback_embedding_device_mode,
+) -> tuple[Dict[str, str], Dict[str, str]]:
+    component_specs = {
+        "llm": {
+            "cli": llm_device_mode,
+            "env_key": "LLM_DEVICE_MODE",
+            "fallback": fallback_llm_device_mode,
+        },
+        "vlm": {
+            "cli": vlm_device_mode,
+            "env_key": "VLM_DEVICE_MODE",
+            "fallback": fallback_llm_device_mode,
+        },
+        "intent_embedder": {
+            "cli": intent_embedder_device_mode,
+            "env_key": "INTENT_EMBEDDER_DEVICE_MODE",
+            "fallback": fallback_embedding_device_mode,
+        },
+        "retrieval_embedder": {
+            "cli": retrieval_embedder_device_mode,
+            "env_key": "RETRIEVAL_EMBEDDER_DEVICE_MODE",
+            "fallback": fallback_embedding_device_mode,
+        },
     }
+    modes: Dict[str, str] = {}
+    sources: Dict[str, str] = {}
+    for component, spec in component_specs.items():
+        cli_value = _normalize_component_device_mode(spec["cli"])
+        env_value = _normalize_component_device_mode(os.getenv(spec["env_key"]))
+        fallback_value = _normalize_component_device_mode(spec["fallback"]) or "cpu"
+        if cli_value is not None:
+            modes[component] = cli_value
+            sources[component] = "cli_override"
+        elif env_value is not None:
+            modes[component] = env_value
+            sources[component] = "env_override"
+        else:
+            modes[component] = fallback_value
+            sources[component] = "auto"
+    return modes, sources
 
 
 def _has_component_override(cli_value: Optional[str], env_key: str) -> bool:
@@ -160,23 +192,26 @@ def _has_component_override(cli_value: Optional[str], env_key: str) -> bool:
 
 def _apply_weak_pc_embedding_policy(
     component_modes: Dict[str, str],
+    component_mode_sources: Dict[str, str],
     hardware_snapshot: Dict[str, Any],
     warnings: List[str],
     *,
     intent_embedder_device_mode: Optional[str],
     retrieval_embedder_device_mode: Optional[str],
-) -> Dict[str, str]:
+) -> tuple[Dict[str, str], Dict[str, str]]:
     has_gpu = bool(hardware_snapshot.get("has_gpu"))
     gpu_count = int(hardware_snapshot.get("gpu_count") or 0)
     total_vram_gb = _safe_float(hardware_snapshot.get("total_vram_gb"), 0.0)
     if not has_gpu or gpu_count != 1 or total_vram_gb <= 0.0 or total_vram_gb > 8.5:
-        return component_modes
+        return component_modes, component_mode_sources
     if not _has_component_override(intent_embedder_device_mode, "INTENT_EMBEDDER_DEVICE_MODE"):
         component_modes["intent_embedder"] = "cpu"
+        component_mode_sources["intent_embedder"] = "weak_pc_policy"
     if not _has_component_override(retrieval_embedder_device_mode, "RETRIEVAL_EMBEDDER_DEVICE_MODE"):
         component_modes["retrieval_embedder"] = "cpu"
+        component_mode_sources["retrieval_embedder"] = "weak_pc_policy"
     warnings.append("weak-pc policy moved embedders to cpu for single-gpu 8GB profile")
-    return component_modes
+    return component_modes, component_mode_sources
 
 
 def detect_hardware_snapshot() -> Dict[str, Any]:
@@ -309,7 +344,7 @@ def build_runtime_plan(
         warnings.append("auto selected cpu-only placement despite detected GPU")
         warnings.append("hint: try --gpu-layers-mode max or set N_GPU_LAYERS_OVERRIDE")
     budget["warnings"] = warnings
-    component_modes = _resolve_component_device_modes(
+    component_modes, component_mode_sources = _resolve_component_device_modes(
         llm_device_mode=llm_device_mode,
         vlm_device_mode=vlm_device_mode,
         intent_embedder_device_mode=intent_embedder_device_mode,
@@ -317,8 +352,9 @@ def build_runtime_plan(
         fallback_llm_device_mode=selected_device_mode,
         fallback_embedding_device_mode="gpu" if tier_info["embedding_device"] == "cuda" else "cpu",
     )
-    component_modes = _apply_weak_pc_embedding_policy(
+    component_modes, component_mode_sources = _apply_weak_pc_embedding_policy(
         component_modes,
+        component_mode_sources,
         hardware_snapshot,
         warnings,
         intent_embedder_device_mode=intent_embedder_device_mode,
@@ -433,6 +469,7 @@ def build_runtime_plan(
         },
     }
     budget["component_device_modes"] = component_modes
+    budget["component_device_mode_sources"] = component_mode_sources
     budget["admission"] = {
         tier_info["llm_model_id"]: llm_admission,
         os.getenv("INTENT_CLASSIFIER_EMBEDDER_MODEL", "qwen3-embedding-0.6b"): intent_admission,

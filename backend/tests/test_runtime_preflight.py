@@ -325,6 +325,8 @@ def test_build_runtime_plan_moves_embedders_to_cpu_for_single_gpu_8gb_profile():
 
     assert plan["component_device_modes"]["intent_embedder"] == "cpu"
     assert plan["component_device_modes"]["retrieval_embedder"] == "cpu"
+    assert plan["component_device_mode_sources"]["intent_embedder"] == "weak_pc_policy"
+    assert plan["component_device_mode_sources"]["retrieval_embedder"] == "weak_pc_policy"
     assert "weak-pc policy moved embedders to cpu" in " ".join(plan["warnings"])
 
 
@@ -415,6 +417,58 @@ def test_build_runtime_plan_supports_component_device_mode_overrides(monkeypatch
     assert plan["placements"]["vlm"]["device_mode"] == "cpu"
     assert plan["placements"]["intent_embedder"]["device_mode"] == "gpu"
     assert plan["placements"]["retrieval_embedder"]["device_mode"] == "hybrid"
+    assert plan["component_device_mode_sources"]["llm"] == "cli_override"
+    assert plan["component_device_mode_sources"]["vlm"] == "cli_override"
+    assert plan["component_device_mode_sources"]["intent_embedder"] == "cli_override"
+    assert plan["component_device_mode_sources"]["retrieval_embedder"] == "cli_override"
+
+
+def test_build_runtime_plan_preserves_explicit_env_embedder_cpu_overrides(monkeypatch):
+    monkeypatch.setenv("INTENT_EMBEDDER_DEVICE_MODE", "cpu")
+    monkeypatch.setenv("RETRIEVAL_EMBEDDER_DEVICE_MODE", "cpu")
+    fake_profile = SimpleNamespace(
+        has_gpu=True,
+        gpu_count=1,
+        gpus=[
+            SimpleNamespace(
+                index=0,
+                name="RTX 2070",
+                total_vram_gb=8.0,
+                free_vram_gb=7.2,
+                compute_capability=(7, 5),
+            )
+        ],
+        best_gpu=SimpleNamespace(index=0, name="RTX 2070", total_vram_gb=8.0, free_vram_gb=7.2),
+        total_vram_gb=8.0,
+        free_vram_gb=7.2,
+        ram_gb=32,
+        cpu_cores=16,
+        platform_name="Linux",
+    )
+    fake_tier = SimpleNamespace(
+        tier=3,
+        rag_mode="agentic",
+        embedding_backend="pytorch",
+        embedding_device="cuda",
+        llm_ctx_size=16384,
+        llm_gpu_layers=-1,
+        llm_model_id="qwen-14b-llm",
+        llm_quant="Q4_K_M",
+    )
+
+    with patch("services.hardware.HardwareProfiler.detect", return_value=fake_profile), patch(
+        "services.hardware.TierSelector.select",
+        return_value=fake_tier,
+    ):
+        plan = runtime_preflight.build_runtime_plan(runtime_profile="adaptive")
+
+    assert plan["component_device_modes"]["intent_embedder"] == "cpu"
+    assert plan["component_device_modes"]["retrieval_embedder"] == "cpu"
+    assert plan["component_device_mode_sources"]["intent_embedder"] == "env_override"
+    assert plan["component_device_mode_sources"]["retrieval_embedder"] == "env_override"
+    rendered = runtime_preflight.render_env_runtime(plan)
+    assert "INTENT_EMBEDDER_DEVICE_MODE=cpu" in rendered
+    assert "RETRIEVAL_EMBEDDER_DEVICE_MODE=cpu" in rendered
 
 
 def test_build_runtime_plan_exposes_llm_admission_and_hybrid_resolution():
