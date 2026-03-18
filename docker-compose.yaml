@@ -1,4 +1,157 @@
 services:
+  agent-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: agent-nav-agent-api
+    env_file:
+      - path: ./backend/.env
+        required: true
+      - path: ./backend/.env.runtime
+        required: false
+    environment:
+      - UMS_URL=${AGENT_API_UMS_URL:-http://ums:8090}
+      - DOC_SERVER_URL=${AGENT_API_DOC_SERVER_URL:-http://document-server:8001}
+      - LEGAL_SERVER_URL=${AGENT_API_LEGAL_SERVER_URL:-http://legal-server:8002}
+      - MCP_DOCUMENT_SERVER_URL=${AGENT_API_MCP_DOCUMENT_SERVER_URL:-http://document-server:8001}
+      - MCP_LEGAL_SERVER_URL=${AGENT_API_MCP_LEGAL_SERVER_URL:-http://legal-server:8002}
+      - HOST_UPLOADS_DIR=/app/backend/open_webui_uploads
+    volumes:
+      - ./backend/open_webui_uploads:/app/backend/open_webui_uploads
+      - ./backend/models:/app/backend/models
+    working_dir: /app/backend
+    command:
+      - python
+      - -m
+      - uvicorn
+      - orchestrator.agent_api:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()"
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+    profiles:
+      - backend
+
+  document-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: agent-nav-document-server
+    env_file:
+      - path: ./backend/.env
+        required: true
+      - path: ./backend/.env.runtime
+        required: false
+    environment:
+      - UMS_URL=${DOCUMENT_SERVER_UMS_URL:-http://ums:8090}
+    volumes:
+      - ./backend/open_webui_uploads:/app/backend/open_webui_uploads
+      - ./backend/models:/app/backend/models
+    working_dir: /app/backend
+    command:
+      - python
+      - -m
+      - uvicorn
+      - services.document_server.mcp_document_server:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8001"
+    ports:
+      - "8001:8001"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=2).read()"
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+    profiles:
+      - backend
+
+  legal-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: agent-nav-legal-server
+    env_file:
+      - path: ./backend/.env
+        required: true
+      - path: ./backend/.env.runtime
+        required: false
+    environment:
+      - UMS_URL=${LEGAL_SERVER_UMS_URL:-http://ums:8090}
+    volumes:
+      - ./backend/open_webui_uploads:/app/backend/open_webui_uploads
+      - ./backend/models:/app/backend/models
+    working_dir: /app/backend
+    command:
+      - python
+      - -m
+      - uvicorn
+      - services.legal_server.mcp_legal_server:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8002"
+    ports:
+      - "8002:8002"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=2).read()"
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+    profiles:
+      - backend
+
+  ums:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: agent-nav-ums
+    env_file:
+      - path: ./backend/.env
+        required: true
+      - path: ./backend/.env.runtime
+        required: false
+    volumes:
+      - ./backend/models:/app/backend/models
+      - ./backend/open_webui_uploads:/app/backend/open_webui_uploads
+    working_dir: /app/backend
+    command:
+      - python
+      - services/model_manager/unified_model_server.py
+    ports:
+      - "8090:8090"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=2).read()"
+      interval: 15s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+    profiles:
+      - backend
+
   # --- Open WebUI (legacy, можно отключить после перехода на Chainlit) ---
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
@@ -35,7 +188,10 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     env_file:
-      - ./backend/.env
+      - path: ./backend/.env
+        required: true
+      - path: ./backend/.env.runtime
+        required: false
     volumes:
       - ./backend/open_webui_uploads:/app/uploads
       - chainlit-data:/app/orchestrator/.data
@@ -44,15 +200,27 @@ services:
       - CHAINLIT_ADMIN_USER=${CHAINLIT_ADMIN_USER:-admin}
       - CHAINLIT_ADMIN_PASSWORD=${CHAINLIT_ADMIN_PASSWORD:-admin}
       - CHAINLIT_DB_URL=${CHAINLIT_DB_URL:-sqlite+aiosqlite:///app/orchestrator/.data/chainlit.db}
-      - UMS_URL=http://host.docker.internal:8090
-      - DOC_SERVER_URL=http://host.docker.internal:8001
-      - LEGAL_SERVER_URL=http://host.docker.internal:8002
-      - MCP_DOCUMENT_SERVER_URL=http://host.docker.internal:8001
-      - MCP_LEGAL_SERVER_URL=http://host.docker.internal:8002
+      - UMS_URL=${CHAINLIT_UMS_URL:-http://host.docker.internal:8090}
+      - DOC_SERVER_URL=${CHAINLIT_DOC_SERVER_URL:-http://host.docker.internal:8001}
+      - LEGAL_SERVER_URL=${CHAINLIT_LEGAL_SERVER_URL:-http://host.docker.internal:8002}
+      - MCP_DOCUMENT_SERVER_URL=${CHAINLIT_MCP_DOCUMENT_SERVER_URL:-http://host.docker.internal:8001}
+      - MCP_LEGAL_SERVER_URL=${CHAINLIT_MCP_LEGAL_SERVER_URL:-http://host.docker.internal:8002}
       - UPLOADS_DIR=/app/uploads
       - HOST_UPLOADS_DIR=${PWD}/backend/open_webui_uploads
     restart: unless-stopped
-    depends_on: []
+    depends_on:
+      agent-api:
+        condition: service_healthy
+        required: false
+      document-server:
+        condition: service_healthy
+        required: false
+      legal-server:
+        condition: service_healthy
+        required: false
+      ums:
+        condition: service_healthy
+        required: false
 
   vllm:
     image: ${VLLM_IMAGE:-vllm/vllm-openai:latest}
@@ -62,7 +230,10 @@ services:
     ports:
       - "${VLLM_PORT:-8101}:8000"
     env_file:
-      - ./backend/.env
+      - path: ./backend/.env
+        required: true
+      - path: ./backend/.env.runtime
+        required: false
     environment:
       - VLLM_INTERNAL_PORT=8000
       - HF_HOME=/root/.cache/huggingface

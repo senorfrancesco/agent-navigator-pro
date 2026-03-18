@@ -110,6 +110,30 @@ def test_setup_ubuntu_uses_conda_base_instead_of_creating_diploma_env():
     assert "conda tos accept" in script
 
 
+def test_setup_ubuntu_targets_cuda_12_8_and_driver_r570_baseline():
+    script = (SCRIPTS_DIR / "setup_ubuntu.sh").read_text(encoding="utf-8")
+    assert "cuda-toolkit-12-8" in script
+    assert "cuda-toolkit-12-4" not in script
+    assert "570.124.06" in script
+    assert "R570+" in script
+
+
+def test_setup_ubuntu_mentions_driver_too_old_path_separately_from_missing_driver():
+    script = (SCRIPTS_DIR / "setup_ubuntu.sh").read_text(encoding="utf-8")
+    assert "версия драйвера NVIDIA слишком старая" in script
+    assert "Обновите драйвер NVIDIA до версии не ниже 570.124.06" in script
+    assert "NVIDIA драйверы не обнаружены" in script
+
+
+def test_setup_ubuntu_installs_pytorch_2_10_cu128_on_gpu_path():
+    script = (SCRIPTS_DIR / "setup_ubuntu.sh").read_text(encoding="utf-8")
+    assert "torch==2.10.0" in script
+    assert "torchvision==0.25.0" in script
+    assert "torchaudio==2.10.0" in script
+    assert "https://download.pytorch.org/whl/cu128" in script
+    assert "https://download.pytorch.org/whl/cpu" in script
+
+
 def test_model_downloader_dry_run_supports_custom_models_root(tmp_path):
     result = _run_script(
         [

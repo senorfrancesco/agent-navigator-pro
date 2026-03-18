@@ -122,10 +122,10 @@ scripts/
 
 ### `scripts/install/install_cuda.sh`
 
-- Делает: ставит CUDA Toolkit только когда обнаружена NVIDIA-среда и пользователь явно выбрал GPU path.
-- Не делает: не ставит NVIDIA driver "вслепую", не включает CUDA на unsupported OS и не меняет runtime path без проверки.
-- Зависимости: `nvidia-smi` или явный user choice, supported OS profile, доступ к NVIDIA repository/packages, `sudo`.
-- Успех проверяется через: `nvcc --version` и/или package-level confirmation, корректный toolkit path, совместимость с поддерживаемой ОС.
+- Делает: ставит `CUDA Toolkit 12.8` только когда обнаружена NVIDIA-среда с достаточным driver baseline и пользователь явно сохраняет GPU path.
+- Не делает: не ставит NVIDIA driver "вслепую", не пытается автоматически чинить too-old driver и не включает CUDA на unsupported OS.
+- Зависимости: `nvidia-smi`, NVIDIA driver не ниже `570.124.06` для целевого baseline `CUDA 12.8 Update 1`, supported Ubuntu profile (`22.04` или `24.04`), доступ к NVIDIA repository/packages, `sudo`.
+- Успех проверяется через: `nvcc --version` с ожидаемым `12.8.x`, корректный toolkit path, совместимость с поддерживаемой ОС.
 - Official docs: [NVIDIA CUDA Installation Guide for Linux](https://docs.nvidia.com/cuda/cuda-installation-guide-linux/index.html).
 
 ### `scripts/install/build_llamacpp.sh`
@@ -138,11 +138,18 @@ scripts/
 
 ### `scripts/install/verify_system.sh`
 
-- Делает: собирает единый post-install verification report по командам, портам, Docker, Python env, CUDA и runtime prerequisites.
+- Делает: собирает единый post-install verification report по командам, портам, Docker, Python env, NVIDIA driver baseline, CUDA и runtime prerequisites.
 - Не делает: не чинит систему автоматически и не перезапускает весь runtime stack без явной команды.
 - Зависимости: установленные зависимости, конфиг из предыдущих шагов, `scripts/utils/system_check.sh`.
 - Успех проверяется через: machine-readable summary со статусами `ok/warn/fail`; обязательный fail при отсутствии критичных команд или unsupported OS.
 - Official docs: verification опирается на vendor docs конкретных шагов, прежде всего [Docker Engine on Ubuntu](https://docs.docker.com/engine/install/ubuntu/) и [NVIDIA CUDA Installation Guide for Linux](https://docs.nvidia.com/cuda/cuda-installation-guide-linux/index.html).
+
+Текущий canonical GPU baseline для guided install path:
+
+- NVIDIA driver: `R570+`, безопасный минимум `570.124.06`
+- CUDA Toolkit: `12.8.x`
+- PyTorch GPU wheel path: `torch==2.10.0`, `torchvision==0.25.0`, `torchaudio==2.10.0` через `cu128`
+- Важно: готовый PyTorch wheel не требует локального CUDA Toolkit, но native CUDA build path для `llama-cpp-python` требует установленный `nvcc`
 
 ### `scripts/models/install_models.sh`
 

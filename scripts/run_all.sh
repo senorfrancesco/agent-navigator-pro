@@ -186,7 +186,8 @@ wait_for_model() {
 
     printf "  %-20s " "Qwen-14B LLM"
     while [ $elapsed -lt $timeout ]; do
-        local status=$(curl -sf "http://localhost:$UMS_PORT/status" 2>/dev/null)
+        local status
+        status=$(curl -sf "http://localhost:$UMS_PORT/status" 2>/dev/null || true)
         if [ -n "$status" ]; then
             if echo "$status" | grep -q '"qwen-14b-llm"'; then
                 echo -e "${GREEN}✓ загружена${NC}"

@@ -115,27 +115,27 @@ def test_launcher_forwards_models_root_to_downloader(tmp_path):
 
 def test_launcher_sources_native_overrides_before_runtime_preflight(tmp_path):
     runtime_env = tmp_path / ".env.runtime"
-    native_env = PROJECT_ROOT / "backend" / ".env.native"
-    original = native_env.read_text(encoding="utf-8") if native_env.exists() else None
-    try:
-        native_env.write_text('DEVICE_MODE="gpu"\n', encoding="utf-8")
-        env = os.environ.copy()
-        env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
-        env["AGENT_NAVIGATOR_RUNTIME_ENV_FILE"] = str(runtime_env)
+    backend_env = tmp_path / ".env"
+    native_env = tmp_path / ".env.native"
+    hardware_env = tmp_path / ".env.hardware.override"
+    backend_env.write_text("CHAINLIT_AUTH_SECRET='ok'\nCHAINLIT_ADMIN_PASSWORD='ok'\n", encoding="utf-8")
+    native_env.write_text('DEVICE_MODE="gpu"\n', encoding="utf-8")
+    hardware_env.write_text("", encoding="utf-8")
+    env = os.environ.copy()
+    env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
+    env["AGENT_NAVIGATOR_BACKEND_ENV_FILE"] = str(backend_env)
+    env["AGENT_NAVIGATOR_BACKEND_NATIVE_ENV_FILE"] = str(native_env)
+    env["AGENT_NAVIGATOR_BACKEND_HARDWARE_OVERRIDE_FILE"] = str(hardware_env)
+    env["AGENT_NAVIGATOR_RUNTIME_ENV_FILE"] = str(runtime_env)
 
-        result = _run_script(
-            "launcher.sh",
-            "--target",
-            "native",
-            "--profile",
-            "adaptive",
-            env=env,
-        )
-    finally:
-        if original is None:
-            native_env.unlink(missing_ok=True)
-        else:
-            native_env.write_text(original, encoding="utf-8")
+    result = _run_script(
+        "launcher.sh",
+        "--target",
+        "native",
+        "--profile",
+        "adaptive",
+        env=env,
+    )
 
     assert result.returncode == 0
     assert runtime_env.exists()
@@ -730,6 +730,22 @@ def test_native_and_legacy_scripts_export_backend_pythonpath_for_service_servers
     assert "export PYTHONPATH='$BACKEND_DIR' && uvicorn mcp_legal_server:app" in run_openwebui
     assert "export PYTHONPATH='$BACKEND_DIR' && uvicorn mcp_document_server:app" in start_system_test
     assert "export PYTHONPATH='$BACKEND_DIR' && uvicorn mcp_legal_server:app" in start_system_test
+
+
+def test_start_system_test_contains_executable_tmux_commands():
+    start_system_test = (SCRIPTS_DIR / "start_system_test.sh").read_text(encoding="utf-8")
+
+    assert '\ntmux new-session -d -s "$SESSION_NAME" -x 200 -y 50\n' in start_system_test
+    assert '\ntmux new-window -t "$SESSION_NAME" -n "agent-api"\n' in start_system_test
+    assert '\ntmux new-window -t "$SESSION_NAME" -n "doc-server"\n' in start_system_test
+    assert '\ntmux new-window -t "$SESSION_NAME" -n "legal-server"\n' in start_system_test
+    assert '\ntmux new-window -t "$SESSION_NAME" -n "ums"\n' in start_system_test
+
+
+def test_run_all_wait_for_model_tolerates_unready_status_endpoint():
+    run_all = (SCRIPTS_DIR / "run_all.sh").read_text(encoding="utf-8")
+
+    assert 'status=$(curl -sf "http://localhost:$UMS_PORT/status" 2>/dev/null || true)' in run_all
 
 
 def test_stop_scripts_kill_detached_runtime_process_patterns():

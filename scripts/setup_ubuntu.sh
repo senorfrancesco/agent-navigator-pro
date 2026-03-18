@@ -19,6 +19,21 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 SKIP_CREATE=false
 DOCKER_RELOGIN_REQUIRED=false
+CUDA_TOOLKIT_TARGET="12.8"
+CUDA_TOOLKIT_APT_PACKAGE="cuda-toolkit-12-8"
+CUDA_DRIVER_MIN_VERSION_LINUX="570.124.06"
+PYTORCH_VERSION="2.10.0"
+TORCHVISION_VERSION="0.25.0"
+TORCHAUDIO_VERSION="2.10.0"
+PYTORCH_CUDA_INDEX_URL="https://download.pytorch.org/whl/cu128"
+PYTORCH_CPU_INDEX_URL="https://download.pytorch.org/whl/cpu"
+GPU_RUNTIME_READY=false
+CUDA_TOOLKIT_READY=false
+CUDA_TOOLKIT_STATUS="missing"
+NVIDIA_DRIVER_STATUS="missing"
+NVIDIA_DRIVER_VERSION=""
+PYTORCH_INSTALL_TARGET="cpu"
+LLAMA_CPP_CUDA_REBUILD_STATUS="skipped"
 
 is_wsl() {
     [[ -n "${WSL_DISTRO_NAME:-}" ]] || grep -qiE '(microsoft|wsl)' /proc/version 2>/dev/null
@@ -42,6 +57,40 @@ prompt_yes_no() {
         reply="$default"
     fi
     [[ "$reply" =~ ^[Yy]$ ]]
+}
+
+version_ge() {
+    local current="$1"
+    local required="$2"
+    [ "$current" = "$required" ] && return 0
+    [ "$(printf '%s\n%s\n' "$required" "$current" | sort -V | head -n 1)" = "$required" ]
+}
+
+resolve_cuda_repo_slug() {
+    case "${VERSION_ID:-}" in
+        "22.04")
+            echo "ubuntu2204"
+            ;;
+        "24.04")
+            echo "ubuntu2404"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+install_cuda_toolkit_12_8() {
+    local repo_slug="$1"
+    local keyring_file="cuda-keyring_1.1-1_all.deb"
+    local keyring_url="https://developer.download.nvidia.com/compute/cuda/repos/${repo_slug}/x86_64/${keyring_file}"
+
+    echo "Установка CUDA Toolkit ${CUDA_TOOLKIT_TARGET} из репозитория NVIDIA (${repo_slug})..."
+    wget "$keyring_url"
+    sudo dpkg -i "$keyring_file"
+    sudo apt-get update
+    sudo apt-get -y install "$CUDA_TOOLKIT_APT_PACKAGE"
+    rm -f "$keyring_file"
 }
 
 install_managed_config() {
@@ -286,35 +335,75 @@ if command -v nvidia-smi &> /dev/null; then
     echo -e "${GREEN}[OK]${NC} NVIDIA драйверы установлены"
     nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
     echo ""
+    NVIDIA_DRIVER_VERSION="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 | tr -d '[:space:]')"
+    if [ -n "$NVIDIA_DRIVER_VERSION" ] && version_ge "$NVIDIA_DRIVER_VERSION" "$CUDA_DRIVER_MIN_VERSION_LINUX"; then
+        NVIDIA_DRIVER_STATUS="ok"
+        GPU_RUNTIME_READY=true
+        echo -e "${GREEN}[OK]${NC} Версия драйвера подходит для baseline CUDA ${CUDA_TOOLKIT_TARGET}: ${NVIDIA_DRIVER_VERSION}"
+    else
+        NVIDIA_DRIVER_STATUS="too-old"
+        echo -e "${YELLOW}[WARNING]${NC} версия драйвера NVIDIA слишком старая для baseline CUDA ${CUDA_TOOLKIT_TARGET}"
+        echo "Обновите драйвер NVIDIA до версии не ниже 570.124.06 (ветка R570+)."
+        echo "Текущая версия драйвера: ${NVIDIA_DRIVER_VERSION:-unknown}"
+        echo "Инструкция: https://ubuntu.com/server/docs/nvidia-drivers-installation"
+        if ! prompt_yes_no "Продолжить без GPU baseline CUDA ${CUDA_TOOLKIT_TARGET}?" "y"; then
+            exit 0
+        fi
+    fi
 
-    # Проверка CUDA
+    # Проверка CUDA Toolkit
     if command -v nvcc &> /dev/null; then
         CUDA_VERSION=$(nvcc --version | grep "release" | awk '{print $5}' | cut -d',' -f1)
-        echo -e "${GREEN}[OK]${NC} CUDA установлена: $CUDA_VERSION"
+        if [[ "$CUDA_VERSION" == ${CUDA_TOOLKIT_TARGET}* ]]; then
+            CUDA_TOOLKIT_READY=true
+            CUDA_TOOLKIT_STATUS="ok"
+            echo -e "${GREEN}[OK]${NC} CUDA toolkit ${CUDA_VERSION} установлен"
+        else
+            CUDA_TOOLKIT_STATUS="mismatch"
+            echo -e "${YELLOW}[WARNING]${NC} Обнаружен CUDA toolkit ${CUDA_VERSION}, но baseline проекта ожидает ${CUDA_TOOLKIT_TARGET}.x"
+        fi
     else
+        CUDA_TOOLKIT_STATUS="missing"
         echo -e "${YELLOW}[WARNING]${NC} CUDA toolkit не обнаружен"
-        read -p "Установить CUDA toolkit? (y/n): " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            echo "Установка CUDA toolkit..."
-            wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
-            sudo dpkg -i cuda-keyring_1.1-1_all.deb
-            sudo apt-get update
-            sudo apt-get -y install cuda-toolkit-12-4
-            rm cuda-keyring_1.1-1_all.deb
-            echo -e "${GREEN}[OK]${NC} CUDA toolkit установлен"
-            echo -e "${YELLOW}[!]${NC} Добавьте в ~/.bashrc:"
-            echo 'export PATH=/usr/local/cuda/bin:$PATH'
-            echo 'export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH'
+    fi
+
+    if [ "$GPU_RUNTIME_READY" = true ] && [ "$CUDA_TOOLKIT_READY" = false ]; then
+        if prompt_yes_no "Установить CUDA toolkit ${CUDA_TOOLKIT_TARGET} для native CUDA build path?" "y"; then
+            CUDA_REPO_SLUG="$(resolve_cuda_repo_slug || true)"
+            if [ -z "$CUDA_REPO_SLUG" ]; then
+                echo -e "${YELLOW}[WARNING]${NC} Автоматическая установка CUDA toolkit поддержана только для Ubuntu 22.04 и 24.04"
+                echo "Установите CUDA toolkit ${CUDA_TOOLKIT_TARGET}.x вручную по NVIDIA guide:"
+                echo "https://docs.nvidia.com/cuda/cuda-installation-guide-linux/"
+                CUDA_TOOLKIT_STATUS="manual-required"
+            else
+                install_cuda_toolkit_12_8 "$CUDA_REPO_SLUG"
+                if command -v nvcc &> /dev/null; then
+                    CUDA_VERSION=$(nvcc --version | grep "release" | awk '{print $5}' | cut -d',' -f1)
+                    if [[ "$CUDA_VERSION" == ${CUDA_TOOLKIT_TARGET}* ]]; then
+                        CUDA_TOOLKIT_READY=true
+                        CUDA_TOOLKIT_STATUS="ok"
+                        echo -e "${GREEN}[OK]${NC} CUDA toolkit ${CUDA_VERSION} установлен"
+                        echo -e "${YELLOW}[!]${NC} Добавьте в ~/.bashrc:"
+                        echo 'export PATH=/usr/local/cuda/bin:$PATH'
+                        echo 'export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH'
+                    else
+                        CUDA_TOOLKIT_STATUS="mismatch"
+                        echo -e "${YELLOW}[WARNING]${NC} После установки nvcc сообщает ${CUDA_VERSION}; expected ${CUDA_TOOLKIT_TARGET}.x"
+                    fi
+                else
+                    CUDA_TOOLKIT_STATUS="missing"
+                    echo -e "${YELLOW}[WARNING]${NC} CUDA toolkit installation завершилась без доступного nvcc"
+                fi
+            fi
         fi
     fi
 else
+    NVIDIA_DRIVER_STATUS="missing"
     echo -e "${YELLOW}[WARNING]${NC} NVIDIA драйверы не обнаружены"
     echo "Для работы с GPU необходимо установить драйверы NVIDIA"
+    echo "Для baseline CUDA ${CUDA_TOOLKIT_TARGET} рекомендуется драйвер ветки R570+ и не ниже ${CUDA_DRIVER_MIN_VERSION_LINUX}"
     echo "Инструкция: https://ubuntu.com/server/docs/nvidia-drivers-installation"
-    read -p "Продолжить без GPU поддержки? (y/n): " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    if ! prompt_yes_no "Продолжить без GPU поддержки?" "y"; then
         exit 0
     fi
 fi
@@ -430,11 +519,33 @@ if ! pip install -r requirements.txt --no-cache-dir; then
     exit 1
 fi
 
+echo ""
+if [ "$GPU_RUNTIME_READY" = true ]; then
+    echo "Canonical PyTorch GPU baseline: torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 via cu128"
+    echo "Установка PyTorch ${PYTORCH_VERSION} (CUDA 12.8 / cu128)..."
+    pip install --no-cache-dir \
+        --index-url "$PYTORCH_CUDA_INDEX_URL" \
+        "torch==${PYTORCH_VERSION}" \
+        "torchvision==${TORCHVISION_VERSION}" \
+        "torchaudio==${TORCHAUDIO_VERSION}"
+    PYTORCH_INSTALL_TARGET="cu128"
+else
+    echo "Canonical PyTorch CPU baseline: torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 via cpu"
+    echo "Установка PyTorch ${PYTORCH_VERSION} (CPU only)..."
+    pip install --no-cache-dir \
+        --index-url "$PYTORCH_CPU_INDEX_URL" \
+        "torch==${PYTORCH_VERSION}" \
+        "torchvision==${TORCHVISION_VERSION}" \
+        "torchaudio==${TORCHAUDIO_VERSION}"
+    PYTORCH_INSTALL_TARGET="cpu"
+fi
+
 # Специальная установка llama-cpp-python с поддержкой CUDA (если доступна)
 if command -v nvcc &> /dev/null; then
     echo ""
-    echo "Переустановка llama-cpp-python с поддержкой CUDA..."
+    echo "Переустановка llama-cpp-python с поддержкой CUDA (native build path, требуется CUDA toolkit)..."
     CMAKE_ARGS="-DLLAMA_CUBLAS=on" pip install llama-cpp-python[server] --force-reinstall --no-cache-dir
+    LLAMA_CPP_CUDA_REBUILD_STATUS="done"
 fi
 
 cd ..
@@ -539,6 +650,33 @@ echo "Проверка установленных пакетов..."
 python -c "import fastapi; print('FastAPI:', fastapi.__version__)" || echo -e "${RED}[ERROR]${NC} FastAPI не установлен"
 python -c "import langchain; print('LangChain:', langchain.__version__)" || echo -e "${RED}[ERROR]${NC} LangChain не установлен"
 python -c "import langgraph; print('LangGraph:', langgraph.__version__)" || echo -e "${RED}[ERROR]${NC} LangGraph не установлен"
+python -c "import torch; print('PyTorch:', torch.__version__)" || echo -e "${RED}[ERROR]${NC} PyTorch не установлен"
+
+echo ""
+echo -e "${BLUE}GPU / CUDA readiness summary${NC}"
+if command -v nvidia-smi >/dev/null 2>&1; then
+    echo "nvidia-smi: ok"
+else
+    echo "nvidia-smi: missing"
+fi
+if [ "$NVIDIA_DRIVER_STATUS" = "ok" ]; then
+    echo "NVIDIA driver: ${NVIDIA_DRIVER_VERSION} (ok)"
+elif [ "$NVIDIA_DRIVER_STATUS" = "too-old" ]; then
+    echo "NVIDIA driver: ${NVIDIA_DRIVER_VERSION:-unknown} (too old, need >= ${CUDA_DRIVER_MIN_VERSION_LINUX})"
+else
+    echo "NVIDIA driver: missing"
+fi
+if [ "$CUDA_TOOLKIT_STATUS" = "ok" ]; then
+    echo "CUDA toolkit: ${CUDA_TOOLKIT_TARGET}.x (ok)"
+elif [ "$CUDA_TOOLKIT_STATUS" = "mismatch" ]; then
+    echo "CUDA toolkit: wrong version (expected ${CUDA_TOOLKIT_TARGET}.x)"
+elif [ "$CUDA_TOOLKIT_STATUS" = "manual-required" ]; then
+    echo "CUDA toolkit: manual install required"
+else
+    echo "CUDA toolkit: missing"
+fi
+echo "PyTorch build target: ${PYTORCH_INSTALL_TARGET}"
+echo "llama-cpp-python CUDA rebuild: ${LLAMA_CPP_CUDA_REBUILD_STATUS}"
 
 # ============================================================
 # Завершение

@@ -13,8 +13,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_DIR = PROJECT_ROOT / "backend"
 sys.path.insert(0, str(BACKEND_DIR))
 
-from services.model_manager.models_config import _MODEL_PATH_SPECS  # type: ignore
-
+DEFAULT_LLM_PATH = "./models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
+DEFAULT_VLM_PATH = "./models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
+DEFAULT_INTENT_EMBEDDING_PATH = "./models/st/Qwen3-Embedding-0.6B"
+DEFAULT_RETRIEVAL_EMBEDDING_PATH = "./models/st/LaBSE"
 DEFAULT_MMPROJ_PATH = "./models/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf"
 
 ASSETS: Dict[str, Dict[str, str]] = {
@@ -24,21 +26,21 @@ ASSETS: Dict[str, Dict[str, str]] = {
         "repo_id": "Qwen/Qwen2.5-14B-Instruct-GGUF",
         "filename": "Qwen2.5-14B-Instruct-Q4_K_M.gguf",
         "target_env": "MODEL_PATH_LLM",
-        "default_path": _MODEL_PATH_SPECS["qwen-14b-llm"]["default_path"],
+        "default_path": DEFAULT_LLM_PATH,
     },
     "intent_embedding": {
         "asset_set": "core",
         "kind": "snapshot",
         "repo_id": "Qwen/Qwen3-Embedding-0.6B",
         "target_env": "MODEL_PATH_EMBEDDING_INTENT",
-        "default_path": _MODEL_PATH_SPECS["qwen3-embedding-0.6b"]["default_path"],
+        "default_path": DEFAULT_INTENT_EMBEDDING_PATH,
     },
     "retrieval_embedding": {
         "asset_set": "core",
         "kind": "snapshot",
         "repo_id": "sentence-transformers/LaBSE",
         "target_env": "MODEL_PATH_EMBEDDING_RETRIEVAL",
-        "default_path": _MODEL_PATH_SPECS["labse-embedding"]["default_path"],
+        "default_path": DEFAULT_RETRIEVAL_EMBEDDING_PATH,
     },
     "vlm": {
         "asset_set": "all",
@@ -46,7 +48,7 @@ ASSETS: Dict[str, Dict[str, str]] = {
         "repo_id": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
         "filename": "Qwen3-VL-8B-Instruct-Q4_K_M.gguf",
         "target_env": "MODEL_PATH_VLM",
-        "default_path": _MODEL_PATH_SPECS["qwen-vl-8b"]["default_path"],
+        "default_path": DEFAULT_VLM_PATH,
     },
     "vlm_mmproj": {
         "asset_set": "all",
