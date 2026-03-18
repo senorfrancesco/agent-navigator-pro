@@ -750,7 +750,6 @@ tmux attach -t agent-navigator
 ├── scripts/
 ├── docker-compose.yaml
 ├── Dockerfile.chainlit
-├── AGENTS.md
 ├── TASKS.md
 └── README.md
 ```
@@ -767,5 +766,4 @@ tmux attach -t agent-navigator
 ## Где смотреть дальше
 
 - backlog и техдолг: [`TASKS.md`](TASKS.md)
-- правила работы по репозиторию: [`AGENTS.md`](AGENTS.md)
 - модели: [`backend/models/README.md`](backend/models/README.md)

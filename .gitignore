@@ -61,6 +61,7 @@ __pycache__/
 documents/
 test_document.pdf
 test_logs/
+all_logs/
 tmp_agent_nav_smoke_doc.txt
 tmp_chainlit_element_smoke.txt
 task.md
@@ -69,6 +70,15 @@ TASKS.md.bak
 # Local runtime env overrides
 backend/.env.native
 backend/.env.runtime
+
+# Local agent/operator workspace files
+.claude/
+.gemini/
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+TASKS_NIGHT.md
+docs/plans/
 
 # Local ad-hoc Node/Playwright bootstrap
 package-lock.json

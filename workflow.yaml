@@ -5,25 +5,22 @@ schema_status: repo-local-policy
 description: |
   This file is a repository-local execution policy for Codex night work.
   It is not treated as an official OpenAI Codex workflow schema; official Codex
-  materials publicly document AGENTS.md and configurable rules/sandboxing, but
-  do not define a native workflow.yaml contract.
+  materials publicly document configurable rules and sandboxing, but do not
+  define a native workflow.yaml contract.
 
 context:
   required_reads:
-    - AGENTS.md
-    - TASKS_NIGHT.md
     - workflow.yaml
-  primary_backlog: TASKS_NIGHT.md
+  local_operator_notes: local-only files outside the tracked repository may be read when available
+  primary_backlog: local-night-backlog
   global_backlog: TASKS.md
-  night_logs_target: TASKS_NIGHT.md#ЛОГИ
+  night_logs_target: local-night-log
 
 scope:
   allowed_paths:
     - scripts/**
     - docs/**
     - README.md
-    - AGENTS.md
-    - TASKS_NIGHT.md
     - workflow.yaml
   soft_allowed_paths:
     - backend/tests/**
@@ -74,8 +71,8 @@ execution:
     - update-backlog
     - checkpoint
   checkpoint_output:
-    target_file: TASKS_NIGHT.md
-    target_section: ЛОГИ
+    target_file: local-night-backlog
+    target_section: local-log
     required_fields:
       - completed_work
       - verification_run
@@ -138,8 +135,8 @@ commit_policy:
 
 night_handoff:
   update_files:
-    - TASKS_NIGHT.md
-  logs_section: ЛОГИ
+    - local-night-backlog
+  logs_section: local-log
   must_record:
     - decisions
     - workarounds
