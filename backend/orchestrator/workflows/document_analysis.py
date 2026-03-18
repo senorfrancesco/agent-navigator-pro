@@ -12,6 +12,7 @@ Map-reduce суммаризация с адаптивным промптом п�
 import asyncio
 from contextlib import asynccontextmanager
 import glob as glob_mod
+import inspect
 import json
 import logging
 import os
@@ -23,6 +24,7 @@ import operator
 from langgraph.graph import StateGraph, END
 
 # Абсолютные импорты пакета (TD-5 Fix)
+from services.model_manager.model_selection import resolve_model_selection
 from services.model_manager.ums_client import ums_client
 from services.observability import inc_metric_counter
 from orchestrator.utils import parse_json_garbage
@@ -56,6 +58,10 @@ DOCUMENT_ANALYSIS_SUMMARIZE_SLEEP_S = float(
 logger = logging.getLogger("document_analysis_workflow")
 
 
+def _resolve_document_analysis_llm_model_id() -> str:
+    return resolve_model_selection("llm.legal_compare").resolved_model_id
+
+
 # === State Definition ===
 
 class DocumentAnalysisState(TypedDict):
@@ -66,7 +72,9 @@ class DocumentAnalysisState(TypedDict):
     items: List[Dict[str, Any]]        # Извлечённые позиции
     full_text: str
     summary: str                       # LLM-сводка ключевых требований
+    summary_metadata: Dict[str, Any]
     final_report: str
+    runtime_context: Dict[str, Any]
     errors: Annotated[List[str], operator.add]
 
 
@@ -145,6 +153,250 @@ def _build_summary_chunk_prompt(type_prompt: str, chunk: str, index: int, total:
 {truncate_text(chunk, MAX_TEXT_FOR_LLM)}<|im_end|>
 <|im_start|>assistant
 """
+
+
+def _get_runtime_context(state: DocumentAnalysisState) -> Dict[str, Any]:
+    raw = state.get("runtime_context") or {}
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _format_elapsed_seconds(elapsed_seconds: float) -> str:
+    clamped = max(0.0, float(elapsed_seconds))
+    if clamped < 60:
+        return f"{clamped:.1f} сек."
+    minutes, seconds = divmod(int(round(clamped)), 60)
+    if minutes < 60:
+        return f"{minutes} мин. {seconds} сек."
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} ч. {minutes} мин. {seconds} сек."
+
+
+async def _raise_if_cancelled(state: DocumentAnalysisState) -> None:
+    callback = _get_runtime_context(state).get("is_cancelled")
+    if callback is None:
+        return
+    result = callback()
+    if inspect.isawaitable(result):
+        result = await result
+    if result:
+        raise asyncio.CancelledError
+
+
+async def _update_summary_progress(
+    state: DocumentAnalysisState,
+    *,
+    title: str,
+    content: str,
+) -> None:
+    callback = _get_runtime_context(state).get("update_progress_box")
+    if callback is None:
+        return
+    result = callback(key="documents_summary_progress", title=title, content=content)
+    if inspect.isawaitable(result):
+        await result
+
+
+def _get_summary_policy(state: DocumentAnalysisState) -> Dict[str, Any]:
+    context = _get_runtime_context(state)
+    policy = context.get("summary_policy") or {}
+    if not isinstance(policy, dict):
+        policy = {}
+    weak_pc = bool(policy.get("weak_pc_mode"))
+    return {
+        "weak_pc_mode": weak_pc,
+        "chunk_input_chars": int(policy.get("chunk_input_chars") or (2200 if weak_pc else MAX_TEXT_FOR_LLM)),
+        "group_input_chars": int(policy.get("group_input_chars") or (1800 if weak_pc else MAX_TEXT_FOR_LLM)),
+        "final_input_chars": int(policy.get("final_input_chars") or (2200 if weak_pc else MAX_TEXT_FOR_LLM)),
+        "group_size": max(2, int(policy.get("group_size") or (2 if weak_pc else 4))),
+        "final_max_tokens": max(256, int(policy.get("final_max_tokens") or DOCUMENT_ANALYSIS_REDUCE_MAX_TOKENS)),
+    }
+
+
+def _group_items_for_budget(items: List[str], *, max_chars: int, max_items: int) -> List[List[str]]:
+    groups: List[List[str]] = []
+    current: List[str] = []
+    current_len = 0
+    for item in items:
+        normalized = str(item or "").strip()
+        if not normalized:
+            continue
+        item_len = len(normalized) + (2 if current else 0)
+        if current and (current_len + item_len > max_chars or len(current) >= max_items):
+            groups.append(current)
+            current = []
+            current_len = 0
+        current.append(normalized[:max_chars])
+        current_len += len(current[-1]) + (2 if len(current) > 1 else 0)
+    if current:
+        groups.append(current)
+    return groups or [items[:max_items]]
+
+
+def _estimate_tokens(text: str) -> int:
+    return max(1, len(str(text or "")) // 4)
+
+
+def _init_summary_metadata() -> Dict[str, Any]:
+    return {
+        "degraded": False,
+        "completed_stages": [],
+        "final_synthesis_status": "not_needed",
+        "stage_admission": {},
+        "degraded_reason": None,
+        "degraded_stage": None,
+    }
+
+
+def _mark_stage_completed(metadata: Dict[str, Any], stage: str) -> None:
+    stages = metadata.setdefault("completed_stages", [])
+    if stage not in stages:
+        stages.append(stage)
+
+
+def _mark_degraded(
+    metadata: Dict[str, Any],
+    *,
+    stage: str,
+    reason: str,
+) -> None:
+    metadata["degraded"] = True
+    metadata["degraded_stage"] = stage
+    metadata["degraded_reason"] = reason
+
+
+def _record_stage_admission(
+    metadata: Dict[str, Any],
+    *,
+    stage: str,
+    admission: Dict[str, Any],
+) -> None:
+    stage_admission = metadata.setdefault("stage_admission", {})
+    stage_admission[stage] = dict(admission)
+
+
+def _resolve_stage_admission(
+    *,
+    stage: str,
+    payload: str,
+    input_char_cap: int,
+    output_token_cap: int,
+) -> Dict[str, Any]:
+    payload_chars = len(str(payload or ""))
+    payload_tokens = _estimate_tokens(payload)
+    combined_budget = payload_tokens + int(output_token_cap)
+    token_budget_limit = max(256, _estimate_tokens("x" * input_char_cap) + int(output_token_cap))
+    requires_bounded = payload_chars > input_char_cap or combined_budget > token_budget_limit
+    return {
+        "stage": stage,
+        "admission": "requires_bounded" if requires_bounded else "ok",
+        "reason": "token_budget" if requires_bounded else "ok",
+        "payload_chars": payload_chars,
+        "payload_tokens": payload_tokens,
+        "input_char_cap": int(input_char_cap),
+        "output_token_cap": int(output_token_cap),
+    }
+
+
+def _build_group_merge_prompt(payload: str) -> str:
+    return f"""<|im_start|>system
+Ты аналитик документов. Объедини фрагменты анализа в единую сводку без потери важных фактов.<|im_end|>
+<|im_start|>user
+Объедини следующие фрагменты анализа документа в единую структурированную сводку. Убери дублирование, сохрани важные детали и различия.
+
+{payload}<|im_end|>
+<|im_start|>assistant
+"""
+
+
+def _build_final_synthesis_prompt(type_prompt: str, payload: str) -> str:
+    return f"""<|im_start|>system
+Ты аналитик документов. Сформируй итоговую структурированную сводку по уже собранным промежуточным summary.<|im_end|>
+<|im_start|>user
+{type_prompt}
+Используй только входные summary. Убери повторы, сохрани ключевые факты и ограничения.
+
+ПРОМЕЖУТОЧНЫЕ СВОДКИ:
+{payload}<|im_end|>
+<|im_start|>assistant
+"""
+
+
+def _build_partial_summary(items: List[str], *, max_chars: int) -> str:
+    fragments: List[str] = []
+    current_len = 0
+    for idx, item in enumerate(items, start=1):
+        normalized = str(item or "").strip()
+        if not normalized:
+            continue
+        block = f"### Блок {idx}\n{normalized}"
+        extra = len(block) + (2 if fragments else 0)
+        if fragments and current_len + extra > max_chars:
+            break
+        fragments.append(block)
+        current_len += extra
+    if not fragments:
+        return "Частичная сводка недоступна."
+    return (
+        "Финальная сводка не была построена полностью. Ниже сохранены промежуточные результаты.\n\n"
+        + "\n\n".join(fragments)
+    ).strip()
+
+
+async def _infer_stage_with_policy_retry(
+    *,
+    stage: str,
+    prompt_factory: Any,
+    payload: str,
+    input_char_cap: int,
+    output_token_cap: int,
+) -> Dict[str, Any]:
+    admission = _resolve_stage_admission(
+        stage=stage,
+        payload=payload,
+        input_char_cap=input_char_cap,
+        output_token_cap=output_token_cap,
+    )
+    prompt_payload = truncate_text(payload, input_char_cap)
+    try:
+        response = await ums_client.async_infer(
+            _resolve_document_analysis_llm_model_id(),
+            {
+                "prompt": prompt_factory(prompt_payload),
+                "temperature": DOCUMENT_ANALYSIS_SUMMARIZE_TEMPERATURE,
+                "max_tokens": output_token_cap,
+            },
+        )
+        return {
+            "text": _extract_llm_content(response).strip(),
+            "admission": admission,
+            "retry_used": False,
+        }
+    except Exception as first_exc:
+        compact_char_cap = max(256, input_char_cap // 2)
+        compact_token_cap = max(256, int(output_token_cap * 0.75))
+        compact_payload = truncate_text(payload, compact_char_cap)
+        compact_admission = _resolve_stage_admission(
+            stage=stage,
+            payload=compact_payload,
+            input_char_cap=compact_char_cap,
+            output_token_cap=compact_token_cap,
+        )
+        try:
+            response = await ums_client.async_infer(
+                _resolve_document_analysis_llm_model_id(),
+                {
+                    "prompt": prompt_factory(compact_payload),
+                    "temperature": DOCUMENT_ANALYSIS_SUMMARIZE_TEMPERATURE,
+                    "max_tokens": compact_token_cap,
+                },
+            )
+            return {
+                "text": _extract_llm_content(response).strip(),
+                "admission": compact_admission,
+                "retry_used": True,
+            }
+        except Exception as retry_exc:
+            raise RuntimeError(f"{stage} failed after policy-changing retry: {retry_exc}") from first_exc
 
 
 # === Node 1: Classify and Load ===
@@ -267,9 +519,25 @@ async def extract_positions_node(state: DocumentAnalysisState) -> dict:
         print(f"  [DocAnalysis] Skipping LLM text extraction: {len(items_table)} items already found in structured tables.")
     else:
         try:
+            async def _on_extract_chunk_progress(current: int, total: int) -> None:
+                await _update_summary_progress(
+                    state,
+                    title="Экстракция позиций",
+                    content=f"Chunk {current}/{total}",
+                )
+
             already_names = [it["name"] for it in items_table]
-            items_text = await _extract_items_llm(path, already_names)
+            items_text = await _extract_items_llm(
+                path,
+                already_names,
+                progress_callback=_on_extract_chunk_progress,
+            )
             print(f"  [DocAnalysis] LLM text: {len(items_text)} items")
+            await _update_summary_progress(
+                state,
+                title="Экстракция позиций",
+                content="Экстракция завершена",
+            )
         except Exception as e:
             logger.warning("Document analysis llm extraction fallback: %s", e, exc_info=True)
             inc_metric_counter(
@@ -339,11 +607,13 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
     full_text = state.get("full_text", "")
     doc_type = state.get("doc_type", "other")
     errors = []
+    summary_metadata = _init_summary_metadata()
 
     if not full_text.strip():
-        return {"summary": "Текст документа пуст.", "errors": errors}
+        return {"summary": "Текст документа пуст.", "errors": errors, "summary_metadata": summary_metadata}
 
     type_prompt = _SUMMARY_PROMPTS.get(doc_type, _SUMMARY_PROMPTS["other"])
+    summary_policy = _get_summary_policy(state)
 
     print(f"[DocAnalysis] Summarizing (type={doc_type})")
 
@@ -354,24 +624,41 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
 
     chunk_summaries = []
     for idx, chunk in enumerate(chunks):
-        prompt = _build_summary_chunk_prompt(type_prompt, chunk, idx + 1, len(chunks))
-        step_name = f"Суммаризация чанка {idx+1}/{len(chunks)}"
+        await _raise_if_cancelled(state)
+        chunk_admission = _resolve_stage_admission(
+            stage="chunk_summary",
+            payload=chunk,
+            input_char_cap=summary_policy["chunk_input_chars"],
+            output_token_cap=DOCUMENT_ANALYSIS_SUMMARIZE_MAX_TOKENS,
+        )
+        _record_stage_admission(summary_metadata, stage=f"chunk_summary_{idx + 1}", admission=chunk_admission)
+        if chunk_admission["admission"] != "ok":
+            _mark_degraded(summary_metadata, stage="chunk_summary", reason="token_budget")
+        prompt = _build_summary_chunk_prompt(
+            type_prompt,
+            truncate_text(chunk, summary_policy["chunk_input_chars"]),
+            idx + 1,
+            len(chunks),
+        )
         print(f"    [DocAnalysis] Processing chunk {idx+1}/{len(chunks)}...")
         try:
-            async with _optional_chainlit_step(step_name, "tool") as step:
-                response = await ums_client.async_infer("qwen-14b-llm", {
-                    "prompt": prompt,
-                    "temperature": DOCUMENT_ANALYSIS_SUMMARIZE_TEMPERATURE,
-                    "max_tokens": DOCUMENT_ANALYSIS_SUMMARIZE_MAX_TOKENS,
-                })
+            await _update_summary_progress(
+                state,
+                title="Суммаризация документа",
+                content=f"Chunk {idx+1}/{len(chunks)}",
+            )
+            response = await ums_client.async_infer(_resolve_document_analysis_llm_model_id(), {
+                "prompt": prompt,
+                "temperature": DOCUMENT_ANALYSIS_SUMMARIZE_TEMPERATURE,
+                "max_tokens": DOCUMENT_ANALYSIS_SUMMARIZE_MAX_TOKENS,
+            })
 
-                content = _extract_llm_content(response)
-                if content.strip():
-                    chunk_summaries.append(content.strip())
-                    if step is not None:
-                        step.output = f"Успешно: {len(content)} симв."
+            content = _extract_llm_content(response)
+            if content.strip():
+                chunk_summaries.append(content.strip())
+                _mark_stage_completed(summary_metadata, "chunk_summary")
 
-                await asyncio.sleep(DOCUMENT_ANALYSIS_SUMMARIZE_SLEEP_S)
+            await asyncio.sleep(DOCUMENT_ANALYSIS_SUMMARIZE_SLEEP_S)
         except Exception as e:
             print(f"    [DocAnalysis] Chunk {idx+1} failed: {e}")
             logger.warning("Document analysis summarize chunk fallback idx=%s: %s", idx + 1, e, exc_info=True)
@@ -382,41 +669,128 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
             errors.append(f"Summarize chunk {idx+1} failed: {e}")
 
     if not chunk_summaries:
-        return {"summary": "Не удалось выполнить суммаризацию.", "errors": errors}
+        summary_metadata["final_synthesis_status"] = "failed"
+        return {"summary": "Не удалось выполнить суммаризацию.", "errors": errors, "summary_metadata": summary_metadata}
 
-    # Reduce: если несколько чанков — объединяем через ещё один LLM-вызов
     if len(chunk_summaries) == 1:
         summary = chunk_summaries[0]
+        summary_metadata["final_synthesis_status"] = "not_needed"
     else:
-        combined = "\n\n---\n\n".join(chunk_summaries)
-        reduce_prompt = f"""<|im_start|>system
-Ты аналитик документов. Объедини фрагменты анализа в единую сводку.<|im_end|>
-<|im_start|>user
-Объедини следующие фрагменты анализа документа в единую структурированную сводку. Убери дублирование, сохрани все важные детали.
-
-{truncate_text(combined, MAX_TEXT_FOR_LLM)}<|im_end|>
-<|im_start|>assistant
-"""
-        try:
-            response = await ums_client.async_infer("qwen-14b-llm", {
-                "prompt": reduce_prompt,
-                "temperature": DOCUMENT_ANALYSIS_SUMMARIZE_TEMPERATURE,
-                "max_tokens": DOCUMENT_ANALYSIS_REDUCE_MAX_TOKENS,
-            })
-            content = response.get("content", "")
-            if not content and "choices" in response:
-                content = response["choices"][0].get("text", "")
-            summary = content.strip() if content.strip() else "\n\n".join(chunk_summaries)
-        except Exception as e:
-            logger.warning("Document analysis reduce summarization fallback: %s", e, exc_info=True)
-            inc_metric_counter(
-                "agent_nav_fallback_events_total",
-                labels={"component": "document_analysis", "fallback": "reduce_summarization_failed", "source": "workflow"},
+        reduce_items = list(chunk_summaries)
+        merge_level = 0
+        while len(reduce_items) > summary_policy["group_size"]:
+            await _raise_if_cancelled(state)
+            merge_level += 1
+            grouped = _group_items_for_budget(
+                reduce_items,
+                max_chars=summary_policy["group_input_chars"],
+                max_items=summary_policy["group_size"],
             )
-            errors.append(f"Reduce summarization failed: {e}")
-            summary = "\n\n".join(chunk_summaries)
+            next_reduce_items = []
+            try:
+                for group_idx, group in enumerate(grouped, start=1):
+                    await _raise_if_cancelled(state)
+                    await _update_summary_progress(
+                        state,
+                        title="Суммаризация документа",
+                        content=f"Group merge L{merge_level} {group_idx}/{len(grouped)}",
+                    )
+                    combined = "\n\n---\n\n".join(group)
+                    admission = _resolve_stage_admission(
+                        stage="group_merge",
+                        payload=combined,
+                        input_char_cap=summary_policy["group_input_chars"],
+                        output_token_cap=summary_policy["final_max_tokens"],
+                    )
+                    _record_stage_admission(
+                        summary_metadata,
+                        stage=f"group_merge_L{merge_level}_{group_idx}",
+                        admission=admission,
+                    )
+                    if admission["admission"] != "ok":
+                        _mark_degraded(summary_metadata, stage="group_merge", reason="token_budget")
+                    stage_result = await _infer_stage_with_policy_retry(
+                        stage="group_merge",
+                        prompt_factory=_build_group_merge_prompt,
+                        payload=combined,
+                        input_char_cap=summary_policy["group_input_chars"],
+                        output_token_cap=summary_policy["final_max_tokens"],
+                    )
+                    if stage_result["retry_used"]:
+                        _mark_degraded(summary_metadata, stage="group_merge", reason="policy_retry")
+                    merged_text = stage_result["text"] or truncate_text(combined, summary_policy["group_input_chars"])
+                    next_reduce_items.append(merged_text.strip())
+                    _mark_stage_completed(summary_metadata, "group_merge")
+            except Exception as e:
+                logger.warning("Document analysis reduce summarization fallback: %s", e, exc_info=True)
+                inc_metric_counter(
+                    "agent_nav_fallback_events_total",
+                    labels={"component": "document_analysis", "fallback": "reduce_summarization_failed", "source": "workflow"},
+                )
+                errors.append(f"Reduce summarization failed: {e}")
+                _mark_degraded(summary_metadata, stage="group_merge", reason="retry_exhausted")
+                reduce_items = next_reduce_items or reduce_items
+                break
+            reduce_items = next_reduce_items
 
-    return {"summary": summary, "errors": errors}
+        final_payload = "\n\n---\n\n".join(reduce_items)
+        final_admission = _resolve_stage_admission(
+            stage="final_synthesis",
+            payload=final_payload,
+            input_char_cap=summary_policy["final_input_chars"],
+            output_token_cap=summary_policy["final_max_tokens"],
+        )
+        _record_stage_admission(summary_metadata, stage="final_synthesis", admission=final_admission)
+        if final_admission["admission"] != "ok":
+            _mark_degraded(summary_metadata, stage="final_synthesis", reason="token_budget")
+        if len(reduce_items) == 1 and final_admission["admission"] == "ok":
+            summary = truncate_text(reduce_items[0], summary_policy["final_input_chars"]).strip()
+            summary_metadata["final_synthesis_status"] = "completed"
+            _mark_stage_completed(summary_metadata, "final_synthesis")
+        elif final_admission["admission"] != "ok" and len(reduce_items) > summary_policy["group_size"]:
+            summary = _build_partial_summary(reduce_items, max_chars=summary_policy["final_input_chars"])
+            summary_metadata["final_synthesis_status"] = "skipped"
+        else:
+            try:
+                await _raise_if_cancelled(state)
+                await _update_summary_progress(
+                    state,
+                    title="Суммаризация документа",
+                    content="Финальная сборка сводки",
+                )
+                stage_result = await _infer_stage_with_policy_retry(
+                    stage="final_synthesis",
+                    prompt_factory=lambda payload: _build_final_synthesis_prompt(type_prompt, payload),
+                    payload=final_payload,
+                    input_char_cap=summary_policy["final_input_chars"],
+                    output_token_cap=summary_policy["final_max_tokens"],
+                )
+                if stage_result["retry_used"]:
+                    _mark_degraded(summary_metadata, stage="final_synthesis", reason="policy_retry")
+                summary = stage_result["text"] or _build_partial_summary(
+                    reduce_items,
+                    max_chars=summary_policy["final_input_chars"],
+                )
+                summary_metadata["final_synthesis_status"] = "completed"
+                _mark_stage_completed(summary_metadata, "final_synthesis")
+            except Exception as e:
+                logger.warning("Document analysis final synthesis degraded: %s", e, exc_info=True)
+                inc_metric_counter(
+                    "agent_nav_fallback_events_total",
+                    labels={"component": "document_analysis", "fallback": "reduce_summarization_failed", "source": "workflow"},
+                )
+                errors.append(f"Reduce summarization failed: {e}")
+                _mark_degraded(summary_metadata, stage="final_synthesis", reason="retry_exhausted")
+                summary_metadata["final_synthesis_status"] = "failed"
+                summary = _build_partial_summary(reduce_items, max_chars=summary_policy["final_input_chars"])
+
+    await _update_summary_progress(
+        state,
+        title="Суммаризация документа",
+        content=f"Готово: обработано {len(chunk_summaries)}/{len(chunks)} фрагментов.",
+    )
+
+    return {"summary": summary, "errors": errors, "summary_metadata": summary_metadata}
 
 
 # === Node 4: Generate Report ===
@@ -437,7 +811,9 @@ async def generate_analysis_report_node(state: DocumentAnalysisState) -> dict:
     doc_metadata = state.get("doc_metadata", {})
     items = state.get("items", [])
     summary = state.get("summary", "")
+    summary_metadata = state.get("summary_metadata") or {}
     errors = state.get("errors", [])
+    runtime_context = _get_runtime_context(state)
 
     type_label = _DOC_TYPE_LABELS.get(doc_type, doc_type)
     pages = doc_metadata.get("pages", 0)
@@ -456,7 +832,16 @@ async def generate_analysis_report_node(state: DocumentAnalysisState) -> dict:
     report = f"# Анализ документа: {doc_name}\n\n"
     report += f"**Дата:** {time.strftime('%Y-%m-%d %H:%M')}  "
     report += f"**Тип:** {type_label}  "
-    report += f"**Формат:** {format_info}\n\n"
+    report += f"**Формат:** {format_info}"
+    started_at_monotonic = runtime_context.get("started_at_monotonic")
+    if started_at_monotonic is not None:
+        try:
+            elapsed_seconds = time.monotonic() - float(started_at_monotonic)
+        except (TypeError, ValueError):
+            elapsed_seconds = None
+        if elapsed_seconds is not None:
+            report += f"  **Время выполнения:** {_format_elapsed_seconds(elapsed_seconds)}"
+    report += "\n\n"
 
     # Ошибки
     if errors:
@@ -464,8 +849,15 @@ async def generate_analysis_report_node(state: DocumentAnalysisState) -> dict:
         for e in errors:
             report += f"- {e}\n"
         report += "\n"
+    if summary_metadata.get("degraded"):
+        report += "## Режим выполнения\n\n"
+        report += "- Итог собран в bounded/degraded режиме из-за ограничений ресурсов.\n"
+        report += f"- completed_stages: {', '.join(summary_metadata.get('completed_stages') or []) or 'нет'}\n"
+        report += f"- final_synthesis_status: {summary_metadata.get('final_synthesis_status', 'unknown')}\n"
+        report += "\n"
 
     # Извлечённые позиции
+    should_render_items_section = bool(items) or doc_type in {"tz", "smeta", "kp"}
     if items:
         report += f"## Извлеченные позиции ({len(items)} шт.)\n\n"
         report += "| # | Наименование | Характеристики | Кол-во | Цена | Источник |\n"
@@ -479,7 +871,7 @@ async def generate_analysis_report_node(state: DocumentAnalysisState) -> dict:
             source = item.get("source", "-")
             report += f"| {idx} | {name} | {specs} | {qty} | {price} | {source} |\n"
         report += "\n"
-    else:
+    elif should_render_items_section:
         report += "## Извлеченные позиции\n\n"
         report += "Позиции оборудования/товаров не обнаружены в документе.\n\n"
 
@@ -509,10 +901,10 @@ async def generate_analysis_report_node(state: DocumentAnalysisState) -> dict:
             current_metric=len(items),
             metric_marker="Позиций извлечено:**"
         )
-        return {"final_report": final_report_text}
+        return {"final_report": final_report_text, "summary_metadata": summary_metadata}
     except Exception as e:
         report += f"\n---\n**Ошибка сохранения отчета:** {e}"
-        return {"final_report": report}
+        return {"final_report": report, "summary_metadata": summary_metadata}
 
 
 # === Build Graph ===

@@ -6,7 +6,7 @@ Workflow: Equipment Analysis (ТЗ vs Смета / Смета vs Смета)
                   ↘ (items пусто) → report (ошибка)
 
 Двухпроходная экстракция: структурные таблицы (без LLM) + LLM текстовые позиции.
-Семантический матчинг через Legal Server (LaBSE + Hungarian).
+Семантический матчинг через Legal Server (multilingual embedding + Hungarian).
 Batch LLM evaluation по BATCH_SIZE=5.
 """
 
@@ -18,16 +18,25 @@ import re
 import time
 import httpx
 import asyncio
-from typing import TypedDict, List, Dict, Any, Annotated, Optional
+from typing import TypedDict, List, Dict, Any, Annotated, Optional, Callable, Awaitable
 import operator
 from langgraph.graph import StateGraph, END
 
 # Абсолютные импорты пакета (TD-5 Fix)
+from services.model_manager.model_selection import resolve_model_selection
 from services.model_manager.ums_client import ums_client
 from services.observability import inc_metric_counter
 from orchestrator.structured_output import extract_model_text, parse_strict_json
 from orchestrator.utils import parse_json_garbage
 from orchestrator.shared.http_client import get_shared_client
+from orchestrator.equipment_parsing import (
+    extract_items_docx_fallback as _extract_items_docx_fallback,
+    load_docx_elements as _load_docx_elements,
+    parse_generic_list_like_elements,
+    parse_offer_like_elements,
+    parse_specification_like_elements,
+    score_document_role,
+)
 
 # URLs серверов
 MCP_DOCUMENT_SERVER_URL = os.getenv("MCP_DOCUMENT_SERVER_URL", "http://localhost:8001")
@@ -37,7 +46,7 @@ UMS_URL = os.getenv("UMS_URL", "http://localhost:8090")
 BATCH_SIZE = 5              # Позиций в одном LLM eval-вызове
 BATCH_POLISH = 3            # Позиций в одном LLM polisher-вызове
 POLISH_MAX_BATCH_CHARS = 3000  # Бюджет XML payload для одного polisher-батча
-MATCH_SIMILARITY_THRESHOLD = 0.45  # Min LaBSE cosine для equipment matching
+MATCH_SIMILARITY_THRESHOLD = 0.45  # Min cosine similarity для equipment matching
 MAX_TEXT_FOR_LLM = 6000     # Лимит символов текста для LLM-экстракции (~2000 токенов)
 CHUNK_MAX_TOKENS = 2000     # токенов на чанк (~6000 символов) — безопасно для 16K ctx
 CHUNK_OVERLAP = 150         # overlap токенов между чанками
@@ -60,6 +69,10 @@ _KP_TEXT_KEYWORDS = [
 ]
 
 logger = logging.getLogger("equipment_workflow")
+
+
+def _resolve_equipment_llm_model_id() -> str:
+    return resolve_model_selection("llm.legal_compare").resolved_model_id
 
 
 def detect_equipment_mode(
@@ -132,6 +145,7 @@ class EquipmentState(TypedDict):
 
     # Output
     final_report: str
+    extraction_metadata: Dict[str, Any]
     errors: Annotated[List[str], operator.add]  # Накопление через reducer
     session_id: str
 
@@ -387,7 +401,7 @@ async def _polish_items_specs_llm(items: List[Dict[str, Any]]):
                 f"  [DEBUG-POLISH] Batch {batch_idx + 1}/{len(batches)}: "
                 f"items={len(batch)}, payload_chars={batch_chars}, ids={expected_ids}"
             )
-            resp = await ums_client.async_infer("qwen-14b-llm", {
+            resp = await ums_client.async_infer(_resolve_equipment_llm_model_id(), {
                 "prompt": prompt, "temperature": 0.1, "max_tokens": 2000
             })
             
@@ -755,7 +769,7 @@ async def _extract_from_single_chunk(
 {chunk_text}<|im_end|>
 <|im_start|>assistant
 """
-    response = await ums_client.async_infer("qwen-14b-llm", {
+    response = await ums_client.async_infer(_resolve_equipment_llm_model_id(), {
         "prompt": prompt, "temperature": 0.1, "max_tokens": 2000
     })
     content = response.get("content", "")
@@ -863,7 +877,11 @@ async def _extract_tables_from_doc(path: str) -> List[Dict[str, Any]]:
     return items
 
 
-async def _extract_items_llm(path: str, already_found: List[str]) -> List[Dict[str, Any]]:
+async def _extract_items_llm(
+    path: str,
+    already_found: List[str],
+    progress_callback: Optional[Callable[[int, int], Awaitable[None]]] = None,
+) -> List[Dict[str, Any]]:
     """Извлекает позиции из текста документа через LLM (Pass 2, Map-Reduce)."""
     client = await get_shared_client()
     try:
@@ -884,6 +902,8 @@ async def _extract_items_llm(path: str, already_found: List[str]) -> List[Dict[s
 
     for idx, chunk in enumerate(chunks):
         try:
+            if progress_callback is not None:
+                await progress_callback(idx + 1, len(chunks))
             chunk_items = await _extract_from_single_chunk(
                 chunk_text=chunk,
                 chunk_idx=idx,
@@ -903,9 +923,11 @@ async def load_and_extract_node(state: EquipmentState) -> dict:
     """Node 1: Двухпроходная экстракция позиций из обоих документов."""
     print(f"[Equipment] Extracting items from: {state['input_1']} and {state['input_2']}")
     errors = []
+    extraction_metadata: Dict[str, Any] = {}
 
     # === Документ 1 ===
     items_1_table = []
+    items_1_fallback = []
     items_1_text = []
     try:
         items_1_table = await _extract_tables_from_doc(state["input_1"])
@@ -920,15 +942,31 @@ async def load_and_extract_node(state: EquipmentState) -> dict:
     else:
         try:
             already_names = [it["name"] for it in items_1_table]
-            items_1_text = await _extract_items_llm(state["input_1"], already_names)
-            print(f"  [Doc1] LLM text: {len(items_1_text)} items")
+            items_1_fallback, metadata_1 = _extract_items_docx_fallback(state["input_1"], already_names)
+            extraction_metadata["doc_1"] = metadata_1
+            if items_1_fallback:
+                print(
+                    f"  [Doc1] DOCX fallback: {len(items_1_fallback)} items "
+                    f"(strategy={metadata_1['strategy_name']}, role={metadata_1['role']}, conf={metadata_1['confidence']})"
+                )
+        except Exception as e:
+            errors.append(f"DOCX fallback doc1 failed: {e}")
+
+        try:
+            already_names = [it["name"] for it in (items_1_table + items_1_fallback)]
+            if len(items_1_fallback) >= 2:
+                print(f"  [Doc1] Skipping LLM text extraction: {len(items_1_fallback)} items already found in DOCX fallback.")
+            else:
+                items_1_text = await _extract_items_llm(state["input_1"], already_names)
+                print(f"  [Doc1] LLM text: {len(items_1_text)} items")
         except Exception as e:
             errors.append(f"LLM extraction doc1 failed: {e}")
 
-    items_1 = _dedup_items(items_1_table + items_1_text)
+    items_1 = _dedup_items(items_1_table + items_1_fallback + items_1_text)
 
     # === Документ 2 ===
     items_2_table = []
+    items_2_fallback = []
     items_2_text = []
     try:
         items_2_table = await _extract_tables_from_doc(state["input_2"])
@@ -941,19 +979,39 @@ async def load_and_extract_node(state: EquipmentState) -> dict:
     else:
         try:
             already_names = [it["name"] for it in items_2_table]
-            items_2_text = await _extract_items_llm(state["input_2"], already_names)
-            print(f"  [Doc2] LLM text: {len(items_2_text)} items")
+            items_2_fallback, metadata_2 = _extract_items_docx_fallback(state["input_2"], already_names)
+            extraction_metadata["doc_2"] = metadata_2
+            if items_2_fallback:
+                print(
+                    f"  [Doc2] DOCX fallback: {len(items_2_fallback)} items "
+                    f"(strategy={metadata_2['strategy_name']}, role={metadata_2['role']}, conf={metadata_2['confidence']})"
+                )
+        except Exception as e:
+            errors.append(f"DOCX fallback doc2 failed: {e}")
+
+        try:
+            already_names = [it["name"] for it in (items_2_table + items_2_fallback)]
+            if len(items_2_fallback) >= 2:
+                print(f"  [Doc2] Skipping LLM text extraction: {len(items_2_fallback)} items already found in DOCX fallback.")
+            else:
+                items_2_text = await _extract_items_llm(state["input_2"], already_names)
+                print(f"  [Doc2] LLM text: {len(items_2_text)} items")
         except Exception as e:
             errors.append(f"LLM extraction doc2 failed: {e}")
 
-    items_2 = _dedup_items(items_2_table + items_2_text)
+    items_2 = _dedup_items(items_2_table + items_2_fallback + items_2_text)
 
     # TD-LLM-Polisher: Очищаем сырые характеристики через LLM
     await _polish_items_specs_llm(items_1)
     await _polish_items_specs_llm(items_2)
 
     print(f"  [Equipment] Total: doc1={len(items_1)}, doc2={len(items_2)}")
-    return {"items_1": items_1, "items_2": items_2, "errors": errors}
+    return {
+        "items_1": items_1,
+        "items_2": items_2,
+        "extraction_metadata": extraction_metadata,
+        "errors": errors,
+    }
 
 
 # === Routing ===
@@ -971,7 +1029,7 @@ def _item_to_text(item: Dict[str, Any]) -> str:
     """Конвертирует item в текст для семантического матчинга."""
     name = item.get("name", "").replace('\n', ' ').strip()
 
-    # Извлекаем артикул/модель из "(Аналог X)" и добавляем в текст для LaBSE
+    # Извлекаем артикул/модель из "(Аналог X)" и добавляем в текст для embedder matching
     analog_match = re.search(r'\(аналог\s+(.+?)\)', name, re.IGNORECASE)
     if analog_match:
         analog_ref = analog_match.group(1).strip()
@@ -996,7 +1054,7 @@ def _item_to_text(item: Dict[str, Any]) -> str:
 
 
 async def match_items_node(state: EquipmentState) -> dict:
-    """Node 2: Семантический матчинг через Legal Server (LaBSE + Hungarian)."""
+    """Node 2: Семантический матчинг через Legal Server (embedding + Hungarian)."""
     items_1 = state.get("items_1", [])
     items_2 = state.get("items_2", [])
 
@@ -1135,7 +1193,7 @@ SAME — без изменений, PRICE_CHANGE — изменилась цен
 <|im_start|>assistant
 """
         try:
-            response = await ums_client.async_infer("qwen-14b-llm", {
+            response = await ums_client.async_infer(_resolve_equipment_llm_model_id(), {
                 "prompt": prompt, "max_tokens": 600, "temperature": 0.1, "echo": False,
             })
             content = response.get("content", "")
@@ -1249,11 +1307,6 @@ async def generate_equipment_report_node(state: EquipmentState) -> dict:
             report += f"| {status} | {count} |\n"
         report += "\n"
 
-        # Детальная таблица
-        report += "## Детальный анализ\n\n"
-        report += "| # | Позиция 1 | Позиция 2 | Статус | Примечание |\n"
-        report += "| :---: | :--- | :--- | :---: | :--- |\n"
-
         _ICONS = {
             "PASS": "✅", "SAME": "✅",
             "PARTIAL": "⚠️", "OVER": "📈",
@@ -1262,15 +1315,50 @@ async def generate_equipment_report_node(state: EquipmentState) -> dict:
             "ERROR": "⚙️",
         }
 
-        for idx, r in enumerate(results, 1):
-            i1 = r.get("item_1") or {}
-            i2 = r.get("item_2") or {}
-            name1 = _md_cell(i1.get("name", "-"))
-            name2 = _md_cell(i2.get("name", "-"))
-            status = r.get("result", "?")
-            icon = _ICONS.get(status, "❓")
-            reason = _md_cell(r.get("reason", ""))
-            report += f"| {idx} | {name1} | {name2} | {icon} {status} | {reason} |\n"
+        if mode == "tz_vs_smeta":
+            main_results = [r for r in results if r.get("item_1")]
+            extra_results = [r for r in results if not r.get("item_1") and r.get("item_2")]
+
+            report += "## Таблица соответствия ТЗ и КП\n\n"
+            report += "| # | Позиция ТЗ | Позиция КП | Статус | Примечание |\n"
+            report += "| :---: | :--- | :--- | :---: | :--- |\n"
+
+            for idx, r in enumerate(main_results, 1):
+                i1 = r.get("item_1") or {}
+                i2 = r.get("item_2") or {}
+                status = r.get("result", "?")
+                icon = _ICONS.get(status, "❓")
+                report += (
+                    f"| {idx} | {_md_cell(i1.get('name', '-'))} | {_md_cell(i2.get('name', '-'))} | "
+                    f"{icon} {status} | {_md_cell(r.get('reason', ''))} |\n"
+                )
+            report += "\n"
+
+            if extra_results:
+                report += "## Дополнительные позиции из КП\n\n"
+                report += "| # | Позиция КП | Характеристики | Кол-во | Цена |\n"
+                report += "| :---: | :--- | :--- | :---: | :---: |\n"
+                for idx, r in enumerate(extra_results, 1):
+                    item = r.get("item_2") or {}
+                    report += (
+                        f"| {idx} | {_md_cell(item.get('name', '-'))} | {_md_cell(item.get('specs', '-'))} | "
+                        f"{_md_cell(item.get('quantity', '-'))} | {_md_cell(item.get('price', '-'))} |\n"
+                    )
+                report += "\n"
+        else:
+            report += "## Детальный анализ\n\n"
+            report += "| # | Позиция 1 | Позиция 2 | Статус | Примечание |\n"
+            report += "| :---: | :--- | :--- | :---: | :--- |\n"
+
+            for idx, r in enumerate(results, 1):
+                i1 = r.get("item_1") or {}
+                i2 = r.get("item_2") or {}
+                name1 = _md_cell(i1.get("name", "-"))
+                name2 = _md_cell(i2.get("name", "-"))
+                status = r.get("result", "?")
+                icon = _ICONS.get(status, "❓")
+                reason = _md_cell(r.get("reason", ""))
+                report += f"| {idx} | {name1} | {name2} | {icon} {status} | {reason} |\n"
 
         report += "\n"
         report += "## Полные детали по позициям\n\n"

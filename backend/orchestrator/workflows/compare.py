@@ -13,6 +13,7 @@ import operator
 from langgraph.graph import StateGraph, END
 
 # Абсолютные импорты пакета (TD-5 Fix)
+from services.model_manager.model_selection import resolve_model_selection
 from services.model_manager.ums_client import ums_client
 from services.observability import inc_metric_counter
 from orchestrator.utils import parse_json_garbage
@@ -30,6 +31,10 @@ COMPARE_MIN_CHUNK_CHARS = int(os.getenv("COMPARE_MIN_CHUNK_CHARS", "40"))
 COMPARE_ANALYSIS_MAX_TOKENS = int(os.getenv("COMPARE_ANALYSIS_MAX_TOKENS", "600"))
 COMPARE_ANALYSIS_TEMPERATURE = float(os.getenv("COMPARE_ANALYSIS_TEMPERATURE", "0.1"))
 logger = logging.getLogger("compare_workflow")
+
+
+def _resolve_compare_llm_model_id() -> str:
+    return resolve_model_selection("llm.legal_compare").resolved_model_id
 
 # === State Definition ===
 
@@ -205,7 +210,7 @@ async def analyze_differences_node(state: CompareState):
                 "temperature": COMPARE_ANALYSIS_TEMPERATURE,
                 "echo": False,
             }
-            response = await ums_client.async_infer("qwen-14b-llm", payload)
+            response = await ums_client.async_infer(_resolve_compare_llm_model_id(), payload)
 
             content = response.get("content", "")
             if not content and "choices" in response:

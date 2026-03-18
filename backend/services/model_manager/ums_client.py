@@ -17,6 +17,7 @@ import numpy as np
 from typing import Dict, Any, Optional, List, AsyncGenerator, Callable, Awaitable
 import json
 from services.observability import inc_metric_counter
+from services.model_manager.model_selection import resolve_model_selection
 
 UMS_URL = os.getenv("UMS_URL", "http://localhost:8090")
 logger = logging.getLogger("ums_client")
@@ -34,6 +35,18 @@ UMS_EMBED_BATCH_TIMEOUT_S = float(os.getenv("UMS_EMBED_BATCH_TIMEOUT_S", "120.0"
 UMS_EMBED_BATCH_CONNECT_TIMEOUT_S = float(os.getenv("UMS_EMBED_BATCH_CONNECT_TIMEOUT_S", "10.0"))
 UMS_EMBED_BATCH_RETRIES = int(os.getenv("UMS_EMBED_BATCH_RETRIES", "3"))
 UMS_EMBED_BATCH_RETRY_DELAY_S = float(os.getenv("UMS_EMBED_BATCH_RETRY_DELAY_S", "1.0"))
+
+
+def _resolve_default_llm_model_id() -> str:
+    return resolve_model_selection("llm.default_chat").resolved_model_id
+
+
+def _resolve_default_retrieval_embedder_model_id() -> str:
+    return resolve_model_selection("legal.embedder").resolved_model_id
+
+
+class UMSBusyError(RuntimeError):
+    """UMS rejected the request because runtime concurrency is saturated."""
 
 # Shared async client для повторного использования соединений
 _async_client: Optional[httpx.AsyncClient] = None
@@ -147,6 +160,8 @@ class UMSClient:
                     )
                 if attempt < retries - 1:
                     time.sleep(2)
+        if isinstance(last_error, requests.exceptions.HTTPError) and getattr(last_error.response, "status_code", None) == 429:
+            raise UMSBusyError(f"Failed to connect to UMS after {retries} attempts: {last_error}")
         raise RuntimeError(f"Failed to connect to UMS after {retries} attempts: {last_error}")
 
     async def async_infer(self, model_id: str, payload: Dict[str, Any], device_mode: str = "hybrid") -> Dict[str, Any]:
@@ -197,6 +212,8 @@ class UMSClient:
                     await asyncio.sleep(delay + jitter)
                     continue
                 break
+        if isinstance(last_error, httpx.HTTPStatusError) and getattr(last_error.response, "status_code", None) == 429:
+            raise UMSBusyError(f"Failed to connect to UMS after {retries} attempts: {last_error}")
         raise RuntimeError(f"Failed to connect to UMS after {retries} attempts: {last_error}")
 
     async def async_infer_stream(self, model_id: str, payload: Dict[str, Any], device_mode: str = "hybrid") -> AsyncGenerator[str, None]:
@@ -314,7 +331,7 @@ ums_client = UMSClient()
 
 def generate_text_via_ums(prompt: str, max_tokens: int = 512, temperature: float = 0.7) -> str:
     """
-    Генерирует текст через UMS, используя LLM-модель (Qwen-14B).
+    Генерирует текст через UMS, используя env-resolved LLM.
     
     Используется MCP Legal Server для анализа.
     """
@@ -326,7 +343,7 @@ def generate_text_via_ums(prompt: str, max_tokens: int = 512, temperature: float
     }
     
     try:
-        response = ums_client.infer("qwen-14b-llm", payload, device_mode="hybrid")
+        response = ums_client.infer(_resolve_default_llm_model_id(), payload, device_mode="hybrid")
         
         # Парсим ответ от llama-server
         if "choices" in response:
@@ -344,13 +361,12 @@ def get_embeddings_via_ums(
     text: str,
     normalize: bool = True,
     *,
-    model_id: str = "labse-embedding",
+    model_id: Optional[str] = None,
 ) -> List[float]:
     """
     Получает эмбеддинги текста через UMS.
     
-    По умолчанию используется `labse-embedding`, что важно для
-    Legal Server и сценариев сравнения юридических документов.
+    По умолчанию используется env-resolved retrieval/legal embedder.
     """
     payload = {
         "input": text,
@@ -358,7 +374,11 @@ def get_embeddings_via_ums(
     }
     
     try:
-        response = ums_client.infer(model_id, payload, device_mode="cpu")
+        response = ums_client.infer(
+            model_id or _resolve_default_retrieval_embedder_model_id(),
+            payload,
+            device_mode="cpu",
+        )
         
         # Парсим ответ от llama-server
         if "data" in response:
@@ -375,7 +395,7 @@ def get_embeddings_via_ums(
 def create_ums_embed_fn(
     base_url: str = None,
     *,
-    model_id: str = "labse-embedding",
+    model_id: Optional[str] = None,
 ) -> Optional[Callable]:
     """
     Фабрика embed_fn для AdaptiveRAGPipeline.
@@ -384,13 +404,14 @@ def create_ums_embed_fn(
     Синхронный requests.post — вызывается изнутри sync кода HybridRetriever.
     Retry с exponential backoff при ошибках.
     """
+    resolved_model_id = model_id or _resolve_default_retrieval_embedder_model_id()
     url = (base_url or UMS_URL).rstrip("/") + "/v1/embeddings"
 
     # Probe: проверяем доступность UMS и конкретной embedding-модели
     try:
         resp = requests.post(
             url,
-            json={"input": ["test"], "model": model_id},
+            json={"input": ["test"], "model": resolved_model_id},
             timeout=UMS_EMBED_PROBE_TIMEOUT_S,
         )
         resp.raise_for_status()
@@ -414,7 +435,7 @@ def create_ums_embed_fn(
                     # Ретраи для каждого батча
                     for attempt in range(UMS_EMBED_BATCH_RETRIES):
                         try:
-                            resp = client.post(url, json={"input": batch, "model": model_id})
+                            resp = client.post(url, json={"input": batch, "model": resolved_model_id})
                             resp.raise_for_status()
                             data = resp.json().get("data", [])
                             data.sort(key=lambda x: x.get("index", i))

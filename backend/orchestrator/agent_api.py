@@ -27,6 +27,7 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from services.model_manager.ums_client import ums_client
+from services.model_manager.model_selection import resolve_model_selection
 from services.observability import (
     inc_metric_counter,
     ObservabilityMiddleware,
@@ -210,7 +211,10 @@ async def _infer_with_effective_settings(
         "top_p": generation.get("top_p", 0.9),
         "max_tokens": generation.get("max_tokens", 2048),
     }
-    model_id = effective_settings.get("resolved_model_id") or "qwen-14b-llm"
+    model_id = (
+        effective_settings.get("resolved_model_id")
+        or resolve_model_selection("llm.default_chat").resolved_model_id
+    )
     resolved_device_mode = normalize_inference_device_mode(device_mode or effective_settings.get("device_mode"))
     response = await asyncio.to_thread(ums_client.infer, model_id, payload, resolved_device_mode)
     return _extract_content(response)
@@ -248,7 +252,8 @@ def _build_api_execution_dependencies(request: OrchestrationRequest, effective_s
         if retrieval_embed_fn is not None:
             return retrieval_embed_fn
         retrieval_embedder_model_id = str(
-            effective_settings.get("resolved_retrieval_embedder_model_id") or "labse-embedding"
+            effective_settings.get("resolved_retrieval_embedder_model_id")
+            or resolve_model_selection("legal.embedder").resolved_model_id
         )
         try:
             from services.model_manager.ums_client import create_ums_embed_fn
@@ -344,6 +349,7 @@ def _build_api_execution_dependencies(request: OrchestrationRequest, effective_s
         attach_and_register_report=_noop_async,
         update_progress_box=_noop_async,
         clear_progress_box=_noop_async,
+        is_cancelled=lambda: False,
     )
 
 def _compute_files_hash(file_paths: List[str]) -> str:

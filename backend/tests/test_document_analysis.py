@@ -12,6 +12,7 @@
 """
 
 import os
+import asyncio
 import sys
 import pytest
 import tempfile
@@ -51,7 +52,9 @@ def base_state() -> DocumentAnalysisState:
         "items": [],
         "full_text": "",
         "summary": "",
+        "summary_metadata": {},
         "final_report": "",
+        "runtime_context": {},
         "errors": [],
     }
 
@@ -312,6 +315,20 @@ class TestExtractPositionsNode:
 
         assert result["items"] == []
 
+    @pytest.mark.asyncio
+    async def test_extract_passes_progress_callback_to_llm_extraction(self, base_state):
+        with patch("orchestrator.workflows.document_analysis._extract_tables_from_doc", new_callable=AsyncMock) as mock_tables, \
+             patch("orchestrator.workflows.document_analysis._extract_items_llm", new_callable=AsyncMock) as mock_llm:
+            mock_tables.return_value = []
+            mock_llm.return_value = []
+
+            await extract_positions_node(base_state)
+
+        assert mock_llm.await_count == 1
+        _, kwargs = mock_llm.call_args
+        assert "progress_callback" in kwargs
+        assert callable(kwargs["progress_callback"])
+
 
 # ============================================================================
 # Tests: summarize_node
@@ -424,6 +441,128 @@ class TestSummarizeNode:
         assert 'component="document_analysis"' in metrics
         assert 'fallback="reduce_summarization_failed"' in metrics
 
+    @pytest.mark.asyncio
+    async def test_summarize_uses_hierarchical_reduce_groups(self, base_state):
+        base_state["full_text"] = "Большой документ"
+        base_state["doc_type"] = "other"
+        base_state["runtime_context"] = {
+            "summary_policy": {
+                "weak_pc_mode": True,
+                "group_size": 2,
+                "group_input_chars": 120,
+                "chunk_input_chars": 120,
+                "final_input_chars": 240,
+                "final_max_tokens": 512,
+            }
+        }
+
+        with patch("orchestrator.workflows.document_analysis._chunk_text", new_callable=AsyncMock) as mock_chunk, \
+             patch("orchestrator.workflows.document_analysis.ums_client") as mock_ums:
+            mock_chunk.return_value = [f"chunk-{idx}" for idx in range(5)]
+            mock_ums.async_infer = AsyncMock(side_effect=[
+                {"content": f"summary-{idx}"} for idx in range(1, 6)
+            ] + [
+                {"content": "merge-1"},
+                {"content": "merge-2"},
+                {"content": "merge-3"},
+                {"content": "merge-4"},
+                {"content": "merge-5"},
+                {"content": "final-merge"},
+            ])
+
+            result = await summarize_node(base_state)
+
+        assert result["summary"] == "final-merge"
+        assert mock_ums.async_infer.await_count == 11
+
+    @pytest.mark.asyncio
+    async def test_summarize_honors_cancel_flag_between_chunks(self, base_state):
+        base_state["full_text"] = "Большой документ"
+        base_state["doc_type"] = "other"
+        calls = {"count": 0}
+
+        def _cancel_after_first_chunk():
+            calls["count"] += 1
+            return calls["count"] >= 2
+
+        base_state["runtime_context"] = {
+            "is_cancelled": _cancel_after_first_chunk,
+            "summary_policy": {"group_size": 2},
+        }
+
+        with patch("orchestrator.workflows.document_analysis._chunk_text", new_callable=AsyncMock) as mock_chunk, \
+             patch("orchestrator.workflows.document_analysis.ums_client") as mock_ums:
+            mock_chunk.return_value = ["chunk-1", "chunk-2", "chunk-3"]
+            mock_ums.async_infer = AsyncMock(return_value={"content": "summary-1"})
+
+            with pytest.raises(asyncio.CancelledError):
+                await summarize_node(base_state)
+
+        assert mock_ums.async_infer.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_summarize_returns_partial_metadata_when_final_synthesis_budget_is_exceeded(self, base_state):
+        base_state["full_text"] = "Большой документ"
+        base_state["doc_type"] = "other"
+        base_state["runtime_context"] = {
+            "summary_policy": {
+                "group_size": 4,
+                "group_input_chars": 120,
+                "chunk_input_chars": 120,
+                "final_input_chars": 80,
+                "final_max_tokens": 64,
+            }
+        }
+
+        with patch("orchestrator.workflows.document_analysis._chunk_text", new_callable=AsyncMock) as mock_chunk, \
+             patch("orchestrator.workflows.document_analysis.ums_client") as mock_ums:
+            mock_chunk.return_value = ["chunk-1", "chunk-2"]
+            mock_ums.async_infer = AsyncMock(side_effect=[
+                {"content": "summary-" + ("A" * 120)},
+                {"content": "summary-" + ("B" * 120)},
+                RuntimeError("final exploded"),
+                RuntimeError("final exploded again"),
+            ])
+
+            result = await summarize_node(base_state)
+
+        assert "Финальная сводка не была построена полностью" in result["summary"]
+        assert result["summary_metadata"]["degraded"] is True
+        assert result["summary_metadata"]["final_synthesis_status"] == "failed"
+        assert "chunk_summary" in result["summary_metadata"]["completed_stages"]
+        assert mock_ums.async_infer.await_count == 4
+
+    @pytest.mark.asyncio
+    async def test_summarize_uses_single_policy_changing_retry_for_final_synthesis(self, base_state):
+        base_state["full_text"] = "Большой документ"
+        base_state["doc_type"] = "other"
+        base_state["runtime_context"] = {
+            "summary_policy": {
+                "group_size": 4,
+                "group_input_chars": 120,
+                "chunk_input_chars": 120,
+                "final_input_chars": 220,
+                "final_max_tokens": 256,
+            }
+        }
+
+        with patch("orchestrator.workflows.document_analysis._chunk_text", new_callable=AsyncMock) as mock_chunk, \
+             patch("orchestrator.workflows.document_analysis.ums_client") as mock_ums:
+            mock_chunk.return_value = ["chunk-1", "chunk-2"]
+            mock_ums.async_infer = AsyncMock(side_effect=[
+                {"content": "summary-1"},
+                {"content": "summary-2"},
+                RuntimeError("first final attempt failed"),
+                {"content": "final-summary"},
+            ])
+
+            result = await summarize_node(base_state)
+
+        assert result["summary"] == "final-summary"
+        assert result["summary_metadata"]["final_synthesis_status"] == "completed"
+        assert result["summary_metadata"]["degraded"] is True
+        assert mock_ums.async_infer.await_count == 4
+
 
 # ============================================================================
 # Tests: generate_analysis_report_node
@@ -445,6 +584,21 @@ class TestGenerateAnalysisReportNode:
         assert "Техническое задание" in report
         assert "12" in report  # pages
         assert "18694" in report  # chars
+
+    @pytest.mark.asyncio
+    async def test_report_contains_elapsed_time_when_runtime_start_is_available(self, base_state):
+        base_state["doc_type"] = "tz"
+        base_state["doc_metadata"] = {"pages": 2, "chars": 2000, "tables_count": 0, "format": "PDF"}
+        base_state["summary"] = "Тестовая сводка"
+        base_state["runtime_context"] = {"started_at_monotonic": 100.0}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(os.environ, {"UPLOADS_DIR": tmpdir}), \
+                 patch("orchestrator.workflows.document_analysis.time.monotonic", return_value=112.3):
+                result = await generate_analysis_report_node(base_state)
+
+        report = result["final_report"]
+        assert "Время выполнения:** 12.3 сек." in report
 
     @pytest.mark.asyncio
     async def test_report_contains_items(self, base_state):
@@ -512,7 +666,23 @@ class TestGenerateAnalysisReportNode:
                 result = await generate_analysis_report_node(base_state)
 
         report = result["final_report"]
-        assert "не обнаружены" in report.lower() or "Позиции оборудования" in report
+        assert "Извлеченные позиции" not in report
+        assert "не обнаружены" not in report.lower()
+
+    @pytest.mark.asyncio
+    async def test_report_omits_empty_items_section_for_legal_documents(self, base_state):
+        base_state["doc_type"] = "legal"
+        base_state["doc_metadata"] = {"pages": 3, "chars": 1500, "tables_count": 0, "format": "PDF"}
+        base_state["items"] = []
+        base_state["summary"] = "Текст"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(os.environ, {"UPLOADS_DIR": tmpdir}):
+                result = await generate_analysis_report_node(base_state)
+
+        report = result["final_report"]
+        assert "Извлеченные позиции" not in report
+        assert "Позиции оборудования/товаров не обнаружены" not in report
 
     @pytest.mark.asyncio
     async def test_report_file_saved(self, base_state):

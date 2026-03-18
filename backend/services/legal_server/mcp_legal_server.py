@@ -7,7 +7,7 @@ MCP Legal Server - FastAPI приложение для анализа юриди
 - Генерация детальных отчётов
 
 Интегрирует UMS для использования:
-- Embedding-модели (LaBSE) для сравнения текстов
+- Embedding-модели (Qwen3 Embedding по умолчанию) для сравнения текстов
 - LLM-модели (Qwen-14B) для анализа значимости
 """
 
@@ -17,15 +17,20 @@ from typing import List, Dict, Any, Optional
 import json
 import sys
 import os
+import re
 import numpy as np
 from scipy.optimize import linear_sum_assignment
+from functools import lru_cache
 
 # Добавляем путь к model_manager
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'model_manager'))
 
 from ums_client import get_embeddings_via_ums, generate_text_via_ums, ums_client
+from services.model_manager.model_selection import resolve_model_selection
 
-LEGAL_EMBEDDER_MODEL = os.getenv("LEGAL_EMBEDDER_MODEL", "labse-embedding")
+LEGAL_RERANKER_MODEL_PATH = os.getenv("MODEL_PATH_RERANKER", "").strip()
+LEGAL_MATCH_TOP_K = max(1, int(os.getenv("LEGAL_MATCH_TOP_K", "3")))
+LEGAL_ENABLE_RERANK = os.getenv("LEGAL_ENABLE_RERANK", "1").strip().lower() not in {"0", "false", "no"}
 
 app = FastAPI(title="MCP Legal Server", version="1.0.0")
 
@@ -139,6 +144,148 @@ async def compare_chunks(request: CompareChunksRequest):
             error=str(e)
         )
 
+@lru_cache(maxsize=1)
+def _get_optional_reranker():
+    if not LEGAL_ENABLE_RERANK or not LEGAL_RERANKER_MODEL_PATH:
+        return None
+    if not os.path.exists(LEGAL_RERANKER_MODEL_PATH):
+        return None
+    try:
+        from sentence_transformers import CrossEncoder
+        return CrossEncoder(LEGAL_RERANKER_MODEL_PATH)
+    except Exception:
+        return None
+
+
+def _normalize_similarity_score(score: float) -> float:
+    return max(0.0, min(1.0, (float(score) + 1.0) / 2.0))
+
+
+def _normalize_rerank_score(score: float) -> float:
+    score = float(score)
+    if 0.0 <= score <= 1.0:
+        return score
+    # CrossEncoder outputs are often logits rather than probabilities.
+    return 1.0 / (1.0 + np.exp(-score))
+
+
+def _tokenize_match_text(text: str) -> List[str]:
+    return re.findall(r"[a-zA-Zа-яА-Я0-9\+\.-]+", str(text or "").lower())
+
+
+def _lexical_overlap_score(left: str, right: str) -> float:
+    left_tokens = set(_tokenize_match_text(left))
+    right_tokens = set(_tokenize_match_text(right))
+    if not left_tokens or not right_tokens:
+        return 0.0
+    intersection = len(left_tokens & right_tokens)
+    union = len(left_tokens | right_tokens)
+    return intersection / max(1, union)
+
+
+def _numeric_compatibility_score(left: str, right: str) -> float:
+    number_pattern = re.compile(r"\d+(?:[.,]\d+)?")
+    left_numbers = set(number_pattern.findall(str(left or "")))
+    right_numbers = set(number_pattern.findall(str(right or "")))
+    if not left_numbers or not right_numbers:
+        return 0.5
+    overlap = len(left_numbers & right_numbers)
+    return overlap / max(1, len(left_numbers))
+
+
+def _heuristic_rerank_score(left: str, right: str) -> float:
+    lexical = _lexical_overlap_score(left, right)
+    numeric = _numeric_compatibility_score(left, right)
+    left_lower = str(left or "").lower()
+    right_lower = str(right or "").lower()
+    exact_model_bonus = 0.0
+    for token in _tokenize_match_text(left):
+        if any(char.isdigit() for char in token) and token in right_lower:
+            exact_model_bonus = max(exact_model_bonus, 0.15)
+    return max(0.0, min(1.0, 0.65 * lexical + 0.25 * numeric + exact_model_bonus))
+
+
+def _rerank_pair_scores(pairs: List[tuple[str, str]]) -> List[float]:
+    if not pairs:
+        return []
+    reranker = _get_optional_reranker()
+    if reranker is not None:
+        try:
+            scores = reranker.predict(pairs)
+            return [_normalize_rerank_score(float(score)) for score in scores]
+        except Exception:
+            pass
+    return [_heuristic_rerank_score(left, right) for left, right in pairs]
+
+
+def _build_candidate_matrix(scores: np.ndarray, top_k: int) -> Dict[int, List[int]]:
+    candidates: Dict[int, List[int]] = {}
+    if scores.size == 0:
+        return candidates
+    for row_idx in range(scores.shape[0]):
+        row = scores[row_idx]
+        top_indices = np.argsort(row)[::-1][:top_k]
+        candidates[row_idx] = [int(idx) for idx in top_indices]
+    return candidates
+
+
+def _build_final_score_matrix(
+    list_old: List[str],
+    list_new: List[str],
+    dense_scores: np.ndarray,
+    candidate_map: Dict[int, List[int]],
+) -> tuple[np.ndarray, Dict[tuple[int, int], Dict[str, float]]]:
+    final_scores = np.zeros_like(dense_scores, dtype=float)
+    pair_metadata: Dict[tuple[int, int], Dict[str, float]] = {}
+    rerank_pairs: List[tuple[str, str]] = []
+    rerank_keys: List[tuple[int, int]] = []
+
+    for row_idx, col_indices in candidate_map.items():
+        for col_idx in col_indices:
+            rerank_pairs.append((list_old[row_idx], list_new[col_idx]))
+            rerank_keys.append((row_idx, col_idx))
+
+    rerank_scores = _rerank_pair_scores(rerank_pairs)
+    for (row_idx, col_idx), rerank_score in zip(rerank_keys, rerank_scores):
+        dense_normalized = _normalize_similarity_score(float(dense_scores[row_idx, col_idx]))
+        lexical = _lexical_overlap_score(list_old[row_idx], list_new[col_idx])
+        numeric = _numeric_compatibility_score(list_old[row_idx], list_new[col_idx])
+        compatibility = (lexical + numeric) / 2.0
+        final_score = 0.45 * rerank_score + 0.35 * dense_normalized + 0.20 * compatibility
+        final_scores[row_idx, col_idx] = final_score
+        pair_metadata[(row_idx, col_idx)] = {
+            "dense_score": float(dense_scores[row_idx, col_idx]),
+            "dense_normalized_score": dense_normalized,
+            "rerank_score": float(rerank_score),
+            "lexical_overlap_score": lexical,
+            "numeric_compatibility_score": numeric,
+            "final_score": float(final_score),
+        }
+
+    return final_scores, pair_metadata
+
+
+def _build_match_entry(
+    *,
+    match_type: str,
+    old_text: Optional[str],
+    new_text: Optional[str],
+    similarity_score: float,
+    meta: Optional[Dict[str, float]] = None,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "type": match_type,
+        "old_text": old_text,
+        "new_text": new_text,
+        "similarity_score": float(similarity_score),
+    }
+    if meta:
+        payload.update(meta)
+    else:
+        payload.setdefault("final_score", 0.0)
+    return payload
+
+
 async def _match_batches_impl(request: MatchBatchesRequest) -> MatchBatchesResponse:
     """
     Эффективно сопоставляет два списка чанков.
@@ -158,12 +305,13 @@ async def _match_batches_impl(request: MatchBatchesRequest) -> MatchBatchesRespo
         
         def get_batch_embeddings(texts: List[str], batch_size: int = 32) -> List[List[float]]:
             all_embeddings = []
+            legal_embedder_model_id = resolve_model_selection("legal.embedder").resolved_model_id
             for i in range(0, len(texts), batch_size):
                 batch = texts[i:i + batch_size]
                 payload = {"input": batch, "normalize": True}
                 try:
                     # Используем cpu для эмбеддингов, чтобы не занимать VRAM LLM-модели
-                    emb_res = ums_client.infer(LEGAL_EMBEDDER_MODEL, payload, device_mode="cpu")
+                    emb_res = ums_client.infer(legal_embedder_model_id, payload, device_mode="cpu")
                     
                     if "data" in emb_res:
                         batch_embs = [item["embedding"] for item in emb_res["data"]]
@@ -189,60 +337,86 @@ async def _match_batches_impl(request: MatchBatchesRequest) -> MatchBatchesRespo
         if embs_old.size == 0 or embs_new.size == 0:
             raise ValueError("Failed to get embeddings from UMS")
 
-        # Строим полную матрицу косинусного сходства (как в монолите)
-        # norm → dot product = cosine similarity
+        # Строим полную матрицу косинусного сходства.
         norms_old = np.linalg.norm(embs_old, axis=1, keepdims=True)
         norms_new = np.linalg.norm(embs_new, axis=1, keepdims=True)
         embs_old_n = embs_old / np.maximum(norms_old, 1e-10)
         embs_new_n = embs_new / np.maximum(norms_new, 1e-10)
-        scores = embs_old_n @ embs_new_n.T  # shape: (N_old, N_new)
+        dense_scores = embs_old_n @ embs_new_n.T  # shape: (N_old, N_new)
 
-        # Венгерский алгоритм — глобально оптимальное сопоставление
-        row_ind, col_ind = linear_sum_assignment(1 - scores)
+        candidate_map = _build_candidate_matrix(dense_scores, LEGAL_MATCH_TOP_K)
+        final_scores, pair_metadata = _build_final_score_matrix(
+            request.list_old,
+            request.list_new,
+            dense_scores,
+            candidate_map,
+        )
+
+        # Венгерский алгоритм теперь работает по fused final score.
+        row_ind, col_ind = linear_sum_assignment(1 - final_scores)
 
         matches = []
+        matched_old_indices = set()
         matched_new_indices = set()
         stats = {"UNCHANGED": 0, "MODIFIED": 0, "DELETED": 0, "ADDED": 0}
 
         for r, c in zip(row_ind, col_ind):
-            s = float(scores[r, c])
-            if s >= 0.99:
+            dense_similarity = float(dense_scores[r, c])
+            meta = pair_metadata.get((r, c), {})
+            final_score = float(meta.get("final_score", 0.0))
+            if final_score >= 0.98 and dense_similarity >= 0.995:
                 # Идентичные чанки — не репортим как изменение
-                matches.append({
-                    "type": "UNCHANGED",
-                    "old_text": request.list_old[r],
-                    "new_text": request.list_new[c],
-                    "similarity_score": s
-                })
+                matches.append(_build_match_entry(
+                    match_type="UNCHANGED",
+                    old_text=request.list_old[r],
+                    new_text=request.list_new[c],
+                    similarity_score=dense_similarity,
+                    meta=meta,
+                ))
+                matched_old_indices.add(r)
                 matched_new_indices.add(c)
                 stats["UNCHANGED"] += 1
-            elif s >= request.threshold:
-                matches.append({
-                    "type": "MODIFIED",
-                    "old_text": request.list_old[r],
-                    "new_text": request.list_new[c],
-                    "similarity_score": s
-                })
+            elif final_score >= request.threshold:
+                matches.append(_build_match_entry(
+                    match_type="MODIFIED",
+                    old_text=request.list_old[r],
+                    new_text=request.list_new[c],
+                    similarity_score=dense_similarity,
+                    meta=meta,
+                ))
+                matched_old_indices.add(r)
                 matched_new_indices.add(c)
                 stats["MODIFIED"] += 1
             else:
-                matches.append({
-                    "type": "DELETED",
-                    "old_text": request.list_old[r],
-                    "new_text": None,
-                    "similarity_score": 0.0
-                })
+                matches.append(_build_match_entry(
+                    match_type="DELETED",
+                    old_text=request.list_old[r],
+                    new_text=None,
+                    similarity_score=0.0,
+                    meta=meta,
+                ))
+                matched_old_indices.add(r)
+                stats["DELETED"] += 1
+
+        for i, text in enumerate(request.list_old):
+            if i not in matched_old_indices:
+                matches.append(_build_match_entry(
+                    match_type="DELETED",
+                    old_text=text,
+                    new_text=None,
+                    similarity_score=0.0,
+                ))
                 stats["DELETED"] += 1
 
         # Чанки из нового документа без пары — добавленные
         for j, text in enumerate(request.list_new):
             if j not in matched_new_indices:
-                matches.append({
-                    "type": "ADDED",
-                    "old_text": None,
-                    "new_text": text,
-                    "similarity_score": 0.0
-                })
+                matches.append(_build_match_entry(
+                    match_type="ADDED",
+                    old_text=None,
+                    new_text=text,
+                    similarity_score=0.0,
+                ))
                 stats["ADDED"] += 1
 
         print(f"[LEGAL_SERVER] Match stats: {stats}")

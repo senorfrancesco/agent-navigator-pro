@@ -38,6 +38,7 @@ except ImportError:
 from fastapi import HTTPException
 from fastapi.responses import FileResponse
 
+from services.model_manager.model_selection import resolve_model_selection
 from services.model_manager.ums_client import ums_client
 from services.hardware.tier_selector import describe_rag_mode
 from orchestrator.shared.http_client import get_shared_client
@@ -79,8 +80,6 @@ from orchestrator.ui_control_plane import (
 )
 
 logger = logging.getLogger("chainlit_app")
-
-LEGAL_EMBEDDER_MODEL = os.getenv("LEGAL_EMBEDDER_MODEL", "labse-embedding")
 
 _DOC_QUESTION_UPLOAD_REQUEST_PHRASES = [
     "предоставьте тексты",
@@ -231,6 +230,7 @@ def _bootstrap_chainlit_sqlite_schema(conninfo: str) -> None:
         "start" TEXT,
         "end" TEXT,
         "defaultOpen" INTEGER,
+        "autoCollapse" INTEGER,
         "generation" TEXT,
         "showInput" TEXT,
         "language" TEXT
@@ -290,6 +290,7 @@ def _bootstrap_chainlit_sqlite_schema(conninfo: str) -> None:
             "start": "TEXT",
             "end": "TEXT",
             "defaultOpen": "INTEGER",
+            "autoCollapse": "INTEGER",
             "generation": "TEXT",
             "showInput": "TEXT",
             "language": "TEXT",
@@ -557,6 +558,10 @@ def _ensure_session_state() -> None:
         cl.user_session.set("thread_name", None)
     if cl.user_session.get("thread_name_locked") is None:
         cl.user_session.set("thread_name_locked", False)
+    if cl.user_session.get("active_execution_task") is None:
+        cl.user_session.set("active_execution_task", None)
+    if cl.user_session.get("cancel_requested") is None:
+        cl.user_session.set("cancel_requested", False)
 
     # Legacy migration: {name: {text, path}} -> documents_by_id/documents_by_name
     docs_by_id = cl.user_session.get("documents_by_id") or {}
@@ -1059,10 +1064,12 @@ async def _persist_current_backend_state(*, status: str = "active", last_error: 
 
 
 def _build_execution_dependencies() -> ExecutionDependencies:
+    legal_embedder_model_id = resolve_model_selection("legal.embedder").resolved_model_id
+
     def _get_retrieval_embed_fn():
         effective = _get_effective_settings()
         retrieval_embedder_model_id = str(
-            effective.get("resolved_retrieval_embedder_model_id") or LEGAL_EMBEDDER_MODEL
+            effective.get("resolved_retrieval_embedder_model_id") or legal_embedder_model_id
         )
         rag_pipeline = cl.user_session.get("rag_pipeline")
         retriever = getattr(rag_pipeline, "retriever", None)
@@ -1075,7 +1082,7 @@ def _build_execution_dependencies() -> ExecutionDependencies:
             cached = cache_entry.get("embed_fn")
             if cached is not None:
                 return cached
-        elif cache_entry is not None and retrieval_embedder_model_id == LEGAL_EMBEDDER_MODEL:
+        elif cache_entry is not None and retrieval_embedder_model_id == legal_embedder_model_id:
             return cache_entry
 
         try:
@@ -1123,7 +1130,34 @@ def _build_execution_dependencies() -> ExecutionDependencies:
         attach_and_register_report=_attach_and_register_report,
         update_progress_box=_update_progress_box,
         clear_progress_box=_clear_progress_box,
+        is_cancelled=lambda: bool(cl.user_session.get("cancel_requested")),
     )
+
+
+def _set_active_execution_task(task: Optional[asyncio.Task[Any]]) -> None:
+    cl.user_session.set("active_execution_task", task)
+
+
+def _reset_cancel_state() -> None:
+    cl.user_session.set("cancel_requested", False)
+
+
+async def _await_backend_execution(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    _reset_cancel_state()
+    task = asyncio.create_task(
+        _backend_execute_orchestration(request, deps=_build_execution_dependencies()),
+        name=f"chainlit-exec:{request.get('trace_id', '-')}",
+    )
+    _set_active_execution_task(task)
+    try:
+        response = await task
+    except asyncio.CancelledError:
+        await _persist_current_backend_state(status="cancelled", last_error="cancelled-by-user")
+        await cl.Message(content="Запрос остановлен пользователем.").send()
+        return None
+    finally:
+        _set_active_execution_task(None)
+    return response
 
 
 async def _update_progress_box(*, key: str, title: str, content: str) -> None:
@@ -1158,11 +1192,22 @@ async def _clear_progress_box(*, key: str) -> None:
     cl.user_session.set(key, None)
 
 
+async def _finalize_progress_box(*, key: str) -> None:
+    step = cl.user_session.get(key)
+    if step is None:
+        return
+    update = getattr(step, "update", None)
+    if callable(update):
+        await update()
+    cl.user_session.set(key, None)
+
+
 async def _render_execution_response(response: Dict[str, Any], history: List[Dict[str, str]]) -> None:
     _sync_run_metadata_from_response(response)
     _apply_session_state_patch(response.get("session_state_patch"))
     assistant_message = response.get("assistant_message")
     if assistant_message:
+        await _finalize_progress_box(key="documents_summary_progress")
         await cl.Message(content=assistant_message).send()
         history.append({"role": "assistant", "content": assistant_message})
     await _persist_current_backend_state(
@@ -1224,6 +1269,7 @@ def _build_execution_request(
         "trace_id": trace_id,
         "forced_route": forced_route,
         "effective_settings": effective,
+        "runtime_budget_metadata": copy.deepcopy(cl.user_session.get("runtime_budget_metadata") or {}),
     }
 
 
@@ -2415,18 +2461,17 @@ async def on_message(message: cl.Message):
             if selected_route == "cancel":
                 await cl.Message(content="Выбор отменён.").send()
             else:
-                response = await _backend_execute_orchestration(
+                execution_response = await _await_backend_execution(
                     _build_execution_request(
                         message=pending_choice["query"],
                         trace_id=trace_id,
                         new_files=pending_choice.get("new_files", []),
                         session_docs=active_session_docs,
-                        classifier_result=None,
                         forced_route=selected_route,
                     ),
-                    deps=_build_execution_dependencies(),
                 )
-                await _render_execution_response(response, history)
+                if execution_response is not None:
+                    await _render_execution_response(execution_response, history)
             history.append({"role": "user", "content": query})
             return
         else:
@@ -2496,15 +2541,18 @@ async def on_message(message: cl.Message):
 
     active_session_docs = _get_active_session_docs()
 
-    response = await _backend_execute_orchestration(
+    response = await _await_backend_execution(
         _build_execution_request(
             message=query,
             trace_id=trace_id,
             new_files=new_files,
             session_docs=active_session_docs,
         ),
-        deps=_build_execution_dependencies(),
     )
+    if response is None:
+        await _sync_thread_presentation(user_message=query)
+        history.append({"role": "user", "content": query})
+        return
     logger.info(
         "Route decision trace=%s route=%s executor=%s action=%s reason=%s conf=%.2f margin=%.3f active_docs=%s",
         trace_id,
@@ -2552,7 +2600,7 @@ async def on_message(message: cl.Message):
             if chosen_route == "cancel":
                 await cl.Message(content="Выбор отменён.").send()
             else:
-                execution_response = await _backend_execute_orchestration(
+                execution_response = await _await_backend_execution(
                     _build_execution_request(
                         message=query,
                         trace_id=trace_id,
@@ -2560,9 +2608,9 @@ async def on_message(message: cl.Message):
                         session_docs=_get_active_session_docs(),
                         forced_route=chosen_route,
                     ),
-                    deps=_build_execution_dependencies(),
                 )
-                await _render_execution_response(execution_response, history)
+                if execution_response is not None:
+                    await _render_execution_response(execution_response, history)
             await _sync_thread_presentation(user_message=query)
         else:
             _set_pending_route_choice(state)
@@ -2588,6 +2636,22 @@ async def on_message(message: cl.Message):
     await _sync_thread_presentation(user_message=query)
 
     history.append({"role": "user", "content": query})
+
+
+@cl.on_stop
+async def on_stop():
+    _ensure_session_state()
+    cl.user_session.set("cancel_requested", True)
+    task = cl.user_session.get("active_execution_task")
+    if task is not None and not task.done():
+        task.cancel()
+    progress_step = cl.user_session.get("documents_summary_progress")
+    if progress_step is not None:
+        progress_step.name = "Остановка запроса"
+        progress_step.output = "Останавливаю текущую обработку и освобождаю слот модели."
+        update = getattr(progress_step, "update", None)
+        if callable(update):
+            await update()
 
 
 def _detect_equipment_mode(file1_name: str, file2_name: str, query: str,

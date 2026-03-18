@@ -1,7 +1,7 @@
 import os
 import sys
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 import asyncio
 from itertools import repeat
 import pytest
@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from orchestrator.execution_runtime import (
     ExecutionDependencies,
     _DOCUMENTS_SUMMARY_CACHE,
+    _execute_document_analysis,
     _execute_documents_summary,
     _run_graph,
     execute_orchestration,
@@ -24,6 +25,7 @@ from orchestrator.doc_question_heuristics import (
 )
 from orchestrator.state_store import get_orchestration_state_store
 from services.observability import render_metrics_text, reset_observability_metrics
+from services.model_manager.ums_client import UMSBusyError
 
 
 def setup_function():
@@ -89,6 +91,7 @@ def _build_minimal_deps() -> ExecutionDependencies:
         attach_and_register_report=AsyncMock(),
         update_progress_box=AsyncMock(),
         clear_progress_box=AsyncMock(),
+        is_cancelled=lambda: False,
     )
 
 
@@ -1055,24 +1058,26 @@ def test_execute_documents_summary_updates_single_progress_box_per_chunk():
     ]
     deps.infer_assistant_text = AsyncMock(side_effect=["chunk-1", "chunk-2", "merged", "global"])
 
-    response = asyncio.run(
-        _execute_documents_summary(
-            query="Сделай сводку",
-            history=[],
-            deps=deps,
+    with patch("orchestrator.execution_runtime._format_elapsed_seconds", return_value="12.3 сек."):
+        response = asyncio.run(
+            _execute_documents_summary(
+                query="Сделай сводку",
+                history=[],
+                deps=deps,
+            )
         )
-    )
 
     assert "## Сводка по документам" in response["assistant_message"]
+    assert "Время выполнения:** 12.3 сек." in response["assistant_message"]
     assert deps.update_progress_box.await_count == 5
     assert deps.update_progress_box.await_args_list[0].kwargs == {
         "key": "documents_summary_progress",
-        "title": "Суммаризация чанков",
+        "title": "Суммаризация фрагментов",
         "content": "1/2",
     }
     assert deps.update_progress_box.await_args_list[1].kwargs == {
         "key": "documents_summary_progress",
-        "title": "Суммаризация чанков",
+        "title": "Суммаризация фрагментов",
         "content": "2/2",
     }
     assert deps.update_progress_box.await_args_list[2].kwargs["title"] == "Промежуточная сводка"
@@ -1085,7 +1090,7 @@ def test_execute_documents_summary_updates_single_progress_box_per_chunk():
     assert deps.update_progress_box.await_args_list[4].kwargs == {
         "key": "documents_summary_progress",
         "title": "Суммаризация завершена",
-        "content": "Готово: обработано 2/2 чанков.",
+        "content": "Готово: обработано 2/2 фрагментов.",
     }
     deps.clear_progress_box.assert_not_awaited()
 
@@ -1248,7 +1253,7 @@ def test_execute_documents_summary_updates_progress_with_partial_results():
     progress_titles = [call.kwargs["title"] for call in deps.update_progress_box.await_args_list]
     progress_contents = [call.kwargs["content"] for call in deps.update_progress_box.await_args_list]
 
-    assert progress_titles[:2] == ["Суммаризация чанков", "Суммаризация чанков"]
+    assert progress_titles[:2] == ["Суммаризация фрагментов", "Суммаризация фрагментов"]
     assert "Готов документ: contract.txt" in progress_contents[2]
     assert "merged" in progress_contents[2]
     assert "Формирую общую сводку" in progress_contents[3]
@@ -1391,3 +1396,86 @@ def test_execute_documents_summary_records_stage_metrics_for_cache_and_degraded_
     metrics = render_metrics_text()
     assert 'fallback="documents_summary_global_degraded"' in metrics
     assert 'fallback="documents_summary_chunk_cache_hit"' in metrics
+
+
+def test_execute_documents_summary_raises_cancelled_before_global_stage():
+    deps = _build_minimal_deps()
+    deps.get_all_docs = lambda: [
+        {
+            "document_id": "doc-1",
+            "display_name": "contract.txt",
+            "text": ("Первый абзац. " * 180) + "\n\n" + ("Второй абзац. " * 180),
+        }
+    ]
+    deps.infer_assistant_text = AsyncMock(side_effect=["chunk-1", "chunk-2", "merged"])
+    state = {"calls": 0}
+
+    def _cancel_after_merge():
+        state["calls"] += 1
+        return state["calls"] >= 4
+
+    deps.is_cancelled = _cancel_after_merge
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            _execute_documents_summary(
+                query="Сделай сводку",
+                history=[],
+                deps=deps,
+            )
+        )
+
+
+def test_execute_orchestration_returns_busy_status_for_ums_saturation(monkeypatch):
+    deps = _build_minimal_deps()
+
+    async def _busy_chat(**kwargs):
+        raise UMSBusyError("429 saturated")
+
+    monkeypatch.setattr("orchestrator.execution_runtime._execute_general_chat", _busy_chat)
+
+    response = asyncio.run(
+        execute_orchestration(
+            {
+                "message": "Привет",
+                "runtime_mode": "chat_only",
+                "assistant_mode": "general_chat",
+                "history": [],
+            },
+            deps=deps,
+        )
+    )
+
+    assert response["execution_metadata"]["status"] == "busy"
+    assert "Модель занята" in response["assistant_message"]
+
+
+def test_execute_document_analysis_surfaces_partial_summary_metadata():
+    deps = _build_minimal_deps()
+
+    with patch("orchestrator.workflows.document_analysis.create_analysis_graph", return_value=SimpleNamespace()), \
+         patch("orchestrator.execution_runtime._run_graph", new=AsyncMock(return_value={
+             "final_report": "# Report\n\npartial",
+             "errors": [],
+             "summary_metadata": {
+                 "degraded": True,
+                 "completed_stages": ["chunk_summary", "group_merge"],
+                 "final_synthesis_status": "failed",
+                 "degraded_reason": "retry_exhausted",
+                 "degraded_stage": "final_synthesis",
+             },
+         })):
+        result = asyncio.run(
+            _execute_document_analysis(
+                new_files=[{"name": "big.pdf", "path": "/tmp/big.pdf"}],
+                session_docs={},
+                effective_settings={"runtime_budget_metadata": {"tier": 1}},
+                deps=deps,
+            )
+        )
+
+    assert result["execution_metadata"]["status"] == "degraded"
+    assert result["execution_metadata"]["degraded"] is True
+    assert result["execution_metadata"]["completed_stages"] == ["chunk_summary", "group_merge"]
+    assert result["execution_metadata"]["final_synthesis_status"] == "failed"
+    deps.attach_and_register_report.assert_awaited_once()

@@ -79,6 +79,7 @@ class TestChainlitControlPlaneSettings:
         mock_cl.on_chat_start = lambda f: f
         mock_cl.on_chat_resume = lambda f: f
         mock_cl.on_message = lambda f: f
+        mock_cl.on_stop = lambda f: f
         mock_cl.on_settings_update = lambda f: f
         mock_cl.set_starters = lambda f: f
         mock_cl.set_chat_profiles = lambda f: f
@@ -155,7 +156,7 @@ class TestChainlitControlPlaneSettings:
 
         assert "model_profile: `legal-compare`" in summary
         assert "intent_embedder: `qwen3-embedding-0.6b`" in summary
-        assert "retrieval_embedder: `labse-embedding`" in summary
+        assert "retrieval_embedder: `qwen3-embedding-0.6b`" in summary
         assert "device_mode: `prefer-gpu`" in summary
         assert "context_budget_profile: `legal-compare`" in summary
         assert "runtime_profile: `adaptive`" in summary
@@ -175,6 +176,48 @@ class TestChainlitControlPlaneSettings:
             assert deps.get_retrieval_embed_fn() == "embed-fn"
 
         assert called["model_id"] == self._store["effective_settings"]["resolved_retrieval_embedder_model_id"]
+
+    def test_build_execution_request_includes_runtime_budget_metadata(self):
+        self._store["runtime_budget_metadata"] = {
+            "tier": 2,
+            "hardware": {"gpu_count": 1, "total_vram_gb": 8.0},
+        }
+
+        payload = self._module._build_execution_request(
+            message="Привет",
+            trace_id="trace-1",
+            new_files=[],
+            session_docs={},
+        )
+
+        assert payload["runtime_budget_metadata"]["tier"] == 2
+        assert payload["runtime_budget_metadata"]["hardware"]["gpu_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_on_stop_marks_cancel_and_cancels_active_execution_task(self):
+        class _FakeTask:
+            def __init__(self):
+                self.cancel_called = False
+
+            def done(self):
+                return False
+
+            def cancel(self):
+                self.cancel_called = True
+
+        progress_step = MagicMock()
+        progress_step.update = AsyncMock()
+        fake_task = _FakeTask()
+        self._store["active_execution_task"] = fake_task
+        self._store["documents_summary_progress"] = progress_step
+
+        await self._module.on_stop()
+
+        assert self._store["cancel_requested"] is True
+        assert fake_task.cancel_called is True
+        assert progress_step.name == "Остановка запроса"
+        assert "освобождаю слот" in progress_step.output
+        progress_step.update.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_send_control_plane_settings_renders_multitab_panel(self):
@@ -527,12 +570,12 @@ class TestChainlitControlPlaneSettings:
 
         await self._module._update_progress_box(
             key="documents_summary_progress",
-            title="Суммаризация чанков",
+            title="Суммаризация фрагментов",
             content="1/10",
         )
         await self._module._update_progress_box(
             key="documents_summary_progress",
-            title="Суммаризация чанков",
+            title="Суммаризация фрагментов",
             content="2/10",
         )
 
@@ -540,9 +583,29 @@ class TestChainlitControlPlaneSettings:
         step = created_steps[0]
         step.send.assert_awaited_once()
         step.update.assert_awaited_once()
-        assert step.name == "Суммаризация чанков"
+        assert step.name == "Суммаризация фрагментов"
         assert step.output == "2/10"
         assert self._store["documents_summary_progress"] is step
+
+    @pytest.mark.asyncio
+    async def test_render_execution_response_finalizes_progress_box_before_final_message(self):
+        progress_step = MagicMock()
+        progress_step.update = AsyncMock()
+        message_instance = MagicMock()
+        message_instance.send = AsyncMock()
+        self._mock_cl.Message.return_value = message_instance
+        self._store["documents_summary_progress"] = progress_step
+        history = []
+
+        await self._module._render_execution_response(
+            {"assistant_message": "Финальный ответ"},
+            history,
+        )
+
+        progress_step.update.assert_awaited_once()
+        assert self._store["documents_summary_progress"] is None
+        message_instance.send.assert_awaited_once()
+        assert history == [{"role": "assistant", "content": "Финальный ответ"}]
 
     def test_render_doc_question_markdown_includes_scope_and_provenance(self):
         markdown = self._module._render_doc_question_markdown(

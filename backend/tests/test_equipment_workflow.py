@@ -52,6 +52,15 @@ from orchestrator.workflows.equipment import (
     _extract_from_single_chunk,
     _extract_items_llm,
 )
+from orchestrator.equipment_parsing import (
+    _extract_items_from_docx_lines_fallback,
+    extract_items_docx_fallback,
+    load_docx_elements,
+    parse_generic_list_like_elements,
+    parse_offer_like_elements,
+    parse_specification_like_elements,
+    score_document_role,
+)
 from services.observability import render_metrics_text, reset_observability_metrics
 
 
@@ -105,6 +114,7 @@ def base_state():
         "matches": [],
         "analysis_results": [],
         "final_report": "",
+        "extraction_metadata": {},
         "errors": [],
         "session_id": "test-session",
     }
@@ -292,6 +302,126 @@ class TestParseTableRows:
             {"p": "Тип корпуса – Rack 19”", "v": "соответствие", "u": ""},
             {"p": "Монтажная высота", "v": "Не более 2", "u": "Юнит"},
         ]
+
+
+class TestDocxFallbackExtraction:
+
+    def test_score_document_role_detects_offer_like_doc(self):
+        elements = load_docx_elements("all_logs/kp_tz_equip/КОММЕРЧЕСКОЕ ПРЕДЛОЖЕНИЕ.docx")
+
+        detection = score_document_role(elements)
+
+        assert detection["role"] == "offer"
+        assert detection["feature_scores"]["offer"] > detection["feature_scores"]["specification"]
+
+    def test_score_document_role_detects_specification_like_doc(self):
+        elements = load_docx_elements("all_logs/kp_tz_equip/2._KSU_1_4_24_tz-V2.docx")
+
+        detection = score_document_role(elements)
+
+        assert detection["role"] == "specification"
+        assert detection["feature_scores"]["specification"] > detection["feature_scores"]["offer"]
+
+    def test_extract_items_from_docx_lines_fallback_parses_commercial_offer_rows(self):
+        lines = [
+            "КОММЕРЧЕСКОЕ ПРЕДЛОЖЕНИЕ № 45/ИТ-2024",
+            "№Наименование товара и краткие характеристикиКол-во (шт)Цена за ед. (руб.)Сумма (руб.)",
+            "1Сервер Т-Платформы E-200 (Intel Xeon Silver 4310, 64GB RAM, 2x480GB SSD Enterprise, Rail Kit)2485 000,00970 000,00",
+            "2Рабочая станция «Графит» (Core i7-13700, 32GB RAM, 1TB NVMe, RTX 3060 12GB)5125 000,00625 000,00",
+            "3Монитор 27\" Professional Series (IPS, 2560x1440, 75Hz, HDMI/DP)528 500,00142 500,00",
+            "ИТОГО:1 737 500,00",
+        ]
+
+        items = _extract_items_from_docx_lines_fallback(lines)
+
+        assert len(items) == 3
+        assert items[0]["name"] == "Сервер Т-Платформы E-200"
+        assert items[0]["quantity"] == "2"
+        assert items[0]["price"] == "485 000,00"
+        assert "64GB RAM" in items[0]["specs"]
+        assert items[2]["name"].startswith("Монитор 27")
+        assert items[2]["quantity"] == "5"
+
+    def test_extract_items_from_docx_lines_fallback_parses_tz_specification_blocks(self):
+        lines = [
+            "Часть VI ТЕХНИЧЕСКАЯ ЧАСТЬ ЗАКУПОЧНОЙ ДОКУМЕНТАЦИИ.",
+            "Техническое задание на поставку сетевого и серверного оборудования.",
+            "№ п/п",
+            "Наименование оборудования",
+            "Технические характеристики оборудования/работ",
+            "Кол-во",
+            "Страна происхождения",
+            "1.",
+            "Сетевой коммутатор 10Gb",
+            "Порты:",
+            "Общее число портов 12 шт. Из них:",
+            "Портов 100M/1G/2.5G/5G/10G Ethernet (RJ-45) - 10 шт.",
+            "Портов SFP+ 1G/10G - 2 шт.",
+            "2",
+            "2.",
+            "Сетевой накопитель",
+            "Сетевой накопитель в конфигурации:",
+            "Память не менее 4 ГБ (DDR4)",
+            "Число слотов не менее 8",
+            "1",
+        ]
+
+        items = _extract_items_from_docx_lines_fallback(lines)
+
+        assert len(items) == 2
+        assert items[0]["name"] == "Сетевой коммутатор 10Gb"
+        assert items[0]["quantity"] == "2"
+        assert "Порты:" in items[0]["specs"]
+        assert items[1]["name"] == "Сетевой накопитель"
+        assert items[1]["quantity"] == "1"
+        assert "Память не менее 4 ГБ" in items[1]["specs"]
+
+    def test_parse_offer_like_elements_uses_row_like_strategy(self):
+        elements = [
+            {"type": "title", "text": "КОММЕРЧЕСКОЕ ПРЕДЛОЖЕНИЕ", "page": None, "metadata": {}},
+            {"type": "row_like", "text": "1Сервер Т-Платформы E-200 (Intel Xeon Silver 4310, 64GB RAM, 2x480GB SSD Enterprise, Rail Kit)2485 000,00970 000,00", "page": None, "metadata": {}},
+        ]
+
+        items = parse_offer_like_elements(elements)
+
+        assert len(items) == 1
+        assert items[0]["name"] == "Сервер Т-Платформы E-200"
+
+    def test_parse_specification_like_elements_uses_numbered_blocks(self):
+        elements = [
+            {"type": "title", "text": "№ п/п", "page": None, "metadata": {}},
+            {"type": "paragraph", "text": "Наименование оборудования", "page": None, "metadata": {}},
+            {"type": "paragraph", "text": "Технические характеристики оборудования/работ", "page": None, "metadata": {}},
+            {"type": "paragraph", "text": "Страна происхождения", "page": None, "metadata": {}},
+            {"type": "row_like", "text": "1.", "page": None, "metadata": {}},
+            {"type": "paragraph", "text": "Сетевой коммутатор 10Gb", "page": None, "metadata": {}},
+            {"type": "paragraph", "text": "Порты: 12 шт.", "page": None, "metadata": {}},
+            {"type": "list_item", "text": "2", "page": None, "metadata": {}},
+        ]
+
+        items = parse_specification_like_elements(elements)
+
+        assert len(items) == 1
+        assert items[0]["name"] == "Сетевой коммутатор 10Gb"
+
+    def test_parse_generic_list_like_elements_extracts_numbered_items(self):
+        elements = [
+            {"type": "row_like", "text": "1. Ноутбук для разработчика", "page": None, "metadata": {}},
+            {"type": "row_like", "text": "2. Монитор 27 дюймов", "page": None, "metadata": {}},
+            {"type": "paragraph", "text": "Срок поставки 15 дней", "page": None, "metadata": {}},
+        ]
+
+        items = parse_generic_list_like_elements(elements)
+
+        assert [item["name"] for item in items] == ["Ноутбук для разработчика", "Монитор 27 дюймов"]
+
+    def test_extract_items_docx_fallback_returns_strategy_metadata(self):
+        items, metadata = extract_items_docx_fallback("all_logs/kp_tz_equip/КОММЕРЧЕСКОЕ ПРЕДЛОЖЕНИЕ.docx", [])
+
+        assert len(items) == 3
+        assert metadata["strategy_name"] == "offer_like"
+        assert metadata["role"] == "offer"
+        assert metadata["matched_blocks"] == 3
 
 
 # ============================================================================
@@ -680,6 +810,38 @@ class TestLoadAndExtractNode:
         assert result["items_1"] == []
         assert result["items_2"] == []
 
+    @pytest.mark.asyncio
+    async def test_prefers_docx_fallback_before_llm_when_structured_tables_are_empty(self, base_state):
+        base_state["input_1"] = "/tmp/test_kp.docx"
+        base_state["input_2"] = "/tmp/test_tz.docx"
+
+        fallback_doc1 = [
+            {"name": "Сервер Т-Платформы E-200", "specs": "64GB RAM", "quantity": "2", "price": "485 000,00", "unit": "шт.", "source": "docx_text_fallback", "page": None},
+            {"name": "Рабочая станция Графит", "specs": "32GB RAM", "quantity": "5", "price": "125 000,00", "unit": "шт.", "source": "docx_text_fallback", "page": None},
+        ]
+        fallback_doc2 = [
+            {"name": "Сетевой коммутатор 10Gb", "specs": "Порты: 12 шт.", "quantity": "2", "price": "", "unit": "", "source": "docx_text_fallback", "page": None},
+            {"name": "Сетевой накопитель", "specs": "Память 4 ГБ", "quantity": "1", "price": "", "unit": "", "source": "docx_text_fallback", "page": None},
+        ]
+
+        with patch("orchestrator.workflows.equipment._extract_tables_from_doc", new_callable=AsyncMock) as mock_tables, \
+             patch("orchestrator.workflows.equipment._extract_items_docx_fallback") as mock_fallback, \
+             patch("orchestrator.workflows.equipment._extract_items_llm", new_callable=AsyncMock) as mock_llm, \
+             patch("orchestrator.workflows.equipment._polish_items_specs_llm", new_callable=AsyncMock):
+            mock_tables.return_value = []
+            mock_fallback.side_effect = [
+                (fallback_doc1, {"strategy_name": "offer_like", "role": "offer", "confidence": 0.91, "matched_blocks": 2, "feature_scores": {"offer": 0.9}}),
+                (fallback_doc2, {"strategy_name": "specification_like", "role": "specification", "confidence": 0.88, "matched_blocks": 2, "feature_scores": {"specification": 0.88}}),
+            ]
+
+            result = await load_and_extract_node(base_state)
+
+        assert len(result["items_1"]) == 2
+        assert len(result["items_2"]) == 2
+        assert result["extraction_metadata"]["doc_1"]["strategy_name"] == "offer_like"
+        assert result["extraction_metadata"]["doc_2"]["strategy_name"] == "specification_like"
+        mock_llm.assert_not_awaited()
+
 
 # ============================================================================
 # Tests: match_items_node (mocked)
@@ -906,6 +1068,9 @@ class TestGenerateEquipmentReportNode:
         assert "Смета КП.pdf" in report
         assert "PASS" in report
         assert "Отчет сохранен" in report
+        assert "Таблица соответствия ТЗ и КП" in report
+        assert "Позиция ТЗ" in report
+        assert "Позиция КП" in report
 
     @pytest.mark.asyncio
     async def test_report_empty_items(self, base_state):
@@ -1007,6 +1172,38 @@ class TestGenerateEquipmentReportNode:
         assert long_reason in report
         assert "Сервер \\| Lenovo" in report
         assert "CPU: 2x Xeon\nRAM: 256GB" in report
+
+    @pytest.mark.asyncio
+    async def test_report_moves_unmatched_kp_positions_to_separate_section(self, base_state):
+        base_state["items_1"] = [{"name": "Коммутатор"}]
+        base_state["items_2"] = [
+            {"name": "Коммутатор Cisco"},
+            {"name": "ИБП APC", "specs": "3000VA", "quantity": "5", "price": "28000"},
+        ]
+        base_state["analysis_results"] = [
+            {
+                "item_1": {"name": "Коммутатор"},
+                "item_2": {"name": "Коммутатор Cisco"},
+                "result": "PASS",
+                "reason": "Соответствует",
+                "type": "MODIFIED",
+            },
+            {
+                "item_1": None,
+                "item_2": {"name": "ИБП APC", "specs": "3000VA", "quantity": "5", "price": "28000"},
+                "result": "GAP",
+                "reason": "Добавлена",
+                "type": "ADDED",
+            },
+        ]
+
+        with patch.dict(os.environ, {"UPLOADS_DIR": tempfile.mkdtemp()}):
+            result = await generate_equipment_report_node(base_state)
+
+        report = result["final_report"]
+        assert "## Таблица соответствия ТЗ и КП" in report
+        assert "## Дополнительные позиции из КП" in report
+        assert "ИБП APC" in report
 
 
 # ============================================================================

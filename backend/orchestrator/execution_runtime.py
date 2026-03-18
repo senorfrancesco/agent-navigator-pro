@@ -27,7 +27,8 @@ from orchestrator.ui_control_plane import (
 )
 from orchestrator.workflows.equipment import detect_equipment_mode
 from services.observability import inc_metric_counter
-from services.model_manager.ums_client import create_ums_embed_fn, ums_client
+from services.model_manager.model_selection import resolve_model_selection
+from services.model_manager.ums_client import UMSBusyError, create_ums_embed_fn, ums_client
 
 
 AsyncStrFn = Callable[..., Awaitable[str]]
@@ -36,11 +37,6 @@ SyncAnyFn = Callable[..., Any]
 
 logger = logging.getLogger("execution_runtime")
 INTENT_CLASSIFIER_MODE = os.getenv("INTENT_CLASSIFIER_MODE", "embedder").strip().lower()
-INTENT_CLASSIFIER_EMBEDDER_MODEL = os.getenv(
-    "INTENT_CLASSIFIER_EMBEDDER_MODEL",
-    "qwen3-embedding-0.6b",
-)
-INTENT_CLASSIFIER_LLM_MODEL = os.getenv("INTENT_CLASSIFIER_LLM_MODEL", "qwen-14b-llm")
 INTENT_CLASSIFIER_LLM_CONFIDENCE_THRESHOLD = float(
     os.getenv("INTENT_CLASSIFIER_LLM_CONFIDENCE_THRESHOLD", "0.75")
 )
@@ -77,6 +73,16 @@ SUMMARY_STAGE_MAX_TOKENS = {
     "merge": {"default": 448, "low_vram": 320},
     "global": {"default": 512, "low_vram": 384},
 }
+DOC_ANALYSIS_CHUNK_INPUT_CHARS = int(os.getenv("DOCUMENT_ANALYSIS_CHUNK_INPUT_CHARS", "3200"))
+DOC_ANALYSIS_WEAK_PC_CHUNK_INPUT_CHARS = int(os.getenv("DOCUMENT_ANALYSIS_WEAK_PC_CHUNK_INPUT_CHARS", "2200"))
+DOC_ANALYSIS_GROUP_INPUT_CHARS = int(os.getenv("DOCUMENT_ANALYSIS_GROUP_INPUT_CHARS", "2600"))
+DOC_ANALYSIS_WEAK_PC_GROUP_INPUT_CHARS = int(os.getenv("DOCUMENT_ANALYSIS_WEAK_PC_GROUP_INPUT_CHARS", "1800"))
+DOC_ANALYSIS_FINAL_INPUT_CHARS = int(os.getenv("DOCUMENT_ANALYSIS_FINAL_INPUT_CHARS", "3200"))
+DOC_ANALYSIS_WEAK_PC_FINAL_INPUT_CHARS = int(os.getenv("DOCUMENT_ANALYSIS_WEAK_PC_FINAL_INPUT_CHARS", "2200"))
+DOC_ANALYSIS_GROUP_SIZE = int(os.getenv("DOCUMENT_ANALYSIS_GROUP_SIZE", "4"))
+DOC_ANALYSIS_WEAK_PC_GROUP_SIZE = int(os.getenv("DOCUMENT_ANALYSIS_WEAK_PC_GROUP_SIZE", "2"))
+DOC_ANALYSIS_FINAL_MAX_TOKENS = int(os.getenv("DOCUMENT_ANALYSIS_FINAL_MAX_TOKENS", "1600"))
+DOC_ANALYSIS_WEAK_PC_FINAL_MAX_TOKENS = int(os.getenv("DOCUMENT_ANALYSIS_WEAK_PC_FINAL_MAX_TOKENS", "1024"))
 _CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
 _LATIN_RE = re.compile(r"[A-Za-z]")
 _CJK_RE = re.compile(r"[\u3400-\u4DBF\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]")
@@ -347,6 +353,64 @@ class ExecutionDependencies:
     attach_and_register_report: AsyncAnyFn
     update_progress_box: AsyncAnyFn
     clear_progress_box: AsyncAnyFn
+    is_cancelled: SyncAnyFn
+
+
+def _is_execution_cancelled(deps: ExecutionDependencies) -> bool:
+    try:
+        return bool(deps.is_cancelled())
+    except Exception:
+        return False
+
+
+def _raise_if_execution_cancelled(deps: ExecutionDependencies) -> None:
+    if _is_execution_cancelled(deps):
+        raise asyncio.CancelledError
+
+
+def _resolve_runtime_budget_metadata(
+    effective_settings: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    raw = (effective_settings or {}).get("runtime_budget_metadata") or {}
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _format_elapsed_seconds(elapsed_seconds: float) -> str:
+    clamped = max(0.0, float(elapsed_seconds))
+    if clamped < 60:
+        return f"{clamped:.1f} сек."
+    minutes, seconds = divmod(int(round(clamped)), 60)
+    if minutes < 60:
+        return f"{minutes} мин. {seconds} сек."
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} ч. {minutes} мин. {seconds} сек."
+
+
+def _is_weak_pc_runtime(effective_settings: Optional[Dict[str, Any]]) -> bool:
+    metadata = _resolve_runtime_budget_metadata(effective_settings)
+    hardware = metadata.get("hardware") or {}
+    gpu_count = int(hardware.get("gpu_count") or 0)
+    total_vram_gb = float(hardware.get("total_vram_gb") or 0.0)
+    tier = metadata.get("tier")
+    if _is_low_vram_device_mode(effective_settings):
+        return True
+    if gpu_count <= 1 and total_vram_gb and total_vram_gb <= 8.5:
+        return True
+    return tier in {0, 1, 2}
+
+
+def _build_document_analysis_summary_policy(
+    effective_settings: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    weak_pc = _is_weak_pc_runtime(effective_settings)
+    return {
+        "weak_pc_mode": weak_pc,
+        "chunk_input_chars": DOC_ANALYSIS_WEAK_PC_CHUNK_INPUT_CHARS if weak_pc else DOC_ANALYSIS_CHUNK_INPUT_CHARS,
+        "group_input_chars": DOC_ANALYSIS_WEAK_PC_GROUP_INPUT_CHARS if weak_pc else DOC_ANALYSIS_GROUP_INPUT_CHARS,
+        "final_input_chars": DOC_ANALYSIS_WEAK_PC_FINAL_INPUT_CHARS if weak_pc else DOC_ANALYSIS_FINAL_INPUT_CHARS,
+        "group_size": DOC_ANALYSIS_WEAK_PC_GROUP_SIZE if weak_pc else DOC_ANALYSIS_GROUP_SIZE,
+        "final_max_tokens": DOC_ANALYSIS_WEAK_PC_FINAL_MAX_TOKENS if weak_pc else DOC_ANALYSIS_FINAL_MAX_TOKENS,
+    }
 
 
 def _infer_intent_via_llm(prompt: str) -> str:
@@ -356,7 +420,7 @@ def _infer_intent_via_llm(prompt: str) -> str:
         "top_p": 0.1,
         "max_tokens": 96,
     }
-    response = ums_client.infer(INTENT_CLASSIFIER_LLM_MODEL, payload)
+    response = ums_client.infer(_resolve_intent_classifier_llm_model_id(), payload)
     return response.get("choices", [{}])[0].get("text", str(response))
 
 
@@ -381,6 +445,14 @@ def _get_cached_llm_classifier(model_id: str) -> LLMIntentClassifier:
     classifier = _INTENT_CLASSIFIER_LLM_CACHE.get(model_id)
     if classifier is not None:
         return classifier
+
+
+def _resolve_intent_classifier_embedder_model_id() -> str:
+    return resolve_model_selection("classifier.intent.embedder").resolved_model_id
+
+
+def _resolve_intent_classifier_llm_model_id() -> str:
+    return resolve_model_selection("classifier.intent.llm").resolved_model_id
     with _INTENT_CLASSIFIER_LOCK:
         classifier = _INTENT_CLASSIFIER_LLM_CACHE.get(model_id)
         if classifier is not None:
@@ -401,7 +473,7 @@ async def _resolve_classifier_result_for_request(
     embedder_result = None
     if INTENT_CLASSIFIER_MODE != "llm":
         intent_embedder_model_id = str(
-            effective_settings.get("resolved_intent_embedder_model_id") or INTENT_CLASSIFIER_EMBEDDER_MODEL
+            effective_settings.get("resolved_intent_embedder_model_id") or _resolve_intent_classifier_embedder_model_id()
         )
         try:
             classifier = await asyncio.to_thread(_get_cached_embedder_classifier, intent_embedder_model_id)
@@ -413,7 +485,7 @@ async def _resolve_classifier_result_for_request(
     llm_result = None
     if INTENT_CLASSIFIER_MODE in {"llm", "hybrid"}:
         try:
-            llm_classifier = _get_cached_llm_classifier(INTENT_CLASSIFIER_LLM_MODEL)
+            llm_classifier = _get_cached_llm_classifier(_resolve_intent_classifier_llm_model_id())
             llm_result = await asyncio.to_thread(llm_classifier.classify, query)
         except Exception as exc:
             logger.warning("Backend LLM classifier failed: %s", exc)
@@ -813,6 +885,9 @@ def _build_checkpoint_blob(request: Dict[str, Any], response: Dict[str, Any]) ->
 
 
 def _derive_run_status(response: Dict[str, Any]) -> str:
+    execution_status = str(((response.get("execution_metadata") or {}).get("status")) or "").strip().lower()
+    if execution_status in {"cancelled", "busy", "degraded"}:
+        return execution_status
     assistant_message = str(response.get("assistant_message") or "")
     if response.get("action_required"):
         return "waiting_action"
@@ -917,9 +992,24 @@ async def _execute_compare(
     )
     report = final_state.get("final_report", "")
     errors = final_state.get("errors", [])
+    summary_metadata = final_state.get("summary_metadata") or {}
     if report:
         await deps.attach_and_register_report(report)
-        return {"assistant_message": report, "generated_report": report}
+        execution_metadata = {
+            "status": "degraded" if summary_metadata.get("degraded") else "completed",
+            "degraded": bool(summary_metadata.get("degraded")),
+            "completed_stages": list(summary_metadata.get("completed_stages") or []),
+            "final_synthesis_status": str(summary_metadata.get("final_synthesis_status") or "unknown"),
+        }
+        if summary_metadata.get("degraded_reason"):
+            execution_metadata["reason"] = str(summary_metadata.get("degraded_reason"))
+        if summary_metadata.get("degraded_stage"):
+            execution_metadata["stage"] = str(summary_metadata.get("degraded_stage"))
+        return {
+            "assistant_message": report,
+            "generated_report": report,
+            "execution_metadata": execution_metadata,
+        }
     if errors:
         return {"assistant_message": "Ошибки:\n" + "\n".join(f"- {e}" for e in errors)}
     return {"assistant_message": "Не удалось создать отчёт."}
@@ -966,9 +1056,24 @@ async def _execute_equipment(
     )
     report = final_state.get("final_report", "")
     errors = final_state.get("errors", [])
+    summary_metadata = final_state.get("summary_metadata") or {}
     if report:
         await deps.attach_and_register_report(report)
-        return {"assistant_message": report, "generated_report": report}
+        execution_metadata = {
+            "status": "degraded" if summary_metadata.get("degraded") else "completed",
+            "degraded": bool(summary_metadata.get("degraded")),
+            "completed_stages": list(summary_metadata.get("completed_stages") or []),
+            "final_synthesis_status": str(summary_metadata.get("final_synthesis_status") or "unknown"),
+        }
+        if summary_metadata.get("degraded_reason"):
+            execution_metadata["reason"] = str(summary_metadata.get("degraded_reason"))
+        if summary_metadata.get("degraded_stage"):
+            execution_metadata["stage"] = str(summary_metadata.get("degraded_stage"))
+        return {
+            "assistant_message": report,
+            "generated_report": report,
+            "execution_metadata": execution_metadata,
+        }
     if errors:
         return {"assistant_message": "Ошибки:\n" + "\n".join(f"- {e}" for e in errors)}
     return {"assistant_message": "Не удалось создать отчёт."}
@@ -978,10 +1083,12 @@ async def _execute_document_analysis(
     *,
     new_files: List[Dict[str, Any]],
     session_docs: Dict[str, Any],
+    effective_settings: Optional[Dict[str, Any]],
     deps: ExecutionDependencies,
 ) -> Dict[str, Any]:
     from orchestrator.workflows.document_analysis import create_analysis_graph
 
+    _raise_if_execution_cancelled(deps)
     file_entry, error_message = _select_single_file(new_files, session_docs, deps.active_set_status_line())
     if error_message:
         return {"assistant_message": error_message}
@@ -997,15 +1104,37 @@ async def _execute_document_analysis(
             "items": [],
             "full_text": "",
             "summary": "",
+            "summary_metadata": {},
             "final_report": "",
             "errors": [],
+            "runtime_context": {
+                "is_cancelled": deps.is_cancelled,
+                "update_progress_box": deps.update_progress_box,
+                "summary_policy": _build_document_analysis_summary_policy(effective_settings),
+                "started_at_monotonic": time.monotonic(),
+            },
         },
     )
     report = final_state.get("final_report", "")
     errors = final_state.get("errors", [])
+    summary_metadata = final_state.get("summary_metadata") or {}
     if report:
         await deps.attach_and_register_report(report)
-        return {"assistant_message": report, "generated_report": report}
+        execution_metadata = {
+            "status": "degraded" if summary_metadata.get("degraded") else "completed",
+            "degraded": bool(summary_metadata.get("degraded")),
+            "completed_stages": list(summary_metadata.get("completed_stages") or []),
+            "final_synthesis_status": str(summary_metadata.get("final_synthesis_status") or "unknown"),
+        }
+        if summary_metadata.get("degraded_reason"):
+            execution_metadata["reason"] = str(summary_metadata.get("degraded_reason"))
+        if summary_metadata.get("degraded_stage"):
+            execution_metadata["stage"] = str(summary_metadata.get("degraded_stage"))
+        return {
+            "assistant_message": report,
+            "generated_report": report,
+            "execution_metadata": execution_metadata,
+        }
     if errors:
         return {"assistant_message": "Ошибки:\n" + "\n".join(f"- {e}" for e in errors)}
     return {"assistant_message": "Не удалось создать отчёт."}
@@ -1018,6 +1147,8 @@ async def _execute_documents_summary(
     effective_settings: Optional[Dict[str, Any]] = None,
     deps: ExecutionDependencies,
 ) -> Dict[str, Any]:
+    started_at_monotonic = time.monotonic()
+
     def _split_summary_chunks(text: str, *, max_chars: int = 3500) -> List[str]:
         normalized = str(text or "").strip()
         if not normalized:
@@ -1065,6 +1196,7 @@ async def _execute_documents_summary(
     processed_chunks = 0
     degraded_events: List[Dict[str, Any]] = []
     for doc_entry in per_doc_chunks:
+        _raise_if_execution_cancelled(deps)
         doc_name = str(doc_entry["name"])
         doc_id = str(doc_entry.get("document_id") or doc_name)
         chunks = list(doc_entry.get("chunks") or [])
@@ -1073,10 +1205,11 @@ async def _execute_documents_summary(
             continue
         chunk_summaries: List[str] = []
         for chunk in chunks:
+            _raise_if_execution_cancelled(deps)
             processed_chunks += 1
             await deps.update_progress_box(
                 key="documents_summary_progress",
-                title="Суммаризация чанков",
+                title="Суммаризация фрагментов",
                 content=f"{processed_chunks}/{total_chunks}",
             )
             prompt = deps.build_prompt(
@@ -1129,6 +1262,7 @@ async def _execute_documents_summary(
         reduce_items = chunk_summaries
         try:
             while len(reduce_items) > 1:
+                _raise_if_execution_cancelled(deps)
                 next_reduce_items: List[str] = []
                 reduce_group_size = (
                     SUMMARY_DEGRADED_REDUCE_GROUP_SIZE
@@ -1145,6 +1279,7 @@ async def _execute_documents_summary(
                     max_chars=merge_char_cap,
                     max_items=reduce_group_size,
                 ):
+                    _raise_if_execution_cancelled(deps)
                     merge_prompt = deps.build_prompt(
                         (
                             "Объедини суммаризации фрагментов одного документа в итоговую краткую сводку из 4-6 пунктов, "
@@ -1222,6 +1357,7 @@ async def _execute_documents_summary(
             title="Формирование итоговой сводки",
             content="Формирую общую сводку по уже собранным промежуточным результатам.",
         )
+        _raise_if_execution_cancelled(deps)
         global_prompt = deps.build_prompt(
             query,
             history,
@@ -1265,7 +1401,7 @@ async def _execute_documents_summary(
     await deps.update_progress_box(
         key="documents_summary_progress",
         title="Суммаризация завершена",
-        content=f"Готово: обработано {processed_chunks}/{total_chunks} чанков.",
+        content=f"Готово: обработано {processed_chunks}/{total_chunks} фрагментов.",
     )
     lines = ["## Сводка по документам", ""]
     execution_metadata = None
@@ -1284,7 +1420,14 @@ async def _execute_documents_summary(
     lines.append("### По каждому документу")
     for item in per_doc:
         lines.extend([f"#### {item['name']}", item["summary"], ""])
-    lines.extend(["### Общая сводка", global_summary.strip()])
+    lines.extend(
+        [
+            "### Общая сводка",
+            global_summary.strip(),
+            "",
+            f"**Время выполнения:** {_format_elapsed_seconds(time.monotonic() - started_at_monotonic)}",
+        ]
+    )
     result = {"assistant_message": "\n".join(lines).strip()}
     if execution_metadata is not None:
         result["execution_metadata"] = execution_metadata
@@ -1653,6 +1796,9 @@ async def execute_orchestration(
             effective_settings=effective_settings,
         )
     request["classifier_result"] = classifier_result
+    runtime_budget_metadata = request.get("runtime_budget_metadata")
+    if isinstance(runtime_budget_metadata, dict):
+        effective_settings["runtime_budget_metadata"] = copy.deepcopy(runtime_budget_metadata)
 
     decision = decide_orchestration(
         query=request.get("message", ""),
@@ -1706,7 +1852,12 @@ async def execute_orchestration(
                 deps=deps,
             )
         elif executor == "document_analysis":
-            result = await _execute_document_analysis(new_files=attachments_meta, session_docs=session_docs, deps=deps)
+            result = await _execute_document_analysis(
+                new_files=attachments_meta,
+                session_docs=session_docs,
+                effective_settings=effective_settings,
+                deps=deps,
+            )
         elif executor == "document_question":
             result = await _execute_doc_question(
                 query=request.get("message", ""),
@@ -1730,6 +1881,16 @@ async def execute_orchestration(
                 effective_settings=effective_settings,
                 deps=deps,
             )
+    except asyncio.CancelledError:
+        result = {
+            "assistant_message": "Запрос остановлен пользователем.",
+            "execution_metadata": {"status": "cancelled"},
+        }
+    except UMSBusyError:
+        result = {
+            "assistant_message": "Модель занята предыдущим тяжёлым запросом. Дождитесь освобождения слота или остановите активный запуск.",
+            "execution_metadata": {"status": "busy"},
+        }
     except Exception as exc:
         result = {"assistant_message": f"Ошибка выполнения сценария: {exc}"}
 

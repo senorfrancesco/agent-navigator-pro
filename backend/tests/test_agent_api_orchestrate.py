@@ -99,7 +99,7 @@ async def test_orchestrate_response_includes_effective_settings():
     assert response["effective_settings"]["tool_scope"] == "document_qa"
     assert response["effective_settings"]["resolved_model_id"] == "qwen-14b-llm"
     assert response["effective_settings"]["resolved_intent_embedder_model_id"] == "qwen3-embedding-0.6b"
-    assert response["effective_settings"]["resolved_retrieval_embedder_model_id"] == "labse-embedding"
+    assert response["effective_settings"]["resolved_retrieval_embedder_model_id"] == "qwen3-embedding-0.6b"
     assert response["effective_settings"]["generation"] == {
         "temperature": 0.15,
         "top_p": 0.5,

@@ -2,6 +2,7 @@ import copy
 import os
 from typing import Any, Dict, Mapping, Optional
 
+from services.model_manager.model_selection import resolve_model_selection
 
 ASSISTANT_MODE_ITEMS: Dict[str, str] = {
     "general_chat": "General Chat",
@@ -39,32 +40,28 @@ MODEL_PROFILE_ALIASES: Dict[str, str] = {
 MODEL_PROFILE_DEFINITIONS: Dict[str, Dict[str, Any]] = {
     "default-chat": {
         "label": "Default Chat",
-        "env_var": "CHAINLIT_MODEL_PROFILE_DEFAULT_CHAT_MODEL",
-        "fallback_model_id": "qwen-14b-llm",
+        "model_role_key": "llm.default_chat",
         "device_mode": "auto",
         "context_budget_profile": "standard",
         "generation": {"temperature": 0.7, "top_p": 0.9, "max_tokens": 2048},
     },
     "long-context": {
         "label": "Long Context",
-        "env_var": "CHAINLIT_MODEL_PROFILE_LONG_CONTEXT_MODEL",
-        "fallback_model_id": "qwen-14b-llm",
+        "model_role_key": "llm.long_context",
         "device_mode": "prefer-gpu",
         "context_budget_profile": "long-context",
         "generation": {"temperature": 0.3, "top_p": 0.9, "max_tokens": 3072},
     },
     "legal-compare": {
         "label": "Legal Compare",
-        "env_var": "CHAINLIT_MODEL_PROFILE_LEGAL_COMPARE_MODEL",
-        "fallback_model_id": "qwen-14b-llm",
+        "model_role_key": "llm.legal_compare",
         "device_mode": "prefer-gpu",
         "context_budget_profile": "legal-compare",
         "generation": {"temperature": 0.2, "top_p": 0.8, "max_tokens": 2048},
     },
     "low-vram": {
         "label": "Low VRAM",
-        "env_var": "CHAINLIT_MODEL_PROFILE_LOW_VRAM_MODEL",
-        "fallback_model_id": "qwen-14b-llm",
+        "model_role_key": "llm.low_vram",
         "device_mode": "low-vram",
         "context_budget_profile": "compact",
         "generation": {"temperature": 0.2, "top_p": 0.8, "max_tokens": 1024},
@@ -80,19 +77,16 @@ MODEL_PROFILE_ENV_PREFIXES: Dict[str, str] = {
 
 INTENT_EMBEDDER_PROFILE_DEFINITIONS: Dict[str, Dict[str, Any]] = {
     "intent-default": {
-        "env_var": "CHAINLIT_INTENT_EMBEDDER_PROFILE_DEFAULT_MODEL",
-        "fallback_model_id": "qwen3-embedding-0.6b",
+        "model_role_key": "embedder.intent.default",
     },
 }
 
 RETRIEVAL_EMBEDDER_PROFILE_DEFINITIONS: Dict[str, Dict[str, Any]] = {
     "legal-default": {
-        "env_var": "CHAINLIT_RETRIEVAL_EMBEDDER_PROFILE_LEGAL_DEFAULT_MODEL",
-        "fallback_model_id": "labse-embedding",
+        "model_role_key": "embedder.retrieval.legal_default",
     },
     "low-vram": {
-        "env_var": "CHAINLIT_RETRIEVAL_EMBEDDER_PROFILE_LOW_VRAM_MODEL",
-        "fallback_model_id": "labse-embedding",
+        "model_role_key": "embedder.retrieval.low_vram",
     },
 }
 
@@ -516,13 +510,15 @@ def resolve_effective_settings(
     effective["device_mode"] = profile_definition["device_mode"]
     effective["context_budget_profile"] = profile_definition["context_budget_profile"]
     effective["profile_generation_defaults"] = get_model_profile_generation_defaults(effective["model_profile"])
-    effective["resolved_model_id"] = resolve_model_id(effective.get("model_profile"))
-    effective["resolved_intent_embedder_model_id"] = resolve_intent_embedder_model_id(
-        effective.get("intent_embedder_profile")
-    )
-    effective["resolved_retrieval_embedder_model_id"] = resolve_retrieval_embedder_model_id(
-        effective.get("retrieval_embedder_profile")
-    )
+    model_selection = resolve_model_id_selection(effective.get("model_profile"))
+    intent_selection = resolve_intent_embedder_model_selection(effective.get("intent_embedder_profile"))
+    retrieval_selection = resolve_retrieval_embedder_model_selection(effective.get("retrieval_embedder_profile"))
+    effective["resolved_model_id"] = model_selection["resolved_model_id"]
+    effective["resolved_model_resolution"] = model_selection
+    effective["resolved_intent_embedder_model_id"] = intent_selection["resolved_model_id"]
+    effective["resolved_intent_embedder_resolution"] = intent_selection
+    effective["resolved_retrieval_embedder_model_id"] = retrieval_selection["resolved_model_id"]
+    effective["resolved_retrieval_embedder_resolution"] = retrieval_selection
     return effective
 
 
@@ -532,9 +528,13 @@ def get_prompt_profile_system_message(prompt_profile: Optional[str]) -> str:
 
 
 def resolve_model_id(model_profile: Optional[str]) -> str:
+    return resolve_model_id_selection(model_profile)["resolved_model_id"]
+
+
+def resolve_model_id_selection(model_profile: Optional[str]) -> Dict[str, Any]:
     normalized = _normalize_model_profile(model_profile) or CONTROL_PLANE_HARD_DEFAULTS["model_profile"]
     definition = MODEL_PROFILE_DEFINITIONS[normalized]
-    return os.getenv(definition["env_var"], definition["fallback_model_id"])
+    return resolve_model_selection(definition["model_role_key"]).to_dict()
 
 
 def normalize_inference_device_mode(device_mode: Optional[str]) -> str:
@@ -549,18 +549,26 @@ def normalize_inference_device_mode(device_mode: Optional[str]) -> str:
 
 
 def resolve_intent_embedder_model_id(intent_embedder_profile: Optional[str]) -> str:
+    return resolve_intent_embedder_model_selection(intent_embedder_profile)["resolved_model_id"]
+
+
+def resolve_intent_embedder_model_selection(intent_embedder_profile: Optional[str]) -> Dict[str, Any]:
     normalized = str(intent_embedder_profile or CONTROL_PLANE_HARD_DEFAULTS["intent_embedder_profile"]).strip()
     definition = INTENT_EMBEDDER_PROFILE_DEFINITIONS.get(
         normalized,
         INTENT_EMBEDDER_PROFILE_DEFINITIONS[CONTROL_PLANE_HARD_DEFAULTS["intent_embedder_profile"]],
     )
-    return os.getenv(definition["env_var"], definition["fallback_model_id"])
+    return resolve_model_selection(definition["model_role_key"]).to_dict()
 
 
 def resolve_retrieval_embedder_model_id(retrieval_embedder_profile: Optional[str]) -> str:
+    return resolve_retrieval_embedder_model_selection(retrieval_embedder_profile)["resolved_model_id"]
+
+
+def resolve_retrieval_embedder_model_selection(retrieval_embedder_profile: Optional[str]) -> Dict[str, Any]:
     normalized = str(retrieval_embedder_profile or CONTROL_PLANE_HARD_DEFAULTS["retrieval_embedder_profile"]).strip()
     definition = RETRIEVAL_EMBEDDER_PROFILE_DEFINITIONS.get(
         normalized,
         RETRIEVAL_EMBEDDER_PROFILE_DEFINITIONS[CONTROL_PLANE_HARD_DEFAULTS["retrieval_embedder_profile"]],
     )
-    return os.getenv(definition["env_var"], definition["fallback_model_id"])
+    return resolve_model_selection(definition["model_role_key"]).to_dict()
