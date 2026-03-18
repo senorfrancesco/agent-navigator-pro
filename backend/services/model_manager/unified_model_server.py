@@ -62,6 +62,7 @@ from services.observability import (
     set_ums_runtime_metrics,
 )
 from services.model_manager.model_registry import get_runtime_config
+from services.model_manager.model_registry import get_preferred_role_for_model_id
 from services.model_manager.model_selection import resolve_model_selection
 from services.model_manager.models_config import (
     get_all_models as get_registered_models,
@@ -158,6 +159,7 @@ state = {
     "processes": {},      # model_id -> process
     "placements": {},     # model_id -> placement metadata
     "admission": {},      # model_id -> admission metadata
+    "last_fallback_event": None,
     "device_mode": DeviceMode.HYBRID,
     "runtime_budget": {},
     "dynamic_ports": 8100, # Начальный порт для динамических моделей
@@ -1053,6 +1055,149 @@ def _prune_dead_processes() -> List[str]:
         removed.append(model_id)
     return removed
 
+
+def _cleanup_failed_start_state(model_id: str) -> None:
+    state.setdefault("processes", {}).pop(model_id, None)
+    state.setdefault("placements", {}).pop(model_id, None)
+    state.setdefault("admission", {}).pop(model_id, None)
+    if state.get("active_model") == model_id:
+        state["active_model"] = None
+    _release_port(model_id, reusable=False)
+
+
+def _resolve_server_model_failover_plan(requested_model_id: str) -> Dict[str, Any]:
+    role_key = get_preferred_role_for_model_id(requested_model_id)
+    if not role_key:
+        return {
+            "requested_model_id": requested_model_id,
+            "role_key": None,
+            "role_label": None,
+            "primary_model_id": requested_model_id,
+            "fallback_model_id": requested_model_id,
+            "fallback_available": False,
+            "source": "model_id_only",
+            "warning": None,
+        }
+
+    try:
+        selection = resolve_model_selection(role_key)
+    except Exception as exc:
+        logger.warning("Failed to resolve model failover plan for %s: %s", requested_model_id, exc)
+        return {
+            "requested_model_id": requested_model_id,
+            "role_key": role_key,
+            "role_label": role_key,
+            "primary_model_id": requested_model_id,
+            "fallback_model_id": requested_model_id,
+            "fallback_available": False,
+            "source": "resolution_failed",
+            "warning": str(exc),
+        }
+
+    primary_model_id = str(selection.resolved_model_id or requested_model_id)
+    fallback_model_id = str(selection.fallback_model_id or primary_model_id)
+    allow_failover = bool(
+        selection.fallback_available
+        and primary_model_id == requested_model_id
+        and fallback_model_id
+        and fallback_model_id != requested_model_id
+    )
+    return {
+        "requested_model_id": requested_model_id,
+        "role_key": selection.role_key,
+        "role_label": selection.role_label,
+        "primary_model_id": requested_model_id,
+        "registry_primary_model_id": primary_model_id,
+        "fallback_model_id": fallback_model_id,
+        "fallback_available": allow_failover,
+        "source": selection.source,
+        "warning": selection.warning,
+    }
+
+
+def _record_model_fallback_event(
+    *,
+    requested_model_id: str,
+    primary_model_id: str,
+    fallback_model_id: str,
+    used_model_id: str,
+    stage: str,
+    reason: str,
+    role_key: Optional[str] = None,
+    role_label: Optional[str] = None,
+) -> Dict[str, Any]:
+    event = {
+        "source": "unified_model_server",
+        "requested_model_id": requested_model_id,
+        "primary_model_id": primary_model_id,
+        "fallback_model_id": fallback_model_id,
+        "used_model_id": used_model_id,
+        "stage": stage,
+        "reason": reason,
+        "role_key": role_key,
+        "role_label": role_label,
+    }
+    state["last_fallback_event"] = event
+    inc_metric_counter(
+        "agent_nav_fallback_events_total",
+        labels={
+            "component": "ums",
+            "fallback": "model_failover",
+            "source": "unified_model_server",
+            "stage": stage,
+        },
+    )
+    return event
+
+
+def _should_attempt_model_failover(exc: Exception) -> bool:
+    if isinstance(exc, HTTPException) and exc.status_code == 429:
+        return False
+    return True
+
+
+def _start_server_with_failover(model_id: str, device_mode: DeviceMode, *, stage: str = "startup") -> str:
+    plan = _resolve_server_model_failover_plan(model_id)
+    try:
+        return _start_server_once(model_id, device_mode)
+    except Exception as primary_exc:
+        if not plan.get("fallback_available") or not _should_attempt_model_failover(primary_exc):
+            raise
+
+        fallback_model_id = str(plan.get("fallback_model_id") or model_id)
+        if fallback_model_id == model_id:
+            raise
+
+        logger.warning(
+            "Model failover for %s -> %s at stage=%s due to: %s",
+            model_id,
+            fallback_model_id,
+            stage,
+            primary_exc,
+        )
+        _cleanup_failed_start_state(model_id)
+        _record_model_fallback_event(
+            requested_model_id=model_id,
+            primary_model_id=model_id,
+            fallback_model_id=fallback_model_id,
+            used_model_id=fallback_model_id,
+            stage=stage,
+            reason=str(primary_exc),
+            role_key=plan.get("role_key"),
+            role_label=plan.get("role_label"),
+        )
+        try:
+            return _start_server_once(fallback_model_id, device_mode)
+        except Exception as fallback_exc:
+            logger.error(
+                "Fallback model start failed for %s -> %s at stage=%s: %s",
+                model_id,
+                fallback_model_id,
+                stage,
+                fallback_exc,
+            )
+            raise fallback_exc
+
 # === Dynamic Model Discovery ===
 
 def get_model_config(model_id: str) -> Optional[Dict[str, Any]]:
@@ -1161,7 +1306,7 @@ def _launch_server_process(
         raise
 
 
-def _start_server(model_id: str, device_mode: DeviceMode):
+def _start_server_once(model_id: str, device_mode: DeviceMode):
     with _get_model_start_lock(model_id):
         device_mode = _resolve_component_device_mode(model_id, device_mode)
         config = get_model_config(model_id)
@@ -1175,7 +1320,7 @@ def _start_server(model_id: str, device_mode: DeviceMode):
         existing_proc = state["processes"].get(model_id)
         if existing_proc is not None:
             if existing_proc.poll() is None:
-                return  # Уже работает
+                return model_id  # Уже работает
             state["processes"].pop(model_id, None)
             state["placements"].pop(model_id, None)
 
@@ -1256,7 +1401,7 @@ def _start_server(model_id: str, device_mode: DeviceMode):
                 vllm_placement["port"] = assigned_port
                 state["placements"][model_id] = vllm_placement
                 state["active_model"] = model_id
-                return
+                return model_id
 
         if is_heavy:
             with _heavy_model_lifecycle_lock:
@@ -1287,7 +1432,7 @@ def _start_server(model_id: str, device_mode: DeviceMode):
                     state["processes"][model_id] = process
                     state["placements"][model_id] = placement
                     state["active_model"] = model_id
-                    return
+                    return model_id
                 except Exception as e:
                     detail = str(e)
                     fallback_port = _reassign_model_port(model_id, int(config["port"]))
@@ -1306,7 +1451,7 @@ def _start_server(model_id: str, device_mode: DeviceMode):
                         state["processes"][model_id] = process
                         state["placements"][model_id] = placement
                         state["active_model"] = model_id
-                        return
+                        return model_id
                     except Exception:
                         logger.error(f"Start failed: {e}")
                         raise
@@ -1339,7 +1484,7 @@ def _start_server(model_id: str, device_mode: DeviceMode):
                     available_gpus=available_gpus,
                     fallback_applied=(idx > 0 and str(device_arg) == "cpu"),
                 )
-                return
+                return model_id
             except Exception as e:
                 detail = str(e)
                 bind_like_error = (
@@ -1364,7 +1509,7 @@ def _start_server(model_id: str, device_mode: DeviceMode):
                             available_gpus=available_gpus,
                             fallback_applied=(idx > 0 and str(device_arg) == "cpu"),
                         )
-                        return
+                        return model_id
                     except Exception:
                         pass
                 last_error = e
@@ -1384,6 +1529,10 @@ def _start_server(model_id: str, device_mode: DeviceMode):
                 logger.error(f"Start failed: {e}")
                 raise
         raise RuntimeError(f"Failed to start {model_id}: {last_error}")
+
+
+def _start_server(model_id: str, device_mode: DeviceMode, *, stage: str = "startup") -> str:
+    return _start_server_with_failover(model_id, device_mode, stage=stage)
 
 # === API ===
 
@@ -1468,8 +1617,8 @@ async def lifespan(app: FastAPI):
     for model_id in _preload_sequence():
         try:
             logger.info("Preloading %s...", model_id)
-            _start_server(model_id, state["device_mode"])
-            logger.info("%s preloaded successfully", model_id)
+            started_model_id = _start_server(model_id, state["device_mode"], stage="startup")
+            logger.info("%s preloaded successfully", started_model_id)
         except Exception as e:
             logger.warning(f"Failed to preload {model_id}: {e}")
 
@@ -1844,6 +1993,8 @@ async def infer(request: InferRequest):
     try:
         policy = _refresh_concurrency_controls()
         config = get_model_config(request.model_id)
+        if not config:
+            raise HTTPException(status_code=404, detail=f"Model {request.model_id} not found")
         sem = _embed_semaphore if config["type"] == "st" else _llm_semaphore
         slot_kind = "embedding" if config["type"] == "st" else "llm"
 
@@ -1857,10 +2008,22 @@ async def infer(request: InferRequest):
         if request.stream:
             policy = await _reserve_runtime_slot(sem, "stream")
             try:
-                await asyncio.to_thread(_start_server, request.model_id, request.device_mode or state["device_mode"])
+                started_model_id = await asyncio.to_thread(
+                    _start_server,
+                    request.model_id,
+                    request.device_mode or state["device_mode"],
+                    stage="infer",
+                )
             except Exception:
                 _release_runtime_slot(sem)
                 raise
+            started_config = get_model_config(started_model_id)
+            if not started_config:
+                raise HTTPException(status_code=404, detail=f"Model {started_model_id} not found")
+            url = _build_infer_url(started_config, is_chat=is_chat)
+            headers = _build_upstream_headers(started_config)
+            payload = _build_infer_payload(started_model_id, started_config, request.payload)
+            payload["stream"] = True
             return StreamingResponse(
                 _proxy_sse_stream(url, payload, sem, slot_pre_acquired=True, headers=headers),
                 media_type="text/event-stream",
@@ -1868,13 +2031,24 @@ async def infer(request: InferRequest):
             )
         else:
             async with _acquire_runtime_slot(sem, slot_kind) as policy:
-                await asyncio.to_thread(_start_server, request.model_id, request.device_mode or state["device_mode"])
+                started_model_id = await asyncio.to_thread(
+                    _start_server,
+                    request.model_id,
+                    request.device_mode or state["device_mode"],
+                    stage="infer",
+                )
+                started_config = get_model_config(started_model_id)
+                if not started_config:
+                    raise HTTPException(status_code=404, detail=f"Model {started_model_id} not found")
+                url = _build_infer_url(started_config, is_chat=is_chat)
+                headers = _build_upstream_headers(started_config)
+                payload = _build_infer_payload(started_model_id, started_config, request.payload)
                 async with httpx.AsyncClient(timeout=300.0, headers=headers) as client:
                     resp = await client.post(url, json=payload)
                     resp.raise_for_status()
                     return {
                         "status": "success",
-                        "model": request.model_id,
+                        "model": started_model_id,
                         "result": resp.json(),
                         "concurrency_policy": policy,
                     }
@@ -1931,11 +2105,16 @@ async def preload_model(model_id: str, request: ModelControlRequest):
     config = get_model_config(model_id)
     if not config:
         raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
-    await asyncio.to_thread(_start_server, model_id, request.device_mode or state["device_mode"])
+    started_model_id = await asyncio.to_thread(
+        _start_server,
+        model_id,
+        request.device_mode or state["device_mode"],
+        stage="preload",
+    )
     return {
         "status": "success",
         "action": "preload",
-        "model": _build_model_view(model_id),
+        "model": _build_model_view(started_model_id),
     }
 
 
@@ -1944,11 +2123,16 @@ async def activate_model(model_id: str, request: ModelControlRequest):
     config = get_model_config(model_id)
     if not config:
         raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
-    await asyncio.to_thread(_start_server, model_id, request.device_mode or state["device_mode"])
+    started_model_id = await asyncio.to_thread(
+        _start_server,
+        model_id,
+        request.device_mode or state["device_mode"],
+        stage="activate",
+    )
     return {
         "status": "success",
         "action": "activate",
-        "model": _build_model_view(model_id),
+        "model": _build_model_view(started_model_id),
     }
 
 
@@ -1992,6 +2176,7 @@ async def get_status():
         "running": list(state["processes"].keys()),
         "placements": dict(state.get("placements") or {}),
         "admission": copy.deepcopy(state.get("admission") or {}),
+        "last_fallback_event": copy.deepcopy(state.get("last_fallback_event")),
         "backend_mode": _resolve_backend_mode(),
         "prompt_cache_policy": _resolve_prompt_cache_policy(
             get_model_config(state.get("active_model") or _default_heavy_model_id())
@@ -2015,15 +2200,22 @@ async def openai_embeddings(request: EmbeddingRequest):
         model_id = resolve_model_selection("embedder.retrieval.legal_default").resolved_model_id
 
     try:
-        config = get_model_config(model_id)
-        url = f"http://localhost:{config['port']}/v1/embeddings"
-
         # Нормализуем input в список
         texts = request.input if isinstance(request.input, list) else [request.input]
 
         payload = {"input": texts, "model": model_id}
         async with _acquire_runtime_slot(_embed_semaphore, "embedding"):
-            await asyncio.to_thread(_start_server, model_id, state["device_mode"])
+            started_model_id = await asyncio.to_thread(
+                _start_server,
+                model_id,
+                state["device_mode"],
+                stage="embeddings",
+            )
+            config = get_model_config(started_model_id)
+            if not config:
+                raise HTTPException(status_code=404, detail=f"Model {started_model_id} not found")
+            url = f"http://localhost:{config['port']}/v1/embeddings"
+            payload["model"] = started_model_id
             async with httpx.AsyncClient(timeout=60.0) as client:
                 resp = await client.post(url, json=payload)
                 resp.raise_for_status()
@@ -2039,7 +2231,7 @@ async def openai_embeddings(request: EmbeddingRequest):
                     {"object": "embedding", "index": i, "embedding": emb}
                     for i, emb in enumerate(embeddings)
                 ],
-                "model": model_id,
+                "model": payload["model"],
                 "usage": {"prompt_tokens": sum(len(t.split()) for t in texts), "total_tokens": sum(len(t.split()) for t in texts)},
             }
 

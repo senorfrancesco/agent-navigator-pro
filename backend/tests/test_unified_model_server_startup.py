@@ -492,6 +492,28 @@ def test_status_exposes_adaptive_runtime_budget(monkeypatch):
     assert payload["tier"]["rag_mode_label"] == "corrective retrieval"
 
 
+def test_status_exposes_last_fallback_event():
+    previous_event = ums_server.state.get("last_fallback_event")
+    fallback_event = {
+        "source": "unified_model_server",
+        "requested_model_id": "qwen-14b-llm",
+        "primary_model_id": "qwen-14b-llm",
+        "fallback_model_id": "qwen-7b-llm",
+        "used_model_id": "qwen-7b-llm",
+        "stage": "infer",
+        "reason": "primary startup failed",
+        "role_key": "llm.default_chat",
+        "role_label": "default chat llm",
+    }
+    ums_server.state["last_fallback_event"] = fallback_event
+    try:
+        payload = asyncio.run(ums_server.get_status())
+    finally:
+        ums_server.state["last_fallback_event"] = previous_event
+
+    assert payload["last_fallback_event"] == fallback_event
+
+
 def test_status_respects_manual_runtime_budget(monkeypatch):
     monkeypatch.setenv("UMS_RUNTIME_PROFILE", "manual")
     monkeypatch.setenv("UMS_MANUAL_EFFECTIVE_CONTEXT_TOKENS", "6144")
@@ -711,6 +733,10 @@ def test_lifespan_preloads_llm_then_retrieval_then_intent(monkeypatch):
     previous_device_mode = ums_server.state.get("device_mode")
     call_order = []
 
+    def fake_start(model_id, device_mode, stage="startup"):
+        call_order.append((model_id, stage))
+        return model_id
+
     with patch("services.hardware.HardwareProfiler.detect", return_value=SimpleNamespace(has_gpu=True, gpu_count=1)), patch(
         "services.hardware.TierSelector.select",
         return_value=SimpleNamespace(
@@ -724,7 +750,7 @@ def test_lifespan_preloads_llm_then_retrieval_then_intent(monkeypatch):
     ), patch.object(
         ums_server,
         "_start_server",
-        side_effect=lambda model_id, device_mode: call_order.append(model_id),
+        side_effect=fake_start,
     ), patch.object(
         ums_server,
         "_stop_all_servers",
@@ -732,7 +758,7 @@ def test_lifespan_preloads_llm_then_retrieval_then_intent(monkeypatch):
         asyncio.run(ums_server.lifespan(ums_server.app).__aenter__())
 
     try:
-        assert call_order[:2] == ["qwen-14b-llm", "qwen3-embedding-0.6b"]
+        assert call_order[:2] == [("qwen-14b-llm", "startup"), ("qwen3-embedding-0.6b", "startup")]
     finally:
         ums_server.state["device_mode"] = previous_device_mode
 
@@ -1033,7 +1059,11 @@ def test_preload_endpoint_starts_model_with_requested_device_mode():
     async def _run_inline(func, *args, **kwargs):
         return func(*args, **kwargs)
 
-    with patch.object(ums_server.asyncio, "to_thread", side_effect=_run_inline), patch.object(ums_server, "_start_server") as mock_start:
+    with patch.object(ums_server.asyncio, "to_thread", side_effect=_run_inline), patch.object(
+        ums_server,
+        "_start_server",
+        return_value="labse-embedding",
+    ) as mock_start:
         response = asyncio.run(
             _api_request(
                 "POST",
@@ -1047,14 +1077,14 @@ def test_preload_endpoint_starts_model_with_requested_device_mode():
     assert payload["status"] == "success"
     assert payload["action"] == "preload"
     assert payload["model"]["model_id"] == "labse-embedding"
-    mock_start.assert_called_once_with("labse-embedding", ums_server.DeviceMode.CPU)
+    mock_start.assert_called_once_with("labse-embedding", ums_server.DeviceMode.CPU, stage="preload")
 
 
 def test_activate_endpoint_starts_model_and_returns_active_view():
     async def _run_inline(func, *args, **kwargs):
         return func(*args, **kwargs)
 
-    def _fake_start(model_id, device_mode):
+    def _fake_start(model_id, device_mode, stage="activate"):
         assert model_id == "qwen-14b-llm"
         assert device_mode == ums_server.DeviceMode.HYBRID
         ums_server.state["active_model"] = model_id
@@ -1063,6 +1093,7 @@ def test_activate_endpoint_starts_model_and_returns_active_view():
             "placement_mode": "single-gpu",
             "gpu_indices": [0],
         }
+        return model_id
 
     with patch.object(ums_server.asyncio, "to_thread", side_effect=_run_inline), patch.object(ums_server, "_start_server", side_effect=_fake_start) as mock_start:
         response = asyncio.run(
@@ -1080,7 +1111,7 @@ def test_activate_endpoint_starts_model_and_returns_active_view():
     assert payload["model"]["model_id"] == "qwen-14b-llm"
     assert payload["model"]["running"] is True
     assert payload["model"]["active"] is True
-    mock_start.assert_called_once_with("qwen-14b-llm", ums_server.DeviceMode.HYBRID)
+    mock_start.assert_called_once_with("qwen-14b-llm", ums_server.DeviceMode.HYBRID, stage="activate")
 
 
 def test_activate_endpoint_uses_remote_vllm_backend(monkeypatch):
@@ -1472,6 +1503,75 @@ def test_start_server_retries_on_bind_failure_with_fallback_port():
     assert ums_server.state["port_owners"][8100] == "qwen-14b-llm"
 
 
+def test_start_server_falls_back_to_registry_model_and_records_event():
+    fake_process = _FakeProcess(pid=321)
+    launch_calls = []
+
+    def fake_start_once(model_id, device_mode):
+        launch_calls.append(model_id)
+        if model_id == "qwen-14b-llm":
+            raise RuntimeError("primary startup failed")
+        ums_server.state["processes"][model_id] = fake_process
+        ums_server.state["placements"][model_id] = {
+            "placement_mode": "single-gpu",
+            "gpu_indices": [0],
+            "device_arg": "cuda:0",
+        }
+        ums_server.state["active_model"] = model_id
+        return model_id
+
+    plan = {
+        "requested_model_id": "qwen-14b-llm",
+        "role_key": "llm.default_chat",
+        "role_label": "default chat llm",
+        "primary_model_id": "qwen-14b-llm",
+        "fallback_model_id": "qwen-7b-llm",
+        "fallback_available": True,
+        "source": "registry_primary",
+        "warning": None,
+    }
+
+    with patch.object(ums_server, "_resolve_server_model_failover_plan", return_value=plan), patch.object(
+        ums_server,
+        "_start_server_once",
+        side_effect=fake_start_once,
+    ):
+        started_model_id = ums_server._start_server("qwen-14b-llm", ums_server.DeviceMode.HYBRID)
+
+    assert started_model_id == "qwen-7b-llm"
+    assert launch_calls == ["qwen-14b-llm", "qwen-7b-llm"]
+    assert ums_server.state["processes"]["qwen-7b-llm"] is fake_process
+    assert ums_server.state["last_fallback_event"]["requested_model_id"] == "qwen-14b-llm"
+    assert ums_server.state["last_fallback_event"]["fallback_model_id"] == "qwen-7b-llm"
+    assert ums_server.state["last_fallback_event"]["stage"] == "startup"
+
+
+def test_start_server_does_not_failover_on_http_429():
+    plan = {
+        "requested_model_id": "qwen-14b-llm",
+        "role_key": "llm.default_chat",
+        "role_label": "default chat llm",
+        "primary_model_id": "qwen-14b-llm",
+        "fallback_model_id": "qwen-7b-llm",
+        "fallback_available": True,
+        "source": "registry_primary",
+        "warning": None,
+    }
+
+    ums_server.state["last_fallback_event"] = None
+    with patch.object(ums_server, "_resolve_server_model_failover_plan", return_value=plan), patch.object(
+        ums_server,
+        "_start_server_once",
+        side_effect=ums_server.HTTPException(status_code=429, detail="busy"),
+    ):
+        with pytest.raises(ums_server.HTTPException) as exc_info:
+            ums_server._start_server("qwen-14b-llm", ums_server.DeviceMode.HYBRID)
+
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.detail == "busy"
+    assert ums_server.state["last_fallback_event"] is None
+
+
 @pytest.mark.asyncio
 async def test_infer_returns_429_when_llm_concurrency_is_saturated(monkeypatch):
     monkeypatch.setenv("UMS_FAIL_FAST_ON_SATURATION", "true")
@@ -1580,7 +1680,7 @@ async def test_non_stream_infer_proxies_to_vllm_with_auth_headers(monkeypatch):
     monkeypatch.setenv("VLLM_MODEL_ID_QWEN_14B_LLM", "qwen-remote")
     fake_client = _FakeVLLMAsyncClient(_FakeJSONResponse({"id": "cmpl-1"}), headers={"Authorization": "Bearer secret-token"})
 
-    with patch.object(ums_server, "_start_server") as mock_start, patch(
+    with patch.object(ums_server, "_start_server", return_value="qwen-14b-llm") as mock_start, patch(
         "services.model_manager.unified_model_server.httpx.AsyncClient",
         return_value=fake_client,
     ):
@@ -1608,7 +1708,7 @@ async def test_non_stream_infer_proxies_to_vllm_with_auth_headers(monkeypatch):
 async def test_non_stream_local_llama_infer_enables_cache_prompt_by_default():
     fake_client = _FakePostAsyncClient(_FakeJSONResponse({"id": "cmpl-1"}))
 
-    with patch.object(ums_server, "_start_server") as mock_start, patch(
+    with patch.object(ums_server, "_start_server", return_value="qwen-14b-llm") as mock_start, patch(
         "services.model_manager.unified_model_server.httpx.AsyncClient",
         return_value=fake_client,
     ):
@@ -1636,7 +1736,7 @@ async def test_non_stream_local_llama_infer_can_disable_cache_prompt(monkeypatch
     monkeypatch.setenv("UMS_LLAMA_CACHE_PROMPT", "false")
     fake_client = _FakePostAsyncClient(_FakeJSONResponse({"id": "cmpl-1"}))
 
-    with patch.object(ums_server, "_start_server") as mock_start, patch(
+    with patch.object(ums_server, "_start_server", return_value="qwen-14b-llm") as mock_start, patch(
         "services.model_manager.unified_model_server.httpx.AsyncClient",
         return_value=fake_client,
     ):
@@ -1660,7 +1760,7 @@ async def test_non_stream_chat_infer_uses_vllm_chat_completions(monkeypatch):
     monkeypatch.setenv("VLLM_MODEL_ID_QWEN_14B_LLM", "qwen-remote")
     fake_client = _FakeVLLMAsyncClient(_FakeJSONResponse({"id": "chatcmpl-1"}))
 
-    with patch.object(ums_server, "_start_server") as mock_start, patch(
+    with patch.object(ums_server, "_start_server", return_value="qwen-14b-llm") as mock_start, patch(
         "services.model_manager.unified_model_server.httpx.AsyncClient",
         return_value=fake_client,
     ):
@@ -1684,7 +1784,7 @@ async def test_non_stream_infer_does_not_mask_vllm_upstream_http_error(monkeypat
     monkeypatch.setenv("VLLM_BASE_URL", "http://vllm.local:8000")
     fake_client = _FakeVLLMAsyncClient(_FakeJSONResponse({"error": "unauthorized"}, status_code=401))
 
-    with patch.object(ums_server, "_start_server") as mock_start, patch(
+    with patch.object(ums_server, "_start_server", return_value="qwen-14b-llm") as mock_start, patch(
         "services.model_manager.unified_model_server.httpx.AsyncClient",
         return_value=fake_client,
     ):
@@ -1700,6 +1800,113 @@ async def test_non_stream_infer_does_not_mask_vllm_upstream_http_error(monkeypat
     mock_start.assert_called_once()
     assert exc_info.value.status_code == 500
     assert "status=401" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_non_stream_infer_falls_back_to_registry_model_when_primary_startup_fails(monkeypatch):
+    plan = {
+        "requested_model_id": "qwen-14b-llm",
+        "role_key": "llm.default_chat",
+        "role_label": "default chat llm",
+        "primary_model_id": "qwen-14b-llm",
+        "fallback_model_id": "qwen-7b-llm",
+        "fallback_available": True,
+        "source": "registry_primary",
+        "warning": None,
+    }
+    fake_client = _FakePostAsyncClient(_FakeJSONResponse({"choices": [{"text": "fallback response"}]}))
+
+    def fake_get_model_config(model_id):
+        if model_id == "qwen-14b-llm":
+            return {"type": "gguf", "path": "./models/gguf/qwen.gguf", "ctx_size": 8192, "gpu_layers": 0, "port": 8091}
+        if model_id == "qwen-7b-llm":
+            return {"type": "gguf", "path": "./models/gguf/qwen7b.gguf", "ctx_size": 4096, "gpu_layers": 0, "port": 8094}
+        return None
+
+    def fake_start_once(model_id, device_mode):
+        if model_id == "qwen-14b-llm":
+            raise RuntimeError("primary startup failed")
+        ums_server.state["processes"][model_id] = _FakeProcess(pid=555)
+        ums_server.state["placements"][model_id] = {"placement_mode": "single-gpu", "gpu_indices": [0]}
+        ums_server.state["active_model"] = model_id
+        return model_id
+
+    with patch.object(ums_server, "_resolve_server_model_failover_plan", return_value=plan), patch.object(
+        ums_server,
+        "_start_server_once",
+        side_effect=fake_start_once,
+    ), patch.object(ums_server, "get_model_config", side_effect=fake_get_model_config), patch(
+        "services.model_manager.unified_model_server.httpx.AsyncClient",
+        return_value=fake_client,
+    ):
+        response = await ums_server.infer(
+            ums_server.InferRequest(
+                model_id="qwen-14b-llm",
+                payload={"prompt": "hello"},
+                stream=False,
+            )
+        )
+
+    assert response["status"] == "success"
+    assert response["model"] == "qwen-7b-llm"
+    assert fake_client.calls[0]["url"] == "http://localhost:8094/v1/completions"
+    assert ums_server.state["last_fallback_event"]["stage"] == "infer"
+
+
+@pytest.mark.asyncio
+async def test_openai_embeddings_falls_back_to_registry_model_when_primary_startup_fails(monkeypatch):
+    plan = {
+        "requested_model_id": "labse-embedding",
+        "role_key": "legal.embedder",
+        "role_label": "legal comparison embedder",
+        "primary_model_id": "labse-embedding",
+        "fallback_model_id": "qwen3-embedding-0.6b",
+        "fallback_available": True,
+        "source": "registry_primary",
+        "warning": None,
+    }
+    fake_client = _FakePostAsyncClient(
+        _FakeJSONResponse({"data": [{"index": 0, "embedding": [0.1, 0.2]}], "model": "qwen3-embedding-0.6b"})
+    )
+
+    def fake_get_model_config(model_id):
+        if model_id == "labse-embedding":
+            return {"type": "st", "path": "./models/st/LaBSE", "port": 8093}
+        if model_id == "qwen3-embedding-0.6b":
+            return {"type": "st", "path": "./models/st/Qwen3-Embedding-0.6B", "port": 8094}
+        return None
+
+    def fake_start_once(model_id, device_mode):
+        if model_id == "labse-embedding":
+            raise RuntimeError("primary startup failed")
+        ums_server.state["processes"][model_id] = _FakeProcess(pid=556)
+        ums_server.state["placements"][model_id] = {
+            "placement_mode": "single-gpu",
+            "gpu_indices": [0],
+            "device_arg": "cuda:0",
+        }
+        ums_server.state["active_model"] = model_id
+        return model_id
+
+    with patch.object(ums_server, "_resolve_server_model_failover_plan", return_value=plan), patch.object(
+        ums_server,
+        "_start_server_once",
+        side_effect=fake_start_once,
+    ), patch.object(ums_server, "get_model_config", side_effect=fake_get_model_config), patch(
+        "services.model_manager.unified_model_server.httpx.AsyncClient",
+        return_value=fake_client,
+    ):
+        response = await ums_server.openai_embeddings(
+            ums_server.EmbeddingRequest(
+                input="test embedding",
+                model="labse-embedding",
+            )
+        )
+
+    assert response["model"] == "qwen3-embedding-0.6b"
+    assert fake_client.calls[0]["url"] == "http://localhost:8094/v1/embeddings"
+    assert fake_client.calls[0]["json"]["model"] == "qwen3-embedding-0.6b"
+    assert ums_server.state["last_fallback_event"]["stage"] == "embeddings"
 
 
 def test_ensure_vllm_backend_rejects_missing_served_model(monkeypatch):
