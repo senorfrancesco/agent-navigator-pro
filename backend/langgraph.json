@@ -1,0 +1,9 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "compare": "./orchestrator/workflows/compare.py:create_compare_graph",
+    "equipment": "./orchestrator/workflows/equipment.py:create_equipment_graph",
+    "document_analysis": "./orchestrator/workflows/document_analysis.py:create_analysis_graph"
+  },
+  "env": ".env"
+}
