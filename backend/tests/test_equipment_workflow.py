@@ -21,6 +21,7 @@ import pytest
 import tempfile
 import time
 import httpx
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Пути для импорта
@@ -62,6 +63,11 @@ from orchestrator.equipment_parsing import (
     score_document_role,
 )
 from services.observability import render_metrics_text, reset_observability_metrics
+
+
+FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "equipment_docs"
+COMMERCIAL_OFFER_DOCX = FIXTURES_DIR / "commercial_offer_sample.docx"
+SPECIFICATION_DOCX = FIXTURES_DIR / "specification_sample.docx"
 
 
 # ============================================================================
@@ -307,7 +313,7 @@ class TestParseTableRows:
 class TestDocxFallbackExtraction:
 
     def test_score_document_role_detects_offer_like_doc(self):
-        elements = load_docx_elements("all_logs/kp_tz_equip/КОММЕРЧЕСКОЕ ПРЕДЛОЖЕНИЕ.docx")
+        elements = load_docx_elements(str(COMMERCIAL_OFFER_DOCX))
 
         detection = score_document_role(elements)
 
@@ -315,7 +321,7 @@ class TestDocxFallbackExtraction:
         assert detection["feature_scores"]["offer"] > detection["feature_scores"]["specification"]
 
     def test_score_document_role_detects_specification_like_doc(self):
-        elements = load_docx_elements("all_logs/kp_tz_equip/2._KSU_1_4_24_tz-V2.docx")
+        elements = load_docx_elements(str(SPECIFICATION_DOCX))
 
         detection = score_document_role(elements)
 
@@ -416,7 +422,7 @@ class TestDocxFallbackExtraction:
         assert [item["name"] for item in items] == ["Ноутбук для разработчика", "Монитор 27 дюймов"]
 
     def test_extract_items_docx_fallback_returns_strategy_metadata(self):
-        items, metadata = extract_items_docx_fallback("all_logs/kp_tz_equip/КОММЕРЧЕСКОЕ ПРЕДЛОЖЕНИЕ.docx", [])
+        items, metadata = extract_items_docx_fallback(str(COMMERCIAL_OFFER_DOCX), [])
 
         assert len(items) == 3
         assert metadata["strategy_name"] == "offer_like"
