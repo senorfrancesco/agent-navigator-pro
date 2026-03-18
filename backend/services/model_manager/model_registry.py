@@ -70,12 +70,59 @@ def get_model_spec_by_id(model_id: str, *, env: Optional[Mapping[str, str]] = No
     raise KeyError(f"Unknown model id: {model_id}")
 
 
+def get_model_key_by_id(model_id: str, *, env: Optional[Mapping[str, str]] = None) -> str:
+    return str(get_model_spec_by_id(model_id, env=env).get("model_key") or "")
+
+
 def get_role_spec(role_key: str, *, env: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
     registry = get_model_registry(env=env)
     spec = registry.roles.get(role_key)
     if spec is None:
         raise KeyError(f"Unknown model role: {role_key}")
     return dict(spec)
+
+
+def get_roles_for_model_key(model_key: str, *, env: Optional[Mapping[str, str]] = None) -> Dict[str, Dict[str, Any]]:
+    registry = get_model_registry(env=env)
+    matches: Dict[str, Dict[str, Any]] = {}
+    for role_key, spec in registry.roles.items():
+        if str(spec.get("primary_model") or "") == model_key or str(spec.get("fallback_model") or "") == model_key:
+            matches[role_key] = dict(spec)
+    return matches
+
+
+def get_roles_for_model_id(model_id: str, *, env: Optional[Mapping[str, str]] = None) -> Dict[str, Dict[str, Any]]:
+    try:
+        model_key = get_model_key_by_id(model_id, env=env)
+    except KeyError:
+        return {}
+    return get_roles_for_model_key(model_key, env=env)
+
+
+def get_preferred_role_for_model_id(model_id: str, *, env: Optional[Mapping[str, str]] = None) -> Optional[str]:
+    registry = get_model_registry(env=env)
+    try:
+        model_key = get_model_key_by_id(model_id, env=env)
+    except KeyError:
+        return None
+    preferred_role = str(registry.runtime.get("default_active_heavy_role") or "").strip() or None
+    if preferred_role:
+        preferred_spec = registry.roles.get(preferred_role)
+        if preferred_spec and (
+            str(preferred_spec.get("primary_model") or "") == model_key
+            or str(preferred_spec.get("fallback_model") or "") == model_key
+        ):
+            return preferred_role
+
+    for role_key, spec in registry.roles.items():
+        if str(spec.get("primary_model") or "") == model_key:
+            return role_key
+
+    for role_key, spec in registry.roles.items():
+        if str(spec.get("fallback_model") or "") == model_key:
+            return role_key
+
+    return None
 
 
 def get_tier_spec(tier_name: str, *, env: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
