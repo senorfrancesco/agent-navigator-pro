@@ -83,6 +83,21 @@ from orchestrator.ui_control_plane import (
 
 logger = logging.getLogger("chainlit_app")
 
+CHAINLIT_UI_TEST_HOOKS = (
+    "login-form",
+    "login-submit",
+    "main-chat-input",
+    "upload-trigger",
+    "assistant-message-container",
+    "thread-list",
+    "current-thread-marker",
+    "report-download-link",
+)
+CHAINLIT_UI_TEST_HOOK_ASSETS = {
+    "custom_js": "/public/test-hooks.js",
+    "custom_css": "/public/test-hooks.css",
+}
+
 _DOC_QUESTION_UPLOAD_REQUEST_PHRASES = [
     "предоставьте тексты",
     "предоставьте текст",
@@ -96,6 +111,13 @@ _DOC_QUESTION_UPLOAD_REQUEST_PHRASES = [
 ]
 RAG_INDEX_CACHE_MAX = int(os.getenv("RAG_INDEX_CACHE_MAX", "8"))
 RAG_INDEX_CACHE_TTL_S = int(os.getenv("RAG_INDEX_CACHE_TTL_S", "1800"))
+
+
+def get_chainlit_ui_test_hook_contract() -> Dict[str, Any]:
+    return {
+        "assets": dict(CHAINLIT_UI_TEST_HOOK_ASSETS),
+        "hooks": list(CHAINLIT_UI_TEST_HOOKS),
+    }
 
 
 # === RAG Mode Helper ===

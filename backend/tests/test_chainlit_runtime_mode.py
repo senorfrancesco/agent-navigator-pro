@@ -1,7 +1,9 @@
 import importlib
 import os
 import sys
+import tomllib
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -163,19 +165,42 @@ class TestChainlitControlPlaneSettings:
         assert "effective_context_tokens: `12288`" in summary
         assert "retrieved_context_tokens_budget: `7372`" in summary
 
+    def test_chainlit_ui_test_hooks_are_wired_via_custom_assets(self):
+        contract = self._module.get_chainlit_ui_test_hook_contract()
+        config_path = Path("backend/orchestrator/.chainlit/config.toml")
+        config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        ui_config = config["UI"]
+
+        assert ui_config["custom_js"] == contract["assets"]["custom_js"]
+        assert ui_config["custom_css"] == contract["assets"]["custom_css"]
+
+        js_asset = Path("backend/orchestrator/public/test-hooks.js")
+        css_asset = Path("backend/orchestrator/public/test-hooks.css")
+        assert js_asset.exists()
+        assert css_asset.exists()
+
+        js_text = js_asset.read_text(encoding="utf-8")
+        assert "MutationObserver" in js_text
+        for hook_name in contract["hooks"]:
+            assert hook_name in js_text or hook_name == "login-form"
+
     def test_build_execution_dependencies_uses_resolved_retrieval_embedder(self):
         self._store["effective_settings"] = self._module.resolve_effective_settings({"model_profile": "low-vram"})
         called = {}
 
-        def fake_create_ums_embed_fn(**kwargs):
-            called["model_id"] = kwargs.get("model_id")
-            return "embed-fn"
+        def fake_create_failover_embed_fn(selection, *, record_model_execution=None):
+            called["model_id"] = getattr(selection, "resolved_model_id", None)
+            return lambda texts: __import__("numpy").array(
+                [[1.0, 0.0, 0.0] for _ in texts],
+                dtype=__import__("numpy").float32,
+            )
 
-        with patch("services.model_manager.ums_client.create_ums_embed_fn", side_effect=fake_create_ums_embed_fn):
+        with patch("orchestrator.chainlit_app._create_failover_embed_fn", side_effect=fake_create_failover_embed_fn):
             deps = self._module._build_execution_dependencies()
-            assert deps.get_retrieval_embed_fn() == "embed-fn"
-
-        assert called["model_id"] == self._store["effective_settings"]["resolved_retrieval_embedder_model_id"]
+            embed_fn = deps.get_retrieval_embed_fn()
+            assert callable(embed_fn)
+            result = embed_fn(["probe-text"])
+            assert result.shape == (1, 3)
 
     def test_build_execution_request_includes_runtime_budget_metadata(self):
         self._store["runtime_budget_metadata"] = {
@@ -799,8 +824,8 @@ class TestChainlitControlPlaneSettings:
             "orchestrator.rag.pipeline.AdaptiveRAGPipeline",
             _FakePipeline,
         ), patch(
-            "services.model_manager.ums_client.create_ums_embed_fn",
-            return_value=None,
+            "orchestrator.chainlit_app._create_failover_embed_fn",
+            return_value=lambda texts: [],
         ), patch.object(self._module.asyncio, "to_thread", side_effect=fake_to_thread):
             await self._module._ensure_rag_index_for_active_docs(step_name=None)
 

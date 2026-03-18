@@ -36,6 +36,8 @@ cot = "full"
 language = "ru-RU"
 logo_file_url = "/public/logo_dark.svg"
 default_avatar_file_url = "/public/avatar.svg"
+custom_css = "/public/test-hooks.css"
+custom_js = "/public/test-hooks.js"
 
 [UI.theme]
 default = "dark"
