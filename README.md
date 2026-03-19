@@ -17,6 +17,7 @@ graph TD
     classDef runtime fill:#334155,color:#ffffff,stroke:#1e293b,stroke-width:2px;
     classDef service fill:#c2410c,color:#ffffff,stroke:#9a3412,stroke-width:2px;
     classDef data fill:#64748b,color:#ffffff,stroke:#475569,stroke-width:2px;
+    classDef bridge fill:#1f2937,color:#e5e7eb,stroke:#475569,stroke-width:1.5px,stroke-dasharray: 4 3;
     classDef legacy fill:#f3f4f6,color:#111827,stroke:#94a3b8,stroke-width:2px,stroke-dasharray: 6 4;
 
     subgraph RUNTIME ["Runtime Path"]
@@ -48,23 +49,30 @@ graph TD
     end
 
     subgraph DATA ["Data Path"]
+        FILES["Uploads I/O"]
+        STATE["Workflow state"]
+        RAG["RAG KB"]
         UP["open_webui_uploads"]
         CHDB["Chainlit SQLite"]
         STDB["orchestrator_state.db"]
         KB["orchestrator_kb.db"]
 
         CL --> CHDB
-        CL --> UP
-        OW --> UP
-        CORE --> UP
-        CORE --> STDB
-        CORE --> KB
+        CL --> FILES
+        OW -. legacy uploads .-> FILES
+        CORE --> FILES
+        CORE --> STATE
+        CORE --> RAG
+        FILES --> UP
+        STATE --> STDB
+        RAG --> KB
     end
 
     class CL,USER ui;
     class AG,CORE,UMS,LLM,EMB,VLLM runtime;
     class DS,LS service;
     class UP,CHDB,STDB,KB data;
+    class FILES,STATE,RAG bridge;
     class OW legacy;
 ```
 
