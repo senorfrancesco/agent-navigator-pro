@@ -1357,6 +1357,31 @@ def _start_server_once(model_id: str, device_mode: DeviceMode):
         placement["port"] = assigned_port
         state.setdefault("admission", {})
 
+        if use_vllm_backend:
+            state["admission"][model_id] = {
+                "requested_device": str(device_mode),
+                "resolved_device": "remote",
+                "admission": "ready",
+                "warnings": [],
+            }
+            with _heavy_model_lifecycle_lock:
+                active_heavy = None
+                for pid in state["processes"]:
+                    p_config = get_model_config(pid)
+                    if p_config and p_config["type"] in ["gguf", "gguf-vl"]:
+                        active_heavy = pid
+                        break
+                if active_heavy and active_heavy != model_id:
+                    logger.info(f"Detaching {active_heavy} before activating remote vLLM model {model_id}")
+                    _stop_model(active_heavy)
+                _ensure_vllm_backend(model_id)
+                state["processes"][model_id] = _RemoteProcess()
+                vllm_placement = _build_vllm_placement(model_id, config)
+                vllm_placement["port"] = assigned_port
+                state["placements"][model_id] = vllm_placement
+                state["active_model"] = model_id
+                return model_id
+
         if is_heavy:
             token_budget = int((state.get("runtime_budget") or {}).get("effective_context_tokens") or config.get("ctx_size") or 4096)
             llm_admission = _resolve_llm_admission(
@@ -1402,25 +1427,6 @@ def _start_server_once(model_id: str, device_mode: DeviceMode):
                     "warnings": list(embed_admission.get("warnings") or []),
                 }
             )
-
-        if use_vllm_backend:
-            with _heavy_model_lifecycle_lock:
-                active_heavy = None
-                for pid in state["processes"]:
-                    p_config = get_model_config(pid)
-                    if p_config and p_config["type"] in ["gguf", "gguf-vl"]:
-                        active_heavy = pid
-                        break
-                if active_heavy and active_heavy != model_id:
-                    logger.info(f"Detaching {active_heavy} before activating remote vLLM model {model_id}")
-                    _stop_model(active_heavy)
-                _ensure_vllm_backend(model_id)
-                state["processes"][model_id] = _RemoteProcess()
-                vllm_placement = _build_vllm_placement(model_id, config)
-                vllm_placement["port"] = assigned_port
-                state["placements"][model_id] = vllm_placement
-                state["active_model"] = model_id
-                return model_id
 
         if is_heavy:
             with _heavy_model_lifecycle_lock:
@@ -1558,6 +1564,24 @@ def _start_server_once(model_id: str, device_mode: DeviceMode):
 
 def _start_server(model_id: str, device_mode: DeviceMode, *, stage: str = "startup") -> str:
     return _start_server_with_failover(model_id, device_mode, stage=stage)
+
+
+def _build_infer_readiness_payload(
+    *,
+    requested_model_id: str,
+    infer_ready: bool,
+    ready_model_id: Optional[str] = None,
+    reason: str = "ok",
+) -> Dict[str, Any]:
+    return {
+        "status": "ready" if infer_ready else ("unavailable" if reason == "model_not_found" else "starting"),
+        "infer_ready": infer_ready,
+        "requested_model_id": requested_model_id,
+        "ready_model_id": ready_model_id,
+        "backend_mode": _resolve_backend_mode(),
+        "fallback_used": bool(ready_model_id and ready_model_id != requested_model_id),
+        "reason": reason,
+    }
 
 # === API ===
 
@@ -2216,6 +2240,49 @@ async def get_status():
         "context_budget_ratio": runtime_budget["context_budget_ratio"],
         "concurrency_policy": concurrency_policy,
     }
+
+
+@app.get("/ready/infer")
+async def ready_infer(model_id: Optional[str] = None):
+    requested_model_id = str(model_id or _default_heavy_model_id())
+    config = get_model_config(requested_model_id)
+    if not config:
+        raise HTTPException(
+            status_code=404,
+            detail=_build_infer_readiness_payload(
+                requested_model_id=requested_model_id,
+                infer_ready=False,
+                reason="model_not_found",
+            ),
+        )
+
+    try:
+        ready_model_id = await asyncio.to_thread(
+            _start_server,
+            requested_model_id,
+            state["device_mode"],
+            stage="readiness",
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        return PlainTextResponse(
+            content=json.dumps(
+                _build_infer_readiness_payload(
+                    requested_model_id=requested_model_id,
+                    infer_ready=False,
+                    reason=str(exc),
+                )
+            ),
+            media_type="application/json",
+            status_code=503,
+        )
+
+    return _build_infer_readiness_payload(
+        requested_model_id=requested_model_id,
+        ready_model_id=ready_model_id,
+        infer_ready=True,
+    )
 
 @app.post("/v1/embeddings")
 async def openai_embeddings(request: EmbeddingRequest):

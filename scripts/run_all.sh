@@ -129,6 +129,8 @@ COMPOSE_PROFILE_ARGS=("--profile" "backend")
 COMPOSE_LOG_TARGETS=("agent-api" "document-server" "legal-server" "ums" "chainlit")
 COMPOSE_PROFILE_TEXT="--profile backend"
 COMPOSE_SERVICES_TEXT="agent-api document-server legal-server ums chainlit"
+PHASE1_SERVICES=("document-server" "legal-server" "ums")
+PHASE2_SERVICES=("agent-api" "chainlit")
 VLLM_PORT="${VLLM_PORT:-8101}"
 VLLM_SERVED_MODEL_ID="${VLLM_MODEL_ID_QWEN_14B_LLM:-qwen-14b-llm}"
 
@@ -138,10 +140,11 @@ if [ "$BACKEND_MODE_RESOLVED" = "vllm" ]; then
     COMPOSE_LOG_TARGETS=("agent-api" "document-server" "legal-server" "ums" "chainlit" "vllm")
     COMPOSE_PROFILE_TEXT="--profile backend --profile vllm"
     COMPOSE_SERVICES_TEXT="agent-api document-server legal-server ums chainlit vllm"
+    PHASE1_SERVICES=("document-server" "legal-server" "ums" "vllm")
 fi
 
 if [ "${AGENT_NAVIGATOR_TEST_MODE:-0}" = "1" ]; then
-    echo "run_all:test-mode backend_mode=$BACKEND_MODE_RESOLVED compose_profiles=$COMPOSE_PROFILE_TEXT compose_services=$COMPOSE_SERVICES_TEXT attach_tmux=$ATTACH_TMUX"
+    echo "run_all:test-mode backend_mode=$BACKEND_MODE_RESOLVED compose_profiles=$COMPOSE_PROFILE_TEXT phase1_services=${PHASE1_SERVICES[*]} phase2_services=${PHASE2_SERVICES[*]} attach_tmux=$ATTACH_TMUX"
     exit 0
 fi
 
@@ -232,6 +235,25 @@ wait_for_model() {
     return 0
 }
 
+wait_for_infer_ready() {
+    local timeout="${1:-180}"
+    local elapsed=0
+
+    printf "  %-20s " "UMS infer-ready"
+    while [ $elapsed -lt $timeout ]; do
+        local http_code
+        http_code=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$UMS_PORT/ready/infer" 2>/dev/null || true)
+        if [ "$http_code" = "200" ]; then
+            echo -e "${GREEN}✓ готов${NC}"
+            return 0
+        fi
+        sleep 3
+        elapsed=$((elapsed + 3))
+    done
+    echo -e "${RED}✗ таймаут (${timeout}с)${NC}"
+    return 1
+}
+
 start_tmux_window() {
     local window_name="$1"
     local command="$2"
@@ -266,8 +288,8 @@ SERVICES_OK=true
 
 echo -e "${GREEN}Запуск backend services через Docker Compose...${NC}"
 COMPOSE_ENV_PREFIX="CHAINLIT_UMS_URL=http://ums:$UMS_PORT CHAINLIT_DOC_SERVER_URL=http://document-server:$DOC_PORT CHAINLIT_LEGAL_SERVER_URL=http://legal-server:$LEGAL_PORT CHAINLIT_MCP_DOCUMENT_SERVER_URL=http://document-server:$DOC_PORT CHAINLIT_MCP_LEGAL_SERVER_URL=http://legal-server:$LEGAL_PORT"
-CHAINLIT_COMPOSE_CMD="cd $PROJECT_ROOT && env $COMPOSE_ENV_PREFIX docker compose ${COMPOSE_PROFILE_ARGS[*]} up -d ${COMPOSE_LOG_TARGETS[*]} && env $COMPOSE_ENV_PREFIX docker compose ${COMPOSE_PROFILE_ARGS[*]} logs -f ${COMPOSE_LOG_TARGETS[*]}"
-start_tmux_window "backend-compose" "$CHAINLIT_COMPOSE_CMD"
+cd "$PROJECT_ROOT"
+env $COMPOSE_ENV_PREFIX docker compose "${COMPOSE_PROFILE_ARGS[@]}" up -d "${PHASE1_SERVICES[@]}"
 
 # 1) Document Server
 wait_for_service "Document Server" "$DOC_PORT" "/health" 60 || SERVICES_OK=false
@@ -282,14 +304,31 @@ echo ""
 echo -e "${YELLOW}Ожидание загрузки модели Qwen LLM (до 3 мин)...${NC}"
 wait_for_model 180 || SERVICES_OK=false
 
-# 4) Agent API
-wait_for_service "Agent API" "$AGENT_PORT" "/health" 30 || SERVICES_OK=false
-
-# 5) Chainlit UI (Docker)
-if [ "$VLLM_ENABLED" = true ]; then
-    wait_for_service "vLLM" "$VLLM_PORT" "/health" 180 || SERVICES_OK=false
+echo ""
+echo -e "${YELLOW}Проверка готовности UMS к первому infer (до 3 мин)...${NC}"
+UMS_INFER_READY=true
+wait_for_infer_ready 180 || UMS_INFER_READY=false
+if [ "$UMS_INFER_READY" = false ]; then
+    SERVICES_OK=false
 fi
-wait_for_service "Chainlit UI" "$CHAINLIT_PORT" "/" 60 || SERVICES_OK=false
+
+if [ "$UMS_INFER_READY" = true ]; then
+    env $COMPOSE_ENV_PREFIX docker compose "${COMPOSE_PROFILE_ARGS[@]}" up -d "${PHASE2_SERVICES[@]}"
+
+    # 4) Agent API
+    wait_for_service "Agent API" "$AGENT_PORT" "/health" 30 || SERVICES_OK=false
+
+    # 5) Chainlit UI (Docker)
+    if [ "$VLLM_ENABLED" = true ]; then
+        wait_for_service "vLLM" "$VLLM_PORT" "/health" 180 || SERVICES_OK=false
+    fi
+    wait_for_service "Chainlit UI" "$CHAINLIT_PORT" "/" 60 || SERVICES_OK=false
+else
+    echo -e "${YELLOW}Пропуск запуска Agent API и Chainlit: UMS infer-ready не подтвержден.${NC}"
+fi
+
+CHAINLIT_COMPOSE_CMD="cd $PROJECT_ROOT && env $COMPOSE_ENV_PREFIX docker compose ${COMPOSE_PROFILE_ARGS[*]} logs -f ${COMPOSE_LOG_TARGETS[*]}"
+start_tmux_window "backend-compose" "$CHAINLIT_COMPOSE_CMD"
 
 # 6) Monitor/Logs
 echo -e "${GREEN}Открытие окна мониторинга...${NC}"

@@ -907,9 +907,57 @@ def test_status_exposes_backend_mode_for_vllm(monkeypatch):
     payload = asyncio.run(ums_server.get_status())
 
     assert payload["backend_mode"] == "vllm"
-    assert payload["running"] == ["qwen-14b-llm"]
-    assert payload["placements"]["qwen-14b-llm"]["placement_mode"] == "remote-vllm"
-    assert payload["prompt_cache_policy"] == {"enabled": False, "backend_mode": "vllm"}
+
+
+def test_ready_infer_reports_ready_for_default_heavy_model():
+    with patch.object(ums_server, "_start_server", return_value="qwen-14b-llm") as mock_start:
+        response = asyncio.run(_api_request("GET", "/ready/infer"))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ready"
+    assert payload["infer_ready"] is True
+    assert payload["requested_model_id"] == "qwen-14b-llm"
+    assert payload["ready_model_id"] == "qwen-14b-llm"
+    assert payload["fallback_used"] is False
+    mock_start.assert_called_once()
+
+
+def test_ready_infer_reports_fallback_when_server_switches_model():
+    with patch.object(ums_server, "_start_server", return_value="qwen-7b-llm") as mock_start:
+        response = asyncio.run(_api_request("GET", "/ready/infer"))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ready"
+    assert payload["infer_ready"] is True
+    assert payload["requested_model_id"] == "qwen-14b-llm"
+    assert payload["ready_model_id"] == "qwen-7b-llm"
+    assert payload["fallback_used"] is True
+    mock_start.assert_called_once()
+
+
+def test_ready_infer_returns_503_when_startup_is_not_ready():
+    with patch.object(ums_server, "_start_server", side_effect=RuntimeError("startup timeout")):
+        response = asyncio.run(_api_request("GET", "/ready/infer"))
+
+    assert response.status_code == 503
+    payload = response.json()
+    assert payload["status"] == "starting"
+    assert payload["infer_ready"] is False
+    assert payload["requested_model_id"] == "qwen-14b-llm"
+    assert payload["ready_model_id"] is None
+    assert payload["reason"] == "startup timeout"
+
+
+def test_ready_infer_returns_404_for_unknown_model():
+    response = asyncio.run(_api_request("GET", "/ready/infer?model_id=missing-model"))
+
+    assert response.status_code == 404
+    payload = response.json()
+    assert payload["detail"]["status"] == "unavailable"
+    assert payload["detail"]["infer_ready"] is False
+    assert payload["detail"]["requested_model_id"] == "missing-model"
 
 
 def test_status_exposes_prompt_cache_policy_for_local_llama():

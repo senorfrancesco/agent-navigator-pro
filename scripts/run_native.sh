@@ -339,6 +339,24 @@ wait_for_model() {
   return 0
 }
 
+wait_for_infer_ready() {
+  local timeout="${1:-180}"
+  local elapsed=0
+  printf "  %-20s " "UMS infer-ready"
+  while [ $elapsed -lt $timeout ]; do
+    local http_code
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$UMS_PORT/ready/infer" 2>/dev/null || true)
+    if [ "$http_code" = "200" ]; then
+      echo -e "${GREEN}✓ готов${NC}"
+      return 0
+    fi
+    sleep 3
+    elapsed=$((elapsed + 3))
+  done
+  echo -e "${RED}✗ таймаут (${timeout}с)${NC}"
+  return 1
+}
+
 start_tmux_window() {
   local window_name="$1"
   local command="$2"
@@ -383,15 +401,27 @@ echo ""
 echo -e "${YELLOW}Ожидание загрузки модели Qwen LLM (до 3 мин)...${NC}"
 wait_for_model 180 || SERVICES_OK=false
 
-# 4) Agent API
-echo -e "${GREEN}Запуск Agent API на порту $AGENT_PORT...${NC}"
-start_tmux_window "agent-api" "cd $BACKEND_DIR/orchestrator && $ACTIVATE_CMD && export MCP_DOCUMENT_SERVER_URL='$MCP_DOCUMENT_SERVER_URL' MCP_LEGAL_SERVER_URL='$MCP_LEGAL_SERVER_URL' UMS_URL='$UMS_URL' UPLOADS_DIR='$UPLOADS_DIR' HOST_UPLOADS_DIR='$HOST_UPLOADS_DIR' CHAINLIT_DB_URL='$CHAINLIT_DB_URL' && python agent_api.py 2>&1 | tee agent-api.log"
-wait_for_service "Agent API" "$AGENT_PORT" "/health" 30 || SERVICES_OK=false
+echo ""
+echo -e "${YELLOW}Проверка готовности UMS к первому infer (до 3 мин)...${NC}"
+UMS_INFER_READY=true
+wait_for_infer_ready 180 || UMS_INFER_READY=false
+if [ "$UMS_INFER_READY" = false ]; then
+  SERVICES_OK=false
+fi
 
-# 5) Chainlit (native)
-echo -e "${GREEN}Запуск Chainlit (native) на порту $CHAINLIT_PORT...${NC}"
-start_tmux_window "chainlit" "cd $BACKEND_DIR/orchestrator && $ACTIVATE_CMD && export MCP_DOCUMENT_SERVER_URL='$MCP_DOCUMENT_SERVER_URL' MCP_LEGAL_SERVER_URL='$MCP_LEGAL_SERVER_URL' UMS_URL='$UMS_URL' UPLOADS_DIR='$UPLOADS_DIR' HOST_UPLOADS_DIR='$HOST_UPLOADS_DIR' CHAINLIT_DB_URL='$CHAINLIT_DB_URL' CHAINLIT_ENABLE_DATA_LAYER='$CHAINLIT_ENABLE_DATA_LAYER' && chainlit run chainlit_app.py --host 0.0.0.0 --port $CHAINLIT_PORT 2>&1 | tee chainlit.log"
-wait_for_service "Chainlit UI" "$CHAINLIT_PORT" "/" 60 || SERVICES_OK=false
+# 4) Agent API
+if [ "$UMS_INFER_READY" = true ]; then
+  echo -e "${GREEN}Запуск Agent API на порту $AGENT_PORT...${NC}"
+  start_tmux_window "agent-api" "cd $BACKEND_DIR/orchestrator && $ACTIVATE_CMD && export MCP_DOCUMENT_SERVER_URL='$MCP_DOCUMENT_SERVER_URL' MCP_LEGAL_SERVER_URL='$MCP_LEGAL_SERVER_URL' UMS_URL='$UMS_URL' UPLOADS_DIR='$UPLOADS_DIR' HOST_UPLOADS_DIR='$HOST_UPLOADS_DIR' CHAINLIT_DB_URL='$CHAINLIT_DB_URL' && python agent_api.py 2>&1 | tee agent-api.log"
+  wait_for_service "Agent API" "$AGENT_PORT" "/health" 30 || SERVICES_OK=false
+
+  # 5) Chainlit (native)
+  echo -e "${GREEN}Запуск Chainlit (native) на порту $CHAINLIT_PORT...${NC}"
+  start_tmux_window "chainlit" "cd $BACKEND_DIR/orchestrator && $ACTIVATE_CMD && export MCP_DOCUMENT_SERVER_URL='$MCP_DOCUMENT_SERVER_URL' MCP_LEGAL_SERVER_URL='$MCP_LEGAL_SERVER_URL' UMS_URL='$UMS_URL' UPLOADS_DIR='$UPLOADS_DIR' HOST_UPLOADS_DIR='$HOST_UPLOADS_DIR' CHAINLIT_DB_URL='$CHAINLIT_DB_URL' CHAINLIT_ENABLE_DATA_LAYER='$CHAINLIT_ENABLE_DATA_LAYER' && chainlit run chainlit_app.py --host 0.0.0.0 --port $CHAINLIT_PORT 2>&1 | tee chainlit.log"
+  wait_for_service "Chainlit UI" "$CHAINLIT_PORT" "/" 60 || SERVICES_OK=false
+else
+  echo -e "${YELLOW}Пропуск запуска Agent API и Chainlit: UMS infer-ready не подтвержден.${NC}"
+fi
 
 # 6) Monitor
 start_tmux_window "monitor" "cd $BACKEND_DIR && echo 'Native mode: logs in tmux windows' && (htop 2>/dev/null || top)"

@@ -1676,22 +1676,24 @@ DOCUMENT_ANALYSIS_SUMMARIZE_MAX_TOKENS=512
   - `last_fallback_event` либо честно показывается в operator-facing surface, либо явно остаётся только debug/status artifact;
   - backlog больше не содержит note-блок без статуса вместо нормальной задачи.
 
-### Future Task — B3.50: Infer-ready readiness gate после preload/fallback
+### B3.50 — Infer-ready readiness gate после preload/fallback
 
-- [ ] **B3.50 — Добавить readiness gate уровня `UMS infer-ready`, а не только `/health`/`/status`**
+- [x] **B3.50 — Добавить readiness gate уровня `UMS infer-ready`, а не только `/health`/`/status`**
   Контекст:
   - после launcher/preflight cleanup container/native orchestration всё ещё в основном ждёт `/status` и `/health`;
   - этого недостаточно для cold-start GPU path, если heavy runtime ещё не готов к первому реальному `POST /infer` после preload/fallback;
   - в таком окне возможен race: UI уже считает систему поднятой, а первый inference ещё не готов обслуживаться.
-  Что нужно сделать:
-  - определить отдельный readiness contract уровня `infer-ready` для heavy model path;
-  - отделить `process is up` от `runtime can actually serve first infer`;
-  - встроить этот gate в launcher/runtime startup path без возврата к ad-hoc sleep/retry;
-  - зафиксировать, как readiness ведёт себя после preload, degraded startup и fallback-switch.
-  Acceptance:
-  - launcher/runtime не объявляет heavy path готовым только по `/health`/`/status`, если первый inference ещё не обслуживается;
-  - cold-start race между UI и первым infer локализован и покрыт тестом;
-  - readiness semantics одинаково понятны для native/container path.
+  Что было сделано:
+  - добавлен `GET /ready/infer` в `UMS` как отдельный readiness contract для heavy inference path;
+  - `run_native.sh` теперь ждёт `infer-ready` и не стартует `agent-api` / `chainlit`, если heavy path не подтверждён;
+  - `run_all.sh` переведён на двухфазный startup:
+    - phase 1: `document-server`, `legal-server`, `ums` и `vllm` при необходимости;
+    - phase 2: `agent-api`, `chainlit` только после `infer-ready`;
+  - readiness покрыт unit/regression тестами для `UMS` и launcher path.
+  Verification:
+  - `pytest backend/tests/test_unified_model_server_startup.py backend/tests/test_runtime_launcher.py -q`
+  - `bash -n scripts/run_all.sh scripts/run_native.sh`
+  - `python -m py_compile backend/services/model_manager/unified_model_server.py`
 
 ### 2026-03-18 — B3.41: SQLite autoCollapse — причина и диагноз
 

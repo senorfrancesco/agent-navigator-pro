@@ -572,7 +572,8 @@ def test_run_all_from_launcher_enables_vllm_compose_profile(tmp_path):
     assert result.returncode == 0
     assert "run_all:test-mode backend_mode=vllm" in result.stdout
     assert "compose_profiles=--profile backend --profile vllm" in result.stdout
-    assert "compose_services=agent-api document-server legal-server ums chainlit vllm" in result.stdout
+    assert "phase1_services=document-server legal-server ums vllm" in result.stdout
+    assert "phase2_services=agent-api chainlit" in result.stdout
 
 
 def test_run_all_from_launcher_keeps_chainlit_only_for_local_backend(tmp_path):
@@ -587,7 +588,8 @@ def test_run_all_from_launcher_keeps_chainlit_only_for_local_backend(tmp_path):
     assert result.returncode == 0
     assert "run_all:test-mode backend_mode=llama-server" in result.stdout
     assert "compose_profiles=--profile backend" in result.stdout
-    assert "compose_services=agent-api document-server legal-server ums chainlit" in result.stdout
+    assert "phase1_services=document-server legal-server ums" in result.stdout
+    assert "phase2_services=agent-api chainlit" in result.stdout
 
 
 def test_install_mode_uses_installer_coordinator(tmp_path):
@@ -816,10 +818,19 @@ def test_start_system_test_contains_executable_tmux_commands():
     assert '\ntmux new-window -t "$SESSION_NAME" -n "ums"\n' in start_system_test
 
 
-def test_run_all_wait_for_model_tolerates_unready_status_endpoint():
+def test_run_all_waits_for_infer_ready_endpoint():
     run_all = (SCRIPTS_DIR / "run_all.sh").read_text(encoding="utf-8")
 
-    assert 'status=$(curl -sf "http://localhost:$UMS_PORT/status" 2>/dev/null || true)' in run_all
+    assert "/ready/infer" in run_all
+    assert "wait_for_infer_ready" in run_all
+
+
+def test_run_native_waits_for_infer_ready_before_starting_ui():
+    run_native = (SCRIPTS_DIR / "run_native.sh").read_text(encoding="utf-8")
+
+    assert "wait_for_infer_ready" in run_native
+    assert "/ready/infer" in run_native
+    assert 'echo -e "${YELLOW}Пропуск запуска Agent API и Chainlit: UMS infer-ready не подтвержден.${NC}"' in run_native
 
 
 def test_stop_scripts_kill_detached_runtime_process_patterns():
