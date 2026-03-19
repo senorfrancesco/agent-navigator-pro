@@ -1307,7 +1307,29 @@ async def _execute_compare(
             "degraded": bool(summary_metadata.get("degraded")),
             "completed_stages": list(summary_metadata.get("completed_stages") or []),
             "final_synthesis_status": str(summary_metadata.get("final_synthesis_status") or "unknown"),
+            "reduce_strategy": str(summary_metadata.get("reduce_strategy") or "single_item"),
+            "reduce_reason": str(summary_metadata.get("reduce_reason") or "not_needed"),
+            "reduce_levels_used": int(summary_metadata.get("reduce_levels_used", 0) or 0),
+            "reduce_groups_total": int(summary_metadata.get("reduce_groups_total", 0) or 0),
+            "fast_path_eligible": bool(summary_metadata.get("fast_path_eligible")),
+            "reduce_decisions": copy.deepcopy(summary_metadata.get("reduce_decisions") or []),
+            "early_exit_after_level": summary_metadata.get("early_exit_after_level"),
         }
+        for key in (
+            "executed_strategy",
+            "recommended_strategy",
+            "shadow_baseline_strategy",
+            "would_skip_levels",
+            "estimated_token_saving",
+            "final_admission_estimated_tokens",
+            "final_prompt_tokens_est",
+            "group_prompt_tokens_est",
+            "final_admission_budget_tokens",
+            "final_admission_reserve_tokens",
+            "final_admission_margin_tokens",
+        ):
+            if key in summary_metadata:
+                execution_metadata[key] = summary_metadata.get(key)
         if summary_metadata.get("degraded_reason"):
             execution_metadata["reason"] = str(summary_metadata.get("degraded_reason"))
         if summary_metadata.get("degraded_stage"):
@@ -1578,6 +1600,18 @@ async def _execute_documents_summary(
                 "reason": "not_needed",
                 "levels_used": 0,
                 "groups_total": 0,
+                "reduce_items_count": 1,
+                "early_exit_after_level": 0,
+                "reduce_decisions": [
+                    {
+                        "items_count": 1,
+                        "chars": len(chunk_summaries[0]),
+                        "tokens_est": _estimate_prompt_tokens(chunk_summaries[0]),
+                        "strategy_selected": "single_item",
+                        "reason": "not_needed",
+                        "early_exit_after_level": 0,
+                    }
+                ],
             }
             if shadow_mode_enabled:
                 single_item_event.update(
@@ -1679,6 +1713,8 @@ async def _execute_documents_summary(
                 )
                 current_admission_snapshot = dict(strategy_meta.get("admission_snapshot") or admission_snapshot)
                 current_reduce_reason = str(strategy_meta["reason"])
+                current_reduce_decisions = copy.deepcopy(strategy_meta.get("reduce_decisions") or [])
+                current_early_exit_after_level = strategy_meta.get("early_exit_after_level")
                 shadow_trace = None
                 if shadow_mode_enabled:
                     shadow_trace = _build_summary_shadow_trace(
@@ -1731,6 +1767,9 @@ async def _execute_documents_summary(
                             "groups_total": 0,
                             "admission_snapshot": dict(current_admission_snapshot),
                             "fast_path_eligible": bool(strategy_meta.get("fast_path_eligible")),
+                            "reduce_items_count": len(reduce_items),
+                            "early_exit_after_level": current_early_exit_after_level,
+                            "reduce_decisions": current_reduce_decisions,
                             **(
                                 {
                                     "executed_strategy": "fast_final_merge",
@@ -1812,6 +1851,9 @@ async def _execute_documents_summary(
                     "groups_total": reduce_groups_total,
                     "admission_snapshot": dict(current_admission_snapshot),
                     "fast_path_eligible": bool(strategy_meta.get("fast_path_eligible")),
+                    "reduce_items_count": len(chunk_summaries),
+                    "early_exit_after_level": strategy_meta.get("early_exit_after_level"),
+                    "reduce_decisions": copy.deepcopy(strategy_meta.get("reduce_decisions") or []),
                 }
                 if shadow_mode_enabled:
                     hierarchical_event.update(
@@ -1880,6 +1922,9 @@ async def _execute_documents_summary(
                     "groups_total": reduce_groups_total,
                     "admission_snapshot": dict(current_admission_snapshot),
                     "fast_path_eligible": False,
+                    "reduce_items_count": len(chunk_summaries),
+                    "early_exit_after_level": None,
+                    "reduce_decisions": copy.deepcopy(strategy_meta.get("reduce_decisions") or []),
                 }
             )
             await deps.update_progress_box(
@@ -1964,6 +2009,10 @@ async def _execute_documents_summary(
         "reduce_levels_used": int(primary_reduce_event.get("levels_used", 0) or 0),
         "reduce_groups_total": int(primary_reduce_event.get("groups_total", 0) or 0),
         "fast_path_eligible": bool(primary_reduce_event.get("fast_path_eligible")),
+        "reduce_decisions": copy.deepcopy(
+            reduce_decisions if shadow_mode_enabled else (primary_reduce_event.get("reduce_decisions") or reduce_decisions)
+        ),
+        "early_exit_after_level": primary_reduce_event.get("early_exit_after_level"),
     }
     if shadow_mode_enabled:
         execution_metadata.update(
@@ -1980,7 +2029,6 @@ async def _execute_documents_summary(
                 ),
                 "would_skip_levels": int(primary_reduce_event.get("would_skip_levels", 0) or 0),
                 "estimated_token_saving": int(primary_reduce_event.get("estimated_token_saving", 0) or 0),
-                "reduce_decisions": copy.deepcopy(reduce_decisions),
             }
         )
     admission_snapshot = dict(primary_reduce_event.get("admission_snapshot") or {})

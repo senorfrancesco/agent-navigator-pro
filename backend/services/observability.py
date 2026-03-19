@@ -31,6 +31,8 @@ _METRIC_HELP = {
     "agent_nav_ums_concurrency_saturation_total": "UMS requests rejected because concurrency policy was saturated.",
     "agent_nav_equipment_fallback_total": "Equipment workflow fallback and degraded-path activations by stage and reason.",
     "agent_nav_fallback_events_total": "Fallback and degraded-path runtime events by component and fallback type.",
+    "agent_nav_summary_strategy_total": "Adaptive summary reduce strategy selections by component, strategy, and reason.",
+    "agent_nav_summary_strategy_shadow_diff_total": "Shadow-mode summary strategy diffs between executed and baseline paths.",
 }
 
 _METRIC_TYPE = {
@@ -44,6 +46,8 @@ _METRIC_TYPE = {
     "agent_nav_ums_concurrency_saturation_total": "counter",
     "agent_nav_equipment_fallback_total": "counter",
     "agent_nav_fallback_events_total": "counter",
+    "agent_nav_summary_strategy_total": "counter",
+    "agent_nav_summary_strategy_shadow_diff_total": "counter",
 }
 
 

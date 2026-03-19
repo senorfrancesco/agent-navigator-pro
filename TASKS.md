@@ -1245,7 +1245,7 @@
 
 ### H10 — Adaptive merge policy для documents_summary / document_analysis (B3.48)
 
-- [ ] **B3.48 — Убрать безусловную многоуровневую group-merge редукцию там, где она не нужна**
+- [x] **B3.48 — Убрать безусловную многоуровневую group-merge редукцию там, где она не нужна**
   Контекст: текущая hierarchical synthesis (`group_merge L1/L2/L3`) решает проблему oversized final merge и weak-hardware stability, но на мощных машинах и/или при умеренном размере документа может добавлять лишние LLM-вызовы и заметно увеличивать tail latency. Сейчас reduce path слишком консервативен: grouped merge используется как default strategy вместо adaptive policy по admission/budget.
   Что сделать:
   - Для `documents_summary` и `document_analysis` ввести adaptive reduce policy:
@@ -1290,7 +1290,7 @@
     - weak-PC policy сохраняет bounded hierarchical path;
     - metadata/logs отражают выбранную reduce strategy
 
-- [ ] **B3.48a — Добавить admission hysteresis / safety margin для fast final merge**
+- [x] **B3.48a — Добавить admission hysteresis / safety margin для fast final merge**
   Контекст: после базовой реализации `B3.48` fast-path всё ещё может флапать на пограничных payload, потому что решение принимается слишком близко к budget limit. Нужен небольшой запас, чтобы `fast_final_merge` не включался в near-limit cases и не срывался затем в retry/degraded branch.
   Что сделать:
   - Ввести `reserve_tokens` и/или `reserve_ratio` для final admission
@@ -1307,7 +1307,7 @@
   - `pytest backend/tests/test_execution_runtime.py backend/tests/test_document_analysis.py -q`
   - Добавить tests на near-limit payload, где без margin был бы fast path, а с margin остаётся hierarchy
 
-- [ ] **B3.48b — Перевести reduce admission на token-first contract**
+- [x] **B3.48b — Перевести reduce admission на token-first contract**
   Контекст: текущая policy всё ещё частично опирается на char caps как на decision primitive. Это дешёвый precheck, но authoritative admission должен жить вокруг estimated tokens и реального prompt budget.
   Что сделать:
   - Оставить `chars` только как cheap precheck / observability field
@@ -1325,7 +1325,7 @@
   - `pytest backend/tests/test_execution_runtime.py backend/tests/test_document_analysis.py -q`
   - Добавить tests на cases, где char count misleading, но token estimate даёт правильное решение
 
-- [ ] **B3.48c — Добавить quality regression contour для adaptive reduce policy**
+- [x] **B3.48c — Добавить quality regression contour для adaptive reduce policy**
   Контекст: `B3.48` оптимизирует control flow и latency, но этого недостаточно без проверки качества итоговой сводки. Нужно подтвердить, что fast-path не ухудшает coverage/completeness относительно старого collapse-heavy path.
   Что сделать:
   - Собрать маленький golden corpus:
@@ -1349,7 +1349,7 @@
   - добавить отдельный eval/smoke contour для golden corpus
   - задокументировать baseline-vs-adaptive comparison procedure
 
-- [ ] **B3.48d — Добавить shadow decision mode для rollout-аналитики**
+- [x] **B3.48d — Добавить shadow decision mode для rollout-аналитики**
   Контекст: после `B3.48` полезно временно иметь режим, где исполняется текущая ветка, но новая strategy recommendation считается параллельно и логирует расхождения. Это нужно для безопасного анализа реальных traffic patterns до более агрессивного rollout fast-path.
   Что сделать:
   - Флаг `SUMMARY_REDUCE_STRATEGY_SHADOW_MODE`

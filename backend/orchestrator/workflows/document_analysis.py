@@ -10,6 +10,7 @@ Map-reduce суммаризация с адаптивным промптом п�
 """
 
 import asyncio
+import copy
 import glob as glob_mod
 import inspect
 import json
@@ -390,6 +391,7 @@ def _init_summary_metadata() -> Dict[str, Any]:
         "final_admission_reserve_tokens": 0,
         "final_admission_margin_tokens": 0,
         "reduce_decisions": [],
+        "early_exit_after_level": None,
     }
 
 
@@ -857,6 +859,18 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
             summary_metadata["would_skip_levels"] = int(single_trace["would_skip_levels"])
             summary_metadata["estimated_token_saving"] = int(single_trace["estimated_token_saving"])
             summary_metadata["reduce_decisions"] = [single_trace]
+        else:
+            summary_metadata["reduce_decisions"] = [
+                {
+                    "items_count": 1,
+                    "chars": len(summary),
+                    "tokens_est": _estimate_tokens(summary),
+                    "strategy_selected": "single_item",
+                    "reason": "not_needed",
+                    "early_exit_after_level": 0,
+                }
+            ]
+        summary_metadata["early_exit_after_level"] = 0
     else:
         reduce_items = list(chunk_summaries)
         merge_level = 0
@@ -891,6 +905,8 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
                 admission_snapshot=admission_snapshot,
             )
             current_admission_snapshot = dict(strategy_meta.get("admission_snapshot") or admission_snapshot)
+            summary_metadata["reduce_decisions"] = copy.deepcopy(strategy_meta.get("reduce_decisions") or [])
+            summary_metadata["early_exit_after_level"] = strategy_meta.get("early_exit_after_level")
             shadow_trace = None
             if shadow_mode_enabled:
                 shadow_trace = _build_summary_shadow_trace(
