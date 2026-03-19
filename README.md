@@ -13,67 +13,95 @@
 
 ```mermaid
 graph TD
-    classDef ui fill:#0f766e,color:#ffffff,stroke:#134e4a,stroke-width:2px;
-    classDef runtime fill:#334155,color:#ffffff,stroke:#1e293b,stroke-width:2px;
-    classDef service fill:#c2410c,color:#ffffff,stroke:#9a3412,stroke-width:2px;
-    classDef data fill:#64748b,color:#ffffff,stroke:#475569,stroke-width:2px;
-    classDef bridge fill:#1f2937,color:#e5e7eb,stroke:#475569,stroke-width:1.5px,stroke-dasharray: 4 3;
-    classDef legacy fill:#f3f4f6,color:#111827,stroke:#94a3b8,stroke-width:2px,stroke-dasharray: 6 4;
+    classDef ui       fill:#0f766e,color:#fff,stroke:#134e4a,stroke-width:2px
+    classDef runtime  fill:#334155,color:#fff,stroke:#1e293b,stroke-width:2px
+    classDef service  fill:#c2410c,color:#fff,stroke:#9a3412,stroke-width:2px
+    classDef data     fill:#64748b,color:#fff,stroke:#475569,stroke-width:2px
+    classDef bridge   fill:#1f2937,color:#e5e7eb,stroke:#475569,stroke-width:1.5px,stroke-dasharray:4 3
+    classDef legacy   fill:#f3f4f6,color:#111827,stroke:#94a3b8,stroke-width:2px,stroke-dasharray:6 4
+    classDef label    fill:none,stroke:none,color:#94a3b8,font-size:12px
 
-    subgraph RUNTIME ["Runtime Path"]
-        USER["Пользователь"]
-        CL["Chainlit :3000<br/>основной UI"]
-        OW["Open WebUI :3001<br/>legacy UI"]
-        AG["Agent API :8000<br/>OpenAI-compatible API"]
-        CORE["Execution core<br/>routing + workflows + doc QA"]
-        DS["Document Server :8001"]
-        LS["Legal Server :8002"]
-        UMS["UMS :8090<br/>infer + status + embeddings"]
-        LLM["llama-server<br/>локальный gguf"]
-        EMB["st_server<br/>LaBSE / Qwen3 Embedding"]
-        VLLM["remote vLLM<br/>optional upstream"]
+    %% ── Entry point ───────────────────────────────────────────
+    USER["Пользователь"]
 
-        USER --> CL
-        USER -. optional .-> OW
-        CL --> AG
-        OW -. legacy path .-> AG
-        AG --> CORE
-        CORE --> DS
-        CORE --> LS
-        CORE --> UMS
-        DS --> UMS
-        LS --> UMS
-        UMS --> LLM
-        UMS --> EMB
-        UMS -. BACKEND_MODE=vllm .-> VLLM
+    %% ── UI layer ──────────────────────────────────────────────
+    subgraph UI ["  UI Layer  "]
+        direction LR
+        CL["Chainlit :3000\nосновной UI"]
+        OW["Open WebUI :3001\nlegacy UI"]
     end
 
-    subgraph DATA ["Data Path"]
-        FILES["Uploads I/O"]
-        STATE["Workflow state"]
+    %% ── Orchestration ─────────────────────────────────────────
+    subgraph ORCH ["  Orchestration  "]
+        direction LR
+        AG["Agent API :8000\nOpenAI-compatible API"]
+        CORE["Execution Core\nrouting · workflows · doc QA"]
+    end
+
+    %% ── Specialised services ──────────────────────────────────
+    subgraph SVC ["  Services  "]
+        direction LR
+        DS["Document Server :8001\nPDF · OCR · chunks"]
+        LS["Legal Server :8002\nbatch matching"]
+    end
+
+    %% ── Model layer ───────────────────────────────────────────
+    subgraph MODELS ["  Model Layer  "]
+        direction LR
+        UMS["UMS :8090\ninfer · status · embeddings"]
+        LLM["llama-server\nлокальный gguf"]
+        EMB["st_server\nLaBSE / Qwen3 Embedding"]
+        VLLM["remote vLLM\noptional upstream"]
+    end
+
+    %% ── Data layer ────────────────────────────────────────────
+    subgraph DATA ["  Data Layer  "]
+        direction LR
+        CHDB["Chainlit\nSQLite"]
+        FILES["Uploads\nI/O"]
+        STATE["Workflow\nstate"]
         RAG["RAG KB"]
+    end
+
+    subgraph FILES_OUT ["  Storage  "]
+        direction LR
         UP["open_webui_uploads"]
-        CHDB["Chainlit SQLite"]
         STDB["orchestrator_state.db"]
         KB["orchestrator_kb.db"]
-
-        CL --> CHDB
-        CL --> FILES
-        OW -. legacy uploads .-> FILES
-        CORE --> FILES
-        CORE --> STATE
-        CORE --> RAG
-        FILES --> UP
-        STATE --> STDB
-        RAG --> KB
     end
 
-    class CL,USER ui;
-    class AG,CORE,UMS,LLM,EMB,VLLM runtime;
-    class DS,LS service;
-    class UP,CHDB,STDB,KB data;
-    class FILES,STATE,RAG bridge;
-    class OW legacy;
+    %% ══ Runtime flow ══════════════════════════════════════════
+    USER        --> CL
+    USER       -. optional .-> OW
+
+    CL          --> AG
+    OW         -. legacy path .-> AG
+
+    AG          --> CORE
+
+    CORE        --> DS & LS
+    DS & LS     --> UMS
+    CORE        --> UMS
+
+    UMS         --> LLM & EMB
+    UMS        -. BACKEND_MODE=vllm .-> VLLM
+
+    %% ══ Data flow ════════════════════════════════════════════
+    CL          --> CHDB & FILES
+    OW         -. legacy uploads .-> FILES
+    CORE        --> FILES & STATE & RAG
+
+    FILES       --> UP
+    STATE       --> STDB
+    RAG         --> KB
+
+    %% ══ Classes ══════════════════════════════════════════════
+    class USER,CL ui
+    class AG,CORE,UMS,LLM,EMB,VLLM runtime
+    class DS,LS service
+    class UP,CHDB,STDB,KB data
+    class FILES,STATE,RAG bridge
+    class OW legacy
 ```
 
 ## Основные компоненты
