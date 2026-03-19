@@ -1465,6 +1465,62 @@
   - локально: `npx playwright test tests/e2e/chainlit`
   - CI smoke: хотя бы `chromium` project для `chat + upload + reload persistence`
 
+### H12 — document_analysis: неусечённый final synthesis report (B3.50)
+
+- [ ] **B3.50 — Устранить усечение финальной сводки/отчёта в `document_analysis` после bounded reduce**
+  Контекст:
+  - после фикса `B3.48` и anti-stall guard для hierarchical reduce длинный `document_analysis` по реальному PDF (`455-z.pdf`) больше не зацикливается на `5 -> 5 -> 5`, но итоговый markdown-отчёт всё ещё может приходить усечённым;
+  - подтверждённый live case: [`backend/open_webui_uploads/Report_Analysis_1773894719.md`](/home/seral/HDD/proj/agent-navigator-pro/backend/open_webui_uploads/Report_Analysis_1773894719.md) заканчивается посреди пункта `17. **Ответственность`, после чего сразу идут `## Метаданные`;
+  - при этом workflow технически помечает `final_synthesis_status: completed`, а в отчёте пишет `Итог собран в bounded/degraded режиме из-за ограничений ресурсов`, что создаёт misleading success signal: stage завершён, но answer quality уже частично деградировала;
+  - проблема относится не к PDF renderer, а к самому final markdown payload: усечение уже присутствует в `.md`.
+  Что нужно сделать:
+  - локализовать, где именно теряется хвост final answer:
+    - `final_max_tokens` / output cap слишком мал;
+    - финальный prompt допускает слишком “раздутый” формат ответа;
+    - bounded final synthesis завершает generation до логического конца ответа;
+    - отсутствует post-check на незавершённый/обрубленный текст;
+  - ввести явный completion guard для `document_analysis final_synthesis`:
+    - детектировать подозрительно незавершённый output;
+    - различать `stage completed technically` и `answer complete semantically enough`;
+    - не оставлять `final_synthesis_status=completed`, если ответ явно обрублен;
+  - реализовать как минимум один безопасный remediation path:
+    - retry с более compact final prompt;
+    - или retry с повышенным `final_max_tokens` в допустимом bounded budget;
+    - или post-final repair/continuation pass для завершения оборванного списка/секции;
+  - сделать format control для final report более жёстким:
+    - ограничить число крупных секций;
+    - не позволять модели бесконечно раздувать enumerated list без closing summary;
+    - при bounded режиме явно требовать короткий, завершённый ответ вместо “максимально полного” списка;
+  - синхронизировать metadata/report copy:
+    - если ответ частично деградирован, это должно быть видно честно;
+    - `completed` не должен означать “качественно полный”, если final text оборван;
+    - при необходимости добавить поле вроде `final_synthesis_complete=false` / `final_answer_truncated=true`;
+  - проверить связку с `B3.49`:
+    - quality/expansion policy не должна строиться на уже усечённом base summary;
+    - compact first answer должен быть завершённым, а не просто коротким из-за hard truncation.
+  Что не считать решением:
+  - просто поднять `max_tokens` без bounded guard и без анализа prompt shape;
+  - считать задачу решённой только потому, что PDF визуально открылся;
+  - игнорировать усечение, если `final_synthesis_status` формально `completed`;
+  - лечить только renderer/markdown-to-pdf слой.
+  Acceptance:
+  - длинный `document_analysis` больше не генерирует markdown, обрывающийся посреди пункта/секции;
+  - completion/truncation guard различает:
+    - полноценный завершённый final answer;
+    - технически завершённый, но качественно усечённый answer;
+  - metadata/report status честно отражают incomplete/truncated outputs;
+  - bounded/degraded path остаётся bounded и не превращается в unbounded final generation;
+  - на длинных legal/other documents final report остаётся завершённым даже если detail level снижен.
+  Verification:
+  - добавить unit/integration tests на:
+    - truncated final synthesis detection;
+    - retry/repair path для незавершённого final answer;
+    - metadata status для `completed` vs `truncated` vs `degraded`;
+  - live smoke:
+    - повторить `document_analysis` на длинном PDF уровня `455-z.pdf`;
+    - убедиться, что итоговый `.md` не заканчивается посреди списка/секции;
+    - проверить, что report metadata не вводит в заблуждение по completeness.
+
 - [ ] **T6.2 P0 — Compose full-stack smoke tests**
   Контекст: runtime/scripts и `docker-compose.yaml` часто меняются, но нет единого black-box gate, который подтверждает что весь stack действительно поднялся и отвечает не только на уровне unit mocks.
   Что сделать:
