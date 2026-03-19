@@ -1521,6 +1521,33 @@
     - убедиться, что итоговый `.md` не заканчивается посреди списка/секции;
     - проверить, что report metadata не вводит в заблуждение по completeness.
 
+### H13 — Compare: semantic legal conclusion for heterogeneous documents (B3.51)
+
+- [x] **B3.51 — Перевести compare из structural-only режима в legal synthesis для `policy vs contract` и других heterogeneous pair**
+  Контекст:
+  - текущий `compare_documents` завершал анализ на structural diff, если после `match_batches` все различия классифицировались как `ADDED/DELETED`;
+  - на реальном кейсе (`Положение о дистанционной работе` vs `Трудовой договор о дистанционной работе`) workflow выдавал `Structural: 112, needs LLM: 0` и сохранял отчёт без юридического вывода;
+  - такой output подходит для redline двух редакций, но не для сравнения разных по роли, но связанных юридических документов.
+  Что сделано:
+  - в `backend/orchestrator/workflows/compare.py` добавлены:
+    - heuristic role detection (`policy`, `contract`, `other`) по имени файла и первым страницам текста;
+    - pair typing / mode selection (`same_document_revision`, `same_genre_legal_compare`, `policy_vs_contract`, `unknown`);
+    - semantic fallback для `heterogeneous_alignment`, который в любом случае строит LLM-based legal conclusion поверх ролей документов, их содержания и representative diffs;
+    - новый report shape: `Юридический вывод` + `Ключевые смысловые различия` + `Что отсутствует / требует отражения` + `Приложение: различия по пунктам`;
+  - structural appendix сохранён, но больше не является единственным результатом для heterogeneous pair.
+  Что не считать полностью закрытым:
+  - richer topic clustering / many-to-one clause alignment;
+  - отдельный auto-mode для `regulation_vs_policy`, `annex_vs_contract` и других related legal roles;
+  - live re-run на production-like проблемной паре как formal acceptance.
+  Acceptance:
+  - `policy vs contract` compare больше не заканчивается на `needs LLM: 0` + appendix-only report;
+  - workflow всегда формирует legal conclusion для heterogeneous pair;
+  - structural differences остаются приложением, а не основным ответом;
+  - обычный redline path для revision-like compare не ломается.
+  Verification:
+  - `pytest backend/tests/test_compare_workflow.py -q`
+  - `python -m py_compile backend/orchestrator/workflows/compare.py backend/tests/test_compare_workflow.py`
+
 - [ ] **T6.2 P0 — Compose full-stack smoke tests**
   Контекст: runtime/scripts и `docker-compose.yaml` часто меняются, но нет единого black-box gate, который подтверждает что весь stack действительно поднялся и отвечает не только на уровне unit mocks.
   Что сделать:
