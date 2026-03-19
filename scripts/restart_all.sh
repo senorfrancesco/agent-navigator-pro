@@ -15,6 +15,24 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    cat <<EOF
+restart_all.sh
+
+Перезапускает compose/runtime стек: сначала вызывает stop_all.sh, затем ждёт
+освобождения сервисных портов и запускает run_all.sh.
+
+Использование:
+  ./scripts/restart_all.sh
+
+Флаги:
+  У скрипта нет пользовательских флагов.
+  -h, --help
+      Показать эту справку.
+EOF
+    exit 0
+fi
+
 echo -e "${GREEN}=== Перезапуск Agent Navigator Pro ===${NC}"
 echo ""
 

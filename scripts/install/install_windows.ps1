@@ -1,11 +1,35 @@
+<#
+.SYNOPSIS
+Проверяет и при необходимости устанавливает минимальные prerequisites для Windows-side install path.
+
+.DESCRIPTION
+Скрипт диагностирует наличие WSL, Docker Desktop и winget, а затем печатает guidance
+или выполняет установку prerequisites для рекомендованной схемы Windows host + WSL2 Ubuntu.
+
+.PARAMETER Apply
+Выполнить установку отсутствующих prerequisites вместо режима только-проверки.
+
+.PARAMETER CheckOnly
+Только вывести диагностику и рекомендуемые дальнейшие шаги без установки.
+
+.PARAMETER Help
+Показать краткую справку по флагам и завершиться.
+#>
+
 param(
     [switch]$Apply,
-    [switch]$CheckOnly
+    [switch]$CheckOnly,
+    [switch]$Help
 )
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $DocsPath = Join-Path $RepoRoot "docs/scripts/installers.md"
+
+if ($Help) {
+    Get-Help $MyInvocation.MyCommand.Path
+    exit 0
+}
 
 Write-Host "Agent Navigator Pro - Windows bootstrap"
 Write-Host "Recommended path: Windows host + WSL2 Ubuntu + Docker Desktop"

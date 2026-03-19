@@ -15,6 +15,23 @@ NC='\033[0m'
 
 SESSION_NAME="agent-navigator-native"
 
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  cat <<EOF
+stop_native.sh
+
+Останавливает native tmux/runtime path без воздействия на Docker-контейнеры.
+
+Использование:
+  ./scripts/stop_native.sh
+
+Флаги:
+  У скрипта нет пользовательских CLI-флагов.
+  -h, --help
+      Показать эту справку.
+EOF
+  exit 0
+fi
+
 load_runtime_env() {
   local env_file
   set -a

@@ -6,12 +6,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
 SETUP_SCRIPT="$PROJECT_ROOT/scripts/setup_ubuntu.sh"
 
-if [[ "${1:-}" == "--help" ]]; then
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   cat <<EOF
 install_ubuntu_server.sh
 
-Ubuntu Server installer wrapper for Agent Navigator.
-Delegates heavy install to scripts/setup_ubuntu.sh with server profile metadata.
+Wrapper для Ubuntu Server install-path.
+Делегирует heavy install в scripts/setup_ubuntu.sh с server-oriented профилем.
+
+Использование:
+  ./scripts/install/install_ubuntu_server.sh
+
+Флаги:
+  -h, --help
+      Показать эту справку.
 EOF
   exit 0
 fi

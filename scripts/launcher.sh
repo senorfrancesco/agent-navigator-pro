@@ -35,34 +35,56 @@ launcher.sh
 
 Canonical entrypoint for Agent Navigator runtime and guided install.
 
-Usage:
+Использование:
   ./scripts/launcher.sh --target native --profile adaptive
   ./scripts/launcher.sh --target container --profile default
   ./scripts/launcher.sh --install --platform ubuntu
   ./scripts/launcher.sh --target native --models-root /mnt/d/agent-models
   ./scripts/launcher.sh --target native --hardware-override-file /mnt/d/agent-models/runtime.override.env
 
-Flags:
+Флаги:
   --target native|container
+      Целевой runtime path: host-only native запуск или compose/container запуск.
   --profile <runtime-profile>
+      Runtime-профиль preflight слоя: default, adaptive или manual.
   --platform auto|ubuntu|ubuntu-server|wsl|windows
+      Платформа guided install path; используется вместе с --install.
   --asset-set core|all
+      Набор моделей для pre-launch ensure-present шага.
   --models-root <path>
+      Корневой каталог моделей вместо стандартного layout внутри backend/models.
   --huggingface-cache <path>
+      Каталог кэша Hugging Face для model provisioning.
   --hardware-override-file <path>
+      Явный файл hardware/runtime overrides для текущего запуска.
   --gpu-layers-mode auto|max|manual
+      Режим выбора GPU layers для LLM.
   --gpu-layers <int>
+      Явное число GPU layers для manual режима.
   --device-mode cpu|gpu|hybrid
+      Общий device-mode для runtime planning.
   --llm-device-mode cpu|gpu|hybrid
+      Переопределение device-mode только для LLM.
   --vlm-device-mode cpu|gpu|hybrid
+      Переопределение device-mode только для VLM.
   --intent-embedder-device-mode cpu|gpu|hybrid
+      Переопределение device-mode для intent embedder.
   --retrieval-embedder-device-mode cpu|gpu|hybrid
+      Переопределение device-mode для retrieval embedder.
   --non-interactive
+      Не задавать интерактивных вопросов при review/runtime guidance.
   --review-runtime
+      Показать и подтвердить runtime plan перед запуском.
   --skip-model-download
+      Пропустить pre-launch model provisioning phase.
   --no-attach
+      Не подключаться к tmux после запуска target runner.
   --report-only
+      Только вывести runtime plan без записи .env.runtime и без запуска.
   --install
+      Запустить guided install path вместо runtime orchestration.
+  -h, --help
+      Показать эту справку.
 
 Interactive review:
   1. launcher показывает runtime plan только для текущего запуска
@@ -73,7 +95,7 @@ EOF
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --help)
+    -h|--help)
       print_help
       exit 0
       ;;

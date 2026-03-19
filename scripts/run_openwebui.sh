@@ -15,6 +15,24 @@ ENV_FILE="$BACKEND_DIR/.env"
 HARDWARE_OVERRIDE_ENV_FILE="${AGENT_NAVIGATOR_BACKEND_HARDWARE_OVERRIDE_FILE:-$BACKEND_DIR/.env.hardware.override}"
 RUNTIME_ENV_FILE="${AGENT_NAVIGATOR_RUNTIME_ENV_FILE:-$BACKEND_DIR/.env.runtime}"
 
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    cat <<EOF
+run_openwebui.sh
+
+legacy entrypoint для старого Open WebUI path.
+Скрипт сохраняется для обратной совместимости, но основной UI проекта — Chainlit.
+
+Использование:
+  ./scripts/run_openwebui.sh
+
+Флаги:
+  У скрипта нет пользовательских флагов.
+  -h, --help
+      Показать эту справку.
+EOF
+    exit 0
+fi
+
 # Цвета для вывода
 RED='\033[0;31m'
 GREEN='\033[0;32m'

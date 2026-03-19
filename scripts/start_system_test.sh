@@ -5,6 +5,24 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BACKEND_DIR="$PROJECT_ROOT/backend"
 
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  cat <<EOF
+start_system_test.sh
+
+Проверочный системный smoke-script: поднимает compose stack, запускает backend
+в tmux и выполняет базовые health-check'и.
+
+Использование:
+  ./scripts/start_system_test.sh
+
+Флаги:
+  У скрипта нет пользовательских CLI-флагов.
+  -h, --help
+      Показать эту справку.
+EOF
+  exit 0
+fi
+
 # 1. Start compose services for the current Chainlit-first stack
 echo "Starting compose services via Docker..."
 cd "$PROJECT_ROOT" && docker compose up -d

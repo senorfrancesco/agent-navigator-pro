@@ -327,14 +327,21 @@ def _resolve_labels(
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Compare two Agent Navigator benchmark JSON reports.",
+        description="Сравнить два JSON-отчёта benchmark Agent Navigator Pro.",
+        epilog="""
+Примеры:
+  python scripts/benchmark_compare.py results/cpu.json results/gpu.json
+  python scripts/benchmark_compare.py base.json cand.json --scenarios health,chat
+  python scripts/benchmark_compare.py base.json cand.json --json-output results/compare.json
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("baseline", help="Path to baseline benchmark JSON")
-    parser.add_argument("candidate", help="Path to candidate benchmark JSON")
-    parser.add_argument("--baseline-label", default=None, help="Display label for baseline report")
-    parser.add_argument("--candidate-label", default=None, help="Display label for candidate report")
-    parser.add_argument("--scenarios", default=None, help="Comma-separated scenario filter")
-    parser.add_argument("--json-output", default=None, help="Optional path to save comparison JSON")
+    parser.add_argument("baseline", help="Базовый отчёт benchmark в формате JSON")
+    parser.add_argument("candidate", help="Кандидатный отчёт benchmark в формате JSON")
+    parser.add_argument("--baseline-label", default=None, help="Подпись для базового отчёта в консольном выводе")
+    parser.add_argument("--candidate-label", default=None, help="Подпись для кандидатного отчёта в консольном выводе")
+    parser.add_argument("--scenarios", default=None, help="Фильтр по сценариям через запятую")
+    parser.add_argument("--json-output", default=None, help="Путь для сохранения итогового JSON-сравнения")
     args = parser.parse_args(argv)
 
     baseline_path = Path(args.baseline)

@@ -11,14 +11,24 @@ print_help() {
   cat <<EOF
 detect_os.sh
 
+Безопасный detector платформы для install-path.
 Safe platform detector for Agent Navigator installer path.
 
-Flags:
-- --print-platform
-- --format=env
-- --help
+Использование:
+  ./scripts/install/detect_os.sh
+  ./scripts/install/detect_os.sh --print-platform
+  ./scripts/install/detect_os.sh --format=env
 
-See: $DOC_PATH
+Флаги:
+  --print-platform
+      Печатает только итоговую платформу: windows, wsl, ubuntu, ubuntu-server или unsupported.
+  --format=env
+      Печатает результат в виде ENV-переменных.
+  -h, --help
+      Показать эту справку.
+
+Документация:
+  $DOC_PATH
 EOF
 }
 
@@ -28,7 +38,7 @@ is_wsl() {
 
 for arg in "$@"; do
   case "$arg" in
-    --help)
+    -h|--help)
       print_help
       exit 0
       ;;

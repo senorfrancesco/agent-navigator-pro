@@ -10,13 +10,22 @@ is_wsl() {
   [[ -n "${WSL_DISTRO_NAME:-}" ]] || grep -qiE '(microsoft|wsl)' /proc/version 2>/dev/null
 }
 
-if [[ "${1:-}" == "--help" ]]; then
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   cat <<EOF
 install_wsl.sh
 
-WSL installer wrapper for Agent Navigator.
-Runs Linux-side setup after validating WSL environment.
-See: $DOC_PATH
+Wrapper для WSL install-path.
+Проверяет, что запуск идёт внутри WSL, и затем делегирует в Linux-side setup.
+
+Использование:
+  ./scripts/install/install_wsl.sh
+
+Флаги:
+  -h, --help
+      Показать эту справку.
+
+Документация:
+  $DOC_PATH
 EOF
   exit 0
 fi

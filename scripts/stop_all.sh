@@ -18,6 +18,24 @@ NC='\033[0m'
 
 SESSION_NAMES=("agent-navigator" "agent-navigator-native")
 
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    cat <<EOF
+stop_all.sh
+
+Останавливает compose/container runtime path и выполняет глобальную зачистку
+tmux-сессий и сервисных процессов Agent Navigator Pro.
+
+Использование:
+  ./scripts/stop_all.sh
+
+Флаги:
+  У скрипта нет пользовательских CLI-флагов.
+  -h, --help
+      Показать эту справку.
+EOF
+    exit 0
+fi
+
 load_runtime_env() {
     local env_file
     set -a

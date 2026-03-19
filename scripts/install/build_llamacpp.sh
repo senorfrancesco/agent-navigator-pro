@@ -6,12 +6,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
 DOC_PATH="$PROJECT_ROOT/docs/scripts/installers.md"
 
-if [[ "${1:-}" == "--help" ]]; then
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   cat <<EOF
 build_llamacpp.sh
 
-Scaffold-only llama.cpp build step for the future installer framework.
-See: $DOC_PATH
+Scaffold-only шаг будущего installer framework.
+Предназначен для сборки llama.cpp, но сейчас служит заглушкой и ничего не собирает.
+
+Флаги:
+  -h, --help
+      Показать эту справку.
+
+Документация:
+  $DOC_PATH
 EOF
   exit 0
 fi

@@ -28,12 +28,13 @@ Usage:
   HF_HOME=/mnt/d/hf-cache ./scripts/models/install_models.sh --dry-run
 
 Flags:
-  --ensure-present                Ensure required artifacts exist; download only missing ones.
-  --asset-set core|all            core = LLM + intent + retrieval embeddings, all = core + VLM + mmproj
-  --models-root /path             Override default ./backend/models root for downloader targets.
-  --huggingface-cache /path       Override Hugging Face cache location.
-  --dry-run                       Print resolved sources and target paths without downloading.
-  --help                          Show this help.
+  --ensure-present                Проверить наличие обязательных артефактов и скачать только отсутствующие.
+  --asset-set core|all            Набор моделей: core = LLM + intent + retrieval embeddings,
+                                  all = core + VLM + mmproj.
+  --models-root /path             Переопределить корневой каталог вместо стандартного ./backend/models.
+  --huggingface-cache /path       Переопределить каталог кэша Hugging Face.
+  --dry-run                       Показать план путей и источников без скачивания.
+  -h, --help                      Показать эту справку.
 
 Examples:
   ./scripts/models/install_models.sh --dry-run
@@ -44,7 +45,7 @@ EOF
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --help)
+    -h|--help)
       print_help
       exit 0
       ;;

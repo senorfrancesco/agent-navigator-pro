@@ -14,26 +14,26 @@ print_help() {
   cat <<EOF
 install.sh
 
-Unified installer entrypoint for Agent Navigator Pro.
+Единая точка входа в guided installer Agent Navigator Pro.
 
-Platforms:
-- auto
-- ubuntu
-- ubuntu-server
-- wsl
-- windows
+Использование:
+  ./scripts/install/install.sh --target=native --platform=auto
+  ./scripts/install/install.sh --target=native --platform=ubuntu-server
+  ./scripts/install/install.sh --target=container --dry-run
 
-Targets:
-- native
-- container
+Флаги:
+  --target=native|container
+      Целевой install path. `native` выбирает platform wrapper и heavy install,
+      `container` только печатает guidance без host-install действий.
+  --platform=auto|ubuntu|ubuntu-server|wsl|windows
+      Платформа, для которой выбирается wrapper installer.
+  --dry-run
+      Ничего не выполнять, только показать какой wrapper был бы вызван.
+  -h, --help
+      Показать эту справку.
 
-Flags:
-- --target=native|container
-- --platform=auto|ubuntu|ubuntu-server|wsl|windows
-- --dry-run
-
-Docs:
-$DOC_PATH
+Документация:
+  $DOC_PATH
 EOF
 }
 
@@ -51,6 +51,10 @@ wrapper_for_platform() {
 
 for arg in "$@"; do
   case "$arg" in
+    -h|--help)
+      print_help
+      exit 0
+      ;;
     --target=*)
       TARGET="${arg#*=}"
       ;;
@@ -59,10 +63,6 @@ for arg in "$@"; do
       ;;
     --dry-run)
       DRY_RUN=1
-      ;;
-    --help)
-      print_help
-      exit 0
       ;;
     *)
       echo "Неизвестный аргумент install.sh: $arg" >&2

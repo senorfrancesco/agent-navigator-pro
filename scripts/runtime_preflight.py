@@ -514,43 +514,93 @@ def _json_print(payload: Dict[str, Any]) -> None:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Runtime preflight and applied env planner.")
+    parser = argparse.ArgumentParser(
+        description="Preflight planner для runtime-профиля и applied env overrides.",
+        epilog="Для подробностей по флагам подкоманд используйте, например: `python scripts/runtime_preflight.py plan --help`. Профиль runtime задаётся через --profile.",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     def _add_common_args(subparser: argparse.ArgumentParser) -> None:
-        subparser.add_argument("--profile", choices=sorted(SUPPORTED_PROFILES), default=os.getenv("UMS_RUNTIME_PROFILE", "adaptive"))
-        subparser.add_argument("--manual-effective-context-tokens", type=int, default=None)
-        subparser.add_argument("--retrieved-context-ratio", type=float, default=None)
-        subparser.add_argument("--generation-tokens-reserve", type=int, default=None)
+        subparser.add_argument(
+            "--profile",
+            choices=sorted(SUPPORTED_PROFILES),
+            default=os.getenv("UMS_RUNTIME_PROFILE", "adaptive"),
+            help="Профиль runtime: default, adaptive или manual.",
+        )
+        subparser.add_argument(
+            "--manual-effective-context-tokens",
+            type=int,
+            default=None,
+            help="Явный effective context budget для manual-профиля.",
+        )
+        subparser.add_argument(
+            "--retrieved-context-ratio",
+            type=float,
+            default=None,
+            help="Доля effective context, выделяемая под retrieved context.",
+        )
+        subparser.add_argument(
+            "--generation-tokens-reserve",
+            type=int,
+            default=None,
+            help="Резерв токенов, оставляемый под генерацию ответа.",
+        )
         subparser.add_argument(
             "--device-mode",
             choices=["cpu", "gpu", "hybrid"],
             default=(os.getenv("DEVICE_MODE") or None),
+            help="Общий device-mode runtime plan: cpu, gpu или hybrid.",
         )
-        subparser.add_argument("--llm-device-mode", choices=sorted(SUPPORTED_COMPONENT_DEVICE_MODES), default=(os.getenv("LLM_DEVICE_MODE") or None))
-        subparser.add_argument("--vlm-device-mode", choices=sorted(SUPPORTED_COMPONENT_DEVICE_MODES), default=(os.getenv("VLM_DEVICE_MODE") or None))
-        subparser.add_argument("--intent-embedder-device-mode", choices=sorted(SUPPORTED_COMPONENT_DEVICE_MODES), default=(os.getenv("INTENT_EMBEDDER_DEVICE_MODE") or None))
-        subparser.add_argument("--retrieval-embedder-device-mode", choices=sorted(SUPPORTED_COMPONENT_DEVICE_MODES), default=(os.getenv("RETRIEVAL_EMBEDDER_DEVICE_MODE") or None))
+        subparser.add_argument(
+            "--llm-device-mode",
+            choices=sorted(SUPPORTED_COMPONENT_DEVICE_MODES),
+            default=(os.getenv("LLM_DEVICE_MODE") or None),
+            help="Переопределение device-mode только для LLM.",
+        )
+        subparser.add_argument(
+            "--vlm-device-mode",
+            choices=sorted(SUPPORTED_COMPONENT_DEVICE_MODES),
+            default=(os.getenv("VLM_DEVICE_MODE") or None),
+            help="Переопределение device-mode только для VLM.",
+        )
+        subparser.add_argument(
+            "--intent-embedder-device-mode",
+            choices=sorted(SUPPORTED_COMPONENT_DEVICE_MODES),
+            default=(os.getenv("INTENT_EMBEDDER_DEVICE_MODE") or None),
+            help="Переопределение device-mode для intent embedder.",
+        )
+        subparser.add_argument(
+            "--retrieval-embedder-device-mode",
+            choices=sorted(SUPPORTED_COMPONENT_DEVICE_MODES),
+            default=(os.getenv("RETRIEVAL_EMBEDDER_DEVICE_MODE") or None),
+            help="Переопределение device-mode для retrieval embedder.",
+        )
         subparser.add_argument(
             "--gpu-layers-mode",
             choices=sorted(SUPPORTED_GPU_LAYERS_MODES),
             default=(os.getenv("GPU_LAYERS_MODE") or None),
+            help="Режим выбора GPU layers: auto, max или manual.",
         )
-        subparser.add_argument("--gpu-layers", type=int, default=None)
+        subparser.add_argument(
+            "--gpu-layers",
+            type=int,
+            default=None,
+            help="Явное количество GPU layers для manual режима.",
+        )
 
-    detect_parser = subparsers.add_parser("detect", help="Report detected hardware snapshot.")
-    detect_parser.add_argument("--json", action="store_true", default=True)
+    detect_parser = subparsers.add_parser("detect", help="Определить текущий hardware snapshot.")
+    detect_parser.add_argument("--json", action="store_true", default=True, help="Печатать snapshot в JSON-формате.")
 
-    plan_parser = subparsers.add_parser("plan", help="Build runtime plan JSON.")
+    plan_parser = subparsers.add_parser("plan", help="Построить runtime plan без записи .env.runtime.")
     _add_common_args(plan_parser)
 
-    report_parser = subparsers.add_parser("report", help="Print runtime plan JSON.")
+    report_parser = subparsers.add_parser("report", help="Показать runtime plan в JSON без записи файла.")
     _add_common_args(report_parser)
 
-    apply_parser = subparsers.add_parser("apply", help="Write backend/.env.runtime and print applied plan.")
+    apply_parser = subparsers.add_parser("apply", help="Построить runtime plan и при необходимости записать backend/.env.runtime.")
     _add_common_args(apply_parser)
-    apply_parser.add_argument("--output", default=str(RUNTIME_ENV_PATH))
-    apply_parser.add_argument("--report-only", action="store_true")
+    apply_parser.add_argument("--output", default=str(RUNTIME_ENV_PATH), help="Путь для записи backend/.env.runtime.")
+    apply_parser.add_argument("--report-only", action="store_true", help="Только вывести runtime plan без записи файла.")
 
     args = parser.parse_args(argv)
 

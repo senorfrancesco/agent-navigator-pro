@@ -35,6 +35,33 @@ NVIDIA_DRIVER_VERSION=""
 PYTORCH_INSTALL_TARGET="cpu"
 LLAMA_CPP_CUDA_REBUILD_STATUS="skipped"
 
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    cat <<EOF
+setup_ubuntu.sh
+
+Полный installer для Ubuntu/Ubuntu Server/WSL-пути.
+Скрипт ставит системные зависимости, настраивает conda/base, Python-зависимости,
+Docker guidance и печатает дальнейшие шаги по launcher/model provisioning.
+
+Использование:
+  ./scripts/setup_ubuntu.sh
+
+Флаги:
+  У скрипта нет отдельных CLI-флагов.
+  -h, --help
+      Показать эту справку.
+
+Переменные окружения:
+  AGENT_NAVIGATOR_ASSUME_YES=1
+      Автоматически отвечать "yes" на интерактивные подтверждения.
+  AGENT_NAVIGATOR_INSTALL_PROFILE
+      Профиль install-path, который передают wrapper-скрипты install.sh.
+  AGENT_NAVIGATOR_TEST_MODE=1
+      Тестовый режим для install wrappers; сам heavy install не запускается.
+EOF
+    exit 0
+fi
+
 is_wsl() {
     [[ -n "${WSL_DISTRO_NAME:-}" ]] || grep -qiE '(microsoft|wsl)' /proc/version 2>/dev/null
 }

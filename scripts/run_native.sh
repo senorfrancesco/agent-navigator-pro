@@ -5,6 +5,10 @@
 # Agent Navigator Pro v3.0 (Chainlit + services)
 # ===========================================
 
+if [ -z "${BASH_VERSION:-}" ]; then
+  exec bash "$0" "$@"
+fi
+
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,8 +20,39 @@ RUNTIME_ENV_FILE="${AGENT_NAVIGATOR_RUNTIME_ENV_FILE:-$BACKEND_DIR/.env.runtime}
 ATTACH_TMUX=true
 FROM_LAUNCHER=false
 
+print_help() {
+  cat <<EOF
+run_native.sh
+
+Поднимает native runtime без Docker: tmux-сессию, backend-сервисы, UMS и Chainlit.
+При прямом вызове считается compatibility entrypoint и делегирует в launcher.sh.
+
+Использование:
+  ./scripts/run_native.sh
+  ./scripts/run_native.sh --no-attach
+
+Флаги:
+  --from-launcher
+      Внутренний флаг. Показывает, что orchestration уже выполнен через launcher.sh
+      и скрипт должен сразу запускать native runtime, а не делегировать обратно.
+  --no-attach
+      Не подключаться к tmux после запуска; оставить сессию в фоне.
+  -h, --help
+      Показать эту справку.
+
+Примеры:
+  ./scripts/run_native.sh
+  ./scripts/run_native.sh --no-attach
+  ./scripts/launcher.sh --target native --profile adaptive
+EOF
+}
+
 for arg in "$@"; do
   case "$arg" in
+    -h|--help)
+      print_help
+      exit 0
+      ;;
     --from-launcher)
       FROM_LAUNCHER=true
       ;;
@@ -26,7 +61,7 @@ for arg in "$@"; do
       ;;
     *)
       echo "Неизвестный аргумент: $arg" >&2
-      echo "Поддерживается: --no-attach" >&2
+      echo "Используйте --help для списка флагов." >&2
       exit 1
       ;;
   esac

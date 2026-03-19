@@ -23,8 +23,39 @@ EXTERNAL_VLLM_BASE_URL="${VLLM_BASE_URL:-}"
 EXTERNAL_VLLM_PORT="${VLLM_PORT:-}"
 EXTERNAL_VLLM_MODEL_ID_QWEN_14B_LLM="${VLLM_MODEL_ID_QWEN_14B_LLM:-}"
 
+print_help() {
+  cat <<EOF
+run_all.sh
+
+Поднимает container/compose runtime для Chainlit-first стека.
+При прямом вызове считается compatibility entrypoint и делегирует в launcher.sh.
+
+Использование:
+  ./scripts/run_all.sh
+  ./scripts/run_all.sh --no-attach
+
+Флаги:
+  --from-launcher
+      Внутренний флаг. Используется launcher.sh после bootstrap/preflight шага,
+      чтобы скрипт сразу выполнил container runtime path.
+  --no-attach
+      Не подключаться к tmux monitoring session после запуска.
+  -h, --help
+      Показать эту справку.
+
+Примеры:
+  ./scripts/run_all.sh
+  BACKEND_MODE=vllm ./scripts/run_all.sh --no-attach
+  ./scripts/launcher.sh --target container --profile default
+EOF
+}
+
 for arg in "$@"; do
     case "$arg" in
+        -h|--help)
+            print_help
+            exit 0
+            ;;
         --from-launcher)
             FROM_LAUNCHER=true
             ;;
@@ -33,7 +64,7 @@ for arg in "$@"; do
             ;;
         *)
             echo "Неизвестный аргумент: $arg" >&2
-            echo "Поддерживается: --no-attach" >&2
+            echo "Используйте --help для списка флагов." >&2
             exit 1
             ;;
     esac

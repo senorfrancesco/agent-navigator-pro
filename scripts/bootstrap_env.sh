@@ -13,8 +13,45 @@ MODE="check"
 TARGET="native"
 PLATFORM="auto"
 
+print_help() {
+  cat <<EOF
+bootstrap_env.sh
+
+Подготавливает bootstrap-окружение перед запуском или install-path.
+Скрипт создаёт backend/.env из шаблона при отсутствии, проверяет critical secrets
+и в режиме install делегирует в scripts/install/install.sh.
+
+Использование:
+  ./scripts/bootstrap_env.sh --check --target=native
+  ./scripts/bootstrap_env.sh --install --target=native --platform=ubuntu
+
+Флаги:
+  --check
+      Режим проверки bootstrap-слоя. Ничего не устанавливает, подготавливает .env
+      и валидирует обязательные секреты для дальнейшего запуска.
+  --install
+      Режим install-handoff. После bootstrap-подготовки передаёт управление
+      unified installer coordinator.
+  --target=native|container
+      Целевой режим. Обычно используется native; container нужен для согласованного
+      CLI-контракта и install guidance.
+  --platform=auto|ubuntu|ubuntu-server|wsl|windows
+      Платформа install-path. Важен только вместе с --install.
+  -h, --help
+      Показать эту справку.
+
+Примеры:
+  ./scripts/bootstrap_env.sh --check --target=native
+  ./scripts/bootstrap_env.sh --install --target=native --platform=wsl
+EOF
+}
+
 for arg in "$@"; do
   case "$arg" in
+    -h|--help)
+      print_help
+      exit 0
+      ;;
     --check)
       MODE="check"
       ;;

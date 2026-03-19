@@ -62,12 +62,17 @@ ASSETS: Dict[str, Dict[str, str]] = {
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Ensure required model artifacts are present.")
-    parser.add_argument("--mode", default="ensure-present", choices=["ensure-present"])
-    parser.add_argument("--asset-set", default="core", choices=["core", "all"])
-    parser.add_argument("--models-root")
-    parser.add_argument("--huggingface-cache")
-    parser.add_argument("--dry-run", action="store_true")
+    parser = argparse.ArgumentParser(description="Проверить наличие модельных артефактов и при необходимости скачать отсутствующие.")
+    parser.add_argument(
+        "--mode",
+        default="ensure-present",
+        choices=["ensure-present"],
+        help="Режим работы downloader; сейчас поддерживается только ensure-present.",
+    )
+    parser.add_argument("--asset-set", default="core", choices=["core", "all"], help="Набор артефактов: core или all.")
+    parser.add_argument("--models-root", help="Переопределить корневой каталог моделей для канонического layout.")
+    parser.add_argument("--huggingface-cache", help="Переопределить корневой каталог кэша Hugging Face.")
+    parser.add_argument("--dry-run", action="store_true", help="Показать план скачивания и целевые пути без фактических загрузок.")
     return parser.parse_args()
 
 
