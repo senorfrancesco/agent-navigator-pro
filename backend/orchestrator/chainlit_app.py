@@ -745,7 +745,8 @@ def _active_set_status_line() -> str:
     if not active_docs:
         return "Активный набор: пусто"
     labels = [_doc_label(str(d["display_name"]), int(d.get("version", 1))) for d in active_docs]
-    return f"Активный набор: {', '.join(labels)} ({len(labels)} docs)"
+    document_word = "документ" if len(labels) == 1 else "документа" if len(labels) in {2, 3, 4} else "документов"
+    return f"Активный набор: {', '.join(labels)} ({len(labels)} {document_word})"
 
 
 def _get_active_doc_labels() -> List[str]:
@@ -962,11 +963,11 @@ def _derive_default_thread_name() -> str:
     active_labels = _get_active_doc_labels()
     assistant_mode = effective.get("assistant_mode") or "general_chat"
     mode_titles = {
-        "general_chat": "General Chat",
-        "coding": "Coding Assistant",
-        "agentic": "Agentic (iterative)",
-        "specific_tasks": "Specific Tasks",
-        "rag_qa": "RAG Q&A",
+        "general_chat": "Общий чат",
+        "coding": "Помощник по коду",
+        "agentic": "Агентный режим (iterative)",
+        "specific_tasks": "Специализированные задачи",
+        "rag_qa": "Вопросы по документам (RAG)",
     }
     base = mode_titles.get(str(assistant_mode), "Agent Navigator")
     if active_labels:
@@ -981,27 +982,27 @@ def _build_context_status_markdown(title: str = "Текущий контекст
     pending_action = _get_pending_route_choice()
     lines = [
         f"### {title}",
-        f"- assistant_mode: `{effective.get('assistant_mode')}`",
-        f"- runtime_mode: `{effective.get('runtime_mode')}`",
-        f"- rag_scope: `{effective.get('rag_scope')}`",
-        f"- model_profile: `{effective.get('model_profile')}`",
-        f"- resolved_model_id: `{effective.get('resolved_model_id')}`",
-        f"- intent_embedder: `{effective.get('resolved_intent_embedder_model_id')}`",
-        f"- retrieval_embedder: `{effective.get('resolved_retrieval_embedder_model_id')}`",
-        f"- device_mode: `{effective.get('device_mode')}`",
-        f"- context_budget_profile: `{effective.get('context_budget_profile')}`",
-        f"- Active docs: `{len(active_labels)}`",
-        f"- pending_action: `{'yes' if pending_action else 'no'}`",
+        f"- Режим ассистента: `{effective.get('assistant_mode')}`",
+        f"- Режим выполнения: `{effective.get('runtime_mode')}`",
+        f"- RAG-область: `{effective.get('rag_scope')}`",
+        f"- Профиль модели: `{effective.get('model_profile')}`",
+        f"- Разрешённая модель: `{effective.get('resolved_model_id')}`",
+        f"- Intent-эмбеддер: `{effective.get('resolved_intent_embedder_model_id')}`",
+        f"- Retrieval-эмбеддер: `{effective.get('resolved_retrieval_embedder_model_id')}`",
+        f"- Device mode: `{effective.get('device_mode')}`",
+        f"- Профиль бюджетов: `{effective.get('context_budget_profile')}`",
+        f"- Активные документы: `{len(active_labels)}`",
+        f"- Ожидает действия: `{'да' if pending_action else 'нет'}`",
     ]
     if active_labels:
-        lines.append(f"- active_set: {', '.join(active_labels)}")
+        lines.append(f"- Активный набор: {', '.join(active_labels)}")
     else:
-        lines.append("- active_set: пусто")
+        lines.append("- Активный набор: пусто")
     if runtime_budget:
-        lines.append(f"- runtime_profile: `{runtime_budget.get('runtime_profile')}`")
-        lines.append(f"- rag_mode: `{runtime_budget.get('rag_mode')}` ({runtime_budget.get('rag_mode_label')})")
+        lines.append(f"- Runtime-профиль: `{runtime_budget.get('runtime_profile')}`")
+        lines.append(f"- RAG-режим: `{runtime_budget.get('rag_mode')}` ({runtime_budget.get('rag_mode_label')})")
     if effective.get("knowledge_collection_id"):
-        lines.append(f"- knowledge_collection_id: `{effective.get('knowledge_collection_id')}`")
+        lines.append(f"- Коллекция знаний: `{effective.get('knowledge_collection_id')}`")
     return "\n".join(lines)
 
 
@@ -2368,11 +2369,25 @@ async def _ensure_rag_index_for_active_docs(step_name: Optional[str] = None) -> 
     if step_name:
         async with cl.Step(name=step_name, type="tool") as step:
             rag, indexed_count, runtime_budget = await _reindex()
-            search_type = "BM25+Dense (hybrid)" if rag.embed_fn else "BM25-only"
+            mode_label = {
+                "simple": "простой",
+                "corrective": "корректирующий",
+                "agentic": "агентный",
+                "multi-agent": "мультиагентный",
+            }.get(str(runtime_budget["rag_mode"]), str(runtime_budget["rag_mode"]))
+            search_type = "BM25 + dense (гибридный)" if rag.embed_fn else "BM25 (только sparse)"
+            profile_label = {
+                "default": "стандартный",
+                "adaptive": "адаптивный",
+                "manual": "ручной",
+            }.get(str(runtime_budget["runtime_profile"]), str(runtime_budget["runtime_profile"]))
+            document_word = "документ" if indexed_count == 1 else "документа" if indexed_count in {2, 3, 4} else "документов"
             step.output = (
-                f"RAG: mode={runtime_budget['rag_mode']} ({runtime_budget.get('rag_mode_label')}), search={search_type}, "
-                f"profile={runtime_budget['runtime_profile']}, "
-                f"budget={runtime_budget['retrieved_context_tokens_budget']} tokens, indexed {indexed_count} docs\n"
+                f"RAG: режим={mode_label} ({runtime_budget['rag_mode']}; {runtime_budget.get('rag_mode_label')}), "
+                f"поиск={search_type}, "
+                f"профиль={profile_label} ({runtime_budget['runtime_profile']}), "
+                f"бюджет={runtime_budget['retrieved_context_tokens_budget']} токенов, "
+                f"проиндексирован {indexed_count} {document_word}\n"
                 f"{_active_set_status_line()}"
             )
     else:
@@ -2448,27 +2463,27 @@ async def on_chat_start():
 def _default_starters() -> List[cl.Starter]:
     return [
         cl.Starter(
-            label="General Chat",
+            label="Общий чат",
             message="Объясни простыми словами, что такое облака на небе.",
             command="preset:general_chat",
         ),
         cl.Starter(
-            label="Coding Assistant",
+            label="Помощник по коду",
             message="Помоги спроектировать небольшой FastAPI endpoint с понятным контрактом.",
             command="preset:coding",
         ),
         cl.Starter(
-            label="Agentic (iterative)",
+            label="Агентный режим (iterative)",
             message="Разложи задачу на шаги и предложи план исполнения с проверками.",
             command="preset:agentic",
         ),
         cl.Starter(
-            label="Specific Tasks",
+            label="Специализированные задачи",
             message="Сравни два загруженных документа и выдели ключевые различия.",
             command="preset:specific_tasks",
         ),
         cl.Starter(
-            label="RAG Q&A",
+            label="Вопросы по документам (RAG)",
             message="Ответь по базе знаний: найди, что сказано про штрафы и сроки уведомления.",
             command="preset:rag_qa",
         ),
@@ -2486,7 +2501,7 @@ async def set_chat_profiles(current_user: Optional[cl.User]):
             name="Agent Navigator",
             markdown_description=(
                 "Основной Chainlit UI для Agent Navigator с use-case режимами: "
-                "General Chat, Coding, Agentic, Specific Tasks и RAG Q&A."
+                "общий чат, помощь по коду, агентный режим, специализированные задачи и RAG-вопросы по документам."
             ),
             icon="/public/logo_dark.svg",
             starters=_default_starters(),

@@ -282,11 +282,11 @@ class TestChainlitControlPlaneSettings:
         assert [widget["id"] for widget in prompt_inputs] == ["prompt_profile", "custom_system_prompt"]
         assert [widget["id"] for widget in generation_inputs] == ["temperature", "top_p", "max_tokens"]
         assert use_case_inputs[0]["initial_value"] == "specific_tasks"
-        assert use_case_inputs[0]["items"]["Specific Tasks"] == "specific_tasks"
+        assert use_case_inputs[0]["items"]["Специализированные задачи"] == "specific_tasks"
         assert use_case_inputs[1]["items"]["Агентный режим: приоритет task-routing"] == "specialized_tasks"
-        assert rag_inputs[0]["items"]["Session RAG"] == "session_rag"
-        assert tabs[2]["inputs"][0]["items"]["Legal Compare"] == "legal-compare"
-        assert prompt_inputs[0]["items"]["Task Router"] == "task-router"
+        assert rag_inputs[0]["items"]["Сессионный RAG"] == "session_rag"
+        assert tabs[2]["inputs"][0]["items"]["Юридическое сравнение"] == "legal-compare"
+        assert prompt_inputs[0]["items"]["Маршрутизатор задач"] == "task-router"
         self._chat_settings_instance.send.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -432,11 +432,11 @@ class TestChainlitControlPlaneSettings:
         starters = self._module._default_starters()
 
         assert [starter["label"] for starter in starters] == [
-            "General Chat",
-            "Coding Assistant",
-            "Agentic (iterative)",
-            "Specific Tasks",
-            "RAG Q&A",
+            "Общий чат",
+            "Помощник по коду",
+            "Агентный режим (iterative)",
+            "Специализированные задачи",
+            "Вопросы по документам (RAG)",
         ]
         assert [starter["command"] for starter in starters] == [
             "preset:general_chat",
@@ -545,8 +545,8 @@ class TestChainlitControlPlaneSettings:
         resume_message.send.assert_awaited_once()
         content = self._mock_cl.Message.call_args.kwargs["content"]
         assert "Контекст восстановлен" in content
-        assert "Active docs: `1`" in content
-        assert "pending_action: `yes`" in content
+        assert "Активные документы: `1`" in content
+        assert "Ожидает действия: `да`" in content
         assert self._store["run_id"] == "run-test"
         assert self._store["state_ref"] == "run:run-test"
         assert self._store["active_doc_ids"] == ["doc-1"]
@@ -782,8 +782,26 @@ class TestChainlitControlPlaneSettings:
         text = self._module._build_context_status_markdown(title="Текущий контекст")
 
         assert "Текущий контекст" in text
-        assert "Active docs: `0`" in text
-        assert "pending_action: `no`" in text
+        assert "Активные документы: `0`" in text
+        assert "Ожидает действия: `нет`" in text
+
+    def test_active_set_status_line_uses_russian_document_count(self):
+        self._store["documents_by_id"] = {
+            "doc-1": {
+                "document_id": "doc-1",
+                "display_name": "455-z.pdf",
+                "version": 1,
+                "path": "/tmp/455-z.pdf",
+                "text": "text",
+                "uploaded_at": 1.0,
+                "source_message_id": None,
+            }
+        }
+        self._store["active_doc_ids"] = ["doc-1"]
+
+        line = self._module._active_set_status_line()
+
+        assert line == "Активный набор: 455-z.pdf (1 документ)"
 
     @pytest.mark.asyncio
     async def test_ensure_rag_index_passes_runtime_budget_into_pipeline(self):
@@ -832,3 +850,70 @@ class TestChainlitControlPlaneSettings:
         assert init_kwargs["rag_mode"] == "corrective"
         assert init_kwargs["effective_context_tokens"] == 12288
         assert init_kwargs["retrieved_context_ratio"] == 0.6
+
+    @pytest.mark.asyncio
+    async def test_ensure_rag_index_renders_russian_status_text(self):
+        self._store["documents_by_id"] = {
+            "doc-1": {
+                "document_id": "doc-1",
+                "display_name": "455-z.pdf",
+                "version": 1,
+                "path": "/tmp/455-z.pdf",
+                "text": "Штраф 10 процентов",
+                "uploaded_at": 1.0,
+                "source_message_id": None,
+            }
+        }
+        self._store["active_doc_ids"] = ["doc-1"]
+        created_steps = []
+
+        class _FakePipeline:
+            def __init__(self, **kwargs):
+                self.embed_fn = None
+                self.rag_mode = kwargs.get("rag_mode")
+
+            def index_documents(self, texts, doc_names=None):
+                return []
+
+        class _FakeStep:
+            def __init__(self, name, **kwargs):
+                self.name = name
+                self.output = ""
+                created_steps.append(self)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        async def fake_to_thread(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        self._mock_cl.Step.side_effect = lambda **kwargs: _FakeStep(**kwargs)
+
+        with patch.object(self._module, "_get_runtime_budget_metadata", new=AsyncMock(return_value={
+            "runtime_profile": "default",
+            "effective_context_tokens": 8192,
+            "retrieved_context_tokens_budget": 4915,
+            "generation_tokens_reserve": 1024,
+            "context_budget_ratio": 0.6,
+            "rag_mode": "agentic",
+            "rag_mode_label": "iterative retrieval",
+        })), patch(
+            "orchestrator.rag.pipeline.AdaptiveRAGPipeline",
+            _FakePipeline,
+        ), patch(
+            "orchestrator.chainlit_app._create_failover_embed_fn",
+            return_value=None,
+        ), patch.object(self._module.asyncio, "to_thread", side_effect=fake_to_thread):
+            await self._module._ensure_rag_index_for_active_docs(step_name="Инициализация RAG")
+
+        assert created_steps
+        output = created_steps[0].output
+        assert "RAG: режим=агентный (agentic; iterative retrieval)" in output
+        assert "поиск=BM25 (только sparse)" in output
+        assert "профиль=стандартный (default)" in output
+        assert "бюджет=4915 токенов" in output
+        assert "проиндексирован 1 документ" in output
+        assert "Активный набор: 455-z.pdf (1 документ)" in output

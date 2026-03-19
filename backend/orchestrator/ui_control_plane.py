@@ -5,11 +5,11 @@ from typing import Any, Dict, Mapping, Optional
 from services.model_manager.model_selection import resolve_model_selection
 
 ASSISTANT_MODE_ITEMS: Dict[str, str] = {
-    "general_chat": "General Chat",
-    "coding": "Coding Assistant",
-    "agentic": "Agentic (iterative)",
-    "specific_tasks": "Specific Tasks",
-    "rag_qa": "RAG Q&A",
+    "general_chat": "Общий чат",
+    "coding": "Помощник по коду",
+    "agentic": "Агентный режим (iterative)",
+    "specific_tasks": "Специализированные задачи",
+    "rag_qa": "Вопросы по документам (RAG)",
 }
 
 RUNTIME_MODE_ITEMS: Dict[str, str] = {
@@ -19,16 +19,16 @@ RUNTIME_MODE_ITEMS: Dict[str, str] = {
 }
 
 RAG_SCOPE_ITEMS: Dict[str, str] = {
-    "off": "Off",
-    "session_rag": "Session RAG",
-    "knowledge_base_rag": "Knowledge Base + Session Overlay",
+    "off": "Отключено",
+    "session_rag": "Сессионный RAG",
+    "knowledge_base_rag": "База знаний + документы сессии",
 }
 
 MODEL_PROFILE_ITEMS: Dict[str, str] = {
-    "default-chat": "Default Chat",
-    "long-context": "Long Context",
-    "legal-compare": "Legal Compare",
-    "low-vram": "Low VRAM",
+    "default-chat": "Стандартный чат",
+    "long-context": "Длинный контекст",
+    "legal-compare": "Юридическое сравнение",
+    "low-vram": "Низкий VRAM",
 }
 
 MODEL_PROFILE_ALIASES: Dict[str, str] = {
@@ -39,28 +39,28 @@ MODEL_PROFILE_ALIASES: Dict[str, str] = {
 
 MODEL_PROFILE_DEFINITIONS: Dict[str, Dict[str, Any]] = {
     "default-chat": {
-        "label": "Default Chat",
+        "label": "Стандартный чат",
         "model_role_key": "llm.default_chat",
         "device_mode": "auto",
         "context_budget_profile": "standard",
         "generation": {"temperature": 0.7, "top_p": 0.9, "max_tokens": 2048},
     },
     "long-context": {
-        "label": "Long Context",
+        "label": "Длинный контекст",
         "model_role_key": "llm.long_context",
         "device_mode": "prefer-gpu",
         "context_budget_profile": "long-context",
         "generation": {"temperature": 0.3, "top_p": 0.9, "max_tokens": 3072},
     },
     "legal-compare": {
-        "label": "Legal Compare",
+        "label": "Юридическое сравнение",
         "model_role_key": "llm.legal_compare",
         "device_mode": "prefer-gpu",
         "context_budget_profile": "legal-compare",
         "generation": {"temperature": 0.2, "top_p": 0.8, "max_tokens": 2048},
     },
     "low-vram": {
-        "label": "Low VRAM",
+        "label": "Низкий VRAM",
         "model_role_key": "llm.low_vram",
         "device_mode": "low-vram",
         "context_budget_profile": "compact",
@@ -91,19 +91,19 @@ RETRIEVAL_EMBEDDER_PROFILE_DEFINITIONS: Dict[str, Dict[str, Any]] = {
 }
 
 PROMPT_PROFILE_ITEMS: Dict[str, str] = {
-    "default-assistant": "Default Assistant",
-    "coding-assistant": "Coding Assistant",
-    "tool-using-agent": "Tool-Using Agent",
-    "task-router": "Task Router",
-    "strict-grounded-doc-qa": "Strict Grounded Doc QA",
+    "default-assistant": "Стандартный ассистент",
+    "coding-assistant": "Помощник по коду",
+    "tool-using-agent": "Агент с инструментами",
+    "task-router": "Маршрутизатор задач",
+    "strict-grounded-doc-qa": "Строгие ответы по документам",
 }
 
 TOOL_SCOPE_ITEMS: Dict[str, str] = {
-    "chat": "Chat",
-    "coding": "Coding",
-    "agentic": "Agentic (iterative)",
-    "domain_tasks": "Domain Tasks",
-    "document_qa": "Document QA",
+    "chat": "Чат",
+    "coding": "Код",
+    "agentic": "Агентный режим (iterative)",
+    "domain_tasks": "Предметные задачи",
+    "document_qa": "Вопросы по документам",
 }
 
 PROMPT_PROFILE_SYSTEM_MESSAGES: Dict[str, str] = {
