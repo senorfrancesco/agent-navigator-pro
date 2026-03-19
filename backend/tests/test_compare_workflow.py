@@ -12,6 +12,8 @@ from orchestrator.workflows.compare import (
     generate_report_node,
     load_documents_node,
     match_chunks_node,
+    _determine_compare_mode,
+    _resolve_analysis_batch_size,
 )
 from services.observability import render_metrics_text, reset_observability_metrics
 
@@ -220,6 +222,26 @@ async def test_compare_load_documents_detects_same_base_law_amendment_pair():
     assert result["base_document_title_2"] == "О средствах массовой информации"
 
 
+def test_compare_mode_does_not_treat_shared_reference_as_same_base_amendment():
+    relation_type, compare_mode = _determine_compare_mode(
+        "other",
+        "other",
+        "Доклад.pdf",
+        "Методичка.pdf",
+        text_1=(
+            "Аналитический доклад. В тексте упоминается Закон Республики Беларусь "
+            "«О средствах массовой информации», но документ не вносит в него изменения."
+        ),
+        text_2=(
+            "Методические рекомендации по применению норм. Документ ссылается на Закон "
+            "Республики Беларусь «О средствах массовой информации», но не является законом о внесении изменений."
+        ),
+    )
+
+    assert relation_type == "unknown"
+    assert compare_mode == "semantic_compare"
+
+
 @pytest.mark.asyncio
 async def test_compare_match_batches_lowers_threshold_for_same_base_law_amendments():
     state = {
@@ -254,6 +276,24 @@ async def test_compare_match_batches_lowers_threshold_for_same_base_law_amendmen
 
     _, kwargs = fake_client.post.call_args
     assert kwargs["json"]["threshold"] == 0.64
+
+
+def test_compare_analysis_batch_size_uses_single_item_for_same_base_law_amendments():
+    state = {
+        "pair_relation_type": "same_base_law_amendments",
+        "compare_mode_selected": "semantic_compare",
+    }
+
+    assert _resolve_analysis_batch_size(state) == 1
+
+
+def test_compare_analysis_batch_size_uses_smaller_batch_for_generic_semantic_compare():
+    state = {
+        "pair_relation_type": "unknown",
+        "compare_mode_selected": "semantic_compare",
+    }
+
+    assert _resolve_analysis_batch_size(state) == 2
 
 
 @pytest.mark.asyncio
@@ -331,6 +371,47 @@ async def test_compare_analyze_uses_semantic_fallback_for_policy_vs_contract_str
 
 
 @pytest.mark.asyncio
+async def test_compare_analyze_retries_partial_batch_item_by_item_for_semantic_compare():
+    state = {
+        "input_1": "/tmp/law_2021.pdf",
+        "input_2": "/tmp/law_2023.pdf",
+        "name_1": "law_2021.pdf",
+        "name_2": "law_2023.pdf",
+        "text_1": "Закон 2021 года вносит изменения в закон о СМИ.",
+        "text_2": "Закон 2023 года вносит изменения в закон о СМИ.",
+        "document_role_1": "other",
+        "document_role_2": "other",
+        "pair_relation_type": "unknown",
+        "compare_mode_selected": "semantic_compare",
+        "chunks_old": [],
+        "chunks_new": [],
+        "matches": [
+            {"type": "MODIFIED", "old_text": "Старая норма 1.", "new_text": "Новая норма 1.", "similarity_score": 0.1},
+            {"type": "MODIFIED", "old_text": "Старая норма 2.", "new_text": "Новая норма 2.", "similarity_score": 0.1},
+        ],
+        "analysis_results": [],
+        "final_report": "",
+        "errors": [],
+        "session_id": "session-1",
+    }
+
+    with patch("orchestrator.workflows.compare.ums_client.async_infer", new_callable=AsyncMock) as mock_infer:
+        mock_infer.side_effect = [
+            {"content": '[{"is_critical": true, "diff": "Только один результат", "impact": "Недостаточно"}]'},
+            {"content": '[{"is_critical": true, "diff": "Изменена первая норма.", "impact": "Меняется регулирование первой темы."}]'},
+            {"content": '[{"is_critical": true, "diff": "Изменена вторая норма.", "impact": "Меняется регулирование второй темы."}]'},
+        ]
+
+        result = await analyze_differences_node(state)
+
+    modified = [item for item in result["analysis_results"] if item.get("type") == "MODIFIED"]
+    assert len(modified) == 2
+    assert "первая норма" in modified[0]["diff"].lower()
+    assert "вторая норма" in modified[1]["diff"].lower()
+    assert mock_infer.await_count == 3
+
+
+@pytest.mark.asyncio
 async def test_compare_analyze_runs_semantic_summary_for_same_base_law_structural_only():
     state = {
         "input_1": "/tmp/law_2021.pdf",
@@ -384,7 +465,13 @@ async def test_compare_analyze_runs_semantic_summary_for_same_base_law_structura
                     "is_critical": true,
                     "diff": "Из прежней редакции исключён фрагмент об ограничении доступа.",
                     "impact": "Меняется структура оснований для ограничения распространения информации."
-                  },
+                  }
+                ]
+                """
+            },
+            {
+                "content": """
+                [
                   {
                     "is_critical": true,
                     "diff": "Добавлено регулирование новостных агрегаторов как нового объекта надзора.",
@@ -401,7 +488,7 @@ async def test_compare_analyze_runs_semantic_summary_for_same_base_law_structura
     assert any(item.get("type") == "COVERAGE_GAP" for item in result["analysis_results"])
     assert any(item.get("type") == "DELETED" and item.get("diff") for item in result["analysis_results"])
     assert any(item.get("type") == "ADDED" and item.get("diff") for item in result["analysis_results"])
-    assert mock_infer.await_count == 2
+    assert mock_infer.await_count == 3
 
 
 @pytest.mark.asyncio

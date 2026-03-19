@@ -148,6 +148,11 @@ def _normalize_legal_title(title: str) -> str:
     return re.sub(r"\W+", " ", title.lower()).strip()
 
 
+def _is_amendment_document(text: str) -> bool:
+    head = text[:6000].lower()
+    return "об изменении" in head and "внести в закон" in head
+
+
 def _determine_compare_mode(
     role_1: str,
     role_2: str,
@@ -158,7 +163,12 @@ def _determine_compare_mode(
 ) -> tuple[str, str]:
     base_title_1 = _normalize_legal_title(_extract_base_document_title(text_1))
     base_title_2 = _normalize_legal_title(_extract_base_document_title(text_2))
-    if base_title_1 and base_title_1 == base_title_2:
+    if (
+        base_title_1
+        and base_title_1 == base_title_2
+        and _is_amendment_document(text_1)
+        and _is_amendment_document(text_2)
+    ):
         return "same_base_law_amendments", "semantic_compare"
     if role_1 == "policy" and role_2 == "contract":
         return "policy_vs_contract", "heterogeneous_alignment"
@@ -179,6 +189,14 @@ def _resolve_match_threshold(state: CompareState) -> float:
     if state.get("compare_mode_selected") == "semantic_compare":
         return 0.68
     return 0.72
+
+
+def _resolve_analysis_batch_size(state: CompareState) -> int:
+    if state.get("pair_relation_type") == "same_base_law_amendments":
+        return 1
+    if state.get("compare_mode_selected") == "semantic_compare":
+        return 2
+    return BATCH_SIZE
 
 
 def _append_structural_result(results: List[Dict[str, Any]], match: Dict[str, Any]) -> None:
@@ -207,6 +225,127 @@ def _build_compare_batch_items_text(batch: List[Dict[str, Any]]) -> str:
                 f"НОВЫЙ: {truncate_text(item.get('new_text', ''), 800)}\n"
             )
     return "".join(parts)
+
+
+def _prioritize_semantic_candidates(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _priority(item: Dict[str, Any]) -> tuple[int, float, int]:
+        diff_type = item.get("type", "MODIFIED")
+        old_text = str(item.get("old_text") or "")
+        new_text = str(item.get("new_text") or "")
+        text = f"{old_text} {new_text}".lower()
+        critical_kw = ("обязан", "запрещ", "огранич", "доступ", "аккредитац", "агрегатор", "экстрем")
+        keyword_hits = sum(1 for keyword in critical_kw if keyword in text)
+        score = float(item.get("similarity_score", item.get("score", 0.0)) or 0.0)
+        weight = 0 if diff_type == "MODIFIED" else 1
+        return (weight, score, -keyword_hits)
+
+    return sorted(candidates, key=_priority)
+
+
+def _extract_compare_response_content(response: Dict[str, Any]) -> str:
+    content = response.get("content", "")
+    if not content and "choices" in response:
+        content = response["choices"][0].get("text", "")
+    elif not content and "result" in response and "choices" in response.get("result", {}):
+        content = response["result"]["choices"][0].get("text", "")
+    return content
+
+
+def _normalize_compare_batch_payload(
+    batch: List[Dict[str, Any]],
+    parsed: Any,
+) -> List[Dict[str, Any]]:
+    if not isinstance(parsed, list):
+        parsed = [parsed] if isinstance(parsed, dict) else []
+
+    normalized: List[Dict[str, Any]] = []
+    for idx, match in enumerate(batch):
+        item_data = parsed[idx] if idx < len(parsed) and isinstance(parsed[idx], dict) else {}
+        diff_type = match.get("type", "MODIFIED")
+        if item_data and (item_data.get("is_critical") or len(item_data.get("diff", " ")) > 5):
+            payload = {
+                "type": diff_type,
+                "is_critical": item_data.get("is_critical"),
+                "diff": item_data.get("diff"),
+                "impact": item_data.get("impact"),
+                "old_text": match.get("old_text", ""),
+                "new_text": match.get("new_text", ""),
+            }
+            if diff_type in {"ADDED", "DELETED"}:
+                payload["content"] = match.get("new_text", "") if diff_type == "ADDED" else match.get("old_text", "")
+            normalized.append(payload)
+        elif diff_type in {"ADDED", "DELETED"}:
+            payload = []
+            _append_structural_result(payload, match)
+            normalized.extend(payload)
+        else:
+            normalized.append({
+                "type": "MODIFIED",
+                "is_critical": False,
+                "diff": "Ошибка анализа",
+                "impact": "Требуется ручной анализ",
+                "old_text": match.get("old_text", ""),
+                "new_text": match.get("new_text", ""),
+            })
+    return normalized
+
+
+async def _analyze_compare_batch(
+    *,
+    batch: List[Dict[str, Any]],
+    model_execution_events: List[Dict[str, Any]],
+    allow_item_retry: bool = True,
+) -> List[Dict[str, Any]]:
+    items_text = _build_compare_batch_items_text(batch)
+    prompt = f"""<|im_start|>system
+Ты эксперт-юрист. Проанализируй {len(batch)} изменений в документе.
+Для каждого изменения объясни юридический смысл, даже если это просто добавленный или удалённый фрагмент.
+Верни JSON массив из ровно {len(batch)} объектов с полями:
+is_critical, diff, impact.<|im_end|>
+<|im_start|>user
+Для каждого из {len(batch)} изменений определи юридическую суть.
+{items_text}
+Ответ — JSON массив из ровно {len(batch)} объектов:
+[{{"is_critical": true/false, "diff": "суть изменения", "impact": "последствия"}}]<|im_end|>
+<|im_start|>assistant
+"""
+    payload = {
+        "prompt": prompt,
+        "max_tokens": COMPARE_ANALYSIS_MAX_TOKENS,
+        "temperature": COMPARE_ANALYSIS_TEMPERATURE,
+        "echo": False,
+    }
+    response, model_execution = await _infer_compare_llm(prompt, payload)
+    if model_execution:
+        model_execution_events.append(model_execution)
+
+    content = _extract_compare_response_content(response)
+    parsed = parse_json_garbage(content)
+    parsed_list = parsed if isinstance(parsed, list) else ([parsed] if isinstance(parsed, dict) else [])
+
+    if len(parsed_list) < len(batch):
+        logger.warning(
+            "Compare analyze fallback: structured output count mismatch batch=%s parsed=%s",
+            len(batch),
+            len(parsed_list),
+        )
+        inc_metric_counter(
+            "agent_nav_fallback_events_total",
+            labels={"component": "compare_workflow", "fallback": "analyze_parse_partial", "source": "workflow"},
+        )
+        if allow_item_retry and len(batch) > 1:
+            retried_results: List[Dict[str, Any]] = []
+            for item in batch:
+                retried_results.extend(
+                    await _analyze_compare_batch(
+                        batch=[item],
+                        model_execution_events=model_execution_events,
+                        allow_item_retry=False,
+                    )
+                )
+            return retried_results
+
+    return _normalize_compare_batch_payload(batch, parsed_list)
 
 
 def _build_heterogeneous_compare_prompt(
@@ -486,77 +625,25 @@ async def analyze_differences_node(state: CompareState):
                 labels={"component": "compare_workflow", "fallback": "semantic_compare_error", "source": "workflow"},
             )
 
-    semantic_candidates = structural + to_analyze
+    semantic_candidates = _prioritize_semantic_candidates(to_analyze + structural)
 
     # Batch LLM анализ: по BATCH_SIZE различий в одном промпте
-    total_batches = (len(semantic_candidates) + BATCH_SIZE - 1) // BATCH_SIZE if semantic_candidates else 0
-    for batch_idx, batch_start in enumerate(range(0, len(semantic_candidates), BATCH_SIZE)):
-        batch = semantic_candidates[batch_start:batch_start + BATCH_SIZE]
+    analysis_batch_size = _resolve_analysis_batch_size(state)
+    print(
+        f"[Workflow] Pair relation={state.get('pair_relation_type', 'unknown')}, "
+        f"threshold={_resolve_match_threshold(state):.2f}, analysis_batch_size={analysis_batch_size}"
+    )
+    total_batches = (len(semantic_candidates) + analysis_batch_size - 1) // analysis_batch_size if semantic_candidates else 0
+    for batch_idx, batch_start in enumerate(range(0, len(semantic_candidates), analysis_batch_size)):
+        batch = semantic_candidates[batch_start:batch_start + analysis_batch_size]
         print(f"[Workflow] LLM batch {batch_idx+1}/{total_batches} ({len(batch)} diffs)")
-
-        items_text = _build_compare_batch_items_text(batch)
-
-        prompt = f"""<|im_start|>system
-Ты эксперт-юрист. Проанализируй {len(batch)} изменений в документе.
-Для каждого изменения объясни юридический смысл, даже если это просто добавленный или удалённый фрагмент.
-Верни JSON массив из ровно {len(batch)} объектов с полями:
-is_critical, diff, impact.<|im_end|>
-<|im_start|>user
-Для каждого из {len(batch)} изменений определи юридическую суть.
-{items_text}
-Ответ — JSON массив из ровно {len(batch)} объектов:
-[{{"is_critical": true/false, "diff": "суть изменения", "impact": "последствия"}}]<|im_end|>
-<|im_start|>assistant
-"""
         try:
-            payload = {
-                "prompt": prompt,
-                "max_tokens": COMPARE_ANALYSIS_MAX_TOKENS,
-                "temperature": COMPARE_ANALYSIS_TEMPERATURE,
-                "echo": False,
-            }
-            response, model_execution = await _infer_compare_llm(prompt, payload)
-
-            content = response.get("content", "")
-            if not content and "choices" in response:
-                content = response["choices"][0].get("text", "")
-            elif not content and "result" in response and "choices" in response.get("result", {}):
-                content = response["result"]["choices"][0].get("text", "")
-
-            parsed = parse_json_garbage(content)
-            if not isinstance(parsed, list):
-                parsed = [parsed] if isinstance(parsed, dict) else []
-            if len(parsed) < len(batch):
-                logger.warning(
-                    "Compare analyze fallback: structured output count mismatch batch=%s parsed=%s",
-                    len(batch),
-                    len(parsed),
+            results.extend(
+                await _analyze_compare_batch(
+                    batch=batch,
+                    model_execution_events=model_execution_events,
                 )
-                inc_metric_counter(
-                    "agent_nav_fallback_events_total",
-                    labels={"component": "compare_workflow", "fallback": "analyze_parse_partial", "source": "workflow"},
-                )
-
-            for idx, m in enumerate(batch):
-                item_data = parsed[idx] if idx < len(parsed) else {}
-                diff_type = m.get("type", "MODIFIED")
-                if item_data and (item_data.get("is_critical") or len(item_data.get("diff", " ")) > 5):
-                    payload = {
-                        "type": diff_type,
-                        "is_critical": item_data.get("is_critical"),
-                        "diff": item_data.get("diff"),
-                        "impact": item_data.get("impact"),
-                        "old_text": m.get('old_text', ''),
-                        "new_text": m.get('new_text', ''),
-                    }
-                    if diff_type in {"ADDED", "DELETED"}:
-                        payload["content"] = m.get('new_text', '') if diff_type == "ADDED" else m.get('old_text', '')
-                    results.append(payload)
-                elif diff_type in {"ADDED", "DELETED"}:
-                    _append_structural_result(results, m)
-
-            if model_execution:
-                model_execution_events.append(model_execution)
+            )
 
         except Exception as e:
             print(f"[Workflow] Error in batch {batch_idx+1}: {e}")
