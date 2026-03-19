@@ -1547,6 +1547,12 @@
   Verification:
   - `pytest backend/tests/test_compare_workflow.py -q`
   - `python -m py_compile backend/orchestrator/workflows/compare.py backend/tests/test_compare_workflow.py`
+  Status 2026-03-19:
+  - В `Chainlit` добавлен presentation-layer UX contour для длинного compare appendix.
+  - Если секция `Приложение: различия по пунктам` превышает threshold по числу строк, основной `assistant_message` теперь оставляет summary-first report без appendix spam.
+  - Полный appendix переносится в отдельный схлопнутый `Chainlit Step` `Приложение: различия по пунктам (N)` с `autoCollapse=True`.
+  - Короткие appendix cases остаются inline, чтобы не ухудшать UX на маленьких compare-ответах.
+  - Workflow `compare.py` не менялся по report contract; split сделан только на уровне `chainlit_app.py`.
 
 - [ ] **B3.51a — Harden pair typing до production-grade compare regime selection**
   Контекст:

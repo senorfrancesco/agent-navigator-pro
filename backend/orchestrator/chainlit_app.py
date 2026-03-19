@@ -12,6 +12,7 @@ Chainlit App — замена Open WebUI для Agent Navigator Pro.
 """
 
 import asyncio
+import contextlib
 import copy
 import json
 import logging
@@ -111,6 +112,8 @@ _DOC_QUESTION_UPLOAD_REQUEST_PHRASES = [
 ]
 RAG_INDEX_CACHE_MAX = int(os.getenv("RAG_INDEX_CACHE_MAX", "8"))
 RAG_INDEX_CACHE_TTL_S = int(os.getenv("RAG_INDEX_CACHE_TTL_S", "1800"))
+COMPARE_APPENDIX_STEP_MIN_LINES = int(os.getenv("CHAINLIT_COMPARE_APPENDIX_STEP_MIN_LINES", "5"))
+EXECUTION_PROGRESS_POLL_S = float(os.getenv("CHAINLIT_EXECUTION_PROGRESS_POLL_S", "2.5"))
 
 
 def get_chainlit_ui_test_hook_contract() -> Dict[str, Any]:
@@ -1178,14 +1181,76 @@ def _reset_cancel_state() -> None:
     cl.user_session.set("cancel_requested", False)
 
 
+def _is_compare_execution_request(request: Dict[str, Any]) -> bool:
+    forced_route = str(request.get("forced_route") or "").strip()
+    if forced_route == "compare_documents":
+        return True
+    session_docs = request.get("session_docs") or {}
+    if len(session_docs) < 2:
+        return False
+    message = str(request.get("message") or "").lower()
+    compare_markers = (
+        "сравн",
+        "compare",
+        "отлич",
+        "разниц",
+        "diff",
+    )
+    return any(marker in message for marker in compare_markers)
+
+
+def _build_execution_progress_stages(request: Dict[str, Any]) -> Optional[List[Dict[str, str]]]:
+    if _is_compare_execution_request(request):
+        return [
+            {
+                "title": "Сравнение документов",
+                "content": "Загружаю документы и подготавливаю текст для сравнения.",
+            },
+            {
+                "title": "Сравнение документов",
+                "content": "Сопоставляю смысловые фрагменты и ищу наиболее близкие нормы.",
+            },
+            {
+                "title": "Сравнение документов",
+                "content": "Анализирую различия по смыслу. Это может занять время на длинных документах.",
+            },
+            {
+                "title": "Сравнение документов",
+                "content": "Формирую юридический вывод и приложение с различиями.",
+            },
+        ]
+    return None
+
+
+async def _run_execution_progress(request: Dict[str, Any]) -> None:
+    stages = _build_execution_progress_stages(request)
+    if not stages:
+        return
+    for idx, stage in enumerate(stages):
+        await _update_progress_box(
+            key="execution_progress",
+            title=stage["title"],
+            content=stage["content"],
+        )
+        if idx < len(stages) - 1:
+            await asyncio.sleep(EXECUTION_PROGRESS_POLL_S)
+
+
 async def _await_backend_execution(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     _reset_cancel_state()
     cl.user_session.set("model_execution_events", [])
+    progress_task: Optional[asyncio.Task[Any]] = None
     task = asyncio.create_task(
         _backend_execute_orchestration(request, deps=_build_execution_dependencies()),
         name=f"chainlit-exec:{request.get('trace_id', '-')}",
     )
     _set_active_execution_task(task)
+    progress_stages = _build_execution_progress_stages(request)
+    if progress_stages:
+        progress_task = asyncio.create_task(
+            _run_execution_progress(request),
+            name=f"chainlit-progress:{request.get('trace_id', '-')}",
+        )
     try:
         response = await task
     except asyncio.CancelledError:
@@ -1193,6 +1258,12 @@ async def _await_backend_execution(request: Dict[str, Any]) -> Optional[Dict[str
         await cl.Message(content="Запрос остановлен пользователем.").send()
         return None
     finally:
+        if progress_task is not None:
+            progress_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await progress_task
+        if progress_stages:
+            await _finalize_progress_box(key="execution_progress")
         _set_active_execution_task(None)
     return response
 
@@ -1239,14 +1310,37 @@ async def _finalize_progress_box(*, key: str) -> None:
     cl.user_session.set(key, None)
 
 
+async def _render_compare_appendix_step(split_result: Dict[str, Any]) -> None:
+    appendix_body = str(split_result.get("appendix_body") or "").strip()
+    if not appendix_body:
+        return
+    appendix_lines = int(split_result.get("appendix_lines") or 0)
+    step = cl.Step(
+        name=f"Приложение: различия по пунктам ({appendix_lines})",
+        type="tool",
+        show_input=False,
+        default_open=False,
+        autoCollapse=True,
+    )
+    step.output = appendix_body
+    await step.send()
+
+
 async def _render_execution_response(response: Dict[str, Any], history: List[Dict[str, str]]) -> None:
     _sync_run_metadata_from_response(response)
     _apply_session_state_patch(response.get("session_state_patch"))
     assistant_message = response.get("assistant_message")
     if assistant_message:
         await _finalize_progress_box(key="documents_summary_progress")
-        await cl.Message(content=assistant_message).send()
-        history.append({"role": "assistant", "content": assistant_message})
+        rendered_message = assistant_message
+        split_result = _split_compare_report_appendix(assistant_message)
+        if _should_render_compare_appendix_in_step(split_result):
+            rendered_message = split_result["main_body"]
+            await cl.Message(content=rendered_message).send()
+            await _render_compare_appendix_step(split_result)
+        else:
+            await cl.Message(content=rendered_message).send()
+        history.append({"role": "assistant", "content": rendered_message})
     await _persist_current_backend_state(
         status="waiting_action" if response.get("action_required") else "completed",
         last_error=assistant_message if str(assistant_message or "").lower().startswith("ошибка") else None,
@@ -2237,6 +2331,44 @@ def _extract_saved_report_filename(report_text: str) -> Optional[str]:
     if not match:
         return None
     return match.group(1).strip()
+
+
+def _split_compare_report_appendix(report_text: str) -> Dict[str, Any]:
+    canonical_header = "## Приложение: различия по пунктам"
+    text = str(report_text or "")
+    marker_index = text.find(canonical_header)
+    if marker_index < 0:
+        return {
+            "main_body": text,
+            "appendix_body": None,
+            "appendix_lines": 0,
+        }
+
+    main_body = text[:marker_index].rstrip()
+    appendix_body = text[marker_index:].strip()
+    if not main_body or not appendix_body.startswith(canonical_header):
+        return {
+            "main_body": text,
+            "appendix_body": None,
+            "appendix_lines": 0,
+        }
+
+    appendix_lines = sum(
+        1
+        for line in appendix_body.splitlines()[1:]
+        if re.match(r"^\s*\d+\.\s+", line)
+    )
+    return {
+        "main_body": main_body,
+        "appendix_body": appendix_body,
+        "appendix_lines": appendix_lines,
+    }
+
+
+def _should_render_compare_appendix_in_step(split_result: Dict[str, Any]) -> bool:
+    appendix_body = split_result.get("appendix_body")
+    appendix_lines = int(split_result.get("appendix_lines") or 0)
+    return bool(appendix_body) and appendix_lines >= COMPARE_APPENDIX_STEP_MIN_LINES
 
 
 async def _attach_and_register_report(report_text: str) -> None:
