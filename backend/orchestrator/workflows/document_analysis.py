@@ -153,22 +153,6 @@ def classify_doc_type(text: str) -> str:
     return max(scores, key=scores.get)
 
 
-@asynccontextmanager
-async def _optional_chainlit_step(name: str, step_type: str) -> AsyncIterator[Any]:
-    """Открывает Chainlit step только при активном UI context."""
-    try:
-        import chainlit as cl
-        from chainlit.context import get_context
-
-        get_context()
-    except Exception:
-        yield None
-        return
-
-    async with cl.Step(name=name, type=step_type) as step:
-        yield step
-
-
 def _build_summary_chunk_prompt(type_prompt: str, chunk: str, index: int, total: int) -> str:
     return f"""<|im_start|>system
 Ты аналитик документов. Извлекай структурированную информацию из текстов.<|im_end|>
@@ -552,8 +536,8 @@ async def extract_positions_node(state: DocumentAnalysisState) -> dict:
             async def _on_extract_chunk_progress(current: int, total: int) -> None:
                 await _update_summary_progress(
                     state,
-                    title="Экстракция позиций",
-                    content=f"Chunk {current}/{total}",
+                    title="Извлечение позиций",
+                    content=f"Фрагмент {current}/{total}",
                 )
 
             already_names = [it["name"] for it in items_table]
@@ -566,8 +550,8 @@ async def extract_positions_node(state: DocumentAnalysisState) -> dict:
             print(f"  [DocAnalysis] LLM text: {len(items_text)} items")
             await _update_summary_progress(
                 state,
-                title="Экстракция позиций",
-                content="Экстракция завершена",
+                title="Извлечение позиций",
+                content="Извлечение завершено",
             )
         except Exception as e:
             logger.warning("Document analysis llm extraction fallback: %s", e, exc_info=True)
@@ -680,7 +664,7 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
             await _update_summary_progress(
                 state,
                 title="Суммаризация документа",
-                content=f"Chunk {idx+1}/{len(chunks)}",
+                content=f"Фрагмент {idx+1}/{len(chunks)}",
             )
             response, model_execution = await _infer_document_analysis_with_failover(
                 stage="chunk_summary",
@@ -731,7 +715,7 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
                     await _update_summary_progress(
                         state,
                         title="Суммаризация документа",
-                        content=f"Group merge L{merge_level} {group_idx}/{len(grouped)}",
+                        content=f"Объединение фрагментов L{merge_level}: {group_idx}/{len(grouped)}",
                     )
                     combined = "\n\n---\n\n".join(group)
                     admission = _resolve_stage_admission(

@@ -146,6 +146,22 @@ class TestClassifyDocType:
         assert _DOC_TYPE_LABELS["legal"] == "Юридический / нормативный документ"
 
 
+@pytest.mark.asyncio
+async def test_document_analysis_infer_fallback_metadata_uses_resolved_model_id():
+    with patch("orchestrator.workflows.document_analysis.ums_client.async_infer", new_callable=AsyncMock) as mock_infer:
+        mock_infer.return_value = {"content": "ok"}
+
+        _, model_execution = await _infer_document_analysis_with_failover(
+            stage="chunk_summary",
+            prompt="prompt",
+            payload={"temperature": 0.1},
+        )
+
+    assert model_execution is not None
+    assert model_execution["role_key"] == "llm.legal_compare"
+    assert model_execution["used_model_id"] == "qwen-14b-llm"
+
+
 # ============================================================================
 # Tests: classify_and_load_node
 # ============================================================================
@@ -332,6 +348,32 @@ class TestExtractPositionsNode:
         assert "model_execution_events" in kwargs
 
     @pytest.mark.asyncio
+    async def test_extract_progress_callback_uses_russian_labels(self, base_state):
+        progress_updates = []
+
+        async def _fake_extract_items_llm(path, already_names, progress_callback=None, model_execution_events=None):
+            assert callable(progress_callback)
+            await progress_callback(1, 3)
+            await progress_callback(3, 3)
+            return []
+
+        async def _update_progress_box(*, key, title, content):
+            progress_updates.append({"key": key, "title": title, "content": content})
+
+        base_state["runtime_context"] = {"update_progress_box": _update_progress_box}
+
+        with patch("orchestrator.workflows.document_analysis._extract_tables_from_doc", new_callable=AsyncMock) as mock_tables, \
+             patch("orchestrator.workflows.document_analysis._extract_items_llm", side_effect=_fake_extract_items_llm):
+            mock_tables.return_value = []
+            await extract_positions_node(base_state)
+
+        assert progress_updates
+        assert progress_updates[0]["title"] == "Извлечение позиций"
+        assert progress_updates[0]["content"] == "Фрагмент 1/3"
+        assert progress_updates[1]["content"] == "Фрагмент 3/3"
+        assert progress_updates[-1]["content"] == "Извлечение завершено"
+
+    @pytest.mark.asyncio
     async def test_extract_collects_model_execution_metadata_from_llm_paths(self, base_state):
         async def _fake_extract_items_llm(path, already_names, progress_callback=None, model_execution_events=None):
             if model_execution_events is not None:
@@ -374,6 +416,30 @@ class TestExtractPositionsNode:
 # ============================================================================
 
 class TestSummarizeNode:
+    @pytest.mark.asyncio
+    async def test_summarize_progress_uses_russian_fragment_labels(self, base_state):
+        base_state["full_text"] = "Фрагмент один\n\nФрагмент два"
+        base_state["doc_type"] = "other"
+        progress_updates = []
+
+        async def _update_progress_box(*, key, title, content):
+            progress_updates.append({"key": key, "title": title, "content": content})
+
+        base_state["runtime_context"] = {"update_progress_box": _update_progress_box}
+
+        with patch("orchestrator.workflows.document_analysis._chunk_text", new_callable=AsyncMock) as mock_chunk, \
+             patch("orchestrator.workflows.document_analysis.ums_client") as mock_ums:
+            mock_chunk.return_value = ["часть 1", "часть 2"]
+            mock_ums.async_infer = AsyncMock(return_value={"content": "- ok"})
+
+            result = await summarize_node(base_state)
+
+        assert result["summary"]
+        assert any(update["title"] == "Суммаризация документа" for update in progress_updates)
+        assert any(update["content"] == "Фрагмент 1/2" for update in progress_updates)
+        assert any(update["content"] == "Фрагмент 2/2" for update in progress_updates)
+        assert all("Chunk" not in update["content"] for update in progress_updates)
+
     @pytest.mark.asyncio
     async def test_summarize_tz_prompt(self, base_state, tz_text):
         base_state["full_text"] = tz_text
