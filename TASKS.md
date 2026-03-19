@@ -1182,16 +1182,15 @@
 ### H6 — Equipment: fallback-экстракция из КП без таблиц (B3.43)
 
 - [x] **B3.43 — Улучшить экстракцию позиций из КП/ТЗ без стандартных таблиц**
-  Контекст: в `kp_tz_equip` оба документа дали `Tables: 0` и `LLM text: 0`. КП содержало 1302 символа чистого текста без таблиц — LLM-промпт для извлечения позиций не сработал. ТЗ имело 6247 символов с нестандартной структурой.
-  Что сделать:
-  - Если `extract_tables_docx` → 0 AND LLM chunk extraction → 0: добавить fallback — передать полный текст документа в LLM с явным промптом "найди все позиции/товары/услуги/оборудование с характеристиками и ценами, даже если они представлены текстом, а не таблицей"
-  - Для ТЗ с нестандартными таблицами: попробовать `extract_tables` (PDF-путь) как fallback к `extract_tables_docx`
-  - Логировать какой path сработал
-  Verification:
-  - Живой тест с `КОММЕРЧЕСКОЕ ПРЕДЛОЖЕНИЕ.docx` и `2._KSU_1_4_24_tz-V2.docx`
-  Статус 2026-03-18:
-  - Реализован structured DOCX fallback через `word/document.xml` для линейризованных строк КП/ТЗ.
-  - Smoke на логовых файлах дал `3` позиции из КП и `2` позиции из ТЗ вместо прежних `0/0`.
+  Контекст:
+  - в `kp_tz_equip` оба документа раньше давали `Tables: 0` и `LLM text: 0`;
+  - DOCX без нормальных таблиц не проходили по стандартному extraction path.
+  Что было сделано:
+  - добавлен structured DOCX fallback через `word/document.xml` для линейризованных строк КП/ТЗ;
+  - fallback path теперь возвращает strategy metadata, чтобы было видно, какой extraction contour реально сработал.
+  Подтверждение:
+  - smoke на проблемных логовых файлах дал `3` позиции из КП и `2` позиции из ТЗ вместо прежних `0/0`;
+  - покрыто тестами в `backend/tests/test_equipment_workflow.py`.
 
 ### H7 — Equipment: структура отчёта ТЗ vs КП (B3.44)
 
@@ -1243,6 +1242,53 @@
     - reload page -> thread/history/steps persist
     - generated report download/open smoke
   - По возможности использовать стабильные test hooks / selectors вместо brittle text-only locators
+
+### H10 — Adaptive merge policy для documents_summary / document_analysis (B3.48)
+
+- [ ] **B3.48 — Убрать безусловную многоуровневую group-merge редукцию там, где она не нужна**
+  Контекст: текущая hierarchical synthesis (`group_merge L1/L2/L3`) решает проблему oversized final merge и weak-hardware stability, но на мощных машинах и/или при умеренном размере документа может добавлять лишние LLM-вызовы и заметно увеличивать tail latency. Сейчас reduce path слишком консервативен: grouped merge используется как default strategy вместо adaptive policy по admission/budget.
+  Что сделать:
+  - Для `documents_summary` и `document_analysis` ввести adaptive reduce policy:
+    - если все `reduce_items` проходят final-stage admission и укладываются в безопасный input/output budget, идти сразу в `final synthesis` без промежуточных `L1/L2/L3`;
+    - включать hierarchical `group_merge` только когда это действительно нужно по budget, chunk/group count или hardware profile;
+    - на сильных профилях не форсировать ту же глубину merge, что и на weak-PC policy;
+  - Явно разделить:
+    - `stability path` для слабого/загруженного runtime;
+    - `fast path` для случаев, где один bounded final merge безопасен;
+  - Сделать policy env/config-driven, а не захардкоженной под одну машину:
+    - adaptive thresholds для `group_size`, `group_input_chars`, `final_input_chars`;
+    - возможность отключать intermediate merge levels при safe admission;
+    - отдельные knobs для weak vs normal hardware profiles;
+  - Сохранить уже реализованные safety guarantees:
+    - никакого unbounded final prompt;
+    - token-budget guard обязателен перед каждой heavy stage;
+    - partial/degraded branch не ломается;
+    - cancel propagation между стадиями остаётся рабочей;
+  - Улучшить observability:
+    - в metadata/logs явно различать `fast_final_merge` vs `hierarchical_merge`;
+    - писать причину выбора grouped path (`budget`, `hardware`, `retry_policy`, `degraded_mode`);
+    - фиксировать фактическую глубину merge (`levels_used`, `groups_total`);
+  Что не считать решением:
+  - полное удаление hierarchical synthesis;
+  - простое увеличение context window / timeout как замена policy;
+  - ручной switch "для мощной машины" без admission/budget-based decision;
+  - грубое укрупнение `group_size` без контроля token/input budget;
+  Acceptance:
+  - если итоговый reduce payload безопасно проходит admission, pipeline не делает лишние `group_merge` уровни;
+  - для длинных/тяжёлых документов grouped path по-прежнему включается автоматически и остаётся bounded;
+  - на мощном профиле среднее число summary-stage LLM-вызовов уменьшается для документов, которые помещаются в safe final merge;
+  - partial/degraded behavior и cancel semantics не регрессируют;
+  - logs/metadata позволяют понять:
+    - почему был выбран `fast path` или `hierarchical path`;
+    - сколько merge levels реально было использовано;
+    - был ли grouped path вызван из-за hardware policy или budget overflow;
+  Verification:
+  - `pytest backend/tests/test_execution_runtime.py backend/tests/test_document_analysis.py -q`
+  - Добавить/обновить unit tests на сценарии:
+    - safe final merge без `L1/L2/L3`;
+    - forced grouped merge при budget overflow;
+    - weak-PC policy сохраняет bounded hierarchical path;
+    - metadata/logs отражают выбранную reduce strategy
   Verification:
   - локально: `npx playwright test tests/e2e/chainlit`
   - CI smoke: хотя бы `chromium` project для `chat + upload + reload persistence`
@@ -1277,14 +1323,24 @@
   - `pytest backend/tests/test_chainlit_persistence_e2e.py -q`
 
 - [ ] **T6.4 P1 — Concurrency / cancel / busy black-box tests**
-  Контекст: UMS concurrency policy и `429 busy` уже покрыты unit-тестами, но нет настоящего пользовательского regression gate на path `long run -> second request -> cancel -> retry`.
-  Что сделать:
-  - Добавить black-box тесты для сценариев:
-    - long-running request saturates slot
-    - second request получает `busy` / ожидаемую деградацию
-    - cancel первого run освобождает slot
-    - второй запрос после cancel проходит без долгого stuck-state
-  - Проверять не только HTTP status, но и `status/metadata`, если они публикуются в `UMS /status`
+  Контекст:
+  - unit-тесты уже покрывают `429 busy`, cancel semantics и часть saturation policy;
+  - но нет одного black-box regression gate, который проверяет пользовательский path целиком:
+    `long request -> second request busy -> cancel first -> retry second`.
+  Что нужно сделать:
+  - создать `backend/tests/test_runtime_busy_e2e.py`;
+  - покрыть минимум 4 сценария:
+    - длинный run действительно занимает runtime slot;
+    - второй запрос получает ожидаемый `busy`/degraded ответ, а не произвольную ошибку;
+    - cancel первого run действительно освобождает slot;
+    - повторный запрос после cancel проходит без долгого stuck-state и без бесконечной серии `429`.
+  Что проверять:
+  - не только HTTP status, но и `execution_metadata` / `model_execution` / `UMS /status`, если соответствующая ветка их публикует;
+  - bounded latency после cancel, а не только факт eventual success.
+  Acceptance:
+  - есть отдельный black-box test file для busy/cancel path;
+  - сценарий стабильно воспроизводится без реального multi-user окружения;
+  - regression suite ловит stuck busy-state после cancel.
   Verification:
   - `pytest backend/tests/test_runtime_busy_e2e.py -q`
 
@@ -1601,15 +1657,41 @@ DOCUMENT_ANALYSIS_SUMMARIZE_MAX_TOKENS=512
 
 **Для полноценного GPU-инференса:** пересобрать llama.cpp с `-DGGML_CUDA=ON`. Ожидаемый прирост: 10–15× (до 40–60 tok/s). Prebuild-варианты: `pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124`.
 
-### 2026-03-18 — Registry-backed universal model failover
+### Future Task — B3.47: Закрыть cleanup после registry-backed universal model failover
 
-- Введён единый execution contract поверх `backend/config/models.yaml`: `primary -> fallback` для client-side и server-side runtime paths.
-- `ums_client` и `UMS` теперь используют один и тот же registry-backed execution plan вместо локальных hardcoded retry loops.
-- Failover не срабатывает на `429 busy` и cancellation; эти ветки считаются saturation/cancel semantics, а не model-failure.
-- Structured diagnostics публикуются в `model_execution`, metrics `agent_nav_fallback_events_total` и `UMS /status -> last_fallback_event`.
-- Follow-up cleanup:
-  - удалить оставшиеся неиспользуемые local failover helper'ы из `chainlit_app.py` / `agent_api.py`, если после verification они больше нигде не нужны как compatibility shims;
-  - при необходимости добавить operator-facing UI surface для `last_fallback_event` без просмотра raw `/status`.
+- [ ] **B3.47 — Завершить cleanup и UI-contract после перехода на registry-backed model failover**
+  Контекст:
+  - базовый `primary -> fallback` contract уже реализован поверх `backend/config/models.yaml`;
+  - `ums_client` и `UMS` уже используют registry-backed execution plan;
+  - `429 busy` и cancellation корректно не трактуются как model-failure.
+  Что ещё осталось:
+  - убрать дублирующиеся local failover helper'ы и compatibility shims из `chainlit_app.py` / `agent_api.py`, если они больше не нужны как отдельный runtime contour;
+  - проверить, что failover wiring не живёт в двух местах с собственной локальной логикой;
+  - решить, нужен ли operator-facing UI surface для `last_fallback_event` и `model_execution`, чтобы не смотреть raw `UMS /status`;
+  - если UI surface нужен:
+    - определить минимальный контракт отображения;
+    - не тащить в UI raw diagnostics целиком без фильтрации.
+  Acceptance:
+  - failover-логика не дублируется бессистемно между `Chainlit`, API и UMS;
+  - `last_fallback_event` либо честно показывается в operator-facing surface, либо явно остаётся только debug/status artifact;
+  - backlog больше не содержит note-блок без статуса вместо нормальной задачи.
+
+### Future Task — B3.50: Infer-ready readiness gate после preload/fallback
+
+- [ ] **B3.50 — Добавить readiness gate уровня `UMS infer-ready`, а не только `/health`/`/status`**
+  Контекст:
+  - после launcher/preflight cleanup container/native orchestration всё ещё в основном ждёт `/status` и `/health`;
+  - этого недостаточно для cold-start GPU path, если heavy runtime ещё не готов к первому реальному `POST /infer` после preload/fallback;
+  - в таком окне возможен race: UI уже считает систему поднятой, а первый inference ещё не готов обслуживаться.
+  Что нужно сделать:
+  - определить отдельный readiness contract уровня `infer-ready` для heavy model path;
+  - отделить `process is up` от `runtime can actually serve first infer`;
+  - встроить этот gate в launcher/runtime startup path без возврата к ad-hoc sleep/retry;
+  - зафиксировать, как readiness ведёт себя после preload, degraded startup и fallback-switch.
+  Acceptance:
+  - launcher/runtime не объявляет heavy path готовым только по `/health`/`/status`, если первый inference ещё не обслуживается;
+  - cold-start race между UI и первым infer локализован и покрыт тестом;
+  - readiness semantics одинаково понятны для native/container path.
 
 ### 2026-03-18 — B3.41: SQLite autoCollapse — причина и диагноз
 
@@ -1630,10 +1712,50 @@ DOCUMENT_ANALYSIS_SUMMARIZE_MAX_TOKENS=512
 - `scripts/run_all.sh` содержит хрупкий `curl -sf` внутри command substitution под `set -e` в `wait_for_model()`. Если `/status` временно недоступен, shell завершится раньше retry-loop. В `run_native.sh` этот же путь уже защищён через `|| true`, значит поведение между native/container paths сейчас расходится.
 - `launcher.sh`, `run_native.sh`, `run_all.sh`, `stop_native.sh`, `stop_all.sh`, `run_openwebui.sh`, `models/install_models.sh`, `bootstrap_env.sh` исполняют `source` на `.env*`/override файлах как shell-код, а не как безопасный `KEY=VALUE` parser. Это допустимо только при fully trusted local files; для user-owned override path это отдельный риск и его нужно явно документировать либо заменить на безопасный parser.
 - `backend/tests/test_runtime_launcher.py::test_launcher_sources_native_overrides_before_runtime_preflight` не hermetic: результат зависит от содержимого реального `backend/.env.hardware.override`. При текущем локальном `DEVICE_MODE="cpu"` тест падает, хотя launcher детерминированно применяет приоритет `.env -> .env.native -> .env.hardware.override`.
-- launcher/preflight contract уже разделён на `current-run -> backend/.env.runtime` и `persistent save -> backend/.env.hardware.override`, а `run_all.sh --from-launcher` больше не подмешивает `hardware.override` второй раз. Но отдельный startup follow-up остаётся: container/native orchestration всё ещё ждёт в основном `/status`/`health`, а не реальную готовность тяжёлого `POST /infer` после preload/fallback. Для cold-start GPU path нужен отдельный readiness gate уровня `UMS infer-ready`, иначе при долгом preload всё ещё возможен race между UI и первым inference.
+- launcher/preflight contract уже разделён на `current-run -> backend/.env.runtime` и `persistent save -> backend/.env.hardware.override`, а `run_all.sh --from-launcher` больше не подмешивает `hardware.override` второй раз. Отдельный startup follow-up вынесен в `B3.50` (`UMS infer-ready` readiness gate).
 - `scripts/setup_ubuntu.sh` скачивает CUDA keyring/Miniconda installer и Docker GPG material по сети без отдельной checksum/integrity verification в самом скрипте. Для interactive installer это workable path, но как supply-chain baseline слабое место.
 - permission-path всё ещё несимметричен: `scripts/run_native.sh` делает реальный writable preflight для `UPLOADS_DIR` и `backend/.data`, но container/runtime Python path в `chainlit_app.py`, `report_utils.py`, `knowledge_base_store.py`, `state_store.py` в основном ограничен `os.makedirs(..., exist_ok=True)` без отдельной ранней диагностики permission-denied/root-owned state. Нужен единый writable-dir preflight и более явные ошибки для compose/container path.
 - `scripts/setup_ubuntu.sh` до сих пор выставляет `chmod 777 backend/open_webui_uploads`; это помогает “чтобы работало”, но слишком грубая модель прав. Нужен более узкий ownership/permission contract вместо world-writable uploads dir.
+
+### Future Task — B3.46: Честный multi-GPU runtime contract для 4+ GPU
+
+- [ ] **B3.46 — Довести orchestration/UMS до надёжного распределения `LLM + intent embedder + retrieval embedder` на 4+ GPU**
+  Контекст:
+  - текущий `UMS` уже умеет строить `multi-gpu` placement для heavy LLM и передавать `--tensor-split`, но это пока только часть решения;
+  - для `4+ GPU` нет полного и детерминированного runtime-контракта на уровне orchestration;
+  - embedder'ы сейчас запускаются только как single-device `cuda:N`, без multi-GPU sharding;
+  - нет жёсткого process/env pinning heavy LLM к выбранному набору GPU, поэтому фактическое распределение остаётся best-effort.
+  Что нужно сделать:
+  - зафиксировать deterministic GPU placement contract для heavy LLM в `llama-server` path:
+    - явный pinning к выбранным GPU-индексам;
+    - согласованность между `placement metadata` и реальным child-process placement;
+    - предсказуемое поведение при `4+ GPU`, а не только weighted `tensor-split`;
+  - определить отдельный placement contract для `intent_embedder` и `retrieval_embedder`:
+    - prefer отдельные GPU, не занятые heavy LLM;
+    - не сажать оба embedder'а на одну карту без явного headroom/admission;
+    - сохранить manual override, но сделать auto-policy честной и повторяемой;
+  - добавить explicit runtime/env overrides для наборов GPU:
+    - `LLM GPU set`
+    - `intent embedder GPU set`
+    - `retrieval embedder GPU set`
+    - поведение при конфликтующих override должно быть детерминированным и диагностируемым;
+  - для `vllm` path отдельно определить, что считается supported multi-GPU contract:
+    - tensor parallel / served model path;
+    - какие env knobs являются source of truth;
+    - как orchestration и launcher это публикуют в runtime metadata;
+  - добавить admission/policy слой для `4+ GPU`:
+    - если headroom позволяет, раскладывать `LLM + 2 embedders` по разным GPU;
+    - если не позволяет, предсказуемо деградировать, а не silently collocate всё на одной/двух картах;
+  - покрыть это тестами:
+    - unit/integration tests для `UMS` placement logic на `4 GPU`;
+    - launcher/runtime_preflight tests для exported placement metadata;
+    - smoke-path для GPU-set overrides.
+  Acceptance:
+  - при `4+ GPU` heavy LLM запускается на детерминированно выбранном наборе GPU, а не только с metadata-level `gpu_indices`;
+  - `intent` и `retrieval` embedder'ы не конкурируют по умолчанию с heavy LLM за ту же GPU, если есть свободные карты;
+  - runtime metadata честно отражают фактическое распределение компонентов по GPU;
+  - manual overrides для GPU sets работают предсказуемо и не ломают auto-policy;
+  - есть тесты, которые подтверждают поведение для `4 GPU` и регрессии не завязаны на реальное железо конкретной машины.
 
 ### Антикризисные правила
 1. Не добавлять новые workflow до B3.31 cleanup
