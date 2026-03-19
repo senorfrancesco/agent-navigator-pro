@@ -14,6 +14,7 @@ import operator
 from langgraph.graph import StateGraph, END
 
 # Абсолютные импорты пакета (TD-5 Fix)
+from services.model_manager.model_selection import resolve_model_selection
 from services.model_manager.ums_client import ums_client
 from services.observability import inc_metric_counter
 from orchestrator.utils import parse_json_garbage
@@ -31,6 +32,7 @@ COMPARE_MIN_CHUNK_CHARS = int(os.getenv("COMPARE_MIN_CHUNK_CHARS", "40"))
 COMPARE_ANALYSIS_MAX_TOKENS = int(os.getenv("COMPARE_ANALYSIS_MAX_TOKENS", "600"))
 COMPARE_ANALYSIS_TEMPERATURE = float(os.getenv("COMPARE_ANALYSIS_TEMPERATURE", "0.1"))
 logger = logging.getLogger("compare_workflow")
+_LEGAL_COMPARE_SELECTION = resolve_model_selection("llm.legal_compare")
 
 
 async def _infer_compare_llm(prompt: str, payload: Dict[str, Any]) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
@@ -44,8 +46,10 @@ async def _infer_compare_llm(prompt: str, payload: Dict[str, Any]) -> tuple[Dict
     model_execution = response.get("model_execution") if isinstance(response, dict) else None
     if not isinstance(model_execution, dict):
         model_execution = {
-            "role_key": "llm.legal_compare",
-            "used_model_id": "llm.legal_compare",
+            "role_key": _LEGAL_COMPARE_SELECTION.role_key,
+            "primary_model_id": _LEGAL_COMPARE_SELECTION.primary_model_id,
+            "fallback_model_id": _LEGAL_COMPARE_SELECTION.fallback_model_id,
+            "used_model_id": _LEGAL_COMPARE_SELECTION.resolved_model_id,
             "fallback_stage": "compare_analysis",
             "fallback_used": False,
             "status": "completed",

@@ -79,6 +79,14 @@ def resolve_execution_plan(
             role_key = get_preferred_role_for_model_id(requested_model_id, env=source)
         except KeyError:
             role_key = None
+        if role_key is None:
+            try:
+                get_role_spec(requested_model_id, env=source)
+            except KeyError:
+                role_key = None
+            else:
+                role_key = requested_model_id
+                requested_model_id = None
 
     role_spec = get_role_spec(role_key, env=source) if role_key is not None else None
     if role_spec is None:

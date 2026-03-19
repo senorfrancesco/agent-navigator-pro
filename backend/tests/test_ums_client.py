@@ -9,7 +9,12 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from services.model_manager.ums_client import UMSBusyError, UMSClient, create_ums_embed_fn
+from services.model_manager.ums_client import (
+    UMSBusyError,
+    UMSClient,
+    _resolve_execution_plan_for_model,
+    create_ums_embed_fn,
+)
 from services.model_manager.model_selection import ModelSelection
 from services.observability import render_metrics_text, reset_observability_metrics
 
@@ -147,6 +152,28 @@ async def test_async_infer_retries_on_503(monkeypatch):
     assert "agent_nav_fallback_events_total" in metrics
     assert 'component="ums_client"' in metrics
     assert 'fallback="async_infer_retry"' in metrics
+
+
+def test_resolve_execution_plan_for_model_supports_role_key_compatibility():
+    selection = _resolve_execution_plan_for_model("llm.legal_compare")
+
+    assert selection.role_key == "llm.legal_compare"
+    assert selection.resolved_model_id == "qwen-14b-llm"
+
+
+@pytest.mark.asyncio
+async def test_async_infer_accepts_role_key_and_uses_resolved_model_id(monkeypatch):
+    client = UMSClient(base_url="http://localhost:8090")
+    fake_client = _FakeClient([
+        _FakeResponse(status_code=200, payload={"status": "success", "result": {"content": "ok"}}),
+    ])
+
+    with patch("services.model_manager.ums_client._get_async_client", new=AsyncMock(return_value=fake_client)):
+        result = await client.async_infer("llm.legal_compare", {"prompt": "x"})
+
+    assert result["content"] == "ok"
+    assert client.last_model_execution["role_key"] == "llm.legal_compare"
+    assert client.last_model_execution["used_model_id"] == "qwen-14b-llm"
 
 
 @pytest.mark.asyncio

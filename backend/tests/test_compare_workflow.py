@@ -7,6 +7,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from orchestrator.workflows.compare import (
+    _infer_compare_llm,
     analyze_differences_node,
     load_documents_node,
     match_chunks_node,
@@ -112,3 +113,15 @@ async def test_compare_analyze_partial_parse_records_metric():
     assert "agent_nav_fallback_events_total" in metrics
     assert 'component="compare_workflow"' in metrics
     assert 'fallback="analyze_parse_partial"' in metrics
+
+
+@pytest.mark.asyncio
+async def test_compare_infer_fallback_metadata_uses_resolved_model_id():
+    with patch("orchestrator.workflows.compare.ums_client.async_infer", new_callable=AsyncMock) as mock_infer:
+        mock_infer.return_value = {"content": "ok"}
+
+        _, model_execution = await _infer_compare_llm("prompt", {"temperature": 0.1})
+
+    assert model_execution is not None
+    assert model_execution["role_key"] == "llm.legal_compare"
+    assert model_execution["used_model_id"] == "qwen-14b-llm"

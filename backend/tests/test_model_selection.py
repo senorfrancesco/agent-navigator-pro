@@ -68,3 +68,16 @@ def test_execution_plan_handles_unknown_requested_model_id(monkeypatch):
     assert selection.resolved_model_id == "unknown-model-id"
     assert selection.fallback_available is False
     assert "no fallback role is available" in str(selection.warning)
+
+
+def test_execution_plan_treats_registered_role_key_as_role_not_model_id(monkeypatch):
+    monkeypatch.delenv("CHAINLIT_MODEL_PROFILE_LEGAL_COMPARE_MODEL", raising=False)
+    monkeypatch.delenv("CHAINLIT_FALLBACK_LLM_MODEL", raising=False)
+
+    selection = resolve_execution_plan(requested_model_id="llm.legal_compare")
+
+    assert selection.requested_model_id is None
+    assert selection.role_key == "llm.legal_compare"
+    assert selection.primary_model_id == "qwen-14b-llm"
+    assert selection.resolved_model_id == "qwen-14b-llm"
+    assert selection.source == "registry_primary"

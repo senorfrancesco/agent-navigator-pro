@@ -24,6 +24,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from orchestrator.workflows.document_analysis import (
+    _infer_document_analysis_with_failover,
     classify_doc_type,
     classify_and_load_node,
     extract_positions_node,

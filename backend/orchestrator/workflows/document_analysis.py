@@ -10,7 +10,6 @@ Map-reduce суммаризация с адаптивным промптом п�
 """
 
 import asyncio
-from contextlib import asynccontextmanager
 import glob as glob_mod
 import inspect
 import json
@@ -19,11 +18,12 @@ import os
 import re
 import time
 import httpx
-from typing import TypedDict, List, Dict, Any, Annotated, Optional, AsyncIterator
+from typing import TypedDict, List, Dict, Any, Annotated, Optional
 import operator
 from langgraph.graph import StateGraph, END
 
 # Абсолютные импорты пакета (TD-5 Fix)
+from services.model_manager.model_selection import resolve_model_selection
 from services.model_manager.ums_client import ums_client
 from services.observability import inc_metric_counter
 from orchestrator.utils import parse_json_garbage
@@ -55,6 +55,7 @@ DOCUMENT_ANALYSIS_SUMMARIZE_SLEEP_S = float(
     os.getenv("DOCUMENT_ANALYSIS_SUMMARIZE_SLEEP_S", "1.0")
 )
 logger = logging.getLogger("document_analysis_workflow")
+_LEGAL_COMPARE_SELECTION = resolve_model_selection("llm.legal_compare")
 
 
 async def _infer_document_analysis_with_failover(
@@ -73,8 +74,10 @@ async def _infer_document_analysis_with_failover(
     model_execution = response.get("model_execution") if isinstance(response, dict) else None
     if not isinstance(model_execution, dict):
         model_execution = {
-            "role_key": "llm.legal_compare",
-            "used_model_id": "llm.legal_compare",
+            "role_key": _LEGAL_COMPARE_SELECTION.role_key,
+            "primary_model_id": _LEGAL_COMPARE_SELECTION.primary_model_id,
+            "fallback_model_id": _LEGAL_COMPARE_SELECTION.fallback_model_id,
+            "used_model_id": _LEGAL_COMPARE_SELECTION.resolved_model_id,
             "fallback_stage": stage,
             "fallback_used": False,
             "status": "completed",
