@@ -2,6 +2,8 @@
 
 Этот документ фиксирует каноническую карту runtime-скриптов проекта и разделяет user-facing entrypoints, compatibility aliases, legacy path и internal helpers.
 
+Канонический справочник флагов и env-переменных находится в [docs/flags-reference.md](../flags-reference.md). Здесь остаётся карта entrypoints, script roles и launcher/runtime semantics.
+
 ## Canonical Paths
 
 - Основной entrypoint для разработки: `./scripts/launcher.sh --target native --profile adaptive`

@@ -274,6 +274,8 @@ cd ..
 - если `backend/.env` отсутствует, создаёт его из `backend/.env.example`;
 - если `CHAINLIT_AUTH_SECRET` пустой или оставлен дефолтным, автоматически генерирует новое значение и записывает его в `backend/.env`.
 
+Канонический справочник по флагам, env-файлам и runtime override-contract находится в [docs/flags-reference.md](docs/flags-reference.md).
+
 Обязательно задать канонический registry и пути к model artifacts:
 
 ```bash
@@ -515,6 +517,7 @@ conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/ma
 - `sentence-transformers/LaBSE`
 
 Полная карта runtime-скриптов, их роли и ограничения описана в [docs/scripts/README.md](docs/scripts/README.md).
+Полный справочник флагов, env-файлов, timeout/concurrency knobs и рекомендаций по placement находится в [docs/flags-reference.md](docs/flags-reference.md).
 
 ## TIERS 1|2|3|4
 

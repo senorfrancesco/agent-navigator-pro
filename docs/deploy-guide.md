@@ -1,7 +1,7 @@
 # Agent Navigator Pro — Инструкция по сборке и деплою на сервер
 
 > Инструкция для переноса проекта с dev-машины на production/staging сервер.
-> Актуальна для ветки `codex/orchestration-control-plane-snapshot` (база `v3.0`).
+> Актуальна для runtime-контракта ветки `v3.0`.
 
 ---
 
@@ -171,8 +171,8 @@ MODEL_PATH_VLM="/opt/agent-navigator-pro/backend/models/gguf/Qwen3-VL-8B-Q4/Qwen
 MODEL_PATH_EMBEDDING_INTENT="/opt/agent-navigator-pro/backend/models/st/Qwen3-Embedding-0.6B"
 MODEL_PATH_EMBEDDING_RETRIEVAL="/opt/agent-navigator-pro/backend/models/st/LaBSE"
 
-# GPU layers (-1 = все на GPU, 0 = CPU only)
-N_GPU_LAYERS_QWEN14B=-1
+# Рекомендуемый shared runtime profile
+UMS_RUNTIME_PROFILE="adaptive"
 
 # Контексты
 CONTEXT_SIZE_QWEN14B=16384
@@ -216,7 +216,20 @@ Legacy aliases для rollout и старых инсталляций всё ещ
 `MODEL_PATH_QWEN3_EMBEDDING_06B` -> `MODEL_PATH_EMBEDDING_INTENT`,
 `MODEL_PATH_LABSE` -> `MODEL_PATH_EMBEDDING_RETRIEVAL`.
 
-### 5.3. Директории
+### 5.3. Модель env-файлов
+
+Для server/operator path важно не смешивать четыре разных env surface:
+
+| Файл | Назначение | Редактировать руками |
+| --- | --- | --- |
+| `backend/.env` | основной shared config: пути моделей, auth, URLs, backend mode, timeouts | да |
+| `backend/.env.native` | native host-specific absolute paths, `CONDA_ENV`, ports | да, только если используете native host path |
+| `backend/.env.hardware.override` | persistent placement overrides и GPU layers | да, если нужен постоянный tuning |
+| `backend/.env.runtime` | generated applied env для текущего запуска | нет |
+
+Полный справочник по флагам и рекомендациям: [docs/flags-reference.md](./flags-reference.md).
+
+### 5.4. Директории
 
 ```bash
 mkdir -p backend/open_webui_uploads
@@ -256,34 +269,43 @@ docker compose run --rm chainlit python -c "from orchestrator.execution_runtime 
 
 ## 7. Запуск системы
 
-### Вариант A: Полный запуск (рекомендуется для production)
+### Вариант A: Полный запуск через launcher (рекомендуется)
 
 ```bash
 cd /opt/agent-navigator-pro
+./scripts/launcher.sh --target container --profile default --no-attach
+```
+
+Канонический control plane теперь `launcher.sh`:
+1. делает bootstrap/preflight;
+2. пишет applied plan в `backend/.env.runtime`;
+3. поднимает infrastructure phase;
+4. ждёт `UMS /ready/infer`;
+5. только после этого поднимает `agent-api` и `chainlit`.
+
+### Вариант B: Direct compatibility runner
+
+```bash
 ./scripts/run_all.sh --no-attach
 ```
 
-Скрипт:
-1. Активирует conda env `diploma_llm`
-2. Создаёт tmux-сессию `agent-navigator` с окнами:
-   - `doc-server` — Document Server (:8001)
-   - `legal-server` — Legal Server (:8002)
-   - `ums` — Unified Model Server (:8090)
-   - `agent-api` — Agent API (:8000)
-   - `chainlit` — Docker Chainlit UI (:3000)
-   - `monitor` — htop/top
-3. Ждёт health-check каждого сервиса
-4. Ждёт загрузку модели Qwen-14B (до 3 мин)
+Использовать только если осознанно нужен direct runner path. Для новых сценариев и operator docs canonical entrypoint остаётся `launcher.sh`.
 
-### Вариант B: Native запуск (без Docker, для dev/debug)
+### Вариант C: Native запуск (без Docker, для dev/debug)
 
 ```bash
 ./scripts/run_native.sh --no-attach
 ```
 
-Chainlit запускается напрямую на хосте (не в Docker). Полезно для отладки.
+Это compatibility/native runner behind launcher. Для новых сценариев запуска предпочтителен:
 
-### Вариант C: Monitoring stack
+```bash
+./scripts/launcher.sh --target native --profile adaptive --no-attach
+```
+
+Chainlit в этом варианте запускается напрямую на хосте. Полезно для отладки.
+
+### Вариант D: Monitoring stack
 
 ```bash
 docker compose --profile monitoring up -d prometheus grafana
@@ -302,7 +324,7 @@ docker compose --profile monitoring up -d prometheus grafana
 
 Иначе Grafana поднимется с небезопасным дефолтным паролем.
 
-### Вариант D: Remote vLLM runtime
+### Вариант E: Remote vLLM runtime
 
 Если выбран `BACKEND_MODE=vllm`, отдельный upstream runtime можно поднять через compose profile:
 
@@ -379,11 +401,11 @@ curl -s http://localhost:8090/health && echo " UMS OK"
 curl -s http://localhost:3000/ -o /dev/null -w "%{http_code}" && echo " Chainlit OK"
 ```
 
-### 8.2. Проверка загрузки модели
+### 8.2. Проверка infer-ready heavy path
 
 ```bash
-curl -s http://localhost:8090/status | python3 -m json.tool
-# Должен показать "qwen-14b-llm" в loaded models
+curl -s http://localhost:8090/ready/infer | python3 -m json.tool
+# Должен вернуть infer_ready=true
 ```
 
 ### 8.3. Тест API
