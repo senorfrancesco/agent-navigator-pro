@@ -693,6 +693,53 @@ class TestSummarizeNode:
         assert result["summary_metadata"]["final_admission_estimated_tokens"] > 0
 
     @pytest.mark.asyncio
+    async def test_summarize_forces_progress_when_budget_grouping_would_repeat_same_item_count(self, base_state):
+        base_state["full_text"] = "Большой документ"
+        base_state["doc_type"] = "other"
+        base_state["runtime_context"] = {
+            "summary_policy": {
+                "group_size": 4,
+                "group_input_chars": 10,
+                "chunk_input_chars": 120,
+                "final_input_chars": 40,
+                "final_max_tokens": 64,
+                "enable_fast_final_merge": True,
+            }
+        }
+
+        def _estimate_tokens(text: str) -> int:
+            normalized = str(text or "")
+            if "summary-" in normalized:
+                return 400
+            if "merge-" in normalized:
+                return 24
+            return max(1, len(normalized) // 4)
+
+        with patch("orchestrator.workflows.document_analysis._chunk_text", new_callable=AsyncMock) as mock_chunk, \
+             patch("orchestrator.workflows.document_analysis.ums_client") as mock_ums, \
+             patch("orchestrator.workflows.document_analysis._estimate_tokens", side_effect=_estimate_tokens):
+            mock_chunk.return_value = [f"chunk-{idx}" for idx in range(5)]
+            mock_ums.async_infer = AsyncMock(side_effect=[
+                {"content": "summary-" + ("A" * 80)},
+                {"content": "summary-" + ("B" * 80)},
+                {"content": "summary-" + ("C" * 80)},
+                {"content": "summary-" + ("D" * 80)},
+                {"content": "summary-" + ("E" * 80)},
+                {"content": "merge-1"},
+                {"content": "merge-2"},
+                {"content": "merge-3"},
+                {"content": "final-summary"},
+            ])
+
+            result = await summarize_node(base_state)
+
+        assert result["summary"] == "final-summary"
+        assert result["summary_metadata"]["reduce_strategy"] == "hierarchical_merge"
+        assert result["summary_metadata"]["reduce_levels_used"] == 1
+        assert result["summary_metadata"]["reduce_groups_total"] == 3
+        assert mock_ums.async_infer.await_count == 9
+
+    @pytest.mark.asyncio
     async def test_summarize_prefers_fast_path_when_chars_are_large_but_token_estimate_is_safe(self, base_state):
         base_state["full_text"] = "Большой документ"
         base_state["doc_type"] = "other"

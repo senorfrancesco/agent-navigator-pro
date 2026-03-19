@@ -254,6 +254,15 @@ def _group_items_for_budget(items: List[str], *, max_chars: int, max_items: int)
     return groups or [items[:max_items]]
 
 
+def _force_progressive_grouping(items: List[str], *, max_items: int) -> List[List[str]]:
+    """Guarantee that collapse reduces item count even when char caps force singleton groups."""
+    normalized = [str(item or "").strip() for item in items if str(item or "").strip()]
+    if len(normalized) <= 1:
+        return [normalized] if normalized else [[]]
+    stride = 2 if max_items >= 2 else 1
+    return [normalized[index:index + stride] for index in range(0, len(normalized), stride)]
+
+
 def _estimate_tokens(text: str) -> int:
     return max(1, len(str(text or "")) // 4)
 
@@ -890,6 +899,17 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
                 max_chars=summary_policy["group_input_chars"],
                 max_items=summary_policy["group_size"],
             )
+            if len(grouped_preview) >= len(reduce_items) and len(reduce_items) > summary_policy["group_size"]:
+                logger.info(
+                    "document_analysis regrouping to guarantee progress items=%s groups=%s group_size=%s",
+                    len(reduce_items),
+                    len(grouped_preview),
+                    summary_policy["group_size"],
+                )
+                grouped_preview = _force_progressive_grouping(
+                    reduce_items,
+                    max_items=summary_policy["group_size"],
+                )
             group_prompt = _build_group_merge_prompt("\n\n---\n\n".join(grouped_preview[0]))
             admission_snapshot = _build_reduce_admission_snapshot(
                 joined_payload=final_payload,
