@@ -1719,6 +1719,91 @@
   - live rerun на `2024-Polozhenie-o-distancionnoy-rabote-ecp.pdf` + `employment contract sample for remote work.pdf`;
   - manual review checkpoint на generated markdown report.
 
+- [ ] **B3.51g — Сделать summary-first compare с prioritized deep diff и bounded latency**
+  Контекст:
+  - live rerun на паре законов о СМИ показал, что adaptive batching снял часть parse-failures, но перевёл compare в `74` одиночных LLM-вызова и latency порядка `8+` минут;
+  - при этом итоговый отчёт всё ещё перекошен в `ADDED/DELETED`, а `Юридический вывод` остаётся слишком общим;
+  - для production compare нужен quality-first output, но без full deep analysis каждого orphan chunk.
+  Что сделать:
+  - оставить `summary pass` отдельным обязательным шагом для любого non-redline compare;
+  - усилить summary prompt так, чтобы он всегда возвращал:
+    - `Ключевые темы`;
+    - `Что исчезло / чем заменено`;
+    - `Что нового добавилось`;
+    - `Последствия / риски`;
+  - перейти на `top-N prioritized deep diff`:
+    - анализировать LLM-ом только наиболее значимые различия, ориентир `12-20`;
+    - prioritization строить по `MODIFIED first`, semantic overlap, topic importance, legal impact markers;
+  - остальные различия оставлять в `Приложении` без полного LLM-анализа;
+  - в metadata/report явно фиксировать:
+    - сколько различий было всего;
+    - сколько ушло в deep diff;
+    - сколько осталось appendix-only.
+  Execution budget:
+  - `fast_compare` target: summary + top findings укладываются в `<= 90s` на документах порядка `30-50` chunks на сторону;
+  - `deep_compare` target: `<= 6 min`, при этом bounded depth и отсутствие unbounded item-by-item expansion;
+  - report должен честно отражать, если deep analysis ограничен budget-ом, а хвост вынесен в appendix.
+  Acceptance:
+  - compare перестаёт анализировать десятки low-value orphan items одинаково глубоко;
+  - summary становится обязательной и содержательной частью любого semantic compare;
+  - runtime остаётся bounded и предсказуемым, без `70+` последовательных LLM-вызовов на один кейс;
+  - отчёт по проблемной паре PDF явно объясняет общие смысловые сдвиги между пакетами поправок, а не только перечисляет `ADDED/DELETED`.
+  Verification:
+  - unit tests на prioritization/top-N selection и budget enforcement;
+  - integration test на pair `H12100110_1621890000.pdf` vs `H12300274_1688590800.pdf`;
+  - manual review generated report на наличие всех summary sections и bounded appendix.
+
+- [ ] **B3.51h — Ввести fast/deep compare mode с user choice и отдельными execution graph paths**
+  Контекст:
+  - compare теперь реально требует разного профиля исполнения: иногда нужен быстрый обзор, иногда глубокий legal diff;
+  - текущий UI скрывает эту развилку, поэтому пользователь не контролирует tradeoff `speed vs depth`;
+  - user request: дать два выбора через кнопки и вести workflow по разным путям.
+  Что сделать:
+  - в Chainlit/UI добавить явный выбор перед compare run:
+    - `Быстрое сравнение`
+    - `Глубокое сравнение`
+  - для `Быстрое сравнение` запускать graph path:
+    - mandatory summary pass;
+    - top findings only;
+    - appendix без полного deep diff хвоста;
+  - для `Глубокое сравнение` запускать отдельный graph path:
+    - summary pass;
+    - расширенный prioritized deep diff;
+    - richer evidence package;
+  - передавать выбранный mode через orchestration contract и сохранять его в metadata/report;
+  - зафиксировать safe default:
+    - если user явно не выбрал mode, стартовать с `Быстрое сравнение`.
+  Acceptance:
+  - пользователь может управлять глубиной анализа до запуска compare;
+  - fast/deep path отличаются не только текстом статуса, но и реальным execution graph / budget / output depth;
+  - saved report и telemetry явно показывают выбранный mode.
+  Verification:
+  - unit tests на mode selection/request payload;
+  - integration tests на fast vs deep graph routing;
+  - manual UI smoke с button-based selection в Chainlit.
+
+- [ ] **B3.51i — Убрать дублирующиеся compare progress messages в Chainlit**
+  Контекст:
+  - после внедрения progress-step пользователь видит повторяющиеся нижние сообщения вида:
+    - `Avatar for Сравнение документов ... Анализирую различия по смыслу`
+    - `Avatar for Сравнение документов ... Формирую юридический вывод...`
+  - такой UX выглядит как дублирование финального отчёта и засоряет ленту.
+  Что сделать:
+  - пересобрать compare progress rendering так, чтобы использовался один устойчивый обновляемый status container, а не серия визуально дублирующихся сообщений;
+  - проверить lifecycle:
+    - создание;
+    - update;
+    - finalize/remove;
+  - убедиться, что progress-state не остаётся “хвостом” после отправки финального compare report;
+  - если `Chainlit Step.update()` не даёт чистого UX, ввести другой presentation primitive для transient execution status.
+  Acceptance:
+  - во время compare пользователь видит один понятный progress block;
+  - после финального ответа внизу не остаётся лишних дублирующихся status entries;
+  - appendix step и progress state визуально не смешиваются.
+  Verification:
+  - unit/integration tests на single-progress-container lifecycle;
+  - manual Chainlit smoke на long-running compare.
+
 - [ ] **T6.2 P0 — Compose full-stack smoke tests**
   Контекст: runtime/scripts и `docker-compose.yaml` часто меняются, но нет единого black-box gate, который подтверждает что весь stack действительно поднялся и отвечает не только на уровне unit mocks.
   Что сделать:
