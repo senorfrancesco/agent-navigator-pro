@@ -321,6 +321,55 @@ def _resolve_reduce_strategy_with_snapshot(
     return normalized
 
 
+def _is_summary_shadow_mode_enabled() -> bool:
+    return str(os.getenv("SUMMARY_REDUCE_STRATEGY_SHADOW_MODE", "0")).strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _estimate_reduce_merge_levels(reduce_items_count: int, group_size: int) -> int:
+    if reduce_items_count <= 1:
+        return 0
+    current = max(1, int(reduce_items_count))
+    group_size = max(2, int(group_size or 2))
+    levels = 0
+    while current > group_size:
+        current = (current + group_size - 1) // group_size
+        levels += 1
+    return levels
+
+
+def _build_summary_shadow_trace(
+    *,
+    reduce_items_count: int,
+    group_size: int,
+    executed_strategy: str,
+    recommended_strategy: str,
+    reason: str,
+    admission_snapshot: Dict[str, Any],
+) -> Dict[str, Any]:
+    shadow_baseline_strategy = "single_item" if reduce_items_count <= 1 else "hierarchical_merge"
+    shadow_baseline_levels = _estimate_reduce_merge_levels(reduce_items_count, group_size)
+    executed_levels = 0 if executed_strategy == "fast_final_merge" else shadow_baseline_levels
+    would_skip_levels = max(0, shadow_baseline_levels - executed_levels)
+    estimated_token_saving = would_skip_levels * int(admission_snapshot.get("group_prompt_tokens_est", 0) or 0)
+    return {
+        "executed_strategy": executed_strategy,
+        "recommended_strategy": recommended_strategy,
+        "shadow_baseline_strategy": shadow_baseline_strategy,
+        "shadow_baseline_levels": shadow_baseline_levels,
+        "executed_levels": executed_levels,
+        "would_skip_levels": would_skip_levels,
+        "estimated_token_saving": estimated_token_saving,
+        "reason": reason,
+        "reduce_items_count": reduce_items_count,
+        "group_size": int(group_size),
+    }
+
+
 def _init_summary_metadata() -> Dict[str, Any]:
     return {
         "degraded": False,
@@ -340,6 +389,7 @@ def _init_summary_metadata() -> Dict[str, Any]:
         "final_admission_budget_tokens": 0,
         "final_admission_reserve_tokens": 0,
         "final_admission_margin_tokens": 0,
+        "reduce_decisions": [],
     }
 
 
@@ -721,6 +771,7 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
 
     type_prompt = _SUMMARY_PROMPTS.get(doc_type, _SUMMARY_PROMPTS["other"])
     summary_policy = _get_summary_policy(state)
+    shadow_mode_enabled = _is_summary_shadow_mode_enabled()
 
     print(f"[DocAnalysis] Summarizing (type={doc_type})")
 
@@ -731,6 +782,7 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
 
     chunk_summaries = []
     model_execution_events: List[Dict[str, Any]] = []
+    shadow_decisions: List[Dict[str, Any]] = []
     for idx, chunk in enumerate(chunks):
         await _raise_if_cancelled(state)
         chunk_admission = _resolve_stage_admission(
@@ -788,6 +840,23 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
         summary_metadata["final_synthesis_status"] = "not_needed"
         summary_metadata["reduce_strategy"] = "single_item"
         summary_metadata["reduce_reason"] = "not_needed"
+        if shadow_mode_enabled:
+            single_trace = _build_summary_shadow_trace(
+                reduce_items_count=1,
+                group_size=summary_policy["group_size"],
+                executed_strategy="single_item",
+                recommended_strategy="single_item",
+                reason="not_needed",
+                admission_snapshot={
+                    "group_prompt_tokens_est": 0,
+                },
+            )
+            summary_metadata["executed_strategy"] = "single_item"
+            summary_metadata["recommended_strategy"] = "single_item"
+            summary_metadata["shadow_baseline_strategy"] = single_trace["shadow_baseline_strategy"]
+            summary_metadata["would_skip_levels"] = int(single_trace["would_skip_levels"])
+            summary_metadata["estimated_token_saving"] = int(single_trace["estimated_token_saving"])
+            summary_metadata["reduce_decisions"] = [single_trace]
     else:
         reduce_items = list(chunk_summaries)
         merge_level = 0
@@ -822,6 +891,26 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
                 admission_snapshot=admission_snapshot,
             )
             current_admission_snapshot = dict(strategy_meta.get("admission_snapshot") or admission_snapshot)
+            shadow_trace = None
+            if shadow_mode_enabled:
+                shadow_trace = _build_summary_shadow_trace(
+                    reduce_items_count=len(reduce_items),
+                    group_size=summary_policy["group_size"],
+                    executed_strategy=str(strategy_meta["strategy"]),
+                    recommended_strategy=str(strategy_meta["strategy"]),
+                    reason=str(strategy_meta["reason"]),
+                    admission_snapshot=current_admission_snapshot,
+                )
+                shadow_decisions.append(dict(shadow_trace))
+                if shadow_trace["shadow_baseline_strategy"] != shadow_trace["executed_strategy"]:
+                    inc_metric_counter(
+                        "agent_nav_summary_strategy_shadow_diff_total",
+                        labels={
+                            "component": "document_analysis",
+                            "executed_strategy": shadow_trace["executed_strategy"],
+                            "shadow_baseline_strategy": shadow_trace["shadow_baseline_strategy"],
+                        },
+                    )
             if not summary_metadata.get("reduce_strategy"):
                 summary_metadata["reduce_strategy"] = strategy_meta["strategy"]
                 summary_metadata["reduce_reason"] = strategy_meta["reason"]
@@ -834,6 +923,12 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
                 summary_metadata["reduce_strategy"] = strategy_meta["strategy"]
                 summary_metadata["reduce_reason"] = strategy_meta["reason"]
             summary_metadata["fast_path_eligible"] = bool(strategy_meta.get("fast_path_eligible"))
+            if shadow_trace is not None:
+                summary_metadata["executed_strategy"] = shadow_trace["executed_strategy"]
+                summary_metadata["recommended_strategy"] = shadow_trace["recommended_strategy"]
+                summary_metadata["shadow_baseline_strategy"] = shadow_trace["shadow_baseline_strategy"]
+                summary_metadata["would_skip_levels"] = int(shadow_trace["would_skip_levels"])
+                summary_metadata["estimated_token_saving"] = int(shadow_trace["estimated_token_saving"])
             summary_metadata["final_admission_estimated_tokens"] = int(
                 current_admission_snapshot.get("joined_payload_tokens_est", 0) or 0
             )
@@ -861,6 +956,16 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
                 summary_policy["weak_pc_mode"],
                 summary_metadata.get("degraded"),
             )
+            if shadow_trace is not None:
+                logger.info(
+                    "document_analysis shadow trace executed=%s recommended=%s baseline=%s skip_levels=%s saving=%s items=%s",
+                    shadow_trace["executed_strategy"],
+                    shadow_trace["recommended_strategy"],
+                    shadow_trace["shadow_baseline_strategy"],
+                    shadow_trace["would_skip_levels"],
+                    shadow_trace["estimated_token_saving"],
+                    len(reduce_items),
+                )
             inc_metric_counter(
                 "agent_nav_summary_strategy_total",
                 labels={
@@ -986,6 +1091,8 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
             summary_metadata["reduce_reason"] = (
                 "hardware_policy" if summary_policy["weak_pc_mode"] else "budget_overflow"
             )
+        if shadow_mode_enabled:
+            summary_metadata["reduce_decisions"] = shadow_decisions
 
     await _update_summary_progress(
         state,

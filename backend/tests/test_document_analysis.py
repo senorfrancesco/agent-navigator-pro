@@ -728,6 +728,78 @@ class TestSummarizeNode:
         assert "group_prompt_tokens_est" in result["summary_metadata"]
 
     @pytest.mark.asyncio
+    async def test_summarize_shadow_mode_records_trace_and_diff_metric(self, base_state, monkeypatch):
+        monkeypatch.setenv("SUMMARY_REDUCE_STRATEGY_SHADOW_MODE", "1")
+        base_state["full_text"] = "Большой документ"
+        base_state["doc_type"] = "other"
+        base_state["runtime_context"] = {
+            "summary_policy": {
+                "group_size": 4,
+                "group_input_chars": 200,
+                "chunk_input_chars": 120,
+                "final_input_chars": 400,
+                "final_max_tokens": 256,
+                "enable_fast_final_merge": True,
+            }
+        }
+
+        with patch("orchestrator.workflows.document_analysis._chunk_text", new_callable=AsyncMock) as mock_chunk, \
+             patch("orchestrator.workflows.document_analysis.ums_client") as mock_ums, \
+             patch("orchestrator.workflows.document_analysis._estimate_tokens", return_value=32):
+            mock_chunk.return_value = ["chunk-1", "chunk-2", "chunk-3", "chunk-4", "chunk-5"]
+            mock_ums.async_infer = AsyncMock(side_effect=[
+                {"content": "summary-1"},
+                {"content": "summary-2"},
+                {"content": "summary-3"},
+                {"content": "summary-4"},
+                {"content": "summary-5"},
+                {"content": "final-summary"},
+            ])
+
+            result = await summarize_node(base_state)
+
+        metadata = result["summary_metadata"]
+        assert result["summary"] == "final-summary"
+        assert metadata["executed_strategy"] == "fast_final_merge"
+        assert metadata["recommended_strategy"] == "fast_final_merge"
+        assert metadata["shadow_baseline_strategy"] == "hierarchical_merge"
+        assert metadata["would_skip_levels"] == 1
+        assert metadata["estimated_token_saving"] > 0
+        assert metadata["reduce_decisions"]
+        assert metadata["reduce_decisions"][0]["executed_strategy"] == "fast_final_merge"
+        assert metadata["reduce_decisions"][0]["shadow_baseline_strategy"] == "hierarchical_merge"
+
+        metrics = render_metrics_text()
+        assert 'agent_nav_summary_strategy_shadow_diff_total{component="document_analysis"' in metrics
+        assert " 1.0" in metrics
+
+    @pytest.mark.asyncio
+    async def test_summarize_shadow_mode_does_not_increment_metric_when_strategies_match(self, base_state, monkeypatch):
+        monkeypatch.setenv("SUMMARY_REDUCE_STRATEGY_SHADOW_MODE", "1")
+        base_state["full_text"] = "Большой документ"
+        base_state["doc_type"] = "other"
+        base_state["runtime_context"] = {
+            "summary_policy": {
+                "group_size": 4,
+                "group_input_chars": 200,
+                "chunk_input_chars": 120,
+                "final_input_chars": 400,
+                "final_max_tokens": 256,
+                "enable_fast_final_merge": True,
+            }
+        }
+
+        with patch("orchestrator.workflows.document_analysis._chunk_text", new_callable=AsyncMock) as mock_chunk, \
+             patch("orchestrator.workflows.document_analysis.ums_client") as mock_ums:
+            mock_chunk.return_value = ["chunk-1"]
+            mock_ums.async_infer = AsyncMock(side_effect=[{"content": "summary-1"}])
+
+            await summarize_node(base_state)
+
+        metrics = render_metrics_text()
+        assert "agent_nav_summary_strategy_shadow_diff_total" not in metrics
+
+    @pytest.mark.asyncio
     async def test_summarize_honors_cancel_flag_between_chunks(self, base_state):
         base_state["full_text"] = "Большой документ"
         base_state["doc_type"] = "other"

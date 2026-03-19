@@ -221,6 +221,57 @@ def _resolve_reduce_strategy_with_snapshot(
     return normalized
 
 
+def _is_summary_shadow_mode_enabled() -> bool:
+    return str(os.getenv("SUMMARY_REDUCE_STRATEGY_SHADOW_MODE", "0")).strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _estimate_reduce_merge_levels(reduce_items_count: int, group_size: int) -> int:
+    if reduce_items_count <= 1:
+        return 0
+    current = max(1, int(reduce_items_count))
+    group_size = max(2, int(group_size or 2))
+    levels = 0
+    while current > group_size:
+        current = (current + group_size - 1) // group_size
+        levels += 1
+    return levels
+
+
+def _build_summary_shadow_trace(
+    *,
+    component: str,
+    reduce_items_count: int,
+    group_size: int,
+    executed_strategy: str,
+    recommended_strategy: str,
+    reason: str,
+    admission_snapshot: Dict[str, Any],
+) -> Dict[str, Any]:
+    shadow_baseline_strategy = "single_item" if reduce_items_count <= 1 else "hierarchical_merge"
+    shadow_baseline_levels = _estimate_reduce_merge_levels(reduce_items_count, group_size)
+    executed_levels = 0 if executed_strategy == "fast_final_merge" else shadow_baseline_levels
+    would_skip_levels = max(0, shadow_baseline_levels - executed_levels)
+    estimated_token_saving = would_skip_levels * int(admission_snapshot.get("group_prompt_tokens_est", 0) or 0)
+    return {
+        "component": component,
+        "executed_strategy": executed_strategy,
+        "recommended_strategy": recommended_strategy,
+        "shadow_baseline_strategy": shadow_baseline_strategy,
+        "shadow_baseline_levels": shadow_baseline_levels,
+        "executed_levels": executed_levels,
+        "would_skip_levels": would_skip_levels,
+        "estimated_token_saving": estimated_token_saving,
+        "reason": reason,
+        "reduce_items_count": reduce_items_count,
+        "group_size": int(group_size),
+    }
+
+
 def _resolve_summary_stage_plan(
     *,
     stage: str,
@@ -1461,6 +1512,9 @@ async def _execute_documents_summary(
     processed_chunks = 0
     degraded_events: List[Dict[str, Any]] = []
     reduce_strategy_events: List[Dict[str, Any]] = []
+    reduce_decisions: List[Dict[str, Any]] = []
+    shadow_mode_enabled = _is_summary_shadow_mode_enabled()
+    global_summary = ""
     for doc_entry in per_doc_chunks:
         _raise_if_execution_cancelled(deps)
         doc_name = str(doc_entry["name"])
@@ -1518,16 +1572,39 @@ async def _execute_documents_summary(
                 chunk_summary = chunk_summary.strip()
             chunk_summaries.append(chunk_summary.strip())
         if len(chunk_summaries) == 1:
-            reduce_strategy_events.append(
-                {
-                    "doc": doc_name,
-                    "strategy": "single_item",
-                    "reason": "not_needed",
-                    "levels_used": 0,
-                    "groups_total": 0,
-                }
-            )
+            single_item_event = {
+                "doc": doc_name,
+                "strategy": "single_item",
+                "reason": "not_needed",
+                "levels_used": 0,
+                "groups_total": 0,
+            }
+            if shadow_mode_enabled:
+                single_item_event.update(
+                    {
+                        "executed_strategy": "single_item",
+                        "recommended_strategy": "single_item",
+                        "shadow_baseline_strategy": "single_item",
+                        "would_skip_levels": 0,
+                        "estimated_token_saving": 0,
+                    }
+                )
+                reduce_decisions.append(
+                    {
+                        "doc": doc_name,
+                        "executed_strategy": "single_item",
+                        "recommended_strategy": "single_item",
+                        "shadow_baseline_strategy": "single_item",
+                        "would_skip_levels": 0,
+                        "estimated_token_saving": 0,
+                        "reason": "not_needed",
+                        "reduce_items_count": 1,
+                        "group_size": 1,
+                    }
+                )
+            reduce_strategy_events.append(single_item_event)
             per_doc.append({"name": doc_name, "summary": chunk_summaries[0]})
+            global_summary = chunk_summaries[0]
             await deps.update_progress_box(
                 key="documents_summary_progress",
                 title="Промежуточная сводка",
@@ -1602,6 +1679,32 @@ async def _execute_documents_summary(
                 )
                 current_admission_snapshot = dict(strategy_meta.get("admission_snapshot") or admission_snapshot)
                 current_reduce_reason = str(strategy_meta["reason"])
+                shadow_trace = None
+                if shadow_mode_enabled:
+                    shadow_trace = _build_summary_shadow_trace(
+                        component="documents_summary",
+                        reduce_items_count=len(reduce_items),
+                        group_size=reduce_group_size,
+                        executed_strategy=str(strategy_meta["strategy"]),
+                        recommended_strategy=str(strategy_meta["strategy"]),
+                        reason=str(strategy_meta["reason"]),
+                        admission_snapshot=current_admission_snapshot,
+                    )
+                    reduce_decisions.append(
+                        {
+                            "doc": doc_name,
+                            **shadow_trace,
+                        }
+                    )
+                    if shadow_trace["shadow_baseline_strategy"] != shadow_trace["executed_strategy"]:
+                        inc_metric_counter(
+                            "agent_nav_summary_strategy_shadow_diff_total",
+                            labels={
+                                "component": "documents_summary",
+                                "executed_strategy": shadow_trace["executed_strategy"],
+                                "shadow_baseline_strategy": shadow_trace["shadow_baseline_strategy"],
+                            },
+                        )
                 inc_metric_counter(
                     "agent_nav_summary_strategy_total",
                     labels={
@@ -1628,8 +1731,30 @@ async def _execute_documents_summary(
                             "groups_total": 0,
                             "admission_snapshot": dict(current_admission_snapshot),
                             "fast_path_eligible": bool(strategy_meta.get("fast_path_eligible")),
+                            **(
+                                {
+                                    "executed_strategy": "fast_final_merge",
+                                    "recommended_strategy": "fast_final_merge",
+                                    "shadow_baseline_strategy": shadow_trace["shadow_baseline_strategy"],
+                                    "would_skip_levels": int(shadow_trace["would_skip_levels"]),
+                                    "estimated_token_saving": int(shadow_trace["estimated_token_saving"]),
+                                }
+                                if shadow_trace is not None
+                                else {}
+                            ),
                         }
                     )
+                    if shadow_trace is not None:
+                        logger.info(
+                            "documents_summary shadow trace executed=%s recommended=%s baseline=%s skip_levels=%s saving=%s doc=%s items=%s",
+                            shadow_trace["executed_strategy"],
+                            shadow_trace["recommended_strategy"],
+                            shadow_trace["shadow_baseline_strategy"],
+                            shadow_trace["would_skip_levels"],
+                            shadow_trace["estimated_token_saving"],
+                            doc_name,
+                            len(reduce_items),
+                        )
                     logger.info(
                         "documents_summary reduce strategy=%s reason=%s doc=%s items=%s chars=%s",
                         strategy_meta["strategy"],
@@ -1679,16 +1804,36 @@ async def _execute_documents_summary(
                     next_reduce_items.append(merged_summary.strip())
                 reduce_items = next_reduce_items
             if not any(item["strategy"] != "single_item" and item.get("doc") == doc_name for item in reduce_strategy_events):
-                reduce_strategy_events.append(
-                    {
-                        "doc": doc_name,
-                        "strategy": "hierarchical_merge",
-                        "reason": current_reduce_reason,
-                        "levels_used": reduce_levels_used,
-                        "groups_total": reduce_groups_total,
-                        "admission_snapshot": dict(current_admission_snapshot),
-                        "fast_path_eligible": bool(strategy_meta.get("fast_path_eligible")),
-                    }
+                hierarchical_event = {
+                    "doc": doc_name,
+                    "strategy": "hierarchical_merge",
+                    "reason": current_reduce_reason,
+                    "levels_used": reduce_levels_used,
+                    "groups_total": reduce_groups_total,
+                    "admission_snapshot": dict(current_admission_snapshot),
+                    "fast_path_eligible": bool(strategy_meta.get("fast_path_eligible")),
+                }
+                if shadow_mode_enabled:
+                    hierarchical_event.update(
+                        {
+                            "executed_strategy": "hierarchical_merge",
+                            "recommended_strategy": "hierarchical_merge",
+                            "shadow_baseline_strategy": shadow_trace["shadow_baseline_strategy"] if shadow_trace else "hierarchical_merge",
+                            "would_skip_levels": int(shadow_trace["would_skip_levels"]) if shadow_trace else 0,
+                            "estimated_token_saving": int(shadow_trace["estimated_token_saving"]) if shadow_trace else 0,
+                        }
+                    )
+                reduce_strategy_events.append(hierarchical_event)
+            if shadow_trace is not None and strategy_meta["strategy"] != "fast_final_merge":
+                logger.info(
+                    "documents_summary shadow trace executed=%s recommended=%s baseline=%s skip_levels=%s saving=%s doc=%s items=%s",
+                    shadow_trace["executed_strategy"],
+                    shadow_trace["recommended_strategy"],
+                    shadow_trace["shadow_baseline_strategy"],
+                    shadow_trace["would_skip_levels"],
+                    shadow_trace["estimated_token_saving"],
+                    doc_name,
+                    len(reduce_items),
                 )
             per_doc.append({"name": doc_name, "summary": reduce_items[0]})
             await deps.update_progress_box(
@@ -1820,6 +1965,24 @@ async def _execute_documents_summary(
         "reduce_groups_total": int(primary_reduce_event.get("groups_total", 0) or 0),
         "fast_path_eligible": bool(primary_reduce_event.get("fast_path_eligible")),
     }
+    if shadow_mode_enabled:
+        execution_metadata.update(
+            {
+                "executed_strategy": str(primary_reduce_event.get("strategy", "single_item")),
+                "recommended_strategy": str(primary_reduce_event.get("strategy", "single_item")),
+                "shadow_baseline_strategy": str(
+                    primary_reduce_event.get("shadow_baseline_strategy")
+                    or (
+                        "single_item"
+                        if int(primary_reduce_event.get("reduce_items_count", 0) or 0) <= 1
+                        else "hierarchical_merge"
+                    )
+                ),
+                "would_skip_levels": int(primary_reduce_event.get("would_skip_levels", 0) or 0),
+                "estimated_token_saving": int(primary_reduce_event.get("estimated_token_saving", 0) or 0),
+                "reduce_decisions": copy.deepcopy(reduce_decisions),
+            }
+        )
     admission_snapshot = dict(primary_reduce_event.get("admission_snapshot") or {})
     if admission_snapshot:
         execution_metadata.update(

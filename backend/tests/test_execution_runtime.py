@@ -1379,6 +1379,76 @@ def test_execute_documents_summary_prefers_fast_path_when_chars_are_large_but_to
     assert "group_prompt_tokens_est" in response["execution_metadata"]
 
 
+def test_execute_documents_summary_shadow_mode_records_trace_and_diff_metric(monkeypatch):
+    monkeypatch.setenv("SUMMARY_REDUCE_STRATEGY_SHADOW_MODE", "1")
+    deps = _build_minimal_deps()
+    deps.get_all_docs = lambda: [
+        {
+            "document_id": "doc-1",
+            "display_name": "contract.txt",
+            "text": "\n\n".join([("А" * 2000) for _ in range(5)]),
+        }
+    ]
+    deps.infer_assistant_text = AsyncMock(side_effect=[
+        "chunk-1",
+        "chunk-2",
+        "chunk-3",
+        "chunk-4",
+        "chunk-5",
+        "doc-final",
+        "global",
+    ])
+
+    with patch("orchestrator.execution_runtime._estimate_prompt_tokens", return_value=48):
+        response = asyncio.run(
+            _execute_documents_summary(
+                query="Сделай сводку",
+                history=[],
+                effective_settings={"device_mode": "prefer-gpu", "resolved_model_id": "test-model"},
+                deps=deps,
+            )
+        )
+
+    metadata = response["execution_metadata"]
+    assert metadata["executed_strategy"] == "fast_final_merge"
+    assert metadata["recommended_strategy"] == "fast_final_merge"
+    assert metadata["shadow_baseline_strategy"] == "hierarchical_merge"
+    assert metadata["would_skip_levels"] == 1
+    assert metadata["estimated_token_saving"] > 0
+    assert metadata["reduce_decisions"]
+    assert metadata["reduce_decisions"][0]["executed_strategy"] == "fast_final_merge"
+    assert metadata["reduce_decisions"][0]["shadow_baseline_strategy"] == "hierarchical_merge"
+
+    metrics = render_metrics_text()
+    assert 'agent_nav_summary_strategy_shadow_diff_total{component="documents_summary"' in metrics
+    assert " 1.0" in metrics
+
+
+def test_execute_documents_summary_shadow_mode_does_not_increment_metric_when_strategies_match(monkeypatch):
+    monkeypatch.setenv("SUMMARY_REDUCE_STRATEGY_SHADOW_MODE", "1")
+    deps = _build_minimal_deps()
+    deps.get_all_docs = lambda: [
+        {
+            "document_id": "doc-1",
+            "display_name": "contract.txt",
+            "text": "Первый абзац.\n\nВторой абзац.",
+        }
+    ]
+    deps.infer_assistant_text = AsyncMock(side_effect=["chunk-1", "global"])
+
+    asyncio.run(
+        _execute_documents_summary(
+            query="Сделай сводку",
+            history=[],
+            effective_settings={"device_mode": "prefer-gpu", "resolved_model_id": "test-model"},
+            deps=deps,
+        )
+    )
+
+    metrics = render_metrics_text()
+    assert "agent_nav_summary_strategy_shadow_diff_total" not in metrics
+
+
 def test_execute_documents_summary_updates_progress_with_partial_results():
     deps = _build_minimal_deps()
     deps.get_all_docs = lambda: [
