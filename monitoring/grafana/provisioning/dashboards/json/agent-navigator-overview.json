@@ -1,0 +1,74 @@
+{
+  "id": null,
+  "uid": "agent-navigator-overview",
+  "title": "Agent Navigator Overview",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "15s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "HTTP Request Rate",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum by (service, path) (rate(agent_nav_http_requests_total[5m]))",
+          "legendFormat": "{{service}} {{path}}"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+    },
+    {
+      "id": 2,
+      "title": "HTTP P95 Latency",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, service, path) (rate(agent_nav_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{service}} {{path}}"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+    },
+    {
+      "id": 3,
+      "title": "UMS Running Models",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "agent_nav_ums_running_models{service=\"ums\"}",
+          "legendFormat": "running"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 6, "x": 0, "y": 8}
+    },
+    {
+      "id": 4,
+      "title": "UMS Active Heavy Model",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "agent_nav_ums_active_heavy_model{service=\"ums\"}",
+          "legendFormat": "active"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 6, "x": 6, "y": 8}
+    },
+    {
+      "id": 5,
+      "title": "UMS Saturation Rejects",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum by (kind, mode) (rate(agent_nav_ums_concurrency_saturation_total[5m]))",
+          "legendFormat": "{{kind}} {{mode}}"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+    }
+  ],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "timezone": "",
+  "annotations": {"list": []}
+}

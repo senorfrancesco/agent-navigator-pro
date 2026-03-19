@@ -1,10 +1,10 @@
 """
 AdaptiveRAGPipeline — tiered RAG pipeline, адаптирующийся к железу.
 
-Tier 1 (Simple): BM25+Dense → RRF → top-5 → Generate (0 доп. LLM-вызовов)
-Tier 2 (Corrective): IntentClassifier → Hybrid Search → Z-score grade → Generate
-Tier 3 (Agentic): LLM-router → search/grade/reformulate tools (ReAct loop)
-Tier 4 (Multi-Agent): Decompose → Parallel Agentic RAG → Synthesize
+Tier 1 (basic retrieval): BM25+Dense -> RRF -> top-5 -> Generate
+Tier 2 (corrective retrieval): IntentClassifier -> Hybrid Search -> grade -> Generate
+Tier 3 (iterative retrieval): internal compat key `agentic`, фактически iterative retrieval loop
+Tier 4 (planned multi-agent): internal compat key `multi-agent`, пока fallback в iterative retrieval
 """
 
 import logging
@@ -14,8 +14,11 @@ from typing import Any, Callable, Dict, List, Optional
 from .retriever import HybridRetriever, RetrievalResult
 from .classifier import EmbeddingIntentClassifier
 from .chunker import LegalDocumentChunker, Chunk
+from services.hardware.tier_selector import describe_rag_mode
 
 logger = logging.getLogger("RAG")
+DEFAULT_CHARS_PER_TOKEN = 4.0
+DEFAULT_RETRIEVED_CONTEXT_RATIO = 0.60
 
 
 @dataclass
@@ -34,7 +37,7 @@ class RAGResult:
 
 class AdaptiveRAGPipeline:
     """
-    Tiered RAG Pipeline — автоматически выбирает стратегию по tier.
+    Tiered RAG Pipeline — автоматически выбирает retrieval-стратегию по tier.
 
     Usage:
         pipeline = AdaptiveRAGPipeline(embed_fn=my_embed, rag_mode="corrective")
@@ -51,22 +54,35 @@ class AdaptiveRAGPipeline:
         top_k: int = 5,
         use_bm25: bool = True,
         z_score_threshold: float = -0.5,
-        max_context_chars: int = 16000,
+        max_context_chars: Optional[int] = 16000,
+        effective_context_tokens: Optional[int] = None,
+        retrieved_context_ratio: float = DEFAULT_RETRIEVED_CONTEXT_RATIO,
+        chars_per_token: float = DEFAULT_CHARS_PER_TOKEN,
     ):
         """
         Args:
             embed_fn: Функция embeddings (List[str]) -> np.ndarray
-            rag_mode: "simple" | "corrective" | "agentic" | "multi-agent"
+            rag_mode: internal compat key:
+                - "simple" -> basic retrieval
+                - "corrective" -> corrective retrieval
+                - "agentic" -> iterative retrieval
+                - "multi-agent" -> planned multi-agent (currently falls back)
             top_k: Количество чанков для retrieval
             use_bm25: Использовать BM25 в hybrid search
             z_score_threshold: Порог Z-score для grading (ниже = poor)
             max_context_chars: Максимум символов контекста для LLM
+            effective_context_tokens: Effective context window runtime profile
+            retrieved_context_ratio: Доля окна под retrieved context
+            chars_per_token: Эвристика token->chars
         """
         self.embed_fn = embed_fn
         self.rag_mode = rag_mode
         self.top_k = top_k
         self.z_score_threshold = z_score_threshold
-        self.max_context_chars = max_context_chars
+        self.effective_context_tokens = effective_context_tokens
+        self.retrieved_context_ratio = max(0.1, min(0.95, retrieved_context_ratio))
+        self.chars_per_token = max(1.0, chars_per_token)
+        self.max_context_chars = self._resolve_max_context_chars(max_context_chars)
 
         self.retriever = HybridRetriever(
             embed_fn=embed_fn,
@@ -77,6 +93,37 @@ class AdaptiveRAGPipeline:
 
         self._classifier_initialized = False
         self._indexed = False
+
+    def _resolve_max_context_chars(self, max_context_chars: Optional[int]) -> int:
+        if self.effective_context_tokens:
+            retrieved_tokens_budget = int(self.effective_context_tokens * self.retrieved_context_ratio)
+            return max(256, int(retrieved_tokens_budget * self.chars_per_token))
+        if max_context_chars is None:
+            return 16000
+        return int(max_context_chars)
+
+    def configure_runtime_budget(
+        self,
+        *,
+        effective_context_tokens: Optional[int],
+        retrieved_context_ratio: Optional[float] = None,
+        max_context_chars: Optional[int] = None,
+    ) -> None:
+        self.effective_context_tokens = effective_context_tokens
+        if retrieved_context_ratio is not None:
+            self.retrieved_context_ratio = max(0.1, min(0.95, retrieved_context_ratio))
+        self.max_context_chars = self._resolve_max_context_chars(max_context_chars)
+
+    def get_runtime_budget_metadata(self) -> Dict[str, Any]:
+        retrieved_tokens_budget = None
+        if self.effective_context_tokens is not None:
+            retrieved_tokens_budget = int(self.effective_context_tokens * self.retrieved_context_ratio)
+        return {
+            "effective_context_tokens": self.effective_context_tokens,
+            "retrieved_context_ratio": self.retrieved_context_ratio,
+            "retrieved_context_tokens_budget": retrieved_tokens_budget,
+            "max_context_chars": self.max_context_chars,
+        }
 
     def index_documents(
         self,
@@ -158,7 +205,11 @@ class AdaptiveRAGPipeline:
         0 дополнительных LLM-вызовов.
         """
         if not self._indexed:
-            return RAGResult(chunks=[], needs_generation=True, metadata={"mode": "simple", "error": "not_indexed"})
+            return RAGResult(
+                chunks=[],
+                needs_generation=True,
+                metadata={"mode": "simple", "mode_label": describe_rag_mode("simple"), "error": "not_indexed"},
+            )
 
         results = self.retriever.search(query, top_k=top_k)
         context = self._build_context(results)
@@ -167,7 +218,12 @@ class AdaptiveRAGPipeline:
             chunks=results,
             needs_generation=True,
             context_text=context,
-            metadata={"mode": "simple", "chunks_found": len(results)},
+            metadata={
+                "mode": "simple",
+                "mode_label": describe_rag_mode("simple"),
+                "chunks_found": len(results),
+                "runtime_budget": self.get_runtime_budget_metadata(),
+            },
         )
 
     def _retrieve_corrective(self, query: str, top_k: int) -> RAGResult:
@@ -192,11 +248,21 @@ class AdaptiveRAGPipeline:
                     intent=intent,
                     needs_generation=True,
                     context_text="",
-                    metadata={"mode": "corrective", "skipped_rag": True, "intent": intent["intent"]},
+                    metadata={
+                        "mode": "corrective",
+                        "mode_label": describe_rag_mode("corrective"),
+                        "skipped_rag": True,
+                        "intent": intent["intent"],
+                    },
                 )
 
         if not self._indexed:
-            return RAGResult(chunks=[], intent=intent, needs_generation=True, metadata={"mode": "corrective", "error": "not_indexed"})
+            return RAGResult(
+                chunks=[],
+                intent=intent,
+                needs_generation=True,
+                metadata={"mode": "corrective", "mode_label": describe_rag_mode("corrective"), "error": "not_indexed"},
+            )
 
         # Hybrid search
         results = self.retriever.search(query, top_k=top_k)
@@ -214,7 +280,13 @@ class AdaptiveRAGPipeline:
                 intent=intent,
                 needs_generation=True,
                 context_text=context,
-                metadata={"mode": "corrective", "quality": "good", "chunks_found": len(good_results)},
+                metadata={
+                    "mode": "corrective",
+                    "mode_label": describe_rag_mode("corrective"),
+                    "quality": "good",
+                    "chunks_found": len(good_results),
+                    "runtime_budget": self.get_runtime_budget_metadata(),
+                },
             )
 
         # Rocchio expansion
@@ -226,18 +298,21 @@ class AdaptiveRAGPipeline:
             intent=intent,
             needs_generation=True,
             context_text=context,
-            metadata={"mode": "corrective", "quality": "expanded", "chunks_found": len(expanded_results)},
+            metadata={
+                "mode": "corrective",
+                "mode_label": describe_rag_mode("corrective"),
+                "quality": "expanded",
+                "chunks_found": len(expanded_results),
+                "runtime_budget": self.get_runtime_budget_metadata(),
+            },
         )
 
     def _retrieve_agentic(self, query: str, top_k: int) -> RAGResult:
         """
-        Tier 3 — Agentic RAG.
-        LLM-router решает, нужен ли поиск.
-        Итеративный поиск с grading и reformulation (до 3 итераций).
+        Tier 3 — iterative retrieval.
 
-        Примечание: полный agentic loop с LLM reformulation
-        реализуется через LangGraph tools. Здесь — упрощённая версия
-        с embedding-based reformulation.
+        Internal compat key остаётся `agentic`, но фактически это
+        iterative corrective path без полноценного planner/tool-use runtime.
         """
         # Classify
         intent = None
@@ -245,7 +320,12 @@ class AdaptiveRAGPipeline:
             intent = self.classifier.classify(query)
 
         if not self._indexed:
-            return RAGResult(chunks=[], intent=intent, needs_generation=True, metadata={"mode": "agentic", "error": "not_indexed"})
+            return RAGResult(
+                chunks=[],
+                intent=intent,
+                needs_generation=True,
+                metadata={"mode": "agentic", "mode_label": describe_rag_mode("agentic"), "error": "not_indexed"},
+            )
 
         max_iterations = 3
         all_results = []
@@ -280,8 +360,10 @@ class AdaptiveRAGPipeline:
             context_text=context,
             metadata={
                 "mode": "agentic",
+                "mode_label": describe_rag_mode("agentic"),
                 "iterations": iteration + 1,
                 "chunks_found": len(all_results),
+                "runtime_budget": self.get_runtime_budget_metadata(),
             },
         )
 

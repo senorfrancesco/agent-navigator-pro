@@ -13,6 +13,66 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BACKEND_DIR="$PROJECT_ROOT/backend"
 ENV_FILE="$BACKEND_DIR/.env"
+HARDWARE_OVERRIDE_ENV_FILE="${AGENT_NAVIGATOR_BACKEND_HARDWARE_OVERRIDE_FILE:-$BACKEND_DIR/.env.hardware.override}"
+RUNTIME_ENV_FILE="${AGENT_NAVIGATOR_RUNTIME_ENV_FILE:-$BACKEND_DIR/.env.runtime}"
+ATTACH_TMUX=true
+FROM_LAUNCHER=false
+
+EXTERNAL_BACKEND_MODE="${BACKEND_MODE:-}"
+EXTERNAL_VLLM_BASE_URL="${VLLM_BASE_URL:-}"
+EXTERNAL_VLLM_PORT="${VLLM_PORT:-}"
+EXTERNAL_VLLM_MODEL_ID_QWEN_14B_LLM="${VLLM_MODEL_ID_QWEN_14B_LLM:-}"
+
+print_help() {
+  cat <<EOF
+run_all.sh
+
+Поднимает container/compose runtime для Chainlit-first стека.
+При прямом вызове считается compatibility entrypoint и делегирует в launcher.sh.
+
+Использование:
+  ./scripts/run_all.sh
+  ./scripts/run_all.sh --no-attach
+
+Флаги:
+  --from-launcher
+      Внутренний флаг. Используется launcher.sh после bootstrap/preflight шага,
+      чтобы скрипт сразу выполнил container runtime path.
+  --no-attach
+      Не подключаться к tmux monitoring session после запуска.
+  -h, --help
+      Показать эту справку.
+
+Примеры:
+  ./scripts/run_all.sh
+  BACKEND_MODE=vllm ./scripts/run_all.sh --no-attach
+  ./scripts/launcher.sh --target container --profile default
+EOF
+}
+
+for arg in "$@"; do
+    case "$arg" in
+        -h|--help)
+            print_help
+            exit 0
+            ;;
+        --from-launcher)
+            FROM_LAUNCHER=true
+            ;;
+        --no-attach)
+            ATTACH_TMUX=false
+            ;;
+        *)
+            echo "Неизвестный аргумент: $arg" >&2
+            echo "Используйте --help для списка флагов." >&2
+            exit 1
+            ;;
+    esac
+done
+
+if [ "$FROM_LAUNCHER" = false ]; then
+    exec bash "$SCRIPT_DIR/launcher.sh" --target container $([ "$ATTACH_TMUX" = false ] && echo "--no-attach")
+fi
 
 # Цвета для вывода
 RED='\033[0;31m'
@@ -36,60 +96,59 @@ else
     echo -e "${YELLOW}Создайте .env из .env.example: cp .env.example .env${NC}"
 fi
 
-# -------------------------------------------
-# Определение Conda окружения
-# -------------------------------------------
-CONDA_ENV="${CONDA_ENV:-diploma_llm}"
-CONDA_SH_PATH=""
-
-# Функция для поиска и активации conda
-find_conda() {
-    # Попытка 1: Стандартные пути
-    local conda_paths=(
-        "$HOME/anaconda3"
-        "$HOME/miniconda3"
-        "/opt/conda"
-        "/opt/anaconda3"
-        "/usr/local/anaconda3"
-    )
-
-    for conda_path in "${conda_paths[@]}"; do
-        if [ -f "$conda_path/etc/profile.d/conda.sh" ]; then
-            CONDA_SH_PATH="$conda_path/etc/profile.d/conda.sh"
-            source "$CONDA_SH_PATH"
-            conda activate "$CONDA_ENV" 2>/dev/null && return 0
-        fi
-    done
-
-    # Попытка 2: Через which conda
-    if command -v conda &> /dev/null; then
-        local conda_bin=$(which conda)
-        local conda_root=$(dirname $(dirname "$conda_bin"))
-        if [ -f "$conda_root/etc/profile.d/conda.sh" ]; then
-            CONDA_SH_PATH="$conda_root/etc/profile.d/conda.sh"
-            source "$CONDA_SH_PATH"
-            conda activate "$CONDA_ENV" 2>/dev/null && return 0
-        fi
-
-        # Fallback: eval hook
-        eval "$(conda shell.bash hook)"
-        conda activate "$CONDA_ENV" 2>/dev/null && return 0
-    fi
-
-    return 1
-}
-
-echo -e "${YELLOW}Активация Conda окружения: $CONDA_ENV...${NC}"
-if ! find_conda; then
-    echo -e "${RED}Ошибка: Не удалось активировать conda окружение $CONDA_ENV${NC}"
-    echo -e "${YELLOW}Попробуйте активировать вручную: conda activate $CONDA_ENV${NC}"
-    exit 1
+if [ "$FROM_LAUNCHER" = false ] && [ -f "$HARDWARE_OVERRIDE_ENV_FILE" ]; then
+    echo -e "${BLUE}Загрузка hardware overrides $HARDWARE_OVERRIDE_ENV_FILE${NC}"
+    set -a
+    source "$HARDWARE_OVERRIDE_ENV_FILE"
+    set +a
 fi
 
-echo -e "${GREEN}Conda окружение активировано: $CONDA_ENV${NC}"
-if [ -n "$CONDA_SH_PATH" ]; then
-    echo -e "${BLUE}Используется conda.sh: $CONDA_SH_PATH${NC}"
+if [ -f "$RUNTIME_ENV_FILE" ]; then
+    echo -e "${BLUE}Загрузка runtime overrides $RUNTIME_ENV_FILE${NC}"
+    set -a
+    source "$RUNTIME_ENV_FILE"
+    set +a
 fi
+
+if [ -n "$EXTERNAL_BACKEND_MODE" ]; then
+    BACKEND_MODE="$EXTERNAL_BACKEND_MODE"
+fi
+if [ -n "$EXTERNAL_VLLM_BASE_URL" ]; then
+    VLLM_BASE_URL="$EXTERNAL_VLLM_BASE_URL"
+fi
+if [ -n "$EXTERNAL_VLLM_PORT" ]; then
+    VLLM_PORT="$EXTERNAL_VLLM_PORT"
+fi
+if [ -n "$EXTERNAL_VLLM_MODEL_ID_QWEN_14B_LLM" ]; then
+    VLLM_MODEL_ID_QWEN_14B_LLM="$EXTERNAL_VLLM_MODEL_ID_QWEN_14B_LLM"
+fi
+
+BACKEND_MODE_RESOLVED="${BACKEND_MODE:-llama-cpp-python}"
+VLLM_ENABLED=false
+COMPOSE_PROFILE_ARGS=("--profile" "backend")
+COMPOSE_LOG_TARGETS=("agent-api" "document-server" "legal-server" "ums" "chainlit")
+COMPOSE_PROFILE_TEXT="--profile backend"
+COMPOSE_SERVICES_TEXT="agent-api document-server legal-server ums chainlit"
+PHASE1_SERVICES=("document-server" "legal-server" "ums")
+PHASE2_SERVICES=("agent-api" "chainlit")
+VLLM_PORT="${VLLM_PORT:-8101}"
+VLLM_SERVED_MODEL_ID="${VLLM_MODEL_ID_QWEN_14B_LLM:-qwen-14b-llm}"
+
+if [ "$BACKEND_MODE_RESOLVED" = "vllm" ]; then
+    VLLM_ENABLED=true
+    COMPOSE_PROFILE_ARGS=("--profile" "backend" "--profile" "vllm")
+    COMPOSE_LOG_TARGETS=("agent-api" "document-server" "legal-server" "ums" "chainlit" "vllm")
+    COMPOSE_PROFILE_TEXT="--profile backend --profile vllm"
+    COMPOSE_SERVICES_TEXT="agent-api document-server legal-server ums chainlit vllm"
+    PHASE1_SERVICES=("document-server" "legal-server" "ums" "vllm")
+fi
+
+if [ "${AGENT_NAVIGATOR_TEST_MODE:-0}" = "1" ]; then
+    echo "run_all:test-mode backend_mode=$BACKEND_MODE_RESOLVED compose_profiles=$COMPOSE_PROFILE_TEXT phase1_services=${PHASE1_SERVICES[*]} phase2_services=${PHASE2_SERVICES[*]} attach_tmux=$ATTACH_TMUX"
+    exit 0
+fi
+
+CONDA_ENV="container-compose"
 
 # -------------------------------------------
 # Проверяем наличие tmux
@@ -103,33 +162,10 @@ fi
 # Создаем новую tmux сессию
 # -------------------------------------------
 SESSION_NAME="agent-navigator"
-
-if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
-    echo -e "${YELLOW}Завершение существующей сессии...${NC}"
-    tmux kill-session -t "$SESSION_NAME"
-fi
-
-# Явное завершение llama-server (остаётся в памяти после закрытия tmux)
-LLAMA_PIDS=$(pgrep -f "llama-server" 2>/dev/null || true)
-if [ -n "$LLAMA_PIDS" ]; then
-    echo -e "${YELLOW}Завершение llama-server перед запуском (PID: $LLAMA_PIDS)...${NC}"
-    echo "$LLAMA_PIDS" | xargs kill 2>/dev/null || true
-    sleep 1
-    LLAMA_PIDS=$(pgrep -f "llama-server" 2>/dev/null || true)
-    if [ -n "$LLAMA_PIDS" ]; then
-        echo "$LLAMA_PIDS" | xargs kill -9 2>/dev/null || true
-    fi
-    echo -e "${GREEN}  llama-server завершён${NC}"
-fi
+echo -e "${YELLOW}Завершение существующих tmux/runtime/docker процессов...${NC}"
+"$SCRIPT_DIR/stop_all.sh" >/dev/null 2>&1 || true
 
 tmux new-session -d -s "$SESSION_NAME" -x 200 -y 50
-
-# Команда активации для tmux окон
-if [ -n "$CONDA_SH_PATH" ]; then
-    ACTIVATE_CMD="source $CONDA_SH_PATH && conda activate $CONDA_ENV"
-else
-    ACTIVATE_CMD="eval \"\$(conda shell.bash hook)\" && conda activate $CONDA_ENV"
-fi
 
 # Порты из .env или значения по умолчанию
 AGENT_PORT="${AGENT_API_PORT:-8000}"
@@ -167,9 +203,25 @@ wait_for_model() {
     local timeout="${1:-180}"
     local elapsed=0
 
+    if [ "$VLLM_ENABLED" = true ]; then
+        printf "  %-20s " "vLLM runtime"
+        while [ $elapsed -lt $timeout ]; do
+            local models=$(curl -sf "http://localhost:$VLLM_PORT/v1/models" 2>/dev/null || true)
+            if [ -n "$models" ] && echo "$models" | grep -q "\"$VLLM_SERVED_MODEL_ID\""; then
+                echo -e "${GREEN}✓ upstream готов${NC}"
+                return 0
+            fi
+            sleep 3
+            elapsed=$((elapsed + 3))
+        done
+        echo -e "${YELLOW}⚠ upstream не подтвердил $VLLM_SERVED_MODEL_ID за ${timeout}с${NC}"
+        return 0
+    fi
+
     printf "  %-20s " "Qwen-14B LLM"
     while [ $elapsed -lt $timeout ]; do
-        local status=$(curl -sf "http://localhost:$UMS_PORT/status" 2>/dev/null)
+        local status
+        status=$(curl -sf "http://localhost:$UMS_PORT/status" 2>/dev/null || true)
         if [ -n "$status" ]; then
             if echo "$status" | grep -q '"qwen-14b-llm"'; then
                 echo -e "${GREEN}✓ загружена${NC}"
@@ -183,61 +235,104 @@ wait_for_model() {
     return 0
 }
 
+wait_for_infer_ready() {
+    local timeout="${1:-180}"
+    local elapsed=0
+
+    printf "  %-20s " "UMS infer-ready"
+    while [ $elapsed -lt $timeout ]; do
+        local http_code
+        http_code=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$UMS_PORT/ready/infer" 2>/dev/null || true)
+        if [ "$http_code" = "200" ]; then
+            echo -e "${GREEN}✓ готов${NC}"
+            return 0
+        fi
+        sleep 3
+        elapsed=$((elapsed + 3))
+    done
+    echo -e "${RED}✗ таймаут (${timeout}с)${NC}"
+    return 1
+}
+
+start_tmux_window() {
+    local window_name="$1"
+    local command="$2"
+    local first_window_target=""
+
+    if tmux list-windows -t "$SESSION_NAME" | grep -q "${window_name}"; then
+        tmux kill-window -t "$SESSION_NAME:$window_name"
+    fi
+
+    first_window_target=$(tmux list-windows -t "$SESSION_NAME" -F "#{session_name}:#{window_index}" | head -n 1)
+
+    if [ "$(tmux list-windows -t "$SESSION_NAME" | wc -l)" -eq 1 ] && [ -n "$first_window_target" ] && tmux display-message -p -t "$first_window_target" '#W' | grep -q '^bash$'; then
+        tmux rename-window -t "$first_window_target" "$window_name"
+        tmux send-keys -t "$SESSION_NAME:$window_name" "$command" Enter
+    else
+        tmux new-window -t "$SESSION_NAME" -n "$window_name"
+        tmux send-keys -t "$SESSION_NAME:$window_name" "$command" Enter
+    fi
+}
+
 # -------------------------------------------
 # Запуск сервисов
 # -------------------------------------------
-
-# Окно 1: Chainlit UI (Docker)
-tmux rename-window -t "$SESSION_NAME" "chainlit"
-echo -e "${GREEN}Запуск Chainlit UI (Docker) на порту $CHAINLIT_PORT...${NC}"
-tmux send-keys -t "$SESSION_NAME:chainlit" "cd $PROJECT_ROOT && docker compose up -d chainlit && docker compose logs -f chainlit" Enter
-
-# Окно 2: Agent API (Main)
-echo -e "${GREEN}Запуск Agent API на порту $AGENT_PORT...${NC}"
-tmux new-window -t "$SESSION_NAME" -n "agent-api"
-tmux send-keys -t "$SESSION_NAME:agent-api" "cd $BACKEND_DIR/orchestrator && $ACTIVATE_CMD && python agent_api.py 2>&1 | tee agent-api.log" Enter
-sleep 2
-
-# Окно 3: Document Server
-echo -e "${GREEN}Запуск Document Server на порту $DOC_PORT...${NC}"
-tmux new-window -t "$SESSION_NAME" -n "doc-server"
-tmux send-keys -t "$SESSION_NAME:doc-server" "cd $BACKEND_DIR/services/document_server && $ACTIVATE_CMD && uvicorn mcp_document_server:app --host 0.0.0.0 --port $DOC_PORT 2>&1 | tee doc-server.log" Enter
-sleep 2
-
-# Окно 4: Legal Server
-echo -e "${GREEN}Запуск Legal Server на порту $LEGAL_PORT...${NC}"
-tmux new-window -t "$SESSION_NAME" -n "legal-server"
-tmux send-keys -t "$SESSION_NAME:legal-server" "cd $BACKEND_DIR/services/legal_server && $ACTIVATE_CMD && uvicorn mcp_legal_server:app --host 0.0.0.0 --port $LEGAL_PORT 2>&1 | tee legal-server.log" Enter
-sleep 2
-
-# Окно 5: UMS (Unified Model Server)
-echo -e "${GREEN}Запуск Unified Model Server на порту $UMS_PORT...${NC}"
-tmux new-window -t "$SESSION_NAME" -n "ums"
-tmux send-keys -t "$SESSION_NAME:ums" "cd $BACKEND_DIR/services/model_manager && $ACTIVATE_CMD && python unified_model_server.py 2>&1 | tee ums.log" Enter
-
-# Окно 6: Monitor/Logs
-echo -e "${GREEN}Открытие окна мониторинга...${NC}"
-tmux new-window -t "$SESSION_NAME" -n "monitor"
-tmux send-keys -t "$SESSION_NAME:monitor" "cd $BACKEND_DIR && echo -e '${GREEN}Система запущена.${NC}\nДля выхода нажмите ${YELLOW}Ctrl+B${NC} затем ${YELLOW}:kill-session${NC} (это остановит все сервисы, включая Docker).'
-" Enter
-tmux send-keys -t "$SESSION_NAME:monitor" "htop 2>/dev/null || top" Enter
 
 # -------------------------------------------
 # Ожидание готовности сервисов
 # -------------------------------------------
 echo ""
-echo -e "${YELLOW}Ожидание готовности сервисов...${NC}"
+echo -e "${YELLOW}Проверка и запуск сервисов...${NC}"
 
 SERVICES_OK=true
-wait_for_service "Agent API"       "$AGENT_PORT"   "/health" 30 || SERVICES_OK=false
-wait_for_service "Document Server" "$DOC_PORT"     "/health" 30 || SERVICES_OK=false
-wait_for_service "Legal Server"    "$LEGAL_PORT"   "/health" 30 || SERVICES_OK=false
-wait_for_service "UMS"             "$UMS_PORT"     "/health" 60 || SERVICES_OK=false
-wait_for_service "Chainlit UI"     "$CHAINLIT_PORT" "/"      60 || SERVICES_OK=false
+
+echo -e "${GREEN}Запуск backend services через Docker Compose...${NC}"
+COMPOSE_ENV_PREFIX="CHAINLIT_UMS_URL=http://ums:$UMS_PORT CHAINLIT_DOC_SERVER_URL=http://document-server:$DOC_PORT CHAINLIT_LEGAL_SERVER_URL=http://legal-server:$LEGAL_PORT CHAINLIT_MCP_DOCUMENT_SERVER_URL=http://document-server:$DOC_PORT CHAINLIT_MCP_LEGAL_SERVER_URL=http://legal-server:$LEGAL_PORT"
+cd "$PROJECT_ROOT"
+env $COMPOSE_ENV_PREFIX docker compose "${COMPOSE_PROFILE_ARGS[@]}" up -d "${PHASE1_SERVICES[@]}"
+
+# 1) Document Server
+wait_for_service "Document Server" "$DOC_PORT" "/health" 60 || SERVICES_OK=false
+
+# 2) Legal Server
+wait_for_service "Legal Server" "$LEGAL_PORT" "/health" 60 || SERVICES_OK=false
+
+# 3) UMS
+wait_for_service "UMS" "$UMS_PORT" "/health" 120 || SERVICES_OK=false
 
 echo ""
 echo -e "${YELLOW}Ожидание загрузки модели Qwen LLM (до 3 мин)...${NC}"
-wait_for_model 180
+wait_for_model 180 || SERVICES_OK=false
+
+echo ""
+echo -e "${YELLOW}Проверка готовности UMS к первому infer (до 3 мин)...${NC}"
+UMS_INFER_READY=true
+wait_for_infer_ready 180 || UMS_INFER_READY=false
+if [ "$UMS_INFER_READY" = false ]; then
+    SERVICES_OK=false
+fi
+
+if [ "$UMS_INFER_READY" = true ]; then
+    env $COMPOSE_ENV_PREFIX docker compose "${COMPOSE_PROFILE_ARGS[@]}" up -d "${PHASE2_SERVICES[@]}"
+
+    # 4) Agent API
+    wait_for_service "Agent API" "$AGENT_PORT" "/health" 30 || SERVICES_OK=false
+
+    # 5) Chainlit UI (Docker)
+    if [ "$VLLM_ENABLED" = true ]; then
+        wait_for_service "vLLM" "$VLLM_PORT" "/health" 180 || SERVICES_OK=false
+    fi
+    wait_for_service "Chainlit UI" "$CHAINLIT_PORT" "/" 60 || SERVICES_OK=false
+else
+    echo -e "${YELLOW}Пропуск запуска Agent API и Chainlit: UMS infer-ready не подтвержден.${NC}"
+fi
+
+CHAINLIT_COMPOSE_CMD="cd $PROJECT_ROOT && env $COMPOSE_ENV_PREFIX docker compose ${COMPOSE_PROFILE_ARGS[*]} logs -f ${COMPOSE_LOG_TARGETS[*]}"
+start_tmux_window "backend-compose" "$CHAINLIT_COMPOSE_CMD"
+
+# 6) Monitor/Logs
+echo -e "${GREEN}Открытие окна мониторинга...${NC}"
+start_tmux_window "monitor" "cd $PROJECT_ROOT && echo -e '${GREEN}Compose backend stack запущен.${NC}\nДля остановки используйте ${YELLOW}docker compose down${NC} или завершите tmux сессию.' && (docker compose ps || true) && (htop 2>/dev/null || top)"
 
 if [ "$SERVICES_OK" = true ]; then
     SYSTEM_STATUS="${GREEN}ГОТОВА К РАБОТЕ${NC}"
@@ -254,9 +349,9 @@ echo -e "${GREEN}║        Agent Navigator Pro v3.0                          �
 echo -e "${GREEN}╠════════════════════════════════════════════════════════════╣${NC}"
 echo -e "${GREEN}║${NC} Статус:          $SYSTEM_STATUS"
 echo -e "${GREEN}║${NC} Сессия tmux:     ${YELLOW}$SESSION_NAME${NC}"
-echo -e "${GREEN}║${NC} Conda окружение: ${YELLOW}$CONDA_ENV${NC}"
+echo -e "${GREEN}║${NC} Runtime target:   ${YELLOW}container-compose${NC}"
 echo -e "${GREEN}╠════════════════════════════════════════════════════════════╣${NC}"
-echo -e "${GREEN}║${NC} Chainlit UI:     ${YELLOW}http://localhost:$CHAINLIT_PORT${NC}  (login: admin/admin)"
+echo -e "${GREEN}║${NC} Chainlit UI:     ${YELLOW}http://localhost:$CHAINLIT_PORT${NC}  (login: ${CHAINLIT_ADMIN_USER:-admin}, password from env)"
 echo -e "${GREEN}║${NC} Agent API:       ${YELLOW}http://localhost:$AGENT_PORT${NC}"
 echo -e "${GREEN}║${NC} Document Server: ${YELLOW}http://localhost:$DOC_PORT${NC}"
 echo -e "${GREEN}║${NC} Legal Server:    ${YELLOW}http://localhost:$LEGAL_PORT${NC}"
@@ -266,3 +361,7 @@ echo -e "${GREEN}║${NC} Подключение: ${BLUE}tmux attach-session -t 
 echo -e "${GREEN}║${NC} Завершение:  ${BLUE}./scripts/stop_all.sh${NC}"
 echo -e "${GREEN}╚════════════════════════════════════════════════════════════╝${NC}"
 echo ""
+
+if [ "$ATTACH_TMUX" = false ]; then
+    echo -e "${YELLOW}tmux attach пропущен (--no-attach).${NC}"
+fi

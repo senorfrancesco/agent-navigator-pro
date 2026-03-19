@@ -12,16 +12,19 @@
 """
 
 import os
+import asyncio
 import sys
 import pytest
 import tempfile
 import time
+from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Пути для импорта
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from orchestrator.workflows.document_analysis import (
+    _infer_document_analysis_with_failover,
     classify_doc_type,
     classify_and_load_node,
     extract_positions_node,
@@ -33,6 +36,7 @@ from orchestrator.workflows.document_analysis import (
     _SUMMARY_PROMPTS,
     _DOC_TYPE_LABELS,
 )
+from services.observability import render_metrics_text, reset_observability_metrics
 
 
 # ============================================================================
@@ -49,9 +53,18 @@ def base_state() -> DocumentAnalysisState:
         "items": [],
         "full_text": "",
         "summary": "",
+        "summary_metadata": {},
         "final_report": "",
+        "runtime_context": {},
         "errors": [],
     }
+
+
+@pytest.fixture(autouse=True)
+def _reset_document_analysis_metrics():
+    reset_observability_metrics()
+    yield
+    reset_observability_metrics()
 
 
 @pytest.fixture
@@ -131,6 +144,22 @@ class TestClassifyDocType:
 
     def test_legal_label_is_not_contract(self):
         assert _DOC_TYPE_LABELS["legal"] == "Юридический / нормативный документ"
+
+
+@pytest.mark.asyncio
+async def test_document_analysis_infer_fallback_metadata_uses_resolved_model_id():
+    with patch("orchestrator.workflows.document_analysis.ums_client.async_infer", new_callable=AsyncMock) as mock_infer:
+        mock_infer.return_value = {"content": "ok"}
+
+        _, model_execution = await _infer_document_analysis_with_failover(
+            stage="chunk_summary",
+            prompt="prompt",
+            payload={"temperature": 0.1},
+        )
+
+    assert model_execution is not None
+    assert model_execution["role_key"] == "llm.legal_compare"
+    assert model_execution["used_model_id"] == "qwen-14b-llm"
 
 
 # ============================================================================
@@ -258,6 +287,21 @@ class TestExtractPositionsNode:
         assert result["items"][0]["source"] == "text"
 
     @pytest.mark.asyncio
+    async def test_extract_llm_failure_records_metric(self, base_state):
+        with patch("orchestrator.workflows.document_analysis._extract_tables_from_doc", new_callable=AsyncMock) as mock_tables, \
+             patch("orchestrator.workflows.document_analysis._extract_items_llm", new_callable=AsyncMock) as mock_llm:
+            mock_tables.return_value = []
+            mock_llm.side_effect = RuntimeError("llm exploded")
+
+            result = await extract_positions_node(base_state)
+
+        assert any("LLM extraction failed" in error for error in result["errors"])
+        metrics = render_metrics_text()
+        assert "agent_nav_fallback_events_total" in metrics
+        assert 'component="document_analysis"' in metrics
+        assert 'fallback="llm_extract_failed"' in metrics
+
+    @pytest.mark.asyncio
     async def test_extract_dedup(self, base_state):
         table_items = [
             {"name": "Сервер HP ProLiant", "specs": "2x Xeon", "quantity": "2", "price": "100000", "unit": "шт", "source": "table", "page": 1},
@@ -288,12 +332,114 @@ class TestExtractPositionsNode:
 
         assert result["items"] == []
 
+    @pytest.mark.asyncio
+    async def test_extract_passes_progress_callback_to_llm_extraction(self, base_state):
+        with patch("orchestrator.workflows.document_analysis._extract_tables_from_doc", new_callable=AsyncMock) as mock_tables, \
+             patch("orchestrator.workflows.document_analysis._extract_items_llm", new_callable=AsyncMock) as mock_llm:
+            mock_tables.return_value = []
+            mock_llm.return_value = []
+
+            await extract_positions_node(base_state)
+
+        assert mock_llm.await_count == 1
+        _, kwargs = mock_llm.call_args
+        assert "progress_callback" in kwargs
+        assert callable(kwargs["progress_callback"])
+        assert "model_execution_events" in kwargs
+
+    @pytest.mark.asyncio
+    async def test_extract_progress_callback_uses_russian_labels(self, base_state):
+        progress_updates = []
+
+        async def _fake_extract_items_llm(path, already_names, progress_callback=None, model_execution_events=None):
+            assert callable(progress_callback)
+            await progress_callback(1, 3)
+            await progress_callback(3, 3)
+            return []
+
+        async def _update_progress_box(*, key, title, content):
+            progress_updates.append({"key": key, "title": title, "content": content})
+
+        base_state["runtime_context"] = {"update_progress_box": _update_progress_box}
+
+        with patch("orchestrator.workflows.document_analysis._extract_tables_from_doc", new_callable=AsyncMock) as mock_tables, \
+             patch("orchestrator.workflows.document_analysis._extract_items_llm", side_effect=_fake_extract_items_llm):
+            mock_tables.return_value = []
+            await extract_positions_node(base_state)
+
+        assert progress_updates
+        assert progress_updates[0]["title"] == "Извлечение позиций"
+        assert progress_updates[0]["content"] == "Фрагмент 1/3"
+        assert progress_updates[1]["content"] == "Фрагмент 3/3"
+        assert progress_updates[-1]["content"] == "Извлечение завершено"
+
+    @pytest.mark.asyncio
+    async def test_extract_collects_model_execution_metadata_from_llm_paths(self, base_state):
+        async def _fake_extract_items_llm(path, already_names, progress_callback=None, model_execution_events=None):
+            if model_execution_events is not None:
+                model_execution_events.append(
+                    {
+                        "role_key": "llm.legal_compare",
+                        "primary_model_id": "qwen-14b-llm",
+                        "fallback_model_id": "qwen-14b-llm",
+                        "used_model_id": "qwen-14b-llm",
+                        "fallback_used": False,
+                        "attempt_count": 1,
+                    }
+                )
+            return [
+                {
+                    "name": "Ноутбук MSI",
+                    "specs": "i7, 32GB",
+                    "quantity": "5",
+                    "price": "",
+                    "unit": "",
+                    "source": "text",
+                    "page": None,
+                }
+            ]
+
+        with patch("orchestrator.workflows.document_analysis._extract_tables_from_doc", new_callable=AsyncMock) as mock_tables, \
+             patch("orchestrator.workflows.document_analysis._extract_items_llm", side_effect=_fake_extract_items_llm) as mock_llm, \
+             patch("orchestrator.workflows.document_analysis._polish_items_specs_llm", new_callable=AsyncMock) as mock_polish:
+            mock_tables.return_value = []
+            mock_polish.return_value = None
+
+            result = await extract_positions_node(base_state)
+
+        assert len(result["items"]) == 1
+        assert result["model_execution"][0]["used_model_id"] == "qwen-14b-llm"
+
 
 # ============================================================================
 # Tests: summarize_node
 # ============================================================================
 
 class TestSummarizeNode:
+    @pytest.mark.asyncio
+    async def test_summarize_progress_uses_russian_fragment_labels(self, base_state):
+        base_state["full_text"] = "Фрагмент один\n\nФрагмент два"
+        base_state["doc_type"] = "other"
+        progress_updates = []
+
+        async def _update_progress_box(*, key, title, content):
+            progress_updates.append({"key": key, "title": title, "content": content})
+
+        base_state["runtime_context"] = {"update_progress_box": _update_progress_box}
+
+        with patch("orchestrator.workflows.document_analysis._chunk_text", new_callable=AsyncMock) as mock_chunk, \
+             patch("orchestrator.workflows.document_analysis.ums_client") as mock_ums:
+            mock_chunk.return_value = ["часть 1", "часть 2"]
+            mock_ums.async_infer = AsyncMock(return_value={"content": "- ok"})
+
+            result = await summarize_node(base_state)
+
+        assert result["summary"]
+        assert any(update["title"] == "Суммаризация документа" for update in progress_updates)
+        assert any(update["content"] == "Фрагмент 1/2" for update in progress_updates)
+        assert any(update["content"] == "Фрагмент 2/2" for update in progress_updates)
+        assert all("Chunk" not in update["content"] for update in progress_updates)
+
     @pytest.mark.asyncio
     async def test_summarize_tz_prompt(self, base_state, tz_text):
         base_state["full_text"] = tz_text
@@ -347,6 +493,10 @@ class TestSummarizeNode:
         # Не должен упасть — вернёт ошибку в summary или errors
         assert "errors" in result
         assert any("failed" in e.lower() or "timeout" in e.lower() for e in result["errors"])
+        metrics = render_metrics_text()
+        assert "agent_nav_fallback_events_total" in metrics
+        assert 'component="document_analysis"' in metrics
+        assert 'fallback="summarize_chunk_failed"' in metrics
 
     @pytest.mark.asyncio
     async def test_summarize_accepts_choices_response_shape(self, base_state, tz_text):
@@ -373,6 +523,417 @@ class TestSummarizeNode:
         result = await summarize_node(base_state)
         assert "пуст" in result["summary"].lower()
 
+    @pytest.mark.asyncio
+    async def test_summarize_reduce_failure_records_metric(self, base_state, tz_text):
+        base_state["full_text"] = tz_text
+        base_state["doc_type"] = "tz"
+
+        with patch("orchestrator.workflows.document_analysis._chunk_text", new_callable=AsyncMock) as mock_chunk, \
+             patch("orchestrator.workflows.document_analysis.ums_client") as mock_ums:
+            mock_chunk.return_value = [tz_text[:80], tz_text[80:]]
+            mock_ums.async_infer = AsyncMock(side_effect=[
+                {"content": "- Срок поставки: 10 дней"},
+                {"content": "- Гарантия: 12 месяцев"},
+                RuntimeError("reduce exploded"),
+            ])
+
+            result = await summarize_node(base_state)
+
+        assert "10 дней" in result["summary"]
+        assert any("Reduce summarization failed" in error for error in result["errors"])
+        metrics = render_metrics_text()
+        assert "agent_nav_fallback_events_total" in metrics
+        assert 'component="document_analysis"' in metrics
+        assert 'fallback="reduce_summarization_failed"' in metrics
+
+    @pytest.mark.asyncio
+    async def test_summarize_uses_hierarchical_reduce_groups(self, base_state):
+        base_state["full_text"] = "Большой документ"
+        base_state["doc_type"] = "other"
+        base_state["runtime_context"] = {
+            "summary_policy": {
+                "weak_pc_mode": True,
+                "group_size": 2,
+                "group_input_chars": 120,
+                "chunk_input_chars": 120,
+                "final_input_chars": 240,
+                "final_max_tokens": 512,
+            }
+        }
+
+        with patch("orchestrator.workflows.document_analysis._chunk_text", new_callable=AsyncMock) as mock_chunk, \
+             patch("orchestrator.workflows.document_analysis.ums_client") as mock_ums:
+            mock_chunk.return_value = [f"chunk-{idx}" for idx in range(5)]
+            mock_ums.async_infer = AsyncMock(side_effect=[
+                {"content": f"summary-{idx}"} for idx in range(1, 6)
+            ] + [
+                {"content": "merge-1"},
+                {"content": "merge-2"},
+                {"content": "merge-3"},
+                {"content": "merge-4"},
+                {"content": "merge-5"},
+                {"content": "final-merge"},
+            ])
+
+            result = await summarize_node(base_state)
+
+        assert result["summary"] == "final-merge"
+        assert mock_ums.async_infer.await_count == 11
+
+    @pytest.mark.asyncio
+    async def test_summarize_uses_fast_final_merge_when_final_payload_is_safe(self, base_state):
+        base_state["full_text"] = "Большой документ"
+        base_state["doc_type"] = "other"
+        base_state["runtime_context"] = {
+            "summary_policy": {
+                "group_size": 2,
+                "group_input_chars": 200,
+                "chunk_input_chars": 120,
+                "final_input_chars": 400,
+                "final_max_tokens": 256,
+                "enable_fast_final_merge": True,
+            }
+        }
+
+        with patch("orchestrator.workflows.document_analysis._chunk_text", new_callable=AsyncMock) as mock_chunk, \
+             patch("orchestrator.workflows.document_analysis.ums_client") as mock_ums:
+            mock_chunk.return_value = ["chunk-1", "chunk-2", "chunk-3"]
+            mock_ums.async_infer = AsyncMock(side_effect=[
+                {"content": "summary-1"},
+                {"content": "summary-2"},
+                {"content": "summary-3"},
+                {"content": "final-summary"},
+            ])
+
+            result = await summarize_node(base_state)
+
+        assert result["summary"] == "final-summary"
+        assert result["summary_metadata"]["reduce_strategy"] == "fast_final_merge"
+        assert result["summary_metadata"]["reduce_reason"] == "fits_final_budget"
+        assert result["summary_metadata"]["reduce_levels_used"] == 0
+        assert result["summary_metadata"]["reduce_groups_total"] == 0
+        assert mock_ums.async_infer.await_count == 4
+
+    @pytest.mark.asyncio
+    async def test_summarize_uses_hierarchical_merge_on_weak_pc_even_if_final_payload_fits(self, base_state):
+        base_state["full_text"] = "Большой документ"
+        base_state["doc_type"] = "other"
+        base_state["runtime_context"] = {
+            "summary_policy": {
+                "weak_pc_mode": True,
+                "group_size": 2,
+                "group_input_chars": 200,
+                "chunk_input_chars": 120,
+                "final_input_chars": 400,
+                "final_max_tokens": 256,
+                "enable_fast_final_merge": True,
+            }
+        }
+
+        with patch("orchestrator.workflows.document_analysis._chunk_text", new_callable=AsyncMock) as mock_chunk, \
+             patch("orchestrator.workflows.document_analysis.ums_client") as mock_ums:
+            mock_chunk.return_value = ["chunk-1", "chunk-2", "chunk-3"]
+            mock_ums.async_infer = AsyncMock(side_effect=[
+                {"content": "summary-1"},
+                {"content": "summary-2"},
+                {"content": "summary-3"},
+                {"content": "merge-1"},
+                {"content": "merge-2"},
+                {"content": "final-summary"},
+            ])
+
+            result = await summarize_node(base_state)
+
+        assert result["summary"] == "final-summary"
+        assert result["summary_metadata"]["reduce_strategy"] == "hierarchical_merge"
+        assert result["summary_metadata"]["reduce_reason"] == "hardware_policy"
+        assert result["summary_metadata"]["reduce_levels_used"] == 1
+        assert result["summary_metadata"]["reduce_groups_total"] == 2
+        assert mock_ums.async_infer.await_count == 6
+
+    @pytest.mark.asyncio
+    async def test_summarize_uses_hierarchy_when_margin_blocks_fast_path(self, base_state):
+        base_state["full_text"] = "Большой документ"
+        base_state["doc_type"] = "other"
+        base_state["runtime_context"] = {
+            "summary_policy": {
+                "group_size": 2,
+                "group_input_chars": 200,
+                "chunk_input_chars": 120,
+                "final_input_chars": 400,
+                "final_max_tokens": 256,
+                "enable_fast_final_merge": True,
+            }
+        }
+
+        def _estimate_tokens(text: str) -> int:
+            if "summary-1" in text and "summary-2" in text:
+                return 300
+            return 24
+
+        with patch("orchestrator.workflows.document_analysis._chunk_text", new_callable=AsyncMock) as mock_chunk, \
+             patch("orchestrator.workflows.document_analysis.ums_client") as mock_ums, \
+             patch("orchestrator.workflows.document_analysis._estimate_tokens", side_effect=_estimate_tokens):
+            mock_chunk.return_value = ["chunk-1", "chunk-2", "chunk-3"]
+            mock_ums.async_infer = AsyncMock(side_effect=[
+                {"content": "summary-1"},
+                {"content": "summary-2"},
+                {"content": "summary-3"},
+                {"content": "merge-1"},
+                {"content": "merge-2"},
+                {"content": "final-summary"},
+            ])
+
+            result = await summarize_node(base_state)
+
+        assert result["summary"] == "final-summary"
+        assert result["summary_metadata"]["reduce_strategy"] == "hierarchical_merge"
+        assert result["summary_metadata"]["reduce_reason"] == "budget_overflow"
+        assert result["summary_metadata"]["final_admission_margin_tokens"] > 0
+        assert result["summary_metadata"]["final_admission_estimated_tokens"] > 0
+
+    @pytest.mark.asyncio
+    async def test_summarize_forces_progress_when_budget_grouping_would_repeat_same_item_count(self, base_state):
+        base_state["full_text"] = "Большой документ"
+        base_state["doc_type"] = "other"
+        base_state["runtime_context"] = {
+            "summary_policy": {
+                "group_size": 4,
+                "group_input_chars": 10,
+                "chunk_input_chars": 120,
+                "final_input_chars": 40,
+                "final_max_tokens": 64,
+                "enable_fast_final_merge": True,
+            }
+        }
+
+        def _estimate_tokens(text: str) -> int:
+            normalized = str(text or "")
+            if "summary-" in normalized:
+                return 400
+            if "merge-" in normalized:
+                return 24
+            return max(1, len(normalized) // 4)
+
+        with patch("orchestrator.workflows.document_analysis._chunk_text", new_callable=AsyncMock) as mock_chunk, \
+             patch("orchestrator.workflows.document_analysis.ums_client") as mock_ums, \
+             patch("orchestrator.workflows.document_analysis._estimate_tokens", side_effect=_estimate_tokens):
+            mock_chunk.return_value = [f"chunk-{idx}" for idx in range(5)]
+            mock_ums.async_infer = AsyncMock(side_effect=[
+                {"content": "summary-" + ("A" * 80)},
+                {"content": "summary-" + ("B" * 80)},
+                {"content": "summary-" + ("C" * 80)},
+                {"content": "summary-" + ("D" * 80)},
+                {"content": "summary-" + ("E" * 80)},
+                {"content": "merge-1"},
+                {"content": "merge-2"},
+                {"content": "merge-3"},
+                {"content": "final-summary"},
+            ])
+
+            result = await summarize_node(base_state)
+
+        assert result["summary"] == "final-summary"
+        assert result["summary_metadata"]["reduce_strategy"] == "hierarchical_merge"
+        assert result["summary_metadata"]["reduce_levels_used"] == 1
+        assert result["summary_metadata"]["reduce_groups_total"] == 3
+        assert mock_ums.async_infer.await_count == 9
+
+    @pytest.mark.asyncio
+    async def test_summarize_prefers_fast_path_when_chars_are_large_but_token_estimate_is_safe(self, base_state):
+        base_state["full_text"] = "Большой документ"
+        base_state["doc_type"] = "other"
+        base_state["runtime_context"] = {
+            "summary_policy": {
+                "group_size": 2,
+                "group_input_chars": 200,
+                "chunk_input_chars": 120,
+                "final_input_chars": 400,
+                "final_max_tokens": 256,
+                "enable_fast_final_merge": True,
+            }
+        }
+
+        with patch("orchestrator.workflows.document_analysis._chunk_text", new_callable=AsyncMock) as mock_chunk, \
+             patch("orchestrator.workflows.document_analysis.ums_client") as mock_ums, \
+             patch("orchestrator.workflows.document_analysis._estimate_tokens", return_value=32):
+            mock_chunk.return_value = ["chunk-1", "chunk-2", "chunk-3"]
+            mock_ums.async_infer = AsyncMock(side_effect=[
+                {"content": "summary-" + ("A" * 240)},
+                {"content": "summary-" + ("B" * 240)},
+                {"content": "summary-" + ("C" * 240)},
+                {"content": "final-summary"},
+            ])
+
+            result = await summarize_node(base_state)
+
+        assert result["summary"] == "final-summary"
+        assert result["summary_metadata"]["reduce_strategy"] == "fast_final_merge"
+        assert result["summary_metadata"]["reduce_reason"] == "fits_final_budget"
+        assert result["summary_metadata"]["fast_path_eligible"] is True
+        assert "final_prompt_tokens_est" in result["summary_metadata"]
+        assert "group_prompt_tokens_est" in result["summary_metadata"]
+
+    @pytest.mark.asyncio
+    async def test_summarize_shadow_mode_records_trace_and_diff_metric(self, base_state, monkeypatch):
+        monkeypatch.setenv("SUMMARY_REDUCE_STRATEGY_SHADOW_MODE", "1")
+        base_state["full_text"] = "Большой документ"
+        base_state["doc_type"] = "other"
+        base_state["runtime_context"] = {
+            "summary_policy": {
+                "group_size": 4,
+                "group_input_chars": 200,
+                "chunk_input_chars": 120,
+                "final_input_chars": 400,
+                "final_max_tokens": 256,
+                "enable_fast_final_merge": True,
+            }
+        }
+
+        with patch("orchestrator.workflows.document_analysis._chunk_text", new_callable=AsyncMock) as mock_chunk, \
+             patch("orchestrator.workflows.document_analysis.ums_client") as mock_ums, \
+             patch("orchestrator.workflows.document_analysis._estimate_tokens", return_value=32):
+            mock_chunk.return_value = ["chunk-1", "chunk-2", "chunk-3", "chunk-4", "chunk-5"]
+            mock_ums.async_infer = AsyncMock(side_effect=[
+                {"content": "summary-1"},
+                {"content": "summary-2"},
+                {"content": "summary-3"},
+                {"content": "summary-4"},
+                {"content": "summary-5"},
+                {"content": "final-summary"},
+            ])
+
+            result = await summarize_node(base_state)
+
+        metadata = result["summary_metadata"]
+        assert result["summary"] == "final-summary"
+        assert metadata["executed_strategy"] == "fast_final_merge"
+        assert metadata["recommended_strategy"] == "fast_final_merge"
+        assert metadata["shadow_baseline_strategy"] == "hierarchical_merge"
+        assert metadata["would_skip_levels"] == 1
+        assert metadata["estimated_token_saving"] > 0
+        assert metadata["reduce_decisions"]
+        assert metadata["reduce_decisions"][0]["executed_strategy"] == "fast_final_merge"
+        assert metadata["reduce_decisions"][0]["shadow_baseline_strategy"] == "hierarchical_merge"
+
+        metrics = render_metrics_text()
+        assert 'agent_nav_summary_strategy_shadow_diff_total{component="document_analysis"' in metrics
+        assert " 1.0" in metrics
+
+    @pytest.mark.asyncio
+    async def test_summarize_shadow_mode_does_not_increment_metric_when_strategies_match(self, base_state, monkeypatch):
+        monkeypatch.setenv("SUMMARY_REDUCE_STRATEGY_SHADOW_MODE", "1")
+        base_state["full_text"] = "Большой документ"
+        base_state["doc_type"] = "other"
+        base_state["runtime_context"] = {
+            "summary_policy": {
+                "group_size": 4,
+                "group_input_chars": 200,
+                "chunk_input_chars": 120,
+                "final_input_chars": 400,
+                "final_max_tokens": 256,
+                "enable_fast_final_merge": True,
+            }
+        }
+
+        with patch("orchestrator.workflows.document_analysis._chunk_text", new_callable=AsyncMock) as mock_chunk, \
+             patch("orchestrator.workflows.document_analysis.ums_client") as mock_ums:
+            mock_chunk.return_value = ["chunk-1"]
+            mock_ums.async_infer = AsyncMock(side_effect=[{"content": "summary-1"}])
+
+            await summarize_node(base_state)
+
+        metrics = render_metrics_text()
+        assert "agent_nav_summary_strategy_shadow_diff_total" not in metrics
+
+    @pytest.mark.asyncio
+    async def test_summarize_honors_cancel_flag_between_chunks(self, base_state):
+        base_state["full_text"] = "Большой документ"
+        base_state["doc_type"] = "other"
+        calls = {"count": 0}
+
+        def _cancel_after_first_chunk():
+            calls["count"] += 1
+            return calls["count"] >= 2
+
+        base_state["runtime_context"] = {
+            "is_cancelled": _cancel_after_first_chunk,
+            "summary_policy": {"group_size": 2},
+        }
+
+        with patch("orchestrator.workflows.document_analysis._chunk_text", new_callable=AsyncMock) as mock_chunk, \
+             patch("orchestrator.workflows.document_analysis.ums_client") as mock_ums:
+            mock_chunk.return_value = ["chunk-1", "chunk-2", "chunk-3"]
+            mock_ums.async_infer = AsyncMock(return_value={"content": "summary-1"})
+
+            with pytest.raises(asyncio.CancelledError):
+                await summarize_node(base_state)
+
+        assert mock_ums.async_infer.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_summarize_returns_partial_metadata_when_final_synthesis_budget_is_exceeded(self, base_state):
+        base_state["full_text"] = "Большой документ"
+        base_state["doc_type"] = "other"
+        base_state["runtime_context"] = {
+            "summary_policy": {
+                "group_size": 4,
+                "group_input_chars": 120,
+                "chunk_input_chars": 120,
+                "final_input_chars": 80,
+                "final_max_tokens": 64,
+            }
+        }
+
+        with patch("orchestrator.workflows.document_analysis._chunk_text", new_callable=AsyncMock) as mock_chunk, \
+             patch("orchestrator.workflows.document_analysis.ums_client") as mock_ums:
+            mock_chunk.return_value = ["chunk-1", "chunk-2"]
+            mock_ums.async_infer = AsyncMock(side_effect=[
+                {"content": "summary-" + ("A" * 120)},
+                {"content": "summary-" + ("B" * 120)},
+                RuntimeError("final exploded"),
+                RuntimeError("final exploded again"),
+            ])
+
+            result = await summarize_node(base_state)
+
+        assert "Финальная сводка не была построена полностью" in result["summary"]
+        assert result["summary_metadata"]["degraded"] is True
+        assert result["summary_metadata"]["final_synthesis_status"] == "failed"
+        assert "chunk_summary" in result["summary_metadata"]["completed_stages"]
+        assert mock_ums.async_infer.await_count == 4
+
+    @pytest.mark.asyncio
+    async def test_summarize_uses_single_policy_changing_retry_for_final_synthesis(self, base_state):
+        base_state["full_text"] = "Большой документ"
+        base_state["doc_type"] = "other"
+        base_state["runtime_context"] = {
+            "summary_policy": {
+                "group_size": 4,
+                "group_input_chars": 120,
+                "chunk_input_chars": 120,
+                "final_input_chars": 220,
+                "final_max_tokens": 256,
+            }
+        }
+
+        with patch("orchestrator.workflows.document_analysis._chunk_text", new_callable=AsyncMock) as mock_chunk, \
+             patch("orchestrator.workflows.document_analysis.ums_client") as mock_ums:
+            mock_chunk.return_value = ["chunk-1", "chunk-2"]
+            mock_ums.async_infer = AsyncMock(side_effect=[
+                {"content": "summary-1"},
+                {"content": "summary-2"},
+                RuntimeError("first final attempt failed"),
+                {"content": "final-summary"},
+            ])
+
+            result = await summarize_node(base_state)
+
+        assert result["summary"] == "final-summary"
+        assert result["summary_metadata"]["final_synthesis_status"] == "completed"
+        assert result["summary_metadata"]["degraded"] is True
+        assert mock_ums.async_infer.await_count == 4
+
 
 # ============================================================================
 # Tests: generate_analysis_report_node
@@ -394,6 +955,21 @@ class TestGenerateAnalysisReportNode:
         assert "Техническое задание" in report
         assert "12" in report  # pages
         assert "18694" in report  # chars
+
+    @pytest.mark.asyncio
+    async def test_report_contains_elapsed_time_when_runtime_start_is_available(self, base_state):
+        base_state["doc_type"] = "tz"
+        base_state["doc_metadata"] = {"pages": 2, "chars": 2000, "tables_count": 0, "format": "PDF"}
+        base_state["summary"] = "Тестовая сводка"
+        base_state["runtime_context"] = {"started_at_monotonic": 100.0}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(os.environ, {"UPLOADS_DIR": tmpdir}), \
+                 patch("orchestrator.workflows.document_analysis.time.monotonic", return_value=112.3):
+                result = await generate_analysis_report_node(base_state)
+
+        report = result["final_report"]
+        assert "Время выполнения:** 12.3 сек." in report
 
     @pytest.mark.asyncio
     async def test_report_contains_items(self, base_state):
@@ -461,7 +1037,23 @@ class TestGenerateAnalysisReportNode:
                 result = await generate_analysis_report_node(base_state)
 
         report = result["final_report"]
-        assert "не обнаружены" in report.lower() or "Позиции оборудования" in report
+        assert "Извлеченные позиции" not in report
+        assert "не обнаружены" not in report.lower()
+
+    @pytest.mark.asyncio
+    async def test_report_omits_empty_items_section_for_legal_documents(self, base_state):
+        base_state["doc_type"] = "legal"
+        base_state["doc_metadata"] = {"pages": 3, "chars": 1500, "tables_count": 0, "format": "PDF"}
+        base_state["items"] = []
+        base_state["summary"] = "Текст"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(os.environ, {"UPLOADS_DIR": tmpdir}):
+                result = await generate_analysis_report_node(base_state)
+
+        report = result["final_report"]
+        assert "Извлеченные позиции" not in report
+        assert "Позиции оборудования/товаров не обнаружены" not in report
 
     @pytest.mark.asyncio
     async def test_report_file_saved(self, base_state):
@@ -605,13 +1197,10 @@ class TestDocumentAnalysisIntent:
             importlib.reload(sys.modules["orchestrator.chainlit_app"])
         else:
             import orchestrator.chainlit_app
+        chainlit_app = sys.modules["orchestrator.chainlit_app"]
 
         from orchestrator.chainlit_app import (
-            _detect_intent,
             _get_intent_decision,
-            _resolve_pending_route_choice,
-            _is_social_query,
-            _is_docs_summary_query,
             _needs_doc_question_regen,
             _resolve_target_doc_name,
             _extract_citation_ids,
@@ -623,15 +1212,55 @@ class TestDocumentAnalysisIntent:
             _strip_model_source_sections,
             _register_loaded_document,
             _get_active_docs,
+            _get_active_doc_ids,
             _set_active_doc_ids,
             _get_session_docs,
-            _build_route_choice_state,
         )
-        self._detect_intent = _detect_intent
+        from orchestrator.orchestration_runtime import (
+            build_route_choice_state,
+            detect_intent,
+            is_docs_summary_query,
+            is_social_query,
+            resolve_pending_action_selection,
+        )
+
+        def _detect_intent_wrapper(
+            query: str,
+            *,
+            file_count: int = 0,
+            has_session_docs: bool = False,
+            classifier_result: Optional[dict] = None,
+        ) -> str:
+            session_docs = chainlit_app._get_session_docs() if has_session_docs else {}
+            return detect_intent(
+                query,
+                file_count=file_count,
+                has_session_docs=has_session_docs,
+                active_docs_count=len(session_docs),
+                classifier_result=classifier_result,
+            )
+
+        def _build_route_choice_state_wrapper(
+            *,
+            query: str,
+            recommended_route: str,
+            new_files: list,
+            mode: str,
+        ) -> dict:
+            return build_route_choice_state(
+                query=query,
+                recommended_route=recommended_route,
+                new_files=new_files,
+                mode=mode,
+                trace_id=mock_session.get("request_trace_id"),
+                active_doc_ids=chainlit_app._get_active_doc_ids(),
+            )
+
+        self._detect_intent = _detect_intent_wrapper
         self._get_intent_decision = _get_intent_decision
-        self._resolve_pending_route_choice = _resolve_pending_route_choice
-        self._is_social_query = _is_social_query
-        self._is_docs_summary_query = _is_docs_summary_query
+        self._resolve_pending_route_choice = resolve_pending_action_selection
+        self._is_social_query = is_social_query
+        self._is_docs_summary_query = is_docs_summary_query
         self._needs_doc_question_regen = _needs_doc_question_regen
         self._resolve_target_doc_name = _resolve_target_doc_name
         self._extract_citation_ids = _extract_citation_ids
@@ -645,7 +1274,7 @@ class TestDocumentAnalysisIntent:
         self._get_active_docs = _get_active_docs
         self._set_active_doc_ids = _set_active_doc_ids
         self._get_session_docs = _get_session_docs
-        self._build_route_choice_state = _build_route_choice_state
+        self._build_route_choice_state = _build_route_choice_state_wrapper
         self._mock_session = mock_session
         self._mock_cl = mock_cl
 
@@ -819,7 +1448,7 @@ class TestDocumentAnalysisIntent:
         assert result["intent"] == "documents_summary"
         assert result["requires_choice"] is False
 
-    def test_classifier_doc_question_without_docs_falls_back_to_general_chat(self):
+    def test_classifier_doc_question_without_docs_requests_upload(self):
         classifier_result = {
             "intent": "document_question",
             "confidence": 0.70,
@@ -833,8 +1462,10 @@ class TestDocumentAnalysisIntent:
             session_docs={},
             classifier_result=classifier_result,
         )
-        assert result["intent"] == "general_chat"
+        assert result["intent"] == "document_question"
         assert result["requires_choice"] is False
+        assert result["reason"] == "missing_documents"
+        assert result["action_required"]["type"] == "upload_required"
 
     def test_document_analysis_with_two_docs_requires_choice(self):
         session_docs = {
@@ -1102,6 +1733,56 @@ class TestDocumentAnalysisIntent:
         ]
         assert self._has_sufficient_evidence(sources, mode="corrective", query="Что написано?", citations_valid=True) is False
 
+    def test_has_sufficient_evidence_multihop_requires_multiple_citations(self):
+        sources = [
+            {
+                "source_id": 1,
+                "document_id": "a.pdf",
+                "display_name": "a.pdf",
+                "chunk_id": 0,
+                "char_span": {"start_char": 0, "end_char": 100},
+                "page": None,
+                "quote": "Уведомление за 10 дней",
+                "raw_score": 0.6,
+                "normalized_score": 0.9,
+                "grade": "good",
+                "z_score": 0.5,
+            },
+            {
+                "source_id": 2,
+                "document_id": "b.pdf",
+                "display_name": "b.pdf",
+                "chunk_id": 1,
+                "char_span": {"start_char": 101, "end_char": 200},
+                "page": None,
+                "quote": "Штраф 10 процентов",
+                "raw_score": 0.55,
+                "normalized_score": 0.88,
+                "grade": "good",
+                "z_score": 0.4,
+            },
+        ]
+        assert (
+            self._has_sufficient_evidence(
+                sources,
+                mode="simple",
+                query="Сравни условия уведомления и штрафа между документами",
+                citations_valid=True,
+                cited_ids=[1],
+            )
+            is False
+        )
+        assert (
+            self._has_sufficient_evidence(
+                sources,
+                mode="simple",
+                query="Сравни условия уведомления и штрафа между документами",
+                citations_valid=True,
+                cited_ids=[1, 2],
+            )
+            is True
+        )
+
     def test_deterministic_fallback_payload(self):
         sources = [
             {
@@ -1141,6 +1822,51 @@ class TestDocumentAnalysisIntent:
         confidence, label = self._compute_confidence_v1(sources, [1], "insufficient_evidence")
         assert confidence <= 0.35
         assert label == "low"
+
+    def test_confidence_v1_penalizes_multihop_single_citation(self):
+        sources = [
+            {
+                "source_id": 1,
+                "document_id": "a.pdf",
+                "display_name": "a.pdf",
+                "chunk_id": 0,
+                "char_span": {"start_char": 0, "end_char": 100},
+                "page": None,
+                "quote": "Уведомление за 10 дней",
+                "raw_score": 0.72,
+                "normalized_score": 0.95,
+                "grade": "excellent",
+                "z_score": 1.0,
+            },
+            {
+                "source_id": 2,
+                "document_id": "b.pdf",
+                "display_name": "b.pdf",
+                "chunk_id": 1,
+                "char_span": {"start_char": 101, "end_char": 200},
+                "page": None,
+                "quote": "Штраф 10 процентов",
+                "raw_score": 0.69,
+                "normalized_score": 0.92,
+                "grade": "excellent",
+                "z_score": 0.9,
+            },
+        ]
+        low_confidence, low_label = self._compute_confidence_v1(
+            sources,
+            [1],
+            "grounded_answer",
+            query="Сравни условия уведомления и штрафа между документами",
+        )
+        high_confidence, high_label = self._compute_confidence_v1(
+            sources,
+            [1, 2],
+            "grounded_answer",
+            query="Сравни условия уведомления и штрафа между документами",
+        )
+        assert high_confidence > low_confidence
+        assert low_label in {"low", "medium"}
+        assert high_label in {"medium", "high"}
 
     def test_build_sources_from_rag_result(self):
         class DummyRetrieval:

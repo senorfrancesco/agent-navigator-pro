@@ -44,12 +44,41 @@ sym_shape_infer_temp.onnx
 # Local agent / browser artifacts
 .playwright-mcp/
 .agents/
+.chainlit/
+backend/.chainlit/
+!.chainlit/translations/
+!.chainlit/translations/ru.json
+!.chainlit/translations/ru-RU.json
+!backend/.chainlit/translations/
+!backend/.chainlit/translations/ru.json
+!backend/.chainlit/translations/ru-RU.json
+backend/orchestrator/.files/
+scripts/__pycache__/
+__pycache__/
+*.py[cod]
 
 # Local test documents and ad-hoc samples
 documents/
 test_document.pdf
 test_logs/
+all_logs/
+tmp_agent_nav_smoke_doc.txt
+tmp_chainlit_element_smoke.txt
+task.md
+TASKS.md.bak
+
+# Local runtime env overrides
+backend/.env.native
+backend/.env.runtime
+
+# Local agent/operator workspace files
+.claude/
+.gemini/
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+TASKS_NIGHT.md
+docs/plans/
 
 # Local ad-hoc Node/Playwright bootstrap
-package.json
 package-lock.json

@@ -13,15 +13,21 @@ Chainlit App — замена Open WebUI для Agent Navigator Pro.
 
 import asyncio
 import copy
+import json
 import logging
+import mimetypes
 import os
 import re
+import sqlite3
 import sys
 import time
 import shutil
 import httpx
 import uuid
-from typing import Dict, List, Optional, Any, TypedDict, Literal
+from pathlib import Path
+from typing import Dict, List, Optional, Any
+from urllib.parse import quote
+import numpy as np
 
 # Добавляем пути (оставляем для обратной совместимости, но используем абсолютные)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -30,47 +36,68 @@ try:
     import chainlit as cl
 except ImportError:
     raise ImportError("chainlit not installed. Run: pip install chainlit")
+from fastapi import HTTPException
+from fastapi.responses import FileResponse
 
-from services.model_manager.ums_client import ums_client
+from services.model_manager.model_selection import resolve_model_selection
+from services.model_manager.model_selection import resolve_execution_plan
+from services.model_manager.ums_client import UMSBusyError, ums_client
+from services.hardware.tier_selector import describe_rag_mode
 from orchestrator.shared.http_client import get_shared_client
+from orchestrator.orchestration_runtime import (
+    ROUTE_CHOICE_TIMEOUT_S,
+    decide_orchestration as _backend_decide_orchestration,
+    normalize_runtime_mode as _backend_normalize_runtime_mode,
+    resolve_pending_action_selection as _backend_resolve_pending_action_selection,
+)
+from orchestrator.execution_runtime import (
+    ExecutionDependencies,
+    execute_orchestration as _backend_execute_orchestration,
+)
+from orchestrator.doc_question_heuristics import (
+    DocQuestionResponse,
+    SourceRef,
+    build_doc_question_deterministic_fallback as _build_doc_question_deterministic_fallback,
+    citations_are_valid as _citations_are_valid,
+    compute_confidence_v1 as _compute_confidence_v1,
+    extract_citation_ids as _extract_citation_ids,
+    has_sufficient_evidence_v1 as _has_sufficient_evidence,
+)
+from orchestrator.knowledge_base_store import get_knowledge_base_store
+from orchestrator.state_store import get_orchestration_state_store
+from orchestrator.ui_control_plane import (
+    ASSISTANT_MODE_ITEMS as _ASSISTANT_MODE_ITEMS,
+    MODEL_PROFILE_ITEMS as _MODEL_PROFILE_ITEMS,
+    PROMPT_PROFILE_ITEMS as _PROMPT_PROFILE_ITEMS,
+    RAG_SCOPE_ITEMS as _RAG_SCOPE_ITEMS,
+    RUNTIME_MODE_ITEMS as _RUNTIME_MODE_ITEMS,
+    build_initial_control_plane_state,
+    build_preset_state,
+    clamp_generation_overrides,
+    get_prompt_profile_system_message,
+    merge_control_plane_state,
+    normalize_inference_device_mode,
+    resolve_effective_settings,
+    resolve_model_id,
+)
 
 logger = logging.getLogger("chainlit_app")
 
-INTENT_LOW_MARGIN_THRESHOLD = 0.12
-INTENT_LOW_CONFIDENCE_THRESHOLD = 0.55
-ROUTE_CHOICE_TIMEOUT_S = 90
+CHAINLIT_UI_TEST_HOOKS = (
+    "login-form",
+    "login-submit",
+    "main-chat-input",
+    "upload-trigger",
+    "assistant-message-container",
+    "thread-list",
+    "current-thread-marker",
+    "report-download-link",
+)
+CHAINLIT_UI_TEST_HOOK_ASSETS = {
+    "custom_js": "/public/test-hooks.js",
+    "custom_css": "/public/test-hooks.css",
+}
 
-_COMPARE_QUERY_KEYWORDS = [
-    "сравни", "сравнение", "различия", "отличия", "изменения",
-    "что изменилось", "что поменялось", "покажи разницу",
-]
-_EQUIPMENT_QUERY_KEYWORDS = [
-    "тз", "техническое задание", "коммерческое предложение", "кп", "смета",
-    "оборудование", "подходит", "что подходит", "что нам подходит",
-    "соответствует", "соответствие", "подходит ли",
-]
-_DOC_QUESTION_KEYWORDS = [
-    "что", "какой", "какая", "какие", "сколько", "найди", "покажи", "указано",
-    "написано", "содержится", "есть ли",
-]
-_SUMMARY_QUERY_KEYWORDS = [
-    "о чем документ",
-    "о чём документ",
-    "о чем документы",
-    "о чём документы",
-    "о чем эти документы",
-    "о чём эти документы",
-    "суть документа",
-    "суть документов",
-    "кратко по документ",
-    "суммариз",
-    "сводк",
-    "проанализируй эти документы",
-    "проанализируй документы",
-    "анализируй эти документы",
-    "анализируй документы",
-    "анализ документов",
-]
 _DOC_QUESTION_UPLOAD_REQUEST_PHRASES = [
     "предоставьте тексты",
     "предоставьте текст",
@@ -82,64 +109,65 @@ _DOC_QUESTION_UPLOAD_REQUEST_PHRASES = [
     "предоставьте содержание",
     "нужно содержание",
 ]
-_SOCIAL_ONLY_RE = re.compile(
-    r"^(?:"
-    r"спасибо(?:\s+большое)?|благодарю|спс|"
-    r"ок(?:ей)?|понятно|ясно|понял(?:а)?|хорошо|"
-    r"привет|здравствуй(?:те)?|добрый день|добрый вечер|доброе утро|"
-    r"hi|hello|thanks|thank you"
-    r")$",
-    re.IGNORECASE,
-)
-
-DOC_QA_MIN_CHUNKS_SIMPLE = int(os.getenv("DOC_QA_MIN_CHUNKS_SIMPLE", "1"))
-DOC_QA_MIN_CHUNKS_MULTIHOP = int(os.getenv("DOC_QA_MIN_CHUNKS_MULTIHOP", "2"))
-DOC_QA_MIN_RAW_SCORE_SIMPLE = float(os.getenv("DOC_QA_MIN_RAW_SCORE_SIMPLE", "0.01"))
-DOC_QA_MIN_ZSCORE_CORRECTIVE = float(os.getenv("DOC_QA_MIN_ZSCORE_CORRECTIVE", "-0.5"))
 RAG_INDEX_CACHE_MAX = int(os.getenv("RAG_INDEX_CACHE_MAX", "8"))
 RAG_INDEX_CACHE_TTL_S = int(os.getenv("RAG_INDEX_CACHE_TTL_S", "1800"))
 
 
-class SourceRef(TypedDict):
-    source_id: int
-    document_id: str
-    chunk_id: int
-    char_span: Dict[str, Optional[int]]
-    page: Optional[int]
-    quote: str
-    raw_score: float
-    normalized_score: float
-    grade: Optional[str]
-    z_score: Optional[float]
-
-
-class DocQuestionResponse(TypedDict):
-    answer_text: str
-    sources: List[SourceRef]
-    answer_mode: Literal["grounded_answer", "insufficient_evidence"]
-    fallback_type: Literal["none", "citation_validation_failed", "insufficient_evidence"]
-    fallback_reason: Optional[str]
-    confidence: float
-    confidence_label: Literal["high", "medium", "low"]
-    confidence_method: Literal["heuristic_v1"]
-    confidence_version: Literal["1"]
+def get_chainlit_ui_test_hook_contract() -> Dict[str, Any]:
+    return {
+        "assets": dict(CHAINLIT_UI_TEST_HOOK_ASSETS),
+        "hooks": list(CHAINLIT_UI_TEST_HOOKS),
+    }
 
 
 # === RAG Mode Helper ===
 
-async def _get_rag_mode() -> str:
-    """Определяет RAG mode: из env override или из UMS tier config."""
+def _default_runtime_budget_metadata() -> Dict[str, Any]:
+    effective_context_tokens = int(os.getenv("CHAINLIT_DEFAULT_EFFECTIVE_CONTEXT_TOKENS", "8192"))
+    context_budget_ratio = float(os.getenv("CHAINLIT_RETRIEVED_CONTEXT_RATIO", "0.60"))
+    retrieved_context_tokens_budget = int(effective_context_tokens * context_budget_ratio)
+    return {
+        "runtime_profile": "default",
+        "effective_context_tokens": effective_context_tokens,
+        "retrieved_context_tokens_budget": retrieved_context_tokens_budget,
+        "generation_tokens_reserve": max(256, effective_context_tokens - retrieved_context_tokens_budget),
+        "context_budget_ratio": context_budget_ratio,
+        "rag_mode": "simple",
+        "rag_mode_label": describe_rag_mode("simple"),
+    }
+
+
+async def _get_runtime_budget_metadata() -> Dict[str, Any]:
     override = os.getenv("RAG_MODE_OVERRIDE", "auto")
+    fallback = _default_runtime_budget_metadata()
     if override != "auto":
-        return override
+        fallback["rag_mode"] = override
+        fallback["rag_mode_label"] = describe_rag_mode(override)
+        return fallback
     try:
         ums_url = os.getenv("UMS_URL", "http://localhost:8090")
         client = await get_shared_client()
         resp = await client.get(f"{ums_url}/status", timeout=5.0)
         data = resp.json()
-        return data.get("tier", {}).get("rag_mode", "simple")
+        budget = {
+            "runtime_profile": data.get("runtime_profile") or fallback["runtime_profile"],
+            "effective_context_tokens": int(data.get("effective_context_tokens") or fallback["effective_context_tokens"]),
+            "retrieved_context_tokens_budget": int(
+                data.get("retrieved_context_tokens_budget") or fallback["retrieved_context_tokens_budget"]
+            ),
+            "generation_tokens_reserve": int(
+                data.get("generation_tokens_reserve") or fallback["generation_tokens_reserve"]
+            ),
+            "context_budget_ratio": float(data.get("context_budget_ratio") or fallback["context_budget_ratio"]),
+            "rag_mode": data.get("tier", {}).get("rag_mode", fallback["rag_mode"]),
+            "rag_mode_label": data.get("tier", {}).get("rag_mode_label")
+            or describe_rag_mode(data.get("tier", {}).get("rag_mode", fallback["rag_mode"])),
+        }
+        cl.user_session.set("runtime_budget_metadata", budget)
+        return budget
     except Exception:
-        return "simple"
+        cl.user_session.set("runtime_budget_metadata", fallback)
+        return fallback
 
 
 # === Authentication ===
@@ -158,22 +186,349 @@ def auth_callback(username: str, password: str) -> Optional[cl.User]:
     return None
 
 
-# === Data Layer (SQLite persistence) ===
+# === Data Layer (SQLite persistence, optional) ===
 
 _DB_URL = os.getenv(
     "CHAINLIT_DB_URL",
     "sqlite+aiosqlite:///.data/chainlit.db",
 )
+_ENABLE_DATA_LAYER = os.getenv("CHAINLIT_ENABLE_DATA_LAYER", "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
-try:
-    from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
 
-    @cl.data_layer
-    def get_data_layer():
-        return SQLAlchemyDataLayer(conninfo=_DB_URL)
+def _sqlite_db_path_from_conninfo(conninfo: str) -> Optional[str]:
+    if not conninfo.startswith("sqlite"):
+        return None
+    if ":///" not in conninfo:
+        return None
+    raw_path = conninfo.split(":///", 1)[1]
+    if not raw_path:
+        return None
+    if raw_path.startswith("/"):
+        return raw_path
+    return os.path.join(os.getcwd(), raw_path)
 
-except ImportError:
-    pass  # aiosqlite не установлен — работаем без persistence
+
+def _bootstrap_chainlit_sqlite_schema(conninfo: str) -> None:
+    db_path = _sqlite_db_path_from_conninfo(conninfo)
+    if not db_path:
+        return
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    schema_sql = """
+    CREATE TABLE IF NOT EXISTS "users" (
+        "id" TEXT PRIMARY KEY,
+        "identifier" TEXT NOT NULL UNIQUE,
+        "createdAt" TEXT NOT NULL,
+        "metadata" TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS "threads" (
+        "id" TEXT PRIMARY KEY,
+        "createdAt" TEXT,
+        "name" TEXT,
+        "userId" TEXT,
+        "userIdentifier" TEXT,
+        "tags" TEXT,
+        "metadata" TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS "steps" (
+        "id" TEXT PRIMARY KEY,
+        "name" TEXT,
+        "type" TEXT,
+        "command" TEXT,
+        "threadId" TEXT,
+        "parentId" TEXT,
+        "streaming" INTEGER,
+        "waitForAnswer" INTEGER,
+        "isError" INTEGER,
+        "metadata" TEXT,
+        "tags" TEXT,
+        "input" TEXT,
+        "output" TEXT,
+        "createdAt" TEXT,
+        "start" TEXT,
+        "end" TEXT,
+        "defaultOpen" INTEGER,
+        "autoCollapse" INTEGER,
+        "generation" TEXT,
+        "showInput" TEXT,
+        "language" TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS "feedbacks" (
+        "id" TEXT PRIMARY KEY,
+        "forId" TEXT,
+        "value" INTEGER,
+        "comment" TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS "elements" (
+        "id" TEXT PRIMARY KEY,
+        "threadId" TEXT,
+        "type" TEXT,
+        "chainlitKey" TEXT,
+        "url" TEXT,
+        "objectKey" TEXT,
+        "name" TEXT,
+        "display" TEXT,
+        "size" TEXT,
+        "language" TEXT,
+        "page" INTEGER,
+        "autoPlay" INTEGER,
+        "playerConfig" TEXT,
+        "forId" TEXT,
+        "mime" TEXT,
+        "props" TEXT
+    );
+    """
+    required_columns = {
+        "threads": {
+            "id": 'TEXT PRIMARY KEY',
+            "createdAt": "TEXT",
+            "name": "TEXT",
+            "userId": "TEXT",
+            "userIdentifier": "TEXT",
+            "tags": "TEXT",
+            "metadata": "TEXT",
+        },
+        "steps": {
+            "id": 'TEXT PRIMARY KEY',
+            "name": "TEXT",
+            "type": "TEXT",
+            "command": "TEXT",
+            "threadId": "TEXT",
+            "parentId": "TEXT",
+            "streaming": "INTEGER",
+            "waitForAnswer": "INTEGER",
+            "isError": "INTEGER",
+            "metadata": "TEXT",
+            "tags": "TEXT",
+            "input": "TEXT",
+            "output": "TEXT",
+            "createdAt": "TEXT",
+            "start": "TEXT",
+            "end": "TEXT",
+            "defaultOpen": "INTEGER",
+            "autoCollapse": "INTEGER",
+            "generation": "TEXT",
+            "showInput": "TEXT",
+            "language": "TEXT",
+        },
+        "elements": {
+            "id": 'TEXT PRIMARY KEY',
+            "threadId": "TEXT",
+            "type": "TEXT",
+            "chainlitKey": "TEXT",
+            "url": "TEXT",
+            "objectKey": "TEXT",
+            "name": "TEXT",
+            "display": "TEXT",
+            "size": "TEXT",
+            "language": "TEXT",
+            "page": "INTEGER",
+            "autoPlay": "INTEGER",
+            "playerConfig": "TEXT",
+            "forId": "TEXT",
+            "mime": "TEXT",
+            "props": "TEXT",
+        },
+    }
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.executescript(schema_sql)
+        for table_name, columns in required_columns.items():
+            existing_columns = {
+                row[1]
+                for row in conn.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+            }
+            for column_name, column_type in columns.items():
+                if column_name in existing_columns:
+                    continue
+                conn.execute(
+                    f'ALTER TABLE "{table_name}" ADD COLUMN "{column_name}" {column_type}'
+                )
+        conn.commit()
+
+if _ENABLE_DATA_LAYER:
+    try:
+        from chainlit.config import config as chainlit_config
+        from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
+        from chainlit.data.storage_clients.base import BaseStorageClient
+        import chainlit.server as chainlit_server
+        from sqlalchemy import event as sqlalchemy_event
+
+        def _uploads_root() -> str:
+            return str(globals().get("UPLOADS_DIR") or os.getenv("UPLOADS_DIR", "/app/uploads"))
+
+        def _chainlit_elements_root() -> str:
+            return os.path.join(_uploads_root(), "chainlit-elements")
+
+        def _resolve_chainlit_element_fs_path(object_key: str) -> Path:
+            normalized_key = object_key.strip().lstrip("/")
+            if not normalized_key:
+                raise HTTPException(status_code=404, detail="Element not found")
+            key_path = Path(normalized_key)
+            if key_path.is_absolute() or ".." in key_path.parts:
+                raise HTTPException(status_code=400, detail="Invalid element path")
+            root_path = Path(_chainlit_elements_root()).resolve()
+            resolved_path = (root_path / key_path).resolve()
+            try:
+                resolved_path.relative_to(root_path)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="Invalid element path") from exc
+            return resolved_path
+
+        class _LocalChainlitStorageProvider(BaseStorageClient):
+            """Persist Chainlit elements in a local file tree under UPLOADS_DIR."""
+
+            def __init__(self, base_dir: Optional[str] = None):
+                self.base_dir = os.path.abspath(base_dir or _chainlit_elements_root())
+                os.makedirs(self.base_dir, exist_ok=True)
+
+            async def upload_file(
+                self,
+                object_key: str,
+                data: bytes | str,
+                mime: str = "application/octet-stream",
+                overwrite: bool = True,
+                content_disposition: str | None = None,
+            ) -> Dict[str, Any]:
+                file_path = _resolve_chainlit_element_fs_path(object_key)
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+                if file_path.exists() and not overwrite:
+                    raise FileExistsError(f"Object already exists: {object_key}")
+                payload = data.encode("utf-8") if isinstance(data, str) else data
+                file_path.write_bytes(payload)
+                return {
+                    "object_key": object_key,
+                    "url": await self.get_read_url(object_key),
+                    "mime": mime,
+                    "content_disposition": content_disposition,
+                }
+
+            async def delete_file(self, object_key: str) -> bool:
+                file_path = _resolve_chainlit_element_fs_path(object_key)
+                if not file_path.exists():
+                    return False
+                file_path.unlink()
+                parent = file_path.parent
+                root_path = Path(self.base_dir).resolve()
+                while parent != root_path and parent.exists():
+                    try:
+                        parent.rmdir()
+                    except OSError:
+                        break
+                    parent = parent.parent
+                return True
+
+            async def get_read_url(self, object_key: str) -> str:
+                encoded_key = quote(object_key.strip().lstrip("/"), safe="/")
+                return f"{chainlit_config.run.root_path}/project/file/{encoded_key}"
+
+            async def close(self) -> None:
+                return None
+
+        async def _serve_local_chainlit_element_file(
+            object_key: str,
+            current_user: Any,
+        ) -> FileResponse:
+            if not current_user:
+                raise HTTPException(status_code=401, detail="Unauthorized")
+            normalized_key = object_key.strip().lstrip("/")
+            if not normalized_key.startswith(f"{current_user.identifier}/"):
+                raise HTTPException(status_code=403, detail="Forbidden")
+            file_path = _resolve_chainlit_element_fs_path(normalized_key)
+            if not file_path.exists():
+                raise HTTPException(status_code=404, detail="Element not found")
+            media_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
+            return FileResponse(file_path, media_type=media_type, filename=file_path.name)
+
+        if not getattr(chainlit_server.app.state, "agent_nav_element_file_route_registered", False):
+
+            @chainlit_server.app.get(f"{chainlit_config.run.root_path}/project/file/{{object_key:path}}")
+            async def get_local_chainlit_element_file(
+                object_key: str,
+                current_user: chainlit_server.UserParam,
+            ):
+                return await _serve_local_chainlit_element_file(
+                    object_key=object_key,
+                    current_user=current_user,
+                )
+
+            chainlit_server.app.state.agent_nav_element_file_route_registered = True
+
+        class _CompatibleSQLAlchemyDataLayer(SQLAlchemyDataLayer):
+            """Compatibility wrapper for local SQLite bootstrap schema and tag serialization."""
+
+            def __init__(self, conninfo: str, *args, **kwargs):
+                connect_args = dict(kwargs.pop("connect_args", {}) or {})
+                sqlite_timeout_s = float(os.getenv("CHAINLIT_SQLITE_TIMEOUT_S", "30"))
+                if conninfo.startswith("sqlite"):
+                    connect_args.setdefault("timeout", sqlite_timeout_s)
+                super().__init__(conninfo=conninfo, *args, connect_args=connect_args, **kwargs)
+                if conninfo.startswith("sqlite"):
+                    busy_timeout_ms = int(sqlite_timeout_s * 1000)
+
+                    @sqlalchemy_event.listens_for(self.engine.sync_engine, "connect")
+                    def _configure_sqlite_connection(dbapi_connection, connection_record):
+                        cursor = dbapi_connection.cursor()
+                        cursor.execute("PRAGMA journal_mode=WAL")
+                        cursor.execute("PRAGMA synchronous=NORMAL")
+                        cursor.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
+                        cursor.close()
+
+            async def update_thread(
+                self,
+                thread_id: str,
+                name: Optional[str] = None,
+                user_id: Optional[str] = None,
+                metadata: Optional[Dict] = None,
+                tags: Optional[List[str]] = None,
+            ):
+                serialized_tags = json.dumps(tags) if isinstance(tags, list) else tags
+                await super().update_thread(
+                    thread_id=thread_id,
+                    name=name,
+                    user_id=user_id,
+                    metadata=metadata,
+                    tags=serialized_tags,
+                )
+
+            async def get_all_user_threads(
+                self, user_id: Optional[str] = None, thread_id: Optional[str] = None
+            ) -> Optional[List[dict]]:
+                threads = await super().get_all_user_threads(user_id=user_id, thread_id=thread_id)
+                if not threads:
+                    return threads
+                for thread in threads:
+                    raw_tags = thread.get("tags")
+                    if isinstance(raw_tags, str):
+                        try:
+                            decoded = json.loads(raw_tags)
+                        except json.JSONDecodeError:
+                            decoded = raw_tags
+                        if isinstance(decoded, list):
+                            thread["tags"] = decoded
+                return threads
+
+        @cl.data_layer
+        def get_data_layer():
+            _bootstrap_chainlit_sqlite_schema(_DB_URL)
+            return _CompatibleSQLAlchemyDataLayer(
+                conninfo=_DB_URL,
+                storage_provider=_LocalChainlitStorageProvider(),
+            )
+
+    except ImportError:
+        logger.warning("SQLAlchemy data layer unavailable, continuing without persistence")
+else:
+    logger.info("CHAINLIT_ENABLE_DATA_LAYER=false, running without persistence")
 
 
 # === Session Storage ===
@@ -191,6 +546,46 @@ def _ensure_session_state() -> None:
         cl.user_session.set("rag_pipeline_cache", {})
     if cl.user_session.get("documents") is None:
         cl.user_session.set("documents", {})
+    if cl.user_session.get("pending_action") is None:
+        cl.user_session.set("pending_action", None)
+    if cl.user_session.get("pending_route_choice") is None:
+        cl.user_session.set("pending_route_choice", None)
+    if cl.user_session.get("runtime_mode") is None:
+        cl.user_session.set("runtime_mode", "auto")
+    if cl.user_session.get("control_plane_state") is None:
+        cl.user_session.set(
+            "control_plane_state",
+            build_initial_control_plane_state(cl.user_session.get("runtime_mode")),
+        )
+    if cl.user_session.get("effective_settings") is None:
+        cl.user_session.set(
+            "effective_settings",
+            resolve_effective_settings(cl.user_session.get("control_plane_state") or {}),
+        )
+    if cl.user_session.get("last_route") is None:
+        cl.user_session.set("last_route", None)
+    if cl.user_session.get("last_executor") is None:
+        cl.user_session.set("last_executor", None)
+    if cl.user_session.get("last_trace_id") is None:
+        cl.user_session.set("last_trace_id", None)
+    if cl.user_session.get("active_mode") is None:
+        cl.user_session.set("active_mode", None)
+    if cl.user_session.get("runtime_budget_metadata") is None:
+        cl.user_session.set("runtime_budget_metadata", _default_runtime_budget_metadata())
+    if cl.user_session.get("run_id") is None:
+        cl.user_session.set("run_id", None)
+    if cl.user_session.get("state_ref") is None:
+        cl.user_session.set("state_ref", None)
+    if cl.user_session.get("state_version") is None:
+        cl.user_session.set("state_version", None)
+    if cl.user_session.get("thread_name") is None:
+        cl.user_session.set("thread_name", None)
+    if cl.user_session.get("thread_name_locked") is None:
+        cl.user_session.set("thread_name_locked", False)
+    if cl.user_session.get("active_execution_task") is None:
+        cl.user_session.set("active_execution_task", None)
+    if cl.user_session.get("cancel_requested") is None:
+        cl.user_session.set("cancel_requested", False)
 
     # Legacy migration: {name: {text, path}} -> documents_by_id/documents_by_name
     docs_by_id = cl.user_session.get("documents_by_id") or {}
@@ -214,6 +609,12 @@ def _ensure_session_state() -> None:
         cl.user_session.set("documents_by_id", migrated_by_id)
         cl.user_session.set("documents_by_name", migrated_by_name)
         cl.user_session.set("active_doc_ids", list(migrated_by_id.keys())[-2:])
+
+    effective = cl.user_session.get("effective_settings") or resolve_effective_settings(
+        cl.user_session.get("control_plane_state") or {}
+    )
+    cl.user_session.set("effective_settings", effective)
+    cl.user_session.set("runtime_mode", _backend_normalize_runtime_mode(effective.get("runtime_mode")))
 
 
 def _get_documents_by_id() -> Dict[str, Any]:
@@ -344,7 +745,13 @@ def _active_set_status_line() -> str:
     if not active_docs:
         return "Активный набор: пусто"
     labels = [_doc_label(str(d["display_name"]), int(d.get("version", 1))) for d in active_docs]
-    return f"Активный набор: {', '.join(labels)} ({len(labels)} docs)"
+    document_word = "документ" if len(labels) == 1 else "документа" if len(labels) in {2, 3, 4} else "документов"
+    return f"Активный набор: {', '.join(labels)} ({len(labels)} {document_word})"
+
+
+def _get_active_doc_labels() -> List[str]:
+    active_docs = _get_active_docs()
+    return [_doc_label(str(d["display_name"]), int(d.get("version", 1))) for d in active_docs]
 
 
 def _next_doc_version(display_name: str) -> int:
@@ -397,207 +804,787 @@ def _get_session_history() -> List[Dict[str, str]]:
 
 def _get_pending_route_choice() -> Optional[Dict[str, Any]]:
     _ensure_session_state()
-    return cl.user_session.get("pending_route_choice")
+    return cl.user_session.get("pending_action") or cl.user_session.get("pending_route_choice")
 
 
 def _set_pending_route_choice(data: Optional[Dict[str, Any]]) -> None:
+    cl.user_session.set("pending_action", data)
     cl.user_session.set("pending_route_choice", data)
 
 
-# === Intent Detection ===
-
-def _detect_intent(query: str, file_count: int = 0, has_session_docs: bool = False) -> str:
-    """
-    Семантическая классификация интентов (Semantic Router).
-    TD-10: Жесткие списки ключевых слов удалены. Вся маршрутизация идет
-    через EmbeddingIntentClassifier (поиск ближайших соседей в векторном пространстве).
-    """
-    query_lower = query.lower()
-    active_docs_count = len(_get_active_doc_ids()) if has_session_docs else 0
-    if has_session_docs and active_docs_count == 0:
-        active_docs_count = len(_get_session_docs())
-
-    # Уровень 1: Semantic Router (Основной и приоритетный)
-    # Источник A: classifier из RAG pipeline (после загрузки файлов)
-    # Источник B: standalone classifier (pre-initialized в on_chat_start)
-    classifier_result = None
-    rag = cl.user_session.get("rag_pipeline")
-    if rag and rag._classifier_initialized:
-        classifier_result = rag.classify_intent(query)
-    elif cl.user_session.get("intent_classifier"):
-        standalone = cl.user_session.get("intent_classifier")
-        try:
-            classifier_result = standalone.classify(query)
-        except Exception as e:
-            logger.warning(f"Standalone classifier error: {e}")
-
-    if classifier_result:
-        intent = classifier_result["intent"]
-        needs_rag = classifier_result["needs_rag"]
-
-        # Защита: если интент требует файлов, но их нет
-        if intent == "document_analysis":
-            has_file = file_count >= 1 or (has_session_docs and active_docs_count >= 1)
-            if not has_file:
-                intent = "general_chat"
-
-        if has_session_docs and needs_rag and intent not in ("compare_documents", "equipment_analysis", "document_analysis"):
-            intent = "document_question"
-
-        logger.info(f"Semantic Router: intent={intent}, confidence={classifier_result['confidence']:.2f}, margin={classifier_result.get('margin',0):.3f}")
-        return intent
-
-    # Уровень 2: Minimal Fallback (только если UMS/Classifier недоступен)
-    logger.warning("Semantic Router offline. Using minimal fallback routing.")
-    if "сравни" in query_lower or "различия" in query_lower:
-        return "compare_documents"
-    if "смет" in query_lower or "тз" in query_lower:
-        return "equipment_analysis"
-    
-    single_file = file_count == 1 or (has_session_docs and active_docs_count == 1)
-    if single_file and ("анализ" in query_lower or "документ" in query_lower):
-        return "document_analysis"
-
-    if has_session_docs:
-        if "привет" in query_lower or "здравствуй" in query_lower:
-            return "greeting"
-        return "document_question"
-
-    if "привет" in query_lower or "здравствуй" in query_lower:
-        return "greeting"
-
-    return "general_chat"
-
-
-def _has_any_keyword(query_lower: str, keywords: List[str]) -> bool:
-    return any(kw in query_lower for kw in keywords)
-
-
-def _is_social_query(query: str) -> bool:
-    normalized = re.sub(r"[\s\.,!?;:()\"'«»…-]+", " ", (query or "").strip().lower()).strip()
-    if not normalized:
-        return False
-    return bool(_SOCIAL_ONLY_RE.match(normalized))
-
-
-def _is_low_confidence(classifier_result: Optional[Dict[str, Any]]) -> bool:
-    if not classifier_result:
-        return True
-    return (
-        classifier_result.get("confidence", 0.0) < INTENT_LOW_CONFIDENCE_THRESHOLD
-        or classifier_result.get("margin", 0.0) < INTENT_LOW_MARGIN_THRESHOLD
-    )
-
-
-def _get_last_session_docs(session_docs: Dict[str, Any], count: int = 2) -> List[Dict[str, Any]]:
-    items = list(session_docs.items())[-count:]
-    return [{"name": name, **doc_info} for name, doc_info in items]
-
-
-def _build_route_choice_prompt(recommended_route: str, mode: str) -> str:
-    if mode == "tz_vs_smeta":
-        base = "Похоже, у вас ТЗ и коммерческое предложение."
-    else:
-        base = "Я вижу два загруженных документа."
-
-    if recommended_route == "equipment_analysis":
-        return (
-            f"{base} Запрос неоднозначный. Что вы хотите сделать?\n\n"
-            "1. Проверить, что из КП подходит под ТЗ\n"
-            "2. Просто сравнить документы\n"
-            "3. Задать вопрос по содержимому\n"
-            "4. Сделать общую сводку по документам"
+def _apply_session_state_patch(patch: Optional[Dict[str, Any]]) -> None:
+    if not patch:
+        return
+    if "pending_action" in patch:
+        _set_pending_route_choice(patch.get("pending_action"))
+    if patch.get("preserve_active_mode"):
+        pass  # intentionally empty — handled by backend orchestration decision
+    elif "active_mode" in patch:
+        cl.user_session.set("active_mode", patch.get("active_mode"))
+    for key in ("last_route", "last_executor", "last_trace_id", "runtime_mode"):
+        if key in patch:
+            cl.user_session.set(key, patch.get(key))
+    if "runtime_mode" in patch:
+        merged_state = merge_control_plane_state(
+            cl.user_session.get("control_plane_state") or {},
+            {"runtime_mode": patch.get("runtime_mode")},
         )
-    if recommended_route == "compare_documents":
-        return (
-            f"{base} Запрос неоднозначный. Что вы хотите сделать?\n\n"
-            "1. Сравнить документы\n"
-            "2. Проверить соответствие ТЗ и КП\n"
-            "3. Задать вопрос по содержимому\n"
-            "4. Сделать общую сводку по документам"
-        )
-    return (
-        f"{base} Запрос неоднозначный. Что вы хотите сделать?\n\n"
-        "1. Задать вопрос по документам\n"
-        "2. Сравнить документы\n"
-        "3. Проверить соответствие ТЗ и КП\n"
-        "4. Сделать общую сводку по документам"
-    )
+        cl.user_session.set("control_plane_state", merged_state)
+        cl.user_session.set("effective_settings", resolve_effective_settings(merged_state))
 
 
-def _build_route_choice_state(
-    query: str,
-    recommended_route: str,
-    new_files: List[Dict[str, Any]],
-    mode: str,
-) -> Dict[str, Any]:
-    if recommended_route == "equipment_analysis":
-        choices = {
-            "1": "equipment_analysis",
-            "2": "compare_documents",
-            "3": "document_question",
-            "4": "documents_summary",
-        }
-    elif recommended_route == "compare_documents":
-        choices = {
-            "1": "compare_documents",
-            "2": "equipment_analysis",
-            "3": "document_question",
-            "4": "documents_summary",
-        }
-    else:
-        choices = {
-            "1": "document_question",
-            "2": "compare_documents",
-            "3": "equipment_analysis",
-            "4": "documents_summary",
-        }
+def _sync_run_metadata_from_response(response: Optional[Dict[str, Any]]) -> None:
+    if not response:
+        return
+    if "run_id" in response:
+        cl.user_session.set("run_id", response.get("run_id"))
+    if "state_ref" in response:
+        cl.user_session.set("state_ref", response.get("state_ref"))
+    if "state_version" in response:
+        cl.user_session.set("state_version", response.get("state_version"))
+    if "model_execution" in response:
+        cl.user_session.set("last_model_execution", copy.deepcopy(response.get("model_execution")))
+
+
+def _build_backend_resume_snapshot() -> Dict[str, Any]:
+    _ensure_session_state()
     return {
-        "route_choice_id": str(uuid.uuid4())[:8],
-        "origin_trace_id": cl.user_session.get("request_trace_id"),
-        "query": query,
-        "new_files": copy.deepcopy(new_files),
-        "choices": choices,
-        "recommended_route": recommended_route,
-        "mode": mode,
+        "history": copy.deepcopy(_get_session_history()),
+        "document_refs": [
+            {
+                "document_id": str(doc.get("document_id")),
+                "display_name": str(doc.get("display_name")),
+                "version": int(doc.get("version", 1)),
+                "path": doc.get("path"),
+                "uploaded_at": doc.get("uploaded_at"),
+                "source_message_id": doc.get("source_message_id"),
+                "source_origin": doc.get("source_origin"),
+                "collection_id": doc.get("collection_id"),
+            }
+            for doc in _get_all_docs()
+            if doc.get("document_id") and doc.get("display_name")
+        ],
         "active_doc_ids": list(_get_active_doc_ids()),
-        "expires_at": time.time() + ROUTE_CHOICE_TIMEOUT_S,
+        "pending_action": copy.deepcopy(_get_pending_route_choice()),
+        "runtime_mode": _get_runtime_mode(),
+        "control_plane_state": copy.deepcopy(_get_control_plane_state()),
+        "effective_settings": copy.deepcopy(_get_effective_settings()),
+        "last_route": cl.user_session.get("last_route"),
+        "last_executor": cl.user_session.get("last_executor"),
+        "last_trace_id": cl.user_session.get("last_trace_id"),
+        "active_mode": cl.user_session.get("active_mode"),
+        "runtime_budget_metadata": copy.deepcopy(cl.user_session.get("runtime_budget_metadata") or {}),
+        "thread_name": cl.user_session.get("thread_name"),
+        "thread_name_locked": bool(cl.user_session.get("thread_name_locked")),
     }
 
 
-def _resolve_pending_route_choice(query: str, pending_choice: Optional[Dict[str, Any]]) -> Optional[str]:
-    if not pending_choice:
+def _restore_backend_resume_snapshot(snapshot: Dict[str, Any]) -> None:
+    _ensure_session_state()
+    docs_by_id = copy.deepcopy(snapshot.get("documents_by_id") or {})
+    if not docs_by_id:
+        for ref in snapshot.get("document_refs") or []:
+            document_id = str(ref.get("document_id") or "").strip()
+            display_name = str(ref.get("display_name") or "").strip()
+            if not document_id or not display_name:
+                continue
+            docs_by_id[document_id] = {
+                "document_id": document_id,
+                "display_name": display_name,
+                "version": int(ref.get("version", 1)),
+                "path": ref.get("path", ""),
+                "text": "",
+                "uploaded_at": float(ref.get("uploaded_at", 0.0) or 0.0),
+                "source_message_id": ref.get("source_message_id"),
+                "source_origin": ref.get("source_origin"),
+                "collection_id": ref.get("collection_id"),
+            }
+    cl.user_session.set("history", copy.deepcopy(snapshot.get("history") or []))
+    cl.user_session.set("documents_by_id", docs_by_id)
+    cl.user_session.set("documents_by_name", {})
+    _get_documents_by_name()
+    cl.user_session.set("active_doc_ids", list(snapshot.get("active_doc_ids") or []))
+    _set_pending_route_choice(copy.deepcopy(snapshot.get("pending_action")))
+
+    runtime_mode = _backend_normalize_runtime_mode(snapshot.get("runtime_mode"))
+    control_plane_state = copy.deepcopy(snapshot.get("control_plane_state") or build_initial_control_plane_state(runtime_mode))
+    effective_settings = copy.deepcopy(snapshot.get("effective_settings") or resolve_effective_settings(control_plane_state))
+    cl.user_session.set("runtime_mode", _backend_normalize_runtime_mode(effective_settings.get("runtime_mode")))
+    cl.user_session.set("control_plane_state", control_plane_state)
+    cl.user_session.set("effective_settings", effective_settings)
+
+    for key in ("last_route", "last_executor", "last_trace_id", "active_mode"):
+        cl.user_session.set(key, snapshot.get(key))
+    cl.user_session.set(
+        "runtime_budget_metadata",
+        copy.deepcopy(snapshot.get("runtime_budget_metadata") or _default_runtime_budget_metadata()),
+    )
+    cl.user_session.set("thread_name", snapshot.get("thread_name"))
+    cl.user_session.set("thread_name_locked", bool(snapshot.get("thread_name_locked")))
+
+    _sync_legacy_documents_cache()
+
+
+def _build_thread_metadata() -> Dict[str, Any]:
+    effective = _get_effective_settings()
+    active_doc_ids = _get_active_doc_ids()
+    active_doc_labels = _get_active_doc_labels()
+    pending_action = _get_pending_route_choice()
+    return {
+        "assistant_mode": effective.get("assistant_mode"),
+        "runtime_mode": effective.get("runtime_mode"),
+        "rag_scope": effective.get("rag_scope"),
+        "model_profile": effective.get("model_profile"),
+        "resolved_model_id": effective.get("resolved_model_id"),
+        "device_mode": effective.get("device_mode"),
+        "context_budget_profile": effective.get("context_budget_profile"),
+        "knowledge_collection_id": effective.get("knowledge_collection_id"),
+        "active_doc_ids": active_doc_ids,
+        "active_doc_labels": active_doc_labels,
+        "active_doc_count": len(active_doc_labels),
+        "has_pending_action": bool(pending_action),
+        "last_route": cl.user_session.get("last_route"),
+        "last_executor": cl.user_session.get("last_executor"),
+        "last_model_execution": cl.user_session.get("last_model_execution"),
+    }
+
+
+def _derive_thread_name_from_message(user_message: Optional[str]) -> Optional[str]:
+    text = " ".join((user_message or "").split())
+    if not text:
         return None
-    if pending_choice.get("expires_at", 0) < time.time():
+    if len(text) <= 80:
+        return text
+    return text[:77].rsplit(" ", 1)[0] + "..."
+
+
+def _derive_default_thread_name() -> str:
+    effective = _get_effective_settings()
+    active_labels = _get_active_doc_labels()
+    assistant_mode = effective.get("assistant_mode") or "general_chat"
+    mode_titles = {
+        "general_chat": "Общий чат",
+        "coding": "Помощник по коду",
+        "agentic": "Агентный режим (iterative)",
+        "specific_tasks": "Специализированные задачи",
+        "rag_qa": "Вопросы по документам (RAG)",
+    }
+    base = mode_titles.get(str(assistant_mode), "Agent Navigator")
+    if active_labels:
+        return f"{base} — {active_labels[0]}"
+    return base
+
+
+def _build_context_status_markdown(title: str = "Текущий контекст") -> str:
+    effective = _get_effective_settings()
+    runtime_budget = cl.user_session.get("runtime_budget_metadata") or {}
+    active_labels = _get_active_doc_labels()
+    pending_action = _get_pending_route_choice()
+    lines = [
+        f"### {title}",
+        f"- Режим ассистента: `{effective.get('assistant_mode')}`",
+        f"- Режим выполнения: `{effective.get('runtime_mode')}`",
+        f"- RAG-область: `{effective.get('rag_scope')}`",
+        f"- Профиль модели: `{effective.get('model_profile')}`",
+        f"- Разрешённая модель: `{effective.get('resolved_model_id')}`",
+        f"- Intent-эмбеддер: `{effective.get('resolved_intent_embedder_model_id')}`",
+        f"- Retrieval-эмбеддер: `{effective.get('resolved_retrieval_embedder_model_id')}`",
+        f"- Device mode: `{effective.get('device_mode')}`",
+        f"- Профиль бюджетов: `{effective.get('context_budget_profile')}`",
+        f"- Активные документы: `{len(active_labels)}`",
+        f"- Ожидает действия: `{'да' if pending_action else 'нет'}`",
+    ]
+    if active_labels:
+        lines.append(f"- Активный набор: {', '.join(active_labels)}")
+    else:
+        lines.append("- Активный набор: пусто")
+    if runtime_budget:
+        lines.append(f"- Runtime-профиль: `{runtime_budget.get('runtime_profile')}`")
+        lines.append(f"- RAG-режим: `{runtime_budget.get('rag_mode')}` ({runtime_budget.get('rag_mode_label')})")
+    if effective.get("knowledge_collection_id"):
+        lines.append(f"- Коллекция знаний: `{effective.get('knowledge_collection_id')}`")
+    return "\n".join(lines)
+
+
+def _build_welcome_markdown() -> str:
+    return (
+        "## Добро пожаловать в Agent Navigator\n\n"
+        "Используйте starter cards или настройки справа, чтобы быстро переключить сценарий.\n\n"
+        f"{_build_context_status_markdown(title='Стартовый контекст')}"
+    )
+
+
+def _build_resume_markdown(*, restored_via: str) -> str:
+    subtitles = {
+        "backend_snapshot": "Контекст восстановлен из backend snapshot.",
+        "legacy_history": "Контекст восстановлен из сохранённой истории Chainlit.",
+        "empty_thread": "Тред найден, но активный контекст отсутствовал.",
+    }
+    subtitle = subtitles.get(restored_via, "Контекст чата восстановлен.")
+    return f"## Контекст восстановлен\n\n{subtitle}\n\n{_build_context_status_markdown()}"
+
+
+async def _sync_thread_presentation(user_message: Optional[str] = None) -> None:
+    ids = _get_current_chainlit_session_ids()
+    thread_id = ids.get("thread_id")
+    if not thread_id:
+        return
+
+    current_name = cl.user_session.get("thread_name")
+    locked = bool(cl.user_session.get("thread_name_locked"))
+    proposed_name = None
+    next_locked = locked
+    if user_message and not locked:
+        proposed_name = _derive_thread_name_from_message(user_message)
+        next_locked = bool(proposed_name)
+    elif not current_name:
+        proposed_name = _derive_default_thread_name()
+        next_locked = False
+
+    if proposed_name:
+        cl.user_session.set("thread_name", proposed_name)
+        cl.user_session.set("thread_name_locked", next_locked)
+    metadata = _build_thread_metadata()
+
+    try:
+        from chainlit.data import get_data_layer
+
+        data_layer = get_data_layer()
+        if data_layer is not None:
+            await data_layer.update_thread(
+                thread_id=thread_id,
+                name=proposed_name,
+                metadata=metadata,
+            )
+    except Exception:
+        logger.debug("Thread presentation sync skipped", exc_info=True)
+
+
+async def _persist_current_backend_state(*, status: str = "active", last_error: Optional[str] = None) -> None:
+    _ensure_session_state()
+    ids = _get_current_chainlit_session_ids()
+    store = get_orchestration_state_store()
+    run_record = await store.get_or_create_run(
+        thread_id=ids.get("thread_id"),
+        session_id=ids.get("session_id"),
+        workflow_type="chainlit",
+    )
+    record = await store.save_run(
+        run_id=run_record.run_id,
+        status=status,
+        pending_action_id=(_get_pending_route_choice() or {}).get("pending_action_id")
+        or (_get_pending_route_choice() or {}).get("route_choice_id"),
+        resume_state_blob=_build_backend_resume_snapshot(),
+        checkpoint_blob={
+            "route": cl.user_session.get("last_route"),
+            "executor": cl.user_session.get("last_executor"),
+            "trace_id": cl.user_session.get("last_trace_id"),
+            "runtime_mode": _get_runtime_mode(),
+            "assistant_mode": _get_effective_settings().get("assistant_mode"),
+            "rag_scope": _get_effective_settings().get("rag_scope"),
+            "knowledge_collection_id": _get_effective_settings().get("knowledge_collection_id"),
+        },
+        last_error=last_error,
+    )
+    cl.user_session.set("run_id", record.run_id)
+    cl.user_session.set("state_ref", record.state_ref)
+    cl.user_session.set("state_version", record.version)
+
+
+def _build_execution_dependencies() -> ExecutionDependencies:
+    model_execution_events = cl.user_session.get("model_execution_events")
+    if not isinstance(model_execution_events, list):
+        model_execution_events = []
+        cl.user_session.set("model_execution_events", model_execution_events)
+
+    def _get_retrieval_embed_fn():
+        effective = _get_effective_settings()
+        rag_pipeline = cl.user_session.get("rag_pipeline")
+        retriever = getattr(rag_pipeline, "retriever", None)
+        embed_fn = getattr(retriever, "embed_fn", None)
+        if embed_fn is not None:
+            return embed_fn
+
+        cache_entry = cl.user_session.get("retrieval_embed_fn")
+        resolved_retrieval_model_id = str(effective.get("resolved_retrieval_embedder_model_id") or "")
+        if isinstance(cache_entry, dict) and cache_entry.get("model_id") == resolved_retrieval_model_id:
+            cached = cache_entry.get("embed_fn")
+            if cached is not None:
+                return cached
+
+        retrieval_resolution = effective.get("resolved_retrieval_embedder_resolution")
+        if retrieval_resolution is None and resolved_retrieval_model_id:
+            retrieval_resolution = resolve_execution_plan(requested_model_id=resolved_retrieval_model_id)
+        if retrieval_resolution is None:
+            retrieval_resolution = resolve_model_selection("legal.embedder")
+        embed_fn = _create_failover_embed_fn(retrieval_resolution, record_model_execution=_record_model_execution)
+        cl.user_session.set(
+            "retrieval_embed_fn",
+            {"model_id": getattr(retrieval_resolution, "resolved_model_id", None), "embed_fn": embed_fn},
+        )
+        return embed_fn
+
+    def _record_model_execution(event: Dict[str, Any]) -> None:
+        if isinstance(event, dict):
+            model_execution_events.append(dict(event))
+
+    def _get_model_execution_events() -> List[Dict[str, Any]]:
+        return [dict(event) for event in model_execution_events]
+
+    return ExecutionDependencies(
+        infer_assistant_text=_infer_assistant_text,
+        build_prompt=_build_prompt,
+        get_profile_system_prompt=_get_profile_system_prompt,
+        has_retrieval_adapter=lambda: (_get_retrieval_embed_fn() is not None) or bool(
+            getattr(cl.user_session.get("rag_pipeline"), "_indexed", False)
+        ),
+        get_retrieval_embed_fn=_get_retrieval_embed_fn,
+        get_knowledge_base_store=get_knowledge_base_store,
+        get_active_doc_ids=_get_active_doc_ids,
+        get_all_docs=_get_all_docs,
+        get_active_docs=_get_active_docs,
+        get_report_docs=_get_report_docs,
+        resolve_target_doc_name=_resolve_target_doc_name,
+        is_report_query=_is_report_query,
+        ensure_rag_index_for_doc_ids=_ensure_rag_index_for_doc_ids,
+        get_rag_pipeline=lambda: cl.user_session.get("rag_pipeline"),
+        build_sources_from_rag_result=_build_sources_from_rag_result,
+        reindex_sources=_reindex_sources,
+        build_doc_question_deterministic_fallback=_build_doc_question_deterministic_fallback,
+        render_doc_question_markdown=_render_doc_question_markdown,
+        build_doc_question_prompt_with_sources=_build_doc_question_prompt_with_sources,
+        citations_are_valid=_citations_are_valid,
+        needs_doc_question_regen=_needs_doc_question_regen,
+        extract_citation_ids=_extract_citation_ids,
+        has_sufficient_evidence=_has_sufficient_evidence,
+        compute_confidence_v1=_compute_confidence_v1,
+        strip_model_source_sections=_strip_model_source_sections,
+        to_host_path=_to_host_path,
+        active_set_status_line=_active_set_status_line,
+        attach_and_register_report=_attach_and_register_report,
+        update_progress_box=_update_progress_box,
+        clear_progress_box=_clear_progress_box,
+        is_cancelled=lambda: bool(cl.user_session.get("cancel_requested")),
+        record_model_execution=_record_model_execution,
+        get_model_execution_events=_get_model_execution_events,
+    )
+
+
+def _set_active_execution_task(task: Optional[asyncio.Task[Any]]) -> None:
+    cl.user_session.set("active_execution_task", task)
+
+
+def _reset_cancel_state() -> None:
+    cl.user_session.set("cancel_requested", False)
+
+
+async def _await_backend_execution(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    _reset_cancel_state()
+    cl.user_session.set("model_execution_events", [])
+    task = asyncio.create_task(
+        _backend_execute_orchestration(request, deps=_build_execution_dependencies()),
+        name=f"chainlit-exec:{request.get('trace_id', '-')}",
+    )
+    _set_active_execution_task(task)
+    try:
+        response = await task
+    except asyncio.CancelledError:
+        await _persist_current_backend_state(status="cancelled", last_error="cancelled-by-user")
+        await cl.Message(content="Запрос остановлен пользователем.").send()
         return None
-    choice = query.strip().lower()
-    if choice in ("отмена", "cancel"):
-        return "cancel"
-    return pending_choice.get("choices", {}).get(choice)
+    finally:
+        _set_active_execution_task(None)
+    return response
 
 
-def _is_docs_summary_query(query: str) -> bool:
-    query_lower = (query or "").lower()
-    return any(kw in query_lower for kw in _SUMMARY_QUERY_KEYWORDS)
+async def _update_progress_box(*, key: str, title: str, content: str) -> None:
+    step = cl.user_session.get(key)
+    rendered_title = str(title or "").strip() or "Прогресс"
+    rendered_content = str(content or "").strip()
+    if step is None:
+        step = cl.Step(
+            name=rendered_title,
+            type="run",
+            show_input=False,
+            default_open=True,
+        )
+        step.output = rendered_content
+        await step.send()
+        cl.user_session.set(key, step)
+        return
+    step.name = rendered_title
+    step.output = rendered_content
+    update = getattr(step, "update", None)
+    if callable(update):
+        await update()
 
+
+async def _clear_progress_box(*, key: str) -> None:
+    step = cl.user_session.get(key)
+    if step is None:
+        return
+    remove = getattr(step, "remove", None)
+    if callable(remove):
+        await remove()
+    cl.user_session.set(key, None)
+
+
+async def _finalize_progress_box(*, key: str) -> None:
+    step = cl.user_session.get(key)
+    if step is None:
+        return
+    update = getattr(step, "update", None)
+    if callable(update):
+        await update()
+    cl.user_session.set(key, None)
+
+
+async def _render_execution_response(response: Dict[str, Any], history: List[Dict[str, str]]) -> None:
+    _sync_run_metadata_from_response(response)
+    _apply_session_state_patch(response.get("session_state_patch"))
+    assistant_message = response.get("assistant_message")
+    if assistant_message:
+        await _finalize_progress_box(key="documents_summary_progress")
+        await cl.Message(content=assistant_message).send()
+        history.append({"role": "assistant", "content": assistant_message})
+    await _persist_current_backend_state(
+        status="waiting_action" if response.get("action_required") else "completed",
+        last_error=assistant_message if str(assistant_message or "").lower().startswith("ошибка") else None,
+    )
+
+
+def _get_current_chainlit_session_ids() -> Dict[str, Optional[str]]:
+    def _normalize(value: Any) -> Optional[str]:
+        return value if isinstance(value, str) and value.strip() else None
+
+    thread_id = _normalize(cl.user_session.get("thread_id"))
+    session_id = _normalize(cl.user_session.get("id"))
+    try:
+        session = getattr(cl, "context").session
+        thread_id = thread_id or _normalize(getattr(session, "thread_id", None))
+        session_id = session_id or _normalize(getattr(session, "id", None))
+    except Exception:
+        pass
+    return {"thread_id": thread_id, "session_id": session_id}
+
+
+def _build_execution_request(
+    *,
+    message: str,
+    trace_id: str,
+    new_files: List[Dict[str, Any]],
+    session_docs: Dict[str, Any],
+    forced_route: Optional[str] = None,
+) -> Dict[str, Any]:
+    effective = _get_effective_settings()
+    ids = _get_current_chainlit_session_ids()
+    return {
+        "message": message,
+        "run_id": cl.user_session.get("run_id"),
+        "state_ref": cl.user_session.get("state_ref"),
+        "state_version": cl.user_session.get("state_version"),
+        "session_id": ids["session_id"],
+        "thread_id": ids["thread_id"],
+        "history": list(_get_session_history()),
+        "pending_action": copy.deepcopy(_get_pending_route_choice()),
+        "active_doc_ids": _get_active_doc_ids(),
+        "attachments_meta": list(new_files),
+        "runtime_mode": _get_runtime_mode(),
+        "assistant_mode": effective.get("assistant_mode"),
+        "rag_scope": effective.get("rag_scope"),
+        "knowledge_collection_id": effective.get("knowledge_collection_id"),
+        "model_profile": effective.get("model_profile"),
+        "prompt_profile": effective.get("prompt_profile"),
+        "generation_overrides": dict(effective.get("generation") or {}),
+        "custom_system_prompt": effective.get("custom_system_prompt"),
+        "tool_scope": effective.get("tool_scope"),
+        "ui_state": _build_backend_resume_snapshot(),
+        "control_plane_state": copy.deepcopy(_get_control_plane_state()),
+        "file_count": len(new_files),
+        "has_session_docs": bool(session_docs),
+        "session_docs": session_docs,
+        "trace_id": trace_id,
+        "forced_route": forced_route,
+        "effective_settings": effective,
+        "runtime_budget_metadata": copy.deepcopy(cl.user_session.get("runtime_budget_metadata") or {}),
+    }
+
+
+def _get_runtime_mode() -> str:
+    return _backend_normalize_runtime_mode(_get_effective_settings().get("runtime_mode"))
+
+
+def _get_control_plane_state() -> Dict[str, Any]:
+    _ensure_session_state()
+    state = cl.user_session.get("control_plane_state")
+    if not isinstance(state, dict):
+        state = build_initial_control_plane_state(cl.user_session.get("runtime_mode"))
+        cl.user_session.set("control_plane_state", state)
+    return state
+
+
+def _get_effective_settings() -> Dict[str, Any]:
+    _ensure_session_state()
+    effective = cl.user_session.get("effective_settings")
+    if not isinstance(effective, dict):
+        effective = resolve_effective_settings(_get_control_plane_state())
+        cl.user_session.set("effective_settings", effective)
+    return effective
+
+
+def _store_control_plane_state(state: Dict[str, Any]) -> Dict[str, Any]:
+    cl.user_session.set("control_plane_state", state)
+    effective = resolve_effective_settings(state)
+    cl.user_session.set("effective_settings", effective)
+    cl.user_session.set("runtime_mode", _backend_normalize_runtime_mode(effective.get("runtime_mode")))
+    return effective
+
+
+def _settings_payload_from_input(settings: Any) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {}
+    if isinstance(settings, dict):
+        payload = dict(settings)
+    else:
+        getter = getattr(settings, "get", None)
+        if callable(getter):
+            for key in (
+                "assistant_mode",
+                "runtime_mode",
+                "rag_scope",
+                "knowledge_collection_id",
+                "model_profile",
+                "prompt_profile",
+                "tool_scope",
+                "custom_system_prompt",
+                "temperature",
+                "top_p",
+                "max_tokens",
+            ):
+                value = getter(key)
+                if value is not None:
+                    payload[key] = value
+    return payload
+
+
+def _assistant_mode_changed_via_modal(
+    payload: Dict[str, Any],
+    previous_effective: Dict[str, Any],
+) -> bool:
+    assistant_mode = payload.get("assistant_mode")
+    if not isinstance(assistant_mode, str):
+        return False
+    assistant_mode = assistant_mode.strip()
+    if assistant_mode not in _ASSISTANT_MODE_ITEMS:
+        return False
+    return assistant_mode != previous_effective.get("assistant_mode")
+
+
+def _generation_value_changed(
+    key: str,
+    value: Any,
+    previous_generation: Dict[str, Any],
+) -> bool:
+    normalized = clamp_generation_overrides({key: value}, base=previous_generation)
+    return normalized.get(key) != previous_generation.get(key)
+
+
+def _extract_control_plane_state_from_settings(
+    settings: Any,
+    *,
+    previous_state: Optional[Dict[str, Any]] = None,
+    previous_effective: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    payload = _settings_payload_from_input(settings)
+    previous_state = previous_state or _get_control_plane_state()
+    previous_effective = previous_effective or _get_effective_settings()
+
+    if not _assistant_mode_changed_via_modal(payload, previous_effective):
+        return merge_control_plane_state(previous_state, payload)
+
+    assistant_mode = payload["assistant_mode"].strip()
+    normalized_payload: Dict[str, Any] = {}
+
+    for key in ("knowledge_collection_id", "custom_system_prompt"):
+        if key in previous_state:
+            normalized_payload[key] = previous_state.get(key)
+        if key in payload:
+            normalized_payload[key] = payload.get(key)
+
+    for key in ("runtime_mode", "rag_scope", "model_profile", "prompt_profile", "tool_scope"):
+        if key in payload and payload.get(key) != previous_effective.get(key):
+            normalized_payload[key] = payload.get(key)
+
+    previous_generation = dict(previous_effective.get("generation") or {})
+    for key in ("temperature", "top_p", "max_tokens"):
+        if key in payload and payload.get(key) is not None and _generation_value_changed(
+            key,
+            payload.get(key),
+            previous_generation,
+        ):
+            normalized_payload[key] = payload.get(key)
+
+    return merge_control_plane_state(build_preset_state(assistant_mode), normalized_payload)
+
+
+def _apply_control_plane_preset(command: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not isinstance(command, str) or not command.startswith("preset:"):
+        return None
+    assistant_mode = command.split(":", 1)[1].strip()
+    if assistant_mode not in _ASSISTANT_MODE_ITEMS:
+        return None
+    return _store_control_plane_state(build_preset_state(assistant_mode))
+
+
+def _format_effective_settings_summary(effective: Optional[Dict[str, Any]] = None) -> str:
+    effective = effective or _get_effective_settings()
+    runtime_budget = cl.user_session.get("runtime_budget_metadata") or {}
+    generation = effective.get("generation") or {}
+    lines = [
+        "### Активная конфигурация",
+        f"- assistant_mode: `{effective.get('assistant_mode')}`",
+        f"- runtime_mode: `{effective.get('runtime_mode')}`",
+        f"- rag_scope: `{effective.get('rag_scope')}`",
+        f"- model_profile: `{effective.get('model_profile')}`",
+        f"- resolved_model_id: `{effective.get('resolved_model_id')}`",
+        f"- intent_embedder: `{effective.get('resolved_intent_embedder_model_id')}`",
+        f"- retrieval_embedder: `{effective.get('resolved_retrieval_embedder_model_id')}`",
+        f"- device_mode: `{effective.get('device_mode')}`",
+        f"- context_budget_profile: `{effective.get('context_budget_profile')}`",
+        f"- prompt_profile: `{effective.get('prompt_profile')}`",
+        f"- temperature: `{generation.get('temperature')}`",
+        f"- top_p: `{generation.get('top_p')}`",
+        f"- max_tokens: `{generation.get('max_tokens')}`",
+    ]
+    if runtime_budget:
+        lines.append(f"- runtime_profile: `{runtime_budget.get('runtime_profile')}`")
+        lines.append(f"- rag_mode: `{runtime_budget.get('rag_mode')}` ({runtime_budget.get('rag_mode_label')})")
+        lines.append(f"- effective_context_tokens: `{runtime_budget.get('effective_context_tokens')}`")
+        lines.append(
+            f"- retrieved_context_tokens_budget: `{runtime_budget.get('retrieved_context_tokens_budget')}`"
+        )
+    if effective.get("knowledge_collection_id"):
+        lines.append(f"- knowledge_collection_id: `{effective.get('knowledge_collection_id')}`")
+    if effective.get("custom_system_prompt"):
+        lines.append("- custom_system_prompt: задан")
+    return "\n".join(lines)
+
+
+def _ui_select_items(items: Dict[str, str]) -> Dict[str, str]:
+    """Chainlit Select expects label -> value mapping on the frontend."""
+    return {label: value for value, label in items.items()}
+
+
+async def _send_control_plane_settings() -> None:
+    effective = _get_effective_settings()
+    settings = cl.ChatSettings(
+        [
+            cl.input_widget.Tab(
+                id="use_case",
+                label="Use Case",
+                inputs=[
+                    cl.input_widget.Select(
+                        id="assistant_mode",
+                        label="Сценарий",
+                        initial_value=effective.get("assistant_mode"),
+                        items=_ui_select_items(_ASSISTANT_MODE_ITEMS),
+                        description="Крупный продуктовый сценарий без жёсткой смены chat profile.",
+                    ),
+                    cl.input_widget.Select(
+                        id="runtime_mode",
+                        label="Режим работы",
+                        initial_value=effective.get("runtime_mode"),
+                        items=_ui_select_items(_RUNTIME_MODE_ITEMS),
+                        description="Policy роутинга backend для текущего чата.",
+                    ),
+                ],
+            ),
+            cl.input_widget.Tab(
+                id="rag",
+                label="RAG",
+                inputs=[
+                    cl.input_widget.Select(
+                        id="rag_scope",
+                        label="RAG scope",
+                        initial_value=effective.get("rag_scope"),
+                        items=_ui_select_items(_RAG_SCOPE_ITEMS),
+                        description="Выбирает session RAG или knowledge-base контур.",
+                    ),
+                    cl.input_widget.TextInput(
+                        id="knowledge_collection_id",
+                        label="Knowledge Collection",
+                        initial=effective.get("knowledge_collection_id") or "",
+                        placeholder="Например: legal",
+                        description="Идентификатор коллекции knowledge base для document Q&A.",
+                    ),
+                ],
+            ),
+            cl.input_widget.Tab(
+                id="model",
+                label="Model",
+                inputs=[
+                    cl.input_widget.Select(
+                        id="model_profile",
+                        label="Model Profile",
+                        initial_value=effective.get("model_profile"),
+                        items=_ui_select_items(_MODEL_PROFILE_ITEMS),
+                        description="Логический профиль модели. Backend сам резолвит физическую модель.",
+                    ),
+                ],
+            ),
+            cl.input_widget.Tab(
+                id="prompt",
+                label="Prompt",
+                inputs=[
+                    cl.input_widget.Select(
+                        id="prompt_profile",
+                        label="Prompt Profile",
+                        initial_value=effective.get("prompt_profile"),
+                        items=_ui_select_items(_PROMPT_PROFILE_ITEMS),
+                        description="Профиль системного промпта до применения пользовательского override.",
+                    ),
+                    cl.input_widget.TextInput(
+                        id="custom_system_prompt",
+                        label="Custom System Prompt",
+                        initial=effective.get("custom_system_prompt") or "",
+                        multiline=True,
+                        placeholder="Опционально переопределяет системный промпт.",
+                    ),
+                ],
+            ),
+            cl.input_widget.Tab(
+                id="generation",
+                label="Generation",
+                inputs=[
+                    cl.input_widget.Slider(
+                        id="temperature",
+                        label="Temperature",
+                        initial=float((effective.get("generation") or {}).get("temperature", 0.7)),
+                        min=0.0,
+                        max=2.0,
+                        step=0.05,
+                    ),
+                    cl.input_widget.Slider(
+                        id="top_p",
+                        label="Top P",
+                        initial=float((effective.get("generation") or {}).get("top_p", 0.9)),
+                        min=0.0,
+                        max=1.0,
+                        step=0.05,
+                    ),
+                    cl.input_widget.NumberInput(
+                        id="max_tokens",
+                        label="Max Tokens",
+                        initial=int((effective.get("generation") or {}).get("max_tokens", 2048)),
+                    ),
+                ],
+            ),
+        ]
+    )
+    await settings.send()
 
 def _is_report_query(query: str) -> bool:
     q = (query or "").lower()
     return ("отчет" in q) or ("отчёт" in q) or ("report_" in q) or ("по отчету" in q) or ("по отчёту" in q)
-
-
-def _get_classifier_result(query: str) -> Optional[Dict[str, Any]]:
-    classifier_result = None
-    rag = cl.user_session.get("rag_pipeline")
-    if rag and rag._classifier_initialized:
-        classifier_result = rag.classify_intent(query)
-    elif cl.user_session.get("intent_classifier"):
-        standalone = cl.user_session.get("intent_classifier")
-        try:
-            classifier_result = standalone.classify(query)
-        except Exception as e:
-            logger.warning(f"Standalone classifier error: {e}")
-    return classifier_result
 
 
 def _get_intent_decision(
@@ -607,144 +1594,31 @@ def _get_intent_decision(
     session_docs: Optional[Dict[str, Any]] = None,
     classifier_result: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    query_lower = query.lower().strip()
     session_docs = session_docs if session_docs is not None else (_get_session_docs() if has_session_docs else {})
-    has_session_docs = has_session_docs or bool(session_docs)
-    social_query = _is_social_query(query)
-    total_docs = max(file_count, len(session_docs))
-    has_any_docs = total_docs > 0
-    has_any_docs = total_docs > 0
-    two_docs = total_docs >= 2
-    single_doc = total_docs == 1
-    classifier_result = classifier_result if classifier_result is not None else _get_classifier_result(query)
-
-    compare_signal = _has_any_keyword(query_lower, _COMPARE_QUERY_KEYWORDS)
-    equipment_signal = _has_any_keyword(query_lower, _EQUIPMENT_QUERY_KEYWORDS)
-    doc_question_signal = _has_any_keyword(query_lower, _DOC_QUESTION_KEYWORDS)
-    summary_signal = _is_docs_summary_query(query)
-
-    mode = None
-    if two_docs and session_docs:
-        docs = _get_last_session_docs(session_docs, count=2)
-        if len(docs) == 2:
-            mode = _detect_equipment_mode(
-                docs[0]["name"],
-                docs[1]["name"],
-                query,
-                text_1=docs[0].get("text", "")[:1000],
-                text_2=docs[1].get("text", "")[:1000],
-            )
-
-    # Guardrail: короткие social/greeting реплики не должны сбрасывать контекст
-    # и не должны запускать workflow/ask-upload при непустом active scope.
-    if has_session_docs and social_query:
-        return {
-            "intent": "greeting",
-            "requires_choice": False,
-            "confidence": (classifier_result or {}).get("confidence", 1.0),
-            "margin": (classifier_result or {}).get("margin", 1.0),
-            "reason": "social_guard",
-        }
-
-    if has_any_docs and summary_signal and not compare_signal and not equipment_signal:
-        return {
-            "intent": "documents_summary",
-            "requires_choice": False,
-            "confidence": (classifier_result or {}).get("confidence", 0.0),
-            "margin": (classifier_result or {}).get("margin", 0.0),
-            "reason": "summary_query",
-        }
-
-    if two_docs and mode == "tz_vs_smeta" and equipment_signal:
-        if classifier_result and classifier_result.get("intent") == "equipment_analysis" and not _is_low_confidence(classifier_result):
-            return {
-                "intent": "equipment_analysis",
-                "requires_choice": False,
-                "confidence": classifier_result.get("confidence", 0.0),
-                "margin": classifier_result.get("margin", 0.0),
-                "reason": "tz_vs_smeta_high_confidence",
-            }
-        return {
-            "intent": "equipment_analysis",
-            "requires_choice": True,
-            "recommended_route": "equipment_analysis",
-            "confidence": (classifier_result or {}).get("confidence", 0.0),
-            "margin": (classifier_result or {}).get("margin", 0.0),
-            "reason": "tz_vs_smeta_ambiguous",
-            "mode": mode or "tz_vs_smeta",
-        }
-
-    if classifier_result:
-        intent = classifier_result["intent"]
-        needs_rag = classifier_result["needs_rag"]
-        low_confidence = _is_low_confidence(classifier_result)
-
-        # Без загруженных документов не уходим в doc_question RAG.
-        if not has_any_docs and intent == "document_question":
-            intent = "general_chat"
-            needs_rag = False
-
-        # Guardrail: без загруженных документов не отправляем запрос в doc-question RAG,
-        # даже если классификатор ошибочно считает, что нужен retrieval.
-        if not has_any_docs and intent == "document_question":
-            intent = "general_chat"
-            needs_rag = False
-
-        if intent == "document_analysis":
-            if not single_doc:
-                if two_docs:
-                    display_mode = mode if (mode == "tz_vs_smeta" and equipment_signal) else "unknown"
-                    return {
-                        "intent": "document_analysis",
-                        "requires_choice": True,
-                        "recommended_route": "document_question",
-                        "confidence": classifier_result.get("confidence", 0.0),
-                        "margin": classifier_result.get("margin", 0.0),
-                        "reason": "document_analysis_multi_doc",
-                        "mode": display_mode,
-                    }
-                intent = "general_chat"
-            elif not (file_count >= 1 or has_session_docs):
-                intent = "general_chat"
-
-        if two_docs and low_confidence:
-            if mode == "tz_vs_smeta" and equipment_signal:
-                recommended_route = "equipment_analysis"
-            elif compare_signal:
-                recommended_route = "compare_documents"
-            elif doc_question_signal:
-                recommended_route = "document_question"
-            elif intent in ("compare_documents", "equipment_analysis", "document_question"):
-                recommended_route = intent
-            else:
-                recommended_route = "compare_documents"
-            return {
-                "intent": recommended_route,
-                "requires_choice": True,
-                "recommended_route": recommended_route,
-                "confidence": classifier_result.get("confidence", 0.0),
-                "margin": classifier_result.get("margin", 0.0),
-                "reason": "two_docs_low_confidence",
-                "mode": mode if (mode == "tz_vs_smeta" and equipment_signal) else "unknown",
-            }
-
-        if has_session_docs and needs_rag and intent not in ("compare_documents", "equipment_analysis", "document_analysis"):
-            intent = "document_question"
-
-        return {
-            "intent": intent,
-            "requires_choice": False,
-            "confidence": classifier_result.get("confidence", 0.0),
-            "margin": classifier_result.get("margin", 0.0),
-            "reason": "semantic_router",
-        }
-
+    response = _backend_decide_orchestration(
+        query=query,
+        trace_id=cl.user_session.get("request_trace_id"),
+        runtime_mode=_get_runtime_mode(),
+        rag_scope=str(_get_effective_settings().get("rag_scope") or "off"),
+        knowledge_collection_id=_get_effective_settings().get("knowledge_collection_id"),
+        file_count=file_count,
+        has_session_docs=has_session_docs,
+        session_docs=session_docs,
+        classifier_result=classifier_result,
+        active_doc_ids=_get_active_doc_ids(),
+    )
+    action_required = response.get("action_required")
     return {
-        "intent": _detect_intent(query, file_count=file_count, has_session_docs=has_session_docs),
-        "requires_choice": False,
-        "confidence": 0.0,
-        "margin": 0.0,
-        "reason": "minimal_fallback",
+        "intent": response.get("route"),
+        "requires_choice": bool(action_required and action_required.get("type") == "choose_route"),
+        "recommended_route": (action_required or {}).get("recommended_route"),
+        "confidence": response.get("confidence", 0.0),
+        "margin": response.get("margin", 0.0),
+        "reason": response.get("reason"),
+        "mode": (action_required or {}).get("mode"),
+        "action_required": action_required,
+        "executor": response.get("executor"),
+        "session_state_patch": response.get("session_state_patch"),
     }
 
 
@@ -765,11 +1639,35 @@ def _to_host_path(container_path: str) -> str:
 
 
 def _save_to_uploads(src_path: str, filename: str) -> str:
-    """Копирует файл в shared uploads директорию, возвращает путь внутри контейнера."""
+    """Копирует файл в shared uploads директорию, возвращает путь внутри контейнера.
+
+    Если одноимённый файл уже существует и не может быть перезаписан
+    (например, остался root-owned после контейнера), сохраняет новую версию
+    с суффиксом _vN.
+    """
     os.makedirs(UPLOADS_DIR, exist_ok=True)
-    dst_path = os.path.join(UPLOADS_DIR, filename)
-    if src_path != dst_path:
-        shutil.copy2(src_path, dst_path)
+    base_name, ext = os.path.splitext(filename)
+    candidate = os.path.join(UPLOADS_DIR, filename)
+
+    # Если путь совпадает, копировать не нужно.
+    if os.path.abspath(src_path) == os.path.abspath(candidate):
+        return candidate
+
+    def _is_writable(path: str) -> bool:
+        return (not os.path.exists(path)) or os.access(path, os.W_OK)
+
+    dst_path = candidate
+    if not _is_writable(dst_path):
+        version = 2
+        while True:
+            alt_name = f"{base_name}_v{version}{ext}"
+            alt_path = os.path.join(UPLOADS_DIR, alt_name)
+            if _is_writable(alt_path):
+                dst_path = alt_path
+                break
+            version += 1
+
+    shutil.copy2(src_path, dst_path)
     return dst_path
 
 
@@ -816,6 +1714,223 @@ def _build_prompt(query: str, history: List, system_msg: str = "") -> str:
     return prompt
 
 
+def _get_profile_system_prompt() -> str:
+    effective = _get_effective_settings()
+    custom_system_prompt = (effective.get("custom_system_prompt") or "").strip()
+    if custom_system_prompt:
+        return custom_system_prompt
+    return get_prompt_profile_system_message(effective.get("prompt_profile"))
+
+
+def _compose_doc_question_system_prompt(catalog: str) -> str:
+    effective = _get_effective_settings()
+    system_parts = [
+        "Ты помощник Agent Navigator.\n"
+        "Отвечай только на основе CATALOG OF SOURCES.\n"
+        "Каждое фактическое утверждение помечай ссылками [n] из каталога.\n"
+        "Запрещено использовать ссылки вне диапазона каталога.\n"
+        "Если данных недостаточно, прямо скажи это и укажи ограничения, не выдумывай.\n"
+        "Не проси повторно загрузить документы/тексты.\n\n"
+        "Не добавляй отдельные разделы 'Источники' и 'Надёжность' — "
+        "система добавляет их автоматически.\n\n"
+        f"CATALOG OF SOURCES:\n{catalog}"
+    ]
+
+    prompt_profile = effective.get("prompt_profile")
+    if prompt_profile and prompt_profile != "default-assistant":
+        system_parts.append(f"PROFILE INSTRUCTIONS:\n{get_prompt_profile_system_message(prompt_profile)}")
+
+    custom_system_prompt = (effective.get("custom_system_prompt") or "").strip()
+    if custom_system_prompt:
+        system_parts.append(f"CUSTOM SYSTEM OVERRIDE:\n{custom_system_prompt}")
+
+    return "\n\n".join(system_parts)
+
+
+def _is_model_failover_blocked(exc: Exception) -> bool:
+    if isinstance(exc, asyncio.CancelledError):
+        return True
+    if isinstance(exc, UMSBusyError):
+        return True
+    message = str(exc).lower()
+    return "429" in message or "busy" in message or "cancel" in message
+
+
+def _build_model_execution_event(
+    *,
+    selection: Any,
+    used_model_id: str,
+    fallback_used: bool,
+    fallback_reason: Optional[str],
+    attempt_count: int,
+) -> Dict[str, Any]:
+    payload = dict(selection.to_dict() if hasattr(selection, "to_dict") else selection or {})
+    payload.update(
+        {
+            "primary_model_id": payload.get("resolved_model_id") or payload.get("primary_model_id"),
+            "fallback_model_id": payload.get("fallback_model_id") if payload.get("fallback_available") else None,
+            "used_model_id": used_model_id,
+            "fallback_used": bool(fallback_used),
+            "fallback_reason": fallback_reason,
+            "attempt_count": max(1, int(attempt_count)),
+            "status": "fallback_completed" if fallback_used else "completed",
+        }
+    )
+    return payload
+
+
+def _infer_with_model_failover(
+    selection: Any,
+    payload: Dict[str, Any],
+    device_mode: str,
+    prompt: Optional[str] = None,
+) -> Dict[str, Any]:
+    primary_model_id = str(getattr(selection, "resolved_model_id", "") or "")
+    fallback_model_id = str(getattr(selection, "fallback_model_id", "") or "")
+    if not fallback_model_id or fallback_model_id == primary_model_id:
+        fallback_model_id = ""
+    attempts = [primary_model_id] + ([fallback_model_id] if fallback_model_id else [])
+    last_error: Optional[Exception] = None
+    for attempt_idx, model_id in enumerate(attempts, start=1):
+        try:
+            request_payload = dict(payload)
+            if prompt is not None:
+                request_payload["prompt"] = prompt
+            response = ums_client.infer(model_id, request_payload, device_mode)
+            return {
+                "response": response,
+                "model_execution": _build_model_execution_event(
+                    selection=selection,
+                    used_model_id=model_id,
+                    fallback_used=attempt_idx > 1,
+                    fallback_reason=str(last_error) if attempt_idx > 1 and last_error is not None else None,
+                    attempt_count=attempt_idx,
+                ),
+            }
+        except Exception as exc:
+            if _is_model_failover_blocked(exc):
+                raise
+            last_error = exc
+            if attempt_idx < len(attempts):
+                logger.warning(
+                    "Model failover retry model=%s fallback=%s error=%s",
+                    primary_model_id,
+                    fallback_model_id or None,
+                    exc,
+                    exc_info=True,
+                )
+                inc_metric_counter(
+                    "agent_nav_fallback_events_total",
+                    labels={
+                        "component": "chainlit",
+                        "fallback": "model_failover_retry",
+                        "source": "ui",
+                    },
+                )
+                continue
+            raise
+
+
+def _create_failover_embed_fn(
+    selection: Any,
+    *,
+    record_model_execution: Optional[Any] = None,
+) -> Optional[Any]:
+    primary_model_id = str(getattr(selection, "resolved_model_id", "") or "")
+    fallback_model_id = str(getattr(selection, "fallback_model_id", "") or "")
+    if not primary_model_id:
+        return None
+    attempts = [primary_model_id] + ([fallback_model_id] if fallback_model_id and fallback_model_id != primary_model_id else [])
+
+    def _record(event: Dict[str, Any]) -> None:
+        if callable(record_model_execution):
+            try:
+                record_model_execution(event)
+            except Exception:
+                logger.debug("Model execution recorder failed", exc_info=True)
+
+    def _embed(texts: List[str]) -> np.ndarray:
+        if not texts:
+            return np.array([], dtype=np.float32)
+        batch_size = int(os.getenv("UMS_EMBED_BATCH_SIZE", "10"))
+        all_embeddings: List[List[float]] = []
+        for batch_start in range(0, len(texts), batch_size):
+            batch = texts[batch_start : batch_start + batch_size]
+            last_error: Optional[Exception] = None
+            for attempt_idx, model_id in enumerate(attempts, start=1):
+                try:
+                    response = ums_client.infer(model_id, {"input": batch, "normalize": True}, device_mode="cpu")
+                    if "data" in response:
+                        batch_embs = [item["embedding"] for item in response["data"]]
+                    elif "embedding" in response:
+                        embedding = response["embedding"]
+                        batch_embs = embedding if isinstance(embedding[0], list) else [embedding]
+                    else:
+                        raise RuntimeError("Embedding response missing data")
+                    all_embeddings.extend(batch_embs)
+                    _record(
+                        _build_model_execution_event(
+                            selection=selection,
+                            used_model_id=model_id,
+                            fallback_used=attempt_idx > 1,
+                            fallback_reason=str(last_error) if attempt_idx > 1 and last_error is not None else None,
+                            attempt_count=attempt_idx,
+                        )
+                    )
+                    break
+                except Exception as exc:
+                    if _is_model_failover_blocked(exc):
+                        raise
+                    last_error = exc
+                    if attempt_idx < len(attempts):
+                        logger.warning(
+                            "Model failover retry embedding model=%s fallback=%s error=%s",
+                            primary_model_id,
+                            fallback_model_id or None,
+                            exc,
+                            exc_info=True,
+                        )
+                        continue
+                    raise
+        return np.array(all_embeddings, dtype=np.float32)
+
+    try:
+        _embed(["probe"])
+    except Exception:
+        return None
+    return _embed
+
+
+def _build_inference_request(
+    *,
+    default_temperature: float = 0.7,
+    default_top_p: float = 0.9,
+    default_max_tokens: int = 2048,
+    enforced_overrides: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    effective = _get_effective_settings()
+    generation = clamp_generation_overrides(
+        (effective.get("generation") or {}),
+        base={
+            "temperature": default_temperature,
+            "top_p": default_top_p,
+            "max_tokens": default_max_tokens,
+        },
+    )
+    if enforced_overrides:
+        generation = clamp_generation_overrides(enforced_overrides, base=generation)
+    return {
+        "model_id": effective.get("resolved_model_id") or resolve_model_id(effective.get("model_profile")),
+        "device_mode": normalize_inference_device_mode(effective.get("device_mode")),
+        "payload": {
+            "prompt": None,
+            "temperature": generation["temperature"],
+            "top_p": generation["top_p"],
+            "max_tokens": generation["max_tokens"],
+        },
+    }
+
+
 # === Stream Response ===
 
 async def _stream_response(prompt: str, msg: cl.Message, history: List):
@@ -831,22 +1946,65 @@ async def _stream_response(prompt: str, msg: cl.Message, history: List):
     history.append({"role": "assistant", "content": msg.content})
 
 
-async def _infer_assistant_text(prompt: str, temperature: float = 0.7) -> str:
+async def _infer_assistant_text(
+    prompt: str,
+    temperature: float = 0.7,
+    *,
+    default_top_p: float = 0.9,
+    default_max_tokens: int = 2048,
+    enforced_overrides: Optional[Dict[str, Any]] = None,
+    device_mode: Optional[str] = None,
+    allow_sync_retry: bool = True,
+    raise_on_error: bool = False,
+    summary_stage: Optional[str] = None,
+) -> str:
+    model_execution_events = cl.user_session.get("model_execution_events")
+    if not isinstance(model_execution_events, list):
+        model_execution_events = []
+        cl.user_session.set("model_execution_events", model_execution_events)
+    request = _build_inference_request(
+        default_temperature=temperature,
+        default_top_p=default_top_p,
+        default_max_tokens=default_max_tokens,
+        enforced_overrides=enforced_overrides,
+    )
+    payload = dict(request["payload"])
+    payload["prompt"] = prompt
+    effective = _get_effective_settings()
+    model_id = str(
+        effective.get("resolved_model_id")
+        or resolve_model_selection("llm.default_chat").resolved_model_id
+    )
+    resolved_device_mode = normalize_inference_device_mode(device_mode or request.get("device_mode"))
     try:
-        response = await asyncio.to_thread(
-            ums_client.infer,
-            "qwen-14b-llm",
-            {"prompt": prompt, "temperature": temperature},
+        response_payload = await asyncio.to_thread(ums_client.infer, model_id, payload, resolved_device_mode)
+        if isinstance(response_payload, dict) and isinstance(response_payload.get("model_execution"), dict):
+            model_execution_events.append(dict(response_payload["model_execution"]))
+            cl.user_session.set("last_model_execution", dict(response_payload["model_execution"]))
+        return _sanitize_assistant_output(response_payload.get("choices", [{}])[0].get("text", str(response_payload)))
+    except Exception as exc:
+        logger.warning(
+            "Assistant infer failed stage=%s model=%s device_mode=%s retry=%s",
+            summary_stage or "default",
+            model_id,
+            resolved_device_mode,
+            allow_sync_retry,
+            exc_info=True,
         )
-        return response.get("choices", [{}])[0].get("text", str(response))
-    except Exception:
+        if not allow_sync_retry:
+            if raise_on_error:
+                raise
+            return f"Ошибка генерации: {exc}"
         try:
             logger.warning("Direct chat infer failed, retrying sync inference", exc_info=True)
-            response = ums_client.infer(
-                "qwen-14b-llm", {"prompt": prompt, "temperature": temperature}
-            )
-            return response.get("choices", [{}])[0].get("text", str(response))
+            response_payload = ums_client.infer(model_id, payload, resolved_device_mode)
+            if isinstance(response_payload, dict) and isinstance(response_payload.get("model_execution"), dict):
+                model_execution_events.append(dict(response_payload["model_execution"]))
+                cl.user_session.set("last_model_execution", dict(response_payload["model_execution"]))
+            return _sanitize_assistant_output(response_payload.get("choices", [{}])[0].get("text", str(response_payload)))
         except Exception as e:
+            if raise_on_error:
+                raise
             return f"Ошибка генерации: {e}"
 
 
@@ -938,7 +2096,11 @@ def _build_sources_from_rag_result(rag_result: Any, rag_pipeline: Any, max_sourc
             {
                 "source_id": idx,
                 "document_id": str(meta.get("doc_name", f"doc_{chunk_id}" if chunk_id >= 0 else "unknown")),
+                "display_name": str(meta.get("doc_name", f"doc_{chunk_id}" if chunk_id >= 0 else "unknown")),
                 "chunk_id": chunk_id,
+                "collection_id": None,
+                "source_origin": "session",
+                "section": meta.get("section"),
                 "char_span": {"start_char": start_char, "end_char": end_char},
                 "page": None,
                 "quote": _normalize_quote(getattr(c, "text", "")),
@@ -951,130 +2113,19 @@ def _build_sources_from_rag_result(rag_result: Any, rag_pipeline: Any, max_sourc
     return sources
 
 
-def _extract_citation_ids(answer_text: str) -> List[int]:
-    return [int(m.group(1)) for m in re.finditer(r"\[(\d+)\]", answer_text or "")]
-
-
-def _citations_are_valid(answer_text: str, source_count: int) -> bool:
-    cited = _extract_citation_ids(answer_text)
-    if not cited:
-        return False
-    return all(1 <= cid <= source_count for cid in cited)
-
-
-def _is_multihop_query(query: str) -> bool:
-    query_lower = (query or "").lower()
-    markers = ["сравни", "сопостав", "что подходит", "какие отличия", "и ", " vs ", " между "]
-    return any(m in query_lower for m in markers)
-
-
-def _has_sufficient_evidence(
-    sources: List[SourceRef],
-    mode: str,
-    query: str,
-    citations_valid: bool,
-) -> bool:
-    if not citations_valid:
-        return False
-    min_chunks = DOC_QA_MIN_CHUNKS_MULTIHOP if _is_multihop_query(query) else DOC_QA_MIN_CHUNKS_SIMPLE
-    if len(sources) < min_chunks:
-        return False
-
-    top = sources[0]
-    raw_top = float(top.get("raw_score", 0.0))
-    z_top = top.get("z_score")
-    grade_top = (top.get("grade") or "").lower()
-    mode = (mode or "simple").lower()
-
-    if mode in ("corrective", "agentic"):
-        if z_top is not None:
-            return float(z_top) >= DOC_QA_MIN_ZSCORE_CORRECTIVE
-        return grade_top in ("excellent", "good") or raw_top >= DOC_QA_MIN_RAW_SCORE_SIMPLE
-    return raw_top >= DOC_QA_MIN_RAW_SCORE_SIMPLE
-
-
-def _confidence_label(value: float) -> Literal["high", "medium", "low"]:
-    if value >= 0.75:
-        return "high"
-    if value >= 0.5:
-        return "medium"
-    return "low"
-
-
-def _compute_confidence_v1(
-    sources: List[SourceRef],
-    cited_ids: List[int],
-    answer_mode: Literal["grounded_answer", "insufficient_evidence"],
-) -> tuple[float, Literal["high", "medium", "low"]]:
-    cited_sources = [s for s in sources if s["source_id"] in cited_ids] if cited_ids else []
-    if not cited_sources:
-        base = 0.2
-    else:
-        avg_raw = sum(float(s.get("raw_score", 0.0)) for s in cited_sources) / len(cited_sources)
-        avg_norm = sum(float(s.get("normalized_score", 0.0)) for s in cited_sources) / len(cited_sources)
-        good_bonus = 0.08 if any((s.get("grade") or "").lower() in ("good", "excellent") for s in cited_sources) else 0.0
-        base = max(0.0, min(1.0, 0.25 + 0.35 * avg_norm + 0.30 * avg_raw + good_bonus))
-
-    if answer_mode == "insufficient_evidence":
-        base = min(base, 0.35)
-    return base, _confidence_label(base)
-
-
-def _build_doc_question_deterministic_fallback(
-    query: str,
-    sources: List[SourceRef],
-    fallback_type: Literal["citation_validation_failed", "insufficient_evidence"],
-    fallback_reason: Optional[str] = None,
-) -> DocQuestionResponse:
-    top_sources = sources[:2]
-    if top_sources:
-        lines = [
-            f"По запросу «{query}» в найденных фрагментах есть только следующие подтверждённые данные:",
-        ]
-        for s in top_sources:
-            lines.append(f"- [{s['source_id']}] {s['quote']}")
-        lines.append("Данных недостаточно для точного вывода без дополнительных подтверждений.")
-        answer_text = "\n".join(lines)
-    else:
-        answer_text = (
-            f"По запросу «{query}» в текущем контексте загруженных документов "
-            "недостаточно подтверждённых данных для точного вывода."
-        )
-
-    confidence, label = _compute_confidence_v1(sources, [], "insufficient_evidence")
-    return {
-        "answer_text": answer_text,
-        "sources": sources,
-        "answer_mode": "insufficient_evidence",
-        "fallback_type": fallback_type,
-        "fallback_reason": fallback_reason or "Недостаточно подтверждённых данных или невалидный citation-ответ модели.",
-        "confidence": confidence,
-        "confidence_label": label,
-        "confidence_method": "heuristic_v1",
-        "confidence_version": "1",
-    }
-
-
 def _build_doc_question_prompt_with_sources(query: str, history: List, sources: List[SourceRef]) -> str:
     lines = []
     for s in sources:
         span = s["char_span"]
+        section = f" section={s.get('section')}" if s.get("section") else ""
+        page = f" page={s.get('page')}" if s.get("page") is not None else ""
+        origin = f" origin={s.get('source_origin')}" if s.get("source_origin") else ""
         lines.append(
             f"[{s['source_id']}] doc={s['document_id']} chunk={s['chunk_id']} "
-            f"span=({span.get('start_char')},{span.get('end_char')}) quote={s['quote']}"
+            f"span=({span.get('start_char')},{span.get('end_char')}){section}{page}{origin} quote={s['quote']}"
         )
     catalog = "\n".join(lines)
-    system_msg = (
-        "Ты помощник Agent Navigator.\n"
-        "Отвечай только на основе CATALOG OF SOURCES.\n"
-        "Каждое фактическое утверждение помечай ссылками [n] из каталога.\n"
-        "Запрещено использовать ссылки вне диапазона каталога.\n"
-        "Если данных недостаточно, прямо скажи это и укажи ограничения, не выдумывай.\n"
-        "Не проси повторно загрузить документы/тексты.\n\n"
-        "Не добавляй отдельные разделы 'Источники' и 'Надёжность' — "
-        "система добавляет их автоматически.\n\n"
-        f"CATALOG OF SOURCES:\n{catalog}"
-    )
+    system_msg = _compose_doc_question_system_prompt(catalog)
     return _build_prompt(query, history, system_msg)
 
 
@@ -1102,14 +2153,65 @@ def _strip_model_source_sections(answer_text: str) -> str:
     return cleaned if cleaned else text
 
 
+_LEAKED_SYSTEM_LINE_PREFIXES = (
+    "используй краткий ответ",
+    "не повторяйся",
+    "profile instructions:",
+    "custom system override:",
+    "catalog of sources:",
+    "<|im_start|>",
+    "<|im_end|>",
+)
+
+
+def _strip_leaked_system_instructions(answer_text: str) -> str:
+    text = (answer_text or "").strip()
+    if not text:
+        return text
+
+    kept_lines: List[str] = []
+    removed_any = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        lowered = line.lower()
+        if any(lowered.startswith(prefix) for prefix in _LEAKED_SYSTEM_LINE_PREFIXES):
+            removed_any = True
+            continue
+        kept_lines.append(raw_line)
+
+    cleaned = "\n".join(kept_lines).strip()
+    if cleaned:
+        return cleaned
+    if removed_any:
+        return "Чем могу помочь?"
+    return text
+
+
+def _sanitize_assistant_output(answer_text: str) -> str:
+    text = _strip_model_source_sections(answer_text)
+    return _strip_leaked_system_instructions(text)
+
+
 def _render_doc_question_markdown(resp: DocQuestionResponse) -> str:
     lines = [resp["answer_text"].strip(), "", "### Источники"]
+    lines.append(f"- retrieval_scope: `{resp.get('source_scope_summary', 'off')}`")
     if resp["sources"]:
         for s in resp["sources"]:
             score_pct = int(round(float(s["normalized_score"]) * 100))
+            origin = str(s.get("source_origin") or "session")
+            scope = f"{origin}"
+            if s.get("collection_id"):
+                scope += f":{s['collection_id']}"
+            location_parts = []
+            if s.get("section"):
+                location_parts.append(f"section={s['section']}")
+            if s.get("page") is not None:
+                location_parts.append(f"page={s['page']}")
+            location = f" {' '.join(location_parts)}" if location_parts else ""
             lines.append(
-                f"- [{s['source_id']}] `{s['document_id']}` chunk={s['chunk_id']} "
-                f"span=({s['char_span'].get('start_char')},{s['char_span'].get('end_char')}) "
+                f"- [{s['source_id']}] `{s.get('display_name') or s['document_id']}` "
+                f"(origin={scope}) chunk={s['chunk_id']} "
+                f"span=({s['char_span'].get('start_char')},{s['char_span'].get('end_char')}){location} "
                 f"relevance={score_pct}% raw={s['raw_score']:.4f}"
             )
             lines.append(f"  Цитата: {s['quote']}")
@@ -1147,14 +2249,36 @@ async def _attach_and_register_report(report_text: str) -> None:
         return
 
     try:
-        file_el = cl.File(name=filename, path=report_path, display="inline")
-        await cl.Message(content=f"Файл отчёта: `{filename}`", elements=[file_el]).send()
+        if filename.lower().endswith(".pdf"):
+            pdf_display = (os.getenv("CHAINLIT_REPORT_PDF_DISPLAY", "inline") or "inline").strip().lower()
+            if pdf_display not in {"inline", "side", "page"}:
+                pdf_display = "inline"
+            report_el = cl.Pdf(
+                name=filename,
+                path=report_path,
+                display=pdf_display,  # inline | side | page
+                page=1,
+            )
+        else:
+            report_el = cl.File(name=filename, path=report_path, display="inline")
+        await cl.Message(content=f"Файл отчёта: `{filename}`", elements=[report_el]).send()
     except Exception:
         logger.warning("Failed to attach report file element for %s", filename, exc_info=True)
 
     try:
-        with open(report_path, "r", encoding="utf-8") as f:
-            report_text_content = f.read()
+        if filename.lower().endswith(".pdf"):
+            try:
+                import fitz  # PyMuPDF
+                doc = fitz.open(report_path)
+                parts = [page.get_text("text") for page in doc]
+                doc.close()
+                report_text_content = "\n".join(parts)
+            except Exception:
+                logger.warning("Failed to extract text from PDF report %s", filename, exc_info=True)
+                report_text_content = ""
+        else:
+            with open(report_path, "r", encoding="utf-8") as f:
+                report_text_content = f.read()
         _register_loaded_document(
             display_name=filename,
             path=report_path,
@@ -1210,37 +2334,71 @@ async def _ensure_rag_index_for_active_docs(step_name: Optional[str] = None) -> 
         return False
 
     from orchestrator.rag.pipeline import AdaptiveRAGPipeline
-    from services.model_manager.ums_client import create_ums_embed_fn
 
-    async def _reindex() -> tuple[AdaptiveRAGPipeline, int, str]:
+    async def _reindex() -> tuple[AdaptiveRAGPipeline, int, Dict[str, Any]]:
         nonlocal rag
-        embed_fn = create_ums_embed_fn()
-        rag_mode = await _get_rag_mode()
+        runtime_budget = await _get_runtime_budget_metadata()
+        effective = _get_effective_settings()
+        retrieval_resolution = effective.get("resolved_retrieval_embedder_resolution")
+        if retrieval_resolution is None and effective.get("resolved_retrieval_embedder_model_id"):
+            retrieval_resolution = resolve_execution_plan(
+                requested_model_id=str(effective.get("resolved_retrieval_embedder_model_id"))
+            )
+        if retrieval_resolution is None:
+            retrieval_resolution = resolve_model_selection("legal.embedder")
+        embed_fn = _create_failover_embed_fn(retrieval_resolution)
+        rag_mode = runtime_budget["rag_mode"]
         if rag is None:
-            rag = AdaptiveRAGPipeline(embed_fn=embed_fn, rag_mode=rag_mode)
+            rag = AdaptiveRAGPipeline(
+                embed_fn=embed_fn,
+                rag_mode=rag_mode,
+                effective_context_tokens=runtime_budget.get("effective_context_tokens"),
+                retrieved_context_ratio=runtime_budget.get("context_budget_ratio", 0.60),
+            )
         else:
             rag.rag_mode = rag_mode
+            rag.configure_runtime_budget(
+                effective_context_tokens=runtime_budget.get("effective_context_tokens"),
+                retrieved_context_ratio=runtime_budget.get("context_budget_ratio", 0.60),
+            )
         texts = [str(d.get("text", "")) for d in active_docs if d.get("text")]
         names = [str(d.get("display_name", "")) for d in active_docs if d.get("text")]
         await asyncio.to_thread(rag.index_documents, texts, doc_names=names)
-        return rag, len(texts), rag_mode
+        return rag, len(texts), runtime_budget
 
     if step_name:
         async with cl.Step(name=step_name, type="tool") as step:
-            rag, indexed_count, rag_mode = await _reindex()
-            search_type = "BM25+Dense (hybrid)" if rag.embed_fn else "BM25-only"
+            rag, indexed_count, runtime_budget = await _reindex()
+            mode_label = {
+                "simple": "простой",
+                "corrective": "корректирующий",
+                "agentic": "агентный",
+                "multi-agent": "мультиагентный",
+            }.get(str(runtime_budget["rag_mode"]), str(runtime_budget["rag_mode"]))
+            search_type = "BM25 + dense (гибридный)" if rag.embed_fn else "BM25 (только sparse)"
+            profile_label = {
+                "default": "стандартный",
+                "adaptive": "адаптивный",
+                "manual": "ручной",
+            }.get(str(runtime_budget["runtime_profile"]), str(runtime_budget["runtime_profile"]))
+            document_word = "документ" if indexed_count == 1 else "документа" if indexed_count in {2, 3, 4} else "документов"
             step.output = (
-                f"RAG: mode={rag_mode}, search={search_type}, indexed {indexed_count} docs\n"
+                f"RAG: режим={mode_label} ({runtime_budget['rag_mode']}; {runtime_budget.get('rag_mode_label')}), "
+                f"поиск={search_type}, "
+                f"профиль={profile_label} ({runtime_budget['runtime_profile']}), "
+                f"бюджет={runtime_budget['retrieved_context_tokens_budget']} токенов, "
+                f"проиндексирован {indexed_count} {document_word}\n"
                 f"{_active_set_status_line()}"
             )
     else:
-        rag, _, _ = await _reindex()
+        rag, _, runtime_budget = await _reindex()
 
     cache[index_key] = {
         "pipeline": rag,
         "doc_ids": active_ids,
         "indexed_at": now_ts,
         "last_used": now_ts,
+        "runtime_budget": runtime_budget,
     }
     if RAG_INDEX_CACHE_MAX > 0 and len(cache) > RAG_INDEX_CACHE_MAX:
         sorted_keys = sorted(
@@ -1273,64 +2431,98 @@ async def _ensure_rag_index_for_doc_ids(doc_ids: List[str], step_name: Optional[
 
 # === Chainlit Handlers ===
 
-async def _init_classifier():
-    """Фоновая инициализация EmbeddingIntentClassifier до загрузки файлов."""
-    try:
-        from orchestrator.rag.classifier import EmbeddingIntentClassifier
-        from services.model_manager.ums_client import create_ums_embed_fn
-
-        retries = int(os.getenv("CHAINLIT_CLASSIFIER_PREINIT_RETRIES", "6"))
-        delay_s = float(os.getenv("CHAINLIT_CLASSIFIER_PREINIT_DELAY_S", "2.0"))
-        embed_fn = None
-
-        for attempt in range(1, retries + 1):
-            embed_fn = await asyncio.to_thread(create_ums_embed_fn)
-            if embed_fn:
-                break
-            if attempt < retries:
-                logger.info(
-                    f"Classifier pre-init: UMS unavailable, retrying ({attempt}/{retries})"
-                )
-                await asyncio.sleep(delay_s)
-
-        if not embed_fn:
-            logger.info("Classifier pre-init skipped: UMS unavailable after retries")
-            return
-        classifier = EmbeddingIntentClassifier(embed_fn=embed_fn)
-        await asyncio.to_thread(classifier.initialize)
-        cl.user_session.set("intent_classifier", classifier)
-        logger.info("Classifier pre-initialized successfully")
-    except Exception as e:
-        logger.warning(f"Classifier pre-init failed: {e}")
-
-
 @cl.on_chat_start
 async def on_chat_start():
+    ids = _get_current_chainlit_session_ids()
+    if ids["session_id"]:
+        cl.user_session.set("id", ids["session_id"])
+    if ids["thread_id"]:
+        cl.user_session.set("thread_id", ids["thread_id"])
     cl.user_session.set("documents", {})
     cl.user_session.set("documents_by_id", {})
     cl.user_session.set("documents_by_name", {})
     cl.user_session.set("active_doc_ids", [])
     cl.user_session.set("history", [])
     cl.user_session.set("active_mode", None)
+    cl.user_session.set("runtime_mode", _backend_normalize_runtime_mode(cl.user_session.get("runtime_mode")))
+    cl.user_session.set(
+        "control_plane_state",
+        build_initial_control_plane_state(cl.user_session.get("runtime_mode")),
+    )
+    cl.user_session.set(
+        "effective_settings",
+        resolve_effective_settings(cl.user_session.get("control_plane_state") or {}),
+    )
     cl.user_session.set("rag_index_key", "")
     cl.user_session.set("rag_index_doc_ids", [])
     cl.user_session.set("rag_pipeline_cache", {})
+    await _persist_current_backend_state(status="initialized")
+    await _send_control_plane_settings()
+    await _sync_thread_presentation()
 
-    # Фоновая инициализация classifier для раннего semantic routing
-    asyncio.create_task(_init_classifier())
+def _default_starters() -> List[cl.Starter]:
+    return [
+        cl.Starter(
+            label="Общий чат",
+            message="Объясни простыми словами, что такое облака на небе.",
+            command="preset:general_chat",
+        ),
+        cl.Starter(
+            label="Помощник по коду",
+            message="Помоги спроектировать небольшой FastAPI endpoint с понятным контрактом.",
+            command="preset:coding",
+        ),
+        cl.Starter(
+            label="Агентный режим (iterative)",
+            message="Разложи задачу на шаги и предложи план исполнения с проверками.",
+            command="preset:agentic",
+        ),
+        cl.Starter(
+            label="Специализированные задачи",
+            message="Сравни два загруженных документа и выдели ключевые различия.",
+            command="preset:specific_tasks",
+        ),
+        cl.Starter(
+            label="Вопросы по документам (RAG)",
+            message="Ответь по базе знаний: найди, что сказано про штрафы и сроки уведомления.",
+            command="preset:rag_qa",
+        ),
+    ]
 
-    user = cl.user_session.get("user")
-    greeting = f", **{user.identifier}**" if user else ""
+@cl.set_starters
+async def set_starters(user: Optional[cl.User] = None, language: Optional[str] = None):
+    return _default_starters()
 
-    await cl.Message(
-        content=f"Добро пожаловать{greeting} в **Agent Navigator Pro** v3.0!\n\n"
-                "Я помогу вам анализировать юридические документы и сметы.\n\n"
-                "**Возможности:**\n"
-                "- Загрузите 2 файла и попросите сравнить\n"
-                "- Загрузите смету и ТЗ для анализа оборудования\n"
-                "- Задайте вопрос по загруженному документу\n"
-                "- Или просто поговорите со мной"
-    ).send()
+
+@cl.set_chat_profiles
+async def set_chat_profiles(current_user: Optional[cl.User]):
+    return [
+        cl.ChatProfile(
+            name="Agent Navigator",
+            markdown_description=(
+                "Основной Chainlit UI для Agent Navigator с use-case режимами: "
+                "общий чат, помощь по коду, агентный режим, специализированные задачи и RAG-вопросы по документам."
+            ),
+            icon="/public/logo_dark.svg",
+            starters=_default_starters(),
+        )
+    ]
+
+
+@cl.on_settings_update
+async def on_settings_update(settings: Dict[str, Any]):
+    _ensure_session_state()
+    effective = _store_control_plane_state(
+        _extract_control_plane_state_from_settings(
+            settings,
+            previous_state=_get_control_plane_state(),
+            previous_effective=_get_effective_settings(),
+        )
+    )
+    cl.user_session.set("effective_settings_summary", _format_effective_settings_summary(effective))
+    await _sync_thread_presentation()
+    await _persist_current_backend_state()
+    await _send_control_plane_settings()
 
 
 @cl.on_chat_resume
@@ -1339,13 +2531,48 @@ async def on_chat_resume(thread):
     Восстановление сессии из сохранённой истории (TD-4 Fix).
     Пытается восстановить список документов и RAG-индекс.
     """
+    ids = _get_current_chainlit_session_ids()
+    if ids["session_id"]:
+        cl.user_session.set("id", ids["session_id"])
+    if thread and thread.get("id"):
+        cl.user_session.set("thread_id", str(thread.get("id")))
+        cl.user_session.set("thread_name", thread.get("name"))
+        cl.user_session.set("thread_name_locked", bool(thread.get("name")))
+    elif ids["thread_id"]:
+        cl.user_session.set("thread_id", ids["thread_id"])
     cl.user_session.set("documents", {})
     cl.user_session.set("documents_by_id", {})
     cl.user_session.set("documents_by_name", {})
     cl.user_session.set("active_doc_ids", [])
+    cl.user_session.set("runtime_mode", _backend_normalize_runtime_mode(cl.user_session.get("runtime_mode")))
+    cl.user_session.set(
+        "control_plane_state",
+        build_initial_control_plane_state(cl.user_session.get("runtime_mode")),
+    )
+    cl.user_session.set(
+        "effective_settings",
+        resolve_effective_settings(cl.user_session.get("control_plane_state") or {}),
+    )
     cl.user_session.set("rag_index_key", "")
     cl.user_session.set("rag_index_doc_ids", [])
     cl.user_session.set("rag_pipeline_cache", {})
+    store = get_orchestration_state_store()
+    restored_run = await store.load_run(
+        thread_id=cl.user_session.get("thread_id"),
+        session_id=cl.user_session.get("id"),
+    )
+    if restored_run is not None:
+        cl.user_session.set("run_id", restored_run.run_id)
+        cl.user_session.set("state_ref", restored_run.state_ref)
+        cl.user_session.set("state_version", restored_run.version)
+        if restored_run.resume_state_blob:
+            _restore_backend_resume_snapshot(restored_run.resume_state_blob)
+            if _get_active_doc_ids():
+                await _ensure_rag_index_for_active_docs(step_name="Восстановление индекса")
+            await _send_control_plane_settings()
+            await _sync_thread_presentation()
+            await cl.Message(content=_build_resume_markdown(restored_via="backend_snapshot")).send()
+            return
     history = []
     found_files = []
 
@@ -1408,12 +2635,27 @@ async def on_chat_resume(thread):
                 else:
                     step.output = "Не удалось восстановить текст документов."
 
+    await _send_control_plane_settings()
+    await _sync_thread_presentation()
+    await cl.Message(
+        content=_build_resume_markdown(
+            restored_via="legacy_history" if (history or found_files) else "empty_thread"
+        )
+    ).send()
+    await _persist_current_backend_state()
+
 
 @cl.on_message
 async def on_message(message: cl.Message):
     _ensure_session_state()
     trace_id = str(uuid.uuid4())[:8]
     cl.user_session.set("request_trace_id", trace_id)
+
+    preset_effective = _apply_control_plane_preset(getattr(message, "command", None))
+    if preset_effective is not None:
+        cl.user_session.set("effective_settings_summary", _format_effective_settings_summary(preset_effective))
+        await _send_control_plane_settings()
+        await _sync_thread_presentation()
 
     query = message.content
     history = _get_session_history()
@@ -1422,7 +2664,7 @@ async def on_message(message: cl.Message):
 
     pending_choice = _get_pending_route_choice()
     if pending_choice:
-        selected_route = _resolve_pending_route_choice(query, pending_choice)
+        selected_route = _backend_resolve_pending_action_selection(query, pending_choice)
         if pending_choice.get("expires_at", 0) < time.time():
             _set_pending_route_choice(None)
         elif selected_route:
@@ -1440,13 +2682,17 @@ async def on_message(message: cl.Message):
             if selected_route == "cancel":
                 await cl.Message(content="Выбор отменён.").send()
             else:
-                await _execute_intent(
-                    selected_route,
-                    pending_choice["query"],
-                    pending_choice.get("new_files", []),
-                    active_session_docs,
-                    history,
+                execution_response = await _await_backend_execution(
+                    _build_execution_request(
+                        message=pending_choice["query"],
+                        trace_id=trace_id,
+                        new_files=pending_choice.get("new_files", []),
+                        session_docs=active_session_docs,
+                        forced_route=selected_route,
+                    ),
                 )
+                if execution_response is not None:
+                    await _render_execution_response(execution_response, history)
             history.append({"role": "user", "content": query})
             return
         else:
@@ -1516,42 +2762,46 @@ async def on_message(message: cl.Message):
 
     active_session_docs = _get_active_session_docs()
 
-    decision = _get_intent_decision(
-        query,
-        file_count=len(new_files),
-        has_session_docs=bool(active_session_docs),
-        session_docs=active_session_docs,
+    response = await _await_backend_execution(
+        _build_execution_request(
+            message=query,
+            trace_id=trace_id,
+            new_files=new_files,
+            session_docs=active_session_docs,
+        ),
     )
+    if response is None:
+        await _sync_thread_presentation(user_message=query)
+        history.append({"role": "user", "content": query})
+        return
     logger.info(
-        "Route decision trace=%s intent=%s requires_choice=%s reason=%s conf=%.2f margin=%.3f active_docs=%s",
+        "Route decision trace=%s route=%s executor=%s action=%s reason=%s conf=%.2f margin=%.3f active_docs=%s",
         trace_id,
-        decision.get("intent"),
-        decision.get("requires_choice"),
-        decision.get("reason"),
-        float(decision.get("confidence", 0.0)),
-        float(decision.get("margin", 0.0)),
+        response.get("route"),
+        response.get("executor"),
+        (response.get("action_required") or {}).get("type"),
+        response.get("reason"),
+        float(response.get("confidence", 0.0)),
+        float(response.get("margin", 0.0)),
         len(_get_active_doc_ids()),
     )
 
-    if decision.get("requires_choice"):
-        recommended_route = decision["recommended_route"]
-        prompt_text = _build_route_choice_prompt(recommended_route, decision.get("mode", "unknown"))
-        state = _build_route_choice_state(query, recommended_route, new_files, decision.get("mode", "unknown"))
+    action_required = response.get("action_required")
+    if action_required and action_required.get("type") == "choose_route":
+        state = action_required
+        prompt_text = action_required.get("title") or response.get("assistant_message") or "Выберите маршрут."
         logger.info(
             "Route choice required trace=%s route_choice_id=%s recommended=%s mode=%s",
             trace_id,
             state.get("route_choice_id"),
-            recommended_route,
-            decision.get("mode", "unknown"),
+            state.get("recommended_route"),
+            state.get("mode", "unknown"),
         )
         response = await cl.AskActionMessage(
             content=prompt_text,
             actions=[
-                cl.Action(name="route_choice", payload={"route": state["choices"]["1"]}, label="1"),
-                cl.Action(name="route_choice", payload={"route": state["choices"]["2"]}, label="2"),
-                cl.Action(name="route_choice", payload={"route": state["choices"]["3"]}, label="3"),
-                cl.Action(name="route_choice", payload={"route": state["choices"]["4"]}, label="4"),
-                cl.Action(name="route_choice", payload={"route": "cancel"}, label="Отмена"),
+                cl.Action(name="route_choice", payload={"route": option["route"]}, label=option["label"])
+                for option in state.get("options", [])
             ],
             timeout=ROUTE_CHOICE_TIMEOUT_S,
             raise_on_timeout=False,
@@ -1571,7 +2821,18 @@ async def on_message(message: cl.Message):
             if chosen_route == "cancel":
                 await cl.Message(content="Выбор отменён.").send()
             else:
-                await _execute_intent(chosen_route, query, new_files, _get_active_session_docs(), history)
+                execution_response = await _await_backend_execution(
+                    _build_execution_request(
+                        message=query,
+                        trace_id=trace_id,
+                        new_files=new_files,
+                        session_docs=_get_active_session_docs(),
+                        forced_route=chosen_route,
+                    ),
+                )
+                if execution_response is not None:
+                    await _render_execution_response(execution_response, history)
+            await _sync_thread_presentation(user_message=query)
         else:
             _set_pending_route_choice(state)
             await cl.Message(
@@ -1581,162 +2842,37 @@ async def on_message(message: cl.Message):
                     f"{_active_set_status_line()}"
                 )
             ).send()
+            await _sync_thread_presentation(user_message=query)
             history.append({"role": "user", "content": query})
             return
+    elif action_required:
+        _apply_session_state_patch(response.get("session_state_patch"))
+        await cl.Message(content=response.get("assistant_message") or action_required.get("title") or "Нужно действие пользователя.").send()
+        await _sync_thread_presentation(user_message=query)
+        history.append({"role": "user", "content": query})
+        return
     else:
-        await _execute_intent(decision["intent"], query, new_files, active_session_docs, history)
+        await _render_execution_response(response, history)
+
+    await _sync_thread_presentation(user_message=query)
 
     history.append({"role": "user", "content": query})
 
 
-async def _execute_intent(intent: str, query: str, new_files: List, session_docs: Dict, history: List):
-    social_query = _is_social_query(query)
-    if intent == "document_question" and not session_docs:
-        intent = "general_chat"
-    if intent == "compare_documents":
-        cl.user_session.set("active_mode", "compare")
-        await _handle_compare(query, new_files, session_docs)
-    elif intent == "equipment_analysis":
-        cl.user_session.set("active_mode", "equipment")
-        await _handle_equipment(query, new_files, session_docs)
-    elif intent == "document_analysis":
-        cl.user_session.set("active_mode", "doc_analysis")
-        await _handle_document_analysis(query, new_files, session_docs)
-    elif intent == "document_question":
-        cl.user_session.set("active_mode", "doc_qa")
-        await _handle_doc_question(query, session_docs, history)
-    elif intent == "documents_summary":
-        cl.user_session.set("active_mode", "doc_summary")
-        await _handle_documents_summary(query, history)
-    else:
-        # Для social-реплик при активных документах сохраняем текущий mode.
-        if not (social_query and bool(_get_active_doc_ids())):
-            cl.user_session.set("active_mode", "chat")
-        await _handle_chat(query, session_docs, history, social_query=social_query)
-
-
-# === Workflow: Сравнение документов ===
-
-# Маппинг нод workflow → отображаемые шаги
-COMPARE_NODE_LABELS = {
-    "load": ("1. Парсинг документов", "tool"),
-    "match": ("2. Сопоставление чанков", "tool"),
-    "analyze": ("3. Глубокий анализ", "llm"),
-    "report": ("4. Генерация отчёта", "tool"),
-}
-
-
-async def _handle_compare(query: str, new_files: List, session_docs: Dict):
-    from orchestrator.workflows.compare import create_compare_graph
-
-    files = list(new_files)[:2]
-    if len(files) < 2:
-        file_names = list(session_docs.keys())
-        if len(file_names) < 2:
-            await cl.Message(content="Нужно минимум 2 документа для сравнения.").send()
-            return
-        if len(file_names) > 2:
-            labels = "\n".join(f"- {name}" for name in file_names)
-            await cl.Message(
-                content=(
-                    "В активном наборе больше 2 документов. Уточните пару для сравнения "
-                    "или загрузите только нужные файлы в одном сообщении.\n"
-                    f"{_active_set_status_line()}\n{labels}"
-                )
-            ).send()
-            return
-        files = [{"name": n, "path": session_docs[n]["path"]} for n in file_names]
-
-    if len(files) < 2 or any(not f.get("path") for f in files):
-        await cl.Message(content="Недостаточно валидных файлов для сравнения. Загрузите 2 документа заново.").send()
-        return
-
-    async with cl.Step(name="Сравнение документов", type="run") as run_step:
-        run_step.input = f"{files[0]['name']} ↔ {files[1]['name']}"
-        t_start = time.perf_counter()
-
-        try:
-            workflow = create_compare_graph()
-            initial_state = {
-                "input_1": _to_host_path(files[0]["path"]),
-                "input_2": _to_host_path(files[1]["path"]),
-                "name_1": files[0]["name"],
-                "name_2": files[1]["name"],
-                "chunks_old": [], "chunks_new": [], "matches": [],
-                "analysis_results": [], "final_report": "", "errors": [],
-            }
-
-            active_steps = {}
-            final_state = {}
-
-            async for event in workflow.astream(initial_state):
-                for node_name, output in event.items():
-                    final_state.update(output)
-
-                    # Закрываем предыдущий шаг
-                    if active_steps:
-                        for prev_name, prev_step in list(active_steps.items()):
-                            await prev_step.__aexit__(None, None, None)
-
-                    # Обновляем вывод в зависимости от ноды
-                    label, step_type = COMPARE_NODE_LABELS.get(
-                        node_name, (node_name, "tool")
-                    )
-
-                    async with cl.Step(name=label, type=step_type) as step:
-                        if node_name == "load":
-                            n_old = len(output.get("chunks_old", []))
-                            n_new = len(output.get("chunks_new", []))
-                            step.output = f"Старый: {n_old} чанков, Новый: {n_new} чанков"
-
-                        elif node_name == "match":
-                            matches = output.get("matches", [])
-                            n_mod = sum(1 for m in matches if m.get("type") == "MODIFIED")
-                            n_add = sum(1 for m in matches if m.get("type") == "ADDED")
-                            n_del = sum(1 for m in matches if m.get("type") == "DELETED")
-                            step.output = (
-                                f"Найдено {len(matches)} изменений: "
-                                f"{n_mod} изменено, {n_add} добавлено, {n_del} удалено"
-                            )
-
-                        elif node_name == "analyze":
-                            results = output.get("analysis_results", [])
-                            step.output = f"Проанализировано {len(results)} пар"
-
-                        elif node_name == "report":
-                            step.output = "Отчёт сгенерирован"
-
-            elapsed = time.perf_counter() - t_start
-            report = final_state.get("final_report", "")
-            errors = final_state.get("errors", [])
-
-            if report:
-                run_step.output = f"Сравнение завершено за {elapsed:.1f}с"
-                await cl.Message(content=report).send()
-                await _attach_and_register_report(report)
-            elif errors:
-                run_step.output = "Завершено с ошибками"
-                await cl.Message(content=f"Ошибки:\n" + "\n".join(f"- {e}" for e in errors)).send()
-            else:
-                await cl.Message(content="Не удалось создать отчёт.").send()
-
-        except Exception as e:
-            run_step.output = f"Ошибка: {e}"
-            await cl.Message(content=f"Ошибка workflow сравнения: {e}").send()
-
-
-# === Workflow: Анализ оборудования ===
-
-EQUIPMENT_NODE_LABELS = {
-    "extract":  ("1. Извлечение позиций", "tool"),
-    "match":    ("2. Сопоставление позиций", "tool"),
-    "evaluate": ("3. Оценка соответствия", "llm"),
-    "report":   ("4. Генерация отчёта", "tool"),
-}
-
-# Ключевые слова для определения mode
-_TZ_KEYWORDS = ["тз", "техническое задание", "требовани", "specification", "техзадани"]
-_SMETA_KEYWORDS = ["смета", "прайс", "предложение", "кп", "коммерческое"]
+@cl.on_stop
+async def on_stop():
+    _ensure_session_state()
+    cl.user_session.set("cancel_requested", True)
+    task = cl.user_session.get("active_execution_task")
+    if task is not None and not task.done():
+        task.cancel()
+    progress_step = cl.user_session.get("documents_summary_progress")
+    if progress_step is not None:
+        progress_step.name = "Остановка запроса"
+        progress_step.output = "Останавливаю текущую обработку и освобождаю слот модели."
+        update = getattr(progress_step, "update", None)
+        if callable(update):
+            await update()
 
 
 def _detect_equipment_mode(file1_name: str, file2_name: str, query: str,
@@ -1744,447 +2880,3 @@ def _detect_equipment_mode(file1_name: str, file2_name: str, query: str,
     """Эвристика: tz_vs_smeta или smeta_vs_smeta."""
     from orchestrator.workflows.equipment import detect_equipment_mode
     return detect_equipment_mode(file1_name, file2_name, query, text_1, text_2)
-
-
-async def _handle_equipment(query: str, new_files: List, session_docs: Dict):
-    from orchestrator.workflows.equipment import create_equipment_graph
-
-    files = list(new_files)[:2]
-    if len(files) < 2:
-        file_names = list(session_docs.keys())
-        if len(file_names) < 2:
-            await cl.Message(content="Нужно минимум 2 документа (ТЗ и смета).").send()
-            return
-        if len(file_names) > 2:
-            labels = "\n".join(f"- {name}" for name in file_names)
-            await cl.Message(
-                content=(
-                    "В активном наборе больше 2 документов. Уточните пару ТЗ/КП "
-                    "или загрузите только нужные файлы в одном сообщении.\n"
-                    f"{_active_set_status_line()}\n{labels}"
-                )
-            ).send()
-            return
-        files = [{"name": n, "path": session_docs[n]["path"]} for n in file_names]
-
-    if len(files) < 2 or any(not f.get("path") for f in files):
-        await cl.Message(content="Недостаточно валидных файлов для анализа оборудования. Загрузите ТЗ и КП/смету заново.").send()
-        return
-
-    mode = _detect_equipment_mode(
-        files[0]["name"], files[1]["name"], query,
-        text_1=session_docs.get(files[0]["name"], {}).get("text", "")[:1000],
-        text_2=session_docs.get(files[1]["name"], {}).get("text", "")[:1000],
-    )
-
-    async with cl.Step(name="Анализ оборудования", type="run") as run_step:
-        run_step.input = f"{files[0]['name']} ↔ {files[1]['name']} ({mode})"
-        t_start = time.perf_counter()
-
-        try:
-            workflow = create_equipment_graph()
-            initial_state = {
-                "input_1": _to_host_path(files[0]["path"]),
-                "input_2": _to_host_path(files[1]["path"]),
-                "name_1": files[0]["name"],
-                "name_2": files[1]["name"],
-                "mode": mode,
-                "items_1": [], "items_2": [],
-                "matches": [], "analysis_results": [],
-                "final_report": "", "errors": [],
-                "session_id": "",
-            }
-
-            final_state = {}
-
-            async for event in workflow.astream(initial_state):
-                for node_name, output in event.items():
-                    final_state.update(output)
-
-                    label, step_type = EQUIPMENT_NODE_LABELS.get(
-                        node_name, (node_name, "tool")
-                    )
-
-                    async with cl.Step(name=label, type=step_type) as step:
-                        if node_name == "extract":
-                            n1 = len(output.get("items_1", []))
-                            n2 = len(output.get("items_2", []))
-                            step.output = f"Документ 1: {n1} позиций, Документ 2: {n2} позиций"
-
-                        elif node_name == "match":
-                            matches = output.get("matches", [])
-                            n_mod = sum(1 for m in matches if m.get("type") not in ("ADDED", "DELETED"))
-                            n_add = sum(1 for m in matches if m.get("type") == "ADDED")
-                            n_del = sum(1 for m in matches if m.get("type") == "DELETED")
-                            step.output = (
-                                f"Сопоставлено {len(matches)} пар: "
-                                f"{n_mod} совпадений, {n_add} добавлено, {n_del} удалено"
-                            )
-
-                        elif node_name == "evaluate":
-                            results = output.get("analysis_results", [])
-                            n_pass = sum(1 for r in results if r.get("result") in ("PASS", "SAME"))
-                            n_fail = sum(1 for r in results if r.get("result") in ("FAIL", "GAP"))
-                            step.output = f"Оценено {len(results)} позиций: {n_pass} ОК, {n_fail} несоответствий"
-
-                        elif node_name == "report":
-                            step.output = "Отчёт сгенерирован"
-
-            elapsed = time.perf_counter() - t_start
-            report = final_state.get("final_report", "")
-            errors = final_state.get("errors", [])
-
-            if report:
-                run_step.output = f"Анализ завершён за {elapsed:.1f}с"
-                await cl.Message(content=report).send()
-                await _attach_and_register_report(report)
-            elif errors:
-                run_step.output = "Завершено с ошибками"
-                await cl.Message(content=f"Ошибки:\n" + "\n".join(f"- {e}" for e in errors)).send()
-            else:
-                await cl.Message(content="Не удалось создать отчёт.").send()
-
-        except Exception as e:
-            run_step.output = f"Ошибка: {e}"
-            await cl.Message(content=f"Ошибка workflow оборудования: {e}").send()
-
-
-# === Workflow: Анализ одного документа ===
-
-ANALYSIS_NODE_LABELS = {
-    "classify":  ("1. Классификация документа", "tool"),
-    "extract":   ("2. Извлечение позиций", "tool"),
-    "summarize": ("3. Анализ требований", "llm"),
-    "report":    ("4. Генерация отчёта", "tool"),
-}
-
-
-async def _handle_document_analysis(query: str, new_files: List, session_docs: Dict):
-    from orchestrator.workflows.document_analysis import create_analysis_graph
-
-    # Берём 1 файл из new_files или из session_docs
-    file = None
-    if new_files:
-        file = new_files[0]
-    elif session_docs:
-        if len(session_docs) > 1:
-            labels = "\n".join(f"- {name}" for name in session_docs.keys())
-            await cl.Message(
-                content=(
-                    "Для анализа нужен один целевой документ. "
-                    "Уточните, какой файл анализировать.\n"
-                    f"{_active_set_status_line()}\n{labels}"
-                )
-            ).send()
-            return
-        only_name = next(iter(session_docs))
-        file = {"name": only_name, "path": session_docs[only_name]["path"]}
-
-    if not file:
-        await cl.Message(content="Нужно загрузить документ для анализа.").send()
-        return
-
-    async with cl.Step(name="Анализ документа", type="run") as run_step:
-        run_step.input = file["name"]
-        t_start = time.perf_counter()
-
-        try:
-            workflow = create_analysis_graph()
-            initial_state = {
-                "input_path": _to_host_path(file["path"]),
-                "doc_name": file["name"],
-                "doc_type": "",
-                "doc_metadata": {},
-                "items": [],
-                "full_text": "",
-                "summary": "",
-                "final_report": "",
-                "errors": [],
-            }
-
-            final_state = {}
-
-            async for event in workflow.astream(initial_state):
-                for node_name, output in event.items():
-                    final_state.update(output)
-
-                    label, step_type = ANALYSIS_NODE_LABELS.get(
-                        node_name, (node_name, "tool")
-                    )
-
-                    async with cl.Step(name=label, type=step_type) as step:
-                        if node_name == "classify":
-                            doc_type = output.get("doc_type", "?")
-                            meta = output.get("doc_metadata", {})
-                            step.output = (
-                                f"Тип: {doc_type}, "
-                                f"страниц: {meta.get('pages', '?')}, "
-                                f"символов: {meta.get('chars', '?')}, "
-                                f"таблиц: {meta.get('tables_count', '?')}"
-                            )
-
-                        elif node_name == "extract":
-                            n_items = len(output.get("items", []))
-                            step.output = f"Извлечено {n_items} позиций"
-
-                        elif node_name == "summarize":
-                            summary = output.get("summary", "")
-                            step.output = f"Сводка: {len(summary)} символов"
-
-                        elif node_name == "report":
-                            step.output = "Отчёт сгенерирован"
-
-            elapsed = time.perf_counter() - t_start
-            report = final_state.get("final_report", "")
-            errors = final_state.get("errors", [])
-
-            if report:
-                run_step.output = f"Анализ завершён за {elapsed:.1f}с"
-                await cl.Message(content=report).send()
-                await _attach_and_register_report(report)
-            elif errors:
-                run_step.output = "Завершено с ошибками"
-                await cl.Message(content=f"Ошибки:\n" + "\n".join(f"- {e}" for e in errors)).send()
-            else:
-                await cl.Message(content="Не удалось создать отчёт.").send()
-
-        except Exception as e:
-            run_step.output = f"Ошибка: {e}"
-            await cl.Message(content=f"Ошибка workflow анализа: {e}").send()
-
-
-# === Document Question (RAG) ===
-
-async def _handle_doc_question(query: str, session_docs: Dict, history: List):
-    """Вопрос по документам с inline citations, sources-блоком и evidence-policy."""
-    all_docs = _get_all_docs()
-    active_docs = _get_active_docs()
-    target_doc_name = _resolve_target_doc_name(query, all_docs)
-
-    scope_docs = active_docs
-    if target_doc_name:
-        scope_docs = [d for d in all_docs if str(d.get("display_name")) == target_doc_name]
-    elif _is_report_query(query):
-        report_docs = _get_report_docs()
-        if report_docs:
-            scope_docs = [report_docs[-1]]
-
-    await _ensure_rag_index_for_doc_ids([str(d["document_id"]) for d in scope_docs])
-    rag = cl.user_session.get("rag_pipeline")
-    rag_result = None
-    rag_meta: Dict[str, Any] = {}
-    rag_mode = "simple"
-
-    if rag and rag._indexed:
-        async with cl.Step(name="Поиск по документам", type="retrieval") as step:
-            try:
-                retrieve_top_k = max(20, int(getattr(rag, "top_k", 5)) * 4) if target_doc_name else None
-                rag_result = await asyncio.to_thread(rag.retrieve, query, retrieve_top_k)
-                rag_meta = rag_result.metadata or {}
-                rag_mode = str(rag_meta.get("mode", "simple"))
-                intent = rag_result.intent or {}
-                found_chunks = len(rag_result.chunks or [])
-                target_hint = f", target_doc: {target_doc_name}" if target_doc_name else ""
-                step.output = (
-                    f"Найдено {found_chunks} релевантных фрагментов "
-                    f"(mode: {rag_meta.get('mode', '?')}, "
-                    f"intent: {intent.get('intent', '?')}, "
-                    f"confidence: {intent.get('confidence', 0):.2f}{target_hint})"
-                )
-            except Exception as e:
-                logger.warning(f"RAG retrieve failed, falling back to naive: {e}")
-                rag_result = None
-
-    if rag_result is None:
-        await cl.Message(
-            content=(
-                "По текущему запросу не удалось получить проверяемые источники из RAG. "
-                "Уточните формулировку или вопрос к конкретной позиции."
-            )
-        ).send()
-        return
-
-    sources = _build_sources_from_rag_result(rag_result, rag, max_sources=20)
-    if target_doc_name:
-        sources = [s for s in sources if str(s.get("document_id")) == target_doc_name]
-        sources = _reindex_sources(sources)
-    if not sources:
-        fallback_reason = None
-        if target_doc_name:
-            fallback_reason = (
-                f"Для документа `{target_doc_name}` не найдено подтверждённых релевантных фрагментов "
-                "в активном наборе."
-            )
-        fallback = _build_doc_question_deterministic_fallback(
-            query=query,
-            sources=[],
-            fallback_type="insufficient_evidence",
-            fallback_reason=fallback_reason,
-        )
-        rendered = _render_doc_question_markdown(fallback)
-        msg = cl.Message(content=rendered)
-        await msg.send()
-        history.append({"role": "assistant", "content": rendered})
-        return
-
-    prompt = _build_doc_question_prompt_with_sources(query, history, sources)
-    response_text = await _infer_assistant_text(prompt, temperature=0.3)
-    citations_valid = _citations_are_valid(response_text, source_count=len(sources))
-
-    if not citations_valid or _needs_doc_question_regen(response_text, has_session_docs=bool(session_docs)):
-        strict_prompt = _build_doc_question_prompt_with_sources(
-            query,
-            history,
-            sources,
-        ) + "\n\nЖЕСТКОЕ ПРАВИЛО: обязательно используй только валидные ссылки [n] из каталога."
-        response_text = await _infer_assistant_text(strict_prompt, temperature=0.2)
-        citations_valid = _citations_are_valid(response_text, source_count=len(sources))
-
-    if not citations_valid:
-        fallback = _build_doc_question_deterministic_fallback(
-            query=query,
-            sources=sources,
-            fallback_type="citation_validation_failed",
-        )
-        rendered = _render_doc_question_markdown(fallback)
-        logger.info(
-            "DocQuestion fallback: type=%s mode=%s sources=%s",
-            fallback["fallback_type"],
-            rag_mode,
-            len(sources),
-        )
-        msg = cl.Message(content=rendered)
-        await msg.send()
-        history.append({"role": "assistant", "content": rendered})
-        return
-
-    cited_ids = _extract_citation_ids(response_text)
-    has_evidence = _has_sufficient_evidence(
-        sources=sources,
-        mode=rag_mode,
-        query=query,
-        citations_valid=True,
-    )
-    if not has_evidence:
-        payload = _build_doc_question_deterministic_fallback(
-            query=query,
-            sources=sources,
-            fallback_type="insufficient_evidence",
-        )
-    else:
-        confidence, label = _compute_confidence_v1(sources, cited_ids, "grounded_answer")
-        payload: DocQuestionResponse = {
-            "answer_text": _strip_model_source_sections(response_text),
-            "sources": sources,
-            "answer_mode": "grounded_answer",
-            "fallback_type": "none",
-            "fallback_reason": None,
-            "confidence": confidence,
-            "confidence_label": label,
-            "confidence_method": "heuristic_v1",
-            "confidence_version": "1",
-        }
-
-    logger.info(
-        "DocQuestion result: mode=%s chunks=%s citations=%s answer_mode=%s fallback=%s target_doc=%s top_raw=%.4f conf=%.2f",
-        rag_mode,
-        len(sources),
-        len(cited_ids),
-        payload["answer_mode"],
-        payload["fallback_type"],
-        target_doc_name or "-",
-        float(sources[0]["raw_score"]) if sources else 0.0,
-        payload["confidence"],
-    )
-    rendered = _render_doc_question_markdown(payload)
-    msg = cl.Message(content=rendered)
-    await msg.send()
-    history.append({"role": "assistant", "content": rendered})
-
-
-async def _handle_documents_summary(query: str, history: List):
-    docs = _get_all_docs()
-    if not docs:
-        await cl.Message(content="Нет загруженных документов для суммаризации.").send()
-        return
-
-    per_doc: List[Dict[str, str]] = []
-    async with cl.Step(name="Суммаризация документов", type="tool") as step:
-        for doc in docs:
-            doc_name = str(doc.get("display_name", "document"))
-            text = str(doc.get("text", ""))[:10000]
-            if not text.strip():
-                per_doc.append({"name": doc_name, "summary": "Документ пуст или текст не извлечён."})
-                continue
-            prompt = _build_prompt(
-                (
-                    "Кратко суммаризируй документ в 4-6 пунктов: тема, цель, ключевые требования/положения, "
-                    "сроки/ограничения (если есть), важные риски/последствия."
-                ),
-                [],
-                (
-                    "Ты аналитик документов. Пиши строго по тексту, без домыслов. "
-                    f"Документ: {doc_name}\n\nТЕКСТ:\n{text}"
-                ),
-            )
-            summary = await _infer_assistant_text(prompt, temperature=0.2)
-            per_doc.append({"name": doc_name, "summary": summary.strip()})
-
-        combined_input = "\n\n".join(
-            f"[{idx+1}] {item['name']}\n{item['summary']}" for idx, item in enumerate(per_doc)
-        )
-        global_prompt = _build_prompt(
-            "Собери общую сводку по набору документов.",
-            [],
-            (
-                "Ты аналитик. На основе сводок по документам сформируй:\n"
-                "1) ОБЩАЯ СВОДКА (5-8 предложений)\n"
-                "2) КЛЮЧЕВЫЕ РАЗЛИЧИЯ/АКЦЕНТЫ (если документов больше одного) списком\n"
-                "Пиши только на основе входных сводок.\n\n"
-                f"СВОДКИ:\n{combined_input}"
-            ),
-        )
-        global_summary = await _infer_assistant_text(global_prompt, temperature=0.2)
-        step.output = f"Суммаризировано документов: {len(per_doc)}"
-
-    lines = ["## Сводка по документам", "", "### По каждому документу"]
-    for item in per_doc:
-        lines.extend([f"#### {item['name']}", item["summary"], ""])
-    lines.extend(["### Общая сводка", global_summary.strip()])
-    rendered = "\n".join(lines).strip()
-    await cl.Message(content=rendered).send()
-    history.append({"role": "assistant", "content": rendered})
-
-
-# === General Chat ===
-
-GENERAL_CHAT_SYSTEM = (
-    "Ты — Agent Navigator. Отвечай естественно, кратко и по делу, как универсальный чат-ассистент. "
-    "Если пользователь общается в общем чате (приветствие, small talk, общие вопросы), "
-    "не навязывай загрузку документов и не перечисляй специализацию без запроса.\n\n"
-    "Когда пользователь явно просит анализ/сравнение/поиск по документам, переходи в профильную роль:\n"
-    "- Сравнение двух документов (договоров, технических заданий, редакций) с выявлением изменений\n"
-    "- Анализ соответствия сметы или КП техническому заданию (ТЗ vs смета/КП)\n"
-    "- Ответы на вопросы по содержимому загруженных документов\n"
-    "- Поиск конкретных условий, цифр и требований в документах\n\n"
-    "Не выдумывай факты и не заявляй о доступе к интернету/новостям/курсам/погоде, если такого доступа нет."
-)
-
-
-async def _handle_chat(query: str, session_docs: Dict, history: List, social_query: bool = False):
-    # Semantic Router определил needs_rag=False → отвечаем без контекста документов.
-    # Даже если документы загружены — greeting/general_chat не нуждаются в RAG.
-    prompt = _build_prompt(query, history, GENERAL_CHAT_SYSTEM)
-    if social_query and not session_docs:
-        prompt += (
-            "\n\nКонтекст: документов в сессии нет. "
-            "Ответь как обычный чат-ассистент, без предложений загрузить документы, "
-            "если пользователь сам не просит анализ документов."
-        )
-    if social_query and session_docs:
-        prompt += (
-            "\n\nКонтекст: у пользователя уже есть загруженные документы. "
-            "Отвечай как в обычном чате, без шаблонных фраз и без просьбы перезагрузить файлы."
-        )
-    msg = cl.Message(content="")
-    await _stream_response(prompt, msg, history)

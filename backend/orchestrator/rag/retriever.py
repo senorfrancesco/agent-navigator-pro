@@ -170,6 +170,27 @@ class HybridRetriever:
 
         self.indexed = True
 
+    def index_with_embeddings(self, documents: List[str], embeddings: np.ndarray):
+        """
+        Индексирует документы с уже посчитанными dense embeddings.
+
+        Args:
+            documents: Список текстов чанков
+            embeddings: np.ndarray shape (N, dim)
+        """
+        self.documents = documents
+
+        if self.use_bm25 and self.bm25:
+            self.bm25.fit(documents)
+
+        array = np.asarray(embeddings, dtype=np.float32)
+        if array.ndim != 2 or array.shape[0] != len(documents):
+            raise ValueError("Embeddings must be a 2D array aligned with documents")
+        norms = np.linalg.norm(array, axis=1, keepdims=True)
+        norms = np.where(norms == 0, 1, norms)
+        self.doc_embeddings = array / norms
+        self.indexed = True
+
     def search(
         self,
         query: str,

@@ -12,6 +12,26 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BACKEND_DIR="$PROJECT_ROOT/backend"
 ENV_FILE="$BACKEND_DIR/.env"
+HARDWARE_OVERRIDE_ENV_FILE="${AGENT_NAVIGATOR_BACKEND_HARDWARE_OVERRIDE_FILE:-$BACKEND_DIR/.env.hardware.override}"
+RUNTIME_ENV_FILE="${AGENT_NAVIGATOR_RUNTIME_ENV_FILE:-$BACKEND_DIR/.env.runtime}"
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    cat <<EOF
+run_openwebui.sh
+
+legacy entrypoint для старого Open WebUI path.
+Скрипт сохраняется для обратной совместимости, но основной UI проекта — Chainlit.
+
+Использование:
+  ./scripts/run_openwebui.sh
+
+Флаги:
+  У скрипта нет пользовательских флагов.
+  -h, --help
+      Показать эту справку.
+EOF
+    exit 0
+fi
 
 # Цвета для вывода
 RED='\033[0;31m'
@@ -35,10 +55,24 @@ else
     echo -e "${YELLOW}Создайте .env из .env.example: cp .env.example .env${NC}"
 fi
 
+if [ -f "$HARDWARE_OVERRIDE_ENV_FILE" ]; then
+    echo -e "${BLUE}Загрузка hardware overrides $HARDWARE_OVERRIDE_ENV_FILE...${NC}"
+    set -a
+    source "$HARDWARE_OVERRIDE_ENV_FILE"
+    set +a
+fi
+
+if [ -f "$RUNTIME_ENV_FILE" ]; then
+    echo -e "${BLUE}Загрузка runtime overrides $RUNTIME_ENV_FILE...${NC}"
+    set -a
+    source "$RUNTIME_ENV_FILE"
+    set +a
+fi
+
 # -------------------------------------------
 # Определение Conda окружения
 # -------------------------------------------
-CONDA_ENV="${CONDA_ENV:-diploma_llm}"
+CONDA_ENV="${CONDA_ENV:-base}"
 CONDA_SH_PATH=""
 
 # Функция для поиска и активации conda
@@ -103,24 +137,8 @@ fi
 # Создаем новую tmux сессию
 # -------------------------------------------
 SESSION_NAME="agent-navigator"
-
-if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
-    echo -e "${YELLOW}Завершение существующей сессии...${NC}"
-    tmux kill-session -t "$SESSION_NAME"
-fi
-
-# Явное завершение llama-server (остаётся в памяти после закрытия tmux)
-LLAMA_PIDS=$(pgrep -f "llama-server" 2>/dev/null)
-if [ -n "$LLAMA_PIDS" ]; then
-    echo -e "${YELLOW}Завершение llama-server перед запуском (PID: $LLAMA_PIDS)...${NC}"
-    echo "$LLAMA_PIDS" | xargs kill 2>/dev/null
-    sleep 1
-    LLAMA_PIDS=$(pgrep -f "llama-server" 2>/dev/null)
-    if [ -n "$LLAMA_PIDS" ]; then
-        echo "$LLAMA_PIDS" | xargs kill -9 2>/dev/null
-    fi
-    echo -e "${GREEN}  llama-server завершён${NC}"
-fi
+echo -e "${YELLOW}Завершение существующих tmux/runtime/docker процессов...${NC}"
+"$SCRIPT_DIR/stop_all.sh" >/dev/null 2>&1 || true
 
 tmux new-session -d -s "$SESSION_NAME" -x 200 -y 50
 
@@ -159,19 +177,19 @@ sleep 2
 # Окно 2: Document Server
 echo -e "${GREEN}Запуск Document Server на порту $DOC_PORT...${NC}"
 tmux new-window -t "$SESSION_NAME" -n "doc-server"
-tmux send-keys -t "$SESSION_NAME:doc-server" "cd $BACKEND_DIR/services/document_server && $ACTIVATE_CMD && uvicorn mcp_document_server:app --host 0.0.0.0 --port $DOC_PORT 2>&1 | tee doc-server.log" Enter
+tmux send-keys -t "$SESSION_NAME:doc-server" "cd $BACKEND_DIR/services/document_server && $ACTIVATE_CMD && export PYTHONPATH='$BACKEND_DIR' && uvicorn mcp_document_server:app --host 0.0.0.0 --port $DOC_PORT 2>&1 | tee doc-server.log" Enter
 sleep 2
 
 # Окно 3: Legal Server
 echo -e "${GREEN}Запуск Legal Server на порту $LEGAL_PORT...${NC}"
 tmux new-window -t "$SESSION_NAME" -n "legal-server"
-tmux send-keys -t "$SESSION_NAME:legal-server" "cd $BACKEND_DIR/services/legal_server && $ACTIVATE_CMD && uvicorn mcp_legal_server:app --host 0.0.0.0 --port $LEGAL_PORT 2>&1 | tee legal-server.log" Enter
+tmux send-keys -t "$SESSION_NAME:legal-server" "cd $BACKEND_DIR/services/legal_server && $ACTIVATE_CMD && export PYTHONPATH='$BACKEND_DIR' && uvicorn mcp_legal_server:app --host 0.0.0.0 --port $LEGAL_PORT 2>&1 | tee legal-server.log" Enter
 sleep 2
 
 # Окно 4: UMS (Unified Model Server)
 echo -e "${GREEN}Запуск Unified Model Server на порту $UMS_PORT...${NC}"
 tmux new-window -t "$SESSION_NAME" -n "ums"
-tmux send-keys -t "$SESSION_NAME:ums" "cd $BACKEND_DIR/services/model_manager && $ACTIVATE_CMD && python unified_model_server.py 2>&1 | tee ums.log" Enter
+tmux send-keys -t "$SESSION_NAME:ums" "cd $BACKEND_DIR && $ACTIVATE_CMD && export PYTHONPATH='$BACKEND_DIR' && python services/model_manager/unified_model_server.py 2>&1 | tee services/model_manager/ums.log" Enter
 
 # Окно 5: Monitor/Logs
 echo -e "${GREEN}Открытие окна мониторинга...${NC}"

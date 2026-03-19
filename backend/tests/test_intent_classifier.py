@@ -2,9 +2,29 @@
 Тесты для EmbeddingIntentClassifier — классификация интентов без LLM.
 """
 
+import os
+import sys
+import hashlib
+
 import numpy as np
 import pytest
-from orchestrator.rag.classifier import EmbeddingIntentClassifier
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from services.observability import render_metrics_text, reset_observability_metrics
+from orchestrator.rag.classifier import (
+    EmbeddingIntentClassifier,
+    LLMIntentClassifier,
+    UNSURE_INTENT,
+    select_classifier_result,
+)
+
+
+@pytest.fixture(autouse=True)
+def _reset_classifier_metrics():
+    reset_observability_metrics()
+    yield
+    reset_observability_metrics()
 
 
 def _mock_embed_fn(texts):
@@ -12,7 +32,9 @@ def _mock_embed_fn(texts):
     results = []
     for text in texts:
         # Создаём детерминированный вектор из текста
-        np.random.seed(hash(text.lower().strip()) % (2**31))
+        digest = hashlib.sha256(text.lower().strip().encode("utf-8")).digest()
+        seed = int.from_bytes(digest[:4], "big") % (2**31)
+        np.random.seed(seed)
         vec = np.random.randn(768).astype(np.float32)
         vec /= np.linalg.norm(vec)
         results.append(vec)
@@ -114,3 +136,121 @@ class TestEmbeddingIntentClassifier:
         for q, _, _ in TEST_QUERIES:
             result = self.classifier.classify(q)
             assert result["margin"] >= 0
+
+
+def test_llm_intent_classifier_parses_json():
+    classifier = LLMIntentClassifier(
+        infer_text_fn=lambda prompt: '{"intent":"compare_documents","confidence":0.93,"needs_rag":true}'
+    )
+
+    result = classifier.classify("Сравни документы")
+
+    assert result is not None
+    assert result["intent"] == "compare_documents"
+    assert result["confidence"] == pytest.approx(0.93)
+    assert result["needs_rag"] is True
+    assert result["source"] == "llm"
+
+
+def test_llm_intent_classifier_rejects_unknown_intent():
+    classifier = LLMIntentClassifier(
+        infer_text_fn=lambda prompt: '{"intent":"unknown_category","confidence":0.99}'
+    )
+
+    assert classifier.classify("какой-то запрос") is None
+    metrics = render_metrics_text()
+    assert "agent_nav_fallback_events_total" in metrics
+    assert 'component="intent_classifier"' in metrics
+    assert 'fallback="llm_unsupported_intent"' in metrics
+
+
+def test_llm_intent_classifier_non_json_records_metric():
+    classifier = LLMIntentClassifier(
+        infer_text_fn=lambda prompt: "not a json payload"
+    )
+
+    assert classifier.classify("какой-то запрос") is None
+    metrics = render_metrics_text()
+    assert "agent_nav_fallback_events_total" in metrics
+    assert 'component="intent_classifier"' in metrics
+    assert 'fallback="llm_non_json"' in metrics
+
+
+def test_select_classifier_result_hybrid_prefers_confident_llm():
+    result = select_classifier_result(
+        "hybrid",
+        embedder_result={"intent": "general_chat", "confidence": 0.61, "needs_rag": False},
+        llm_result={"intent": "document_question", "confidence": 0.88, "needs_rag": True},
+        llm_confidence_threshold=0.75,
+    )
+
+    assert result["intent"] == "document_question"
+    assert result["source"] == "llm"
+
+
+def test_select_classifier_result_hybrid_falls_back_to_embedder():
+    result = select_classifier_result(
+        "hybrid",
+        embedder_result={"intent": "equipment_analysis", "confidence": 0.67, "needs_rag": True},
+        llm_result={"intent": "general_chat", "confidence": 0.41, "needs_rag": False},
+        llm_confidence_threshold=0.75,
+    )
+
+    assert result["intent"] == "equipment_analysis"
+    assert result["source"] == "embedder_fallback"
+    assert result["llm_fallback"]["intent"] == "general_chat"
+
+
+def test_select_classifier_result_embedder_abstains_when_below_thresholds():
+    result = select_classifier_result(
+        "embedder",
+        embedder_result={"intent": "document_question", "confidence": 0.42, "margin": 0.03, "needs_rag": True},
+        llm_result=None,
+        embedder_confidence_threshold=0.6,
+        embedder_margin_threshold=0.1,
+    )
+
+    assert result["intent"] == UNSURE_INTENT
+    assert result["predicted_intent"] == "document_question"
+    assert result["abstained"] is True
+    assert result["abstain_reason"] == "embedder_low_confidence"
+    assert result["source"] == "embedder_abstain"
+    assert result["thresholds"] == {"confidence": 0.6, "margin": 0.1}
+
+
+def test_select_classifier_result_hybrid_can_end_unsure():
+    result = select_classifier_result(
+        "hybrid",
+        embedder_result={"intent": "compare_documents", "confidence": 0.48, "margin": 0.02, "needs_rag": True},
+        llm_result={"intent": "general_chat", "confidence": 0.41, "needs_rag": False},
+        llm_confidence_threshold=0.75,
+        embedder_confidence_threshold=0.6,
+        embedder_margin_threshold=0.1,
+    )
+
+    assert result["intent"] == UNSURE_INTENT
+    assert result["predicted_intent"] == "compare_documents"
+    assert result["abstained"] is True
+    assert result["source"] == "hybrid_unsure"
+    metrics = render_metrics_text()
+    assert "agent_nav_fallback_events_total" in metrics
+    assert 'fallback="hybrid_low_confidence_unsure"' in metrics
+
+
+def test_select_classifier_result_llm_fallback_still_respects_embedder_abstain():
+    result = select_classifier_result(
+        "llm",
+        embedder_result={"intent": "document_question", "confidence": 0.42, "margin": 0.03, "needs_rag": True},
+        llm_result=None,
+        embedder_confidence_threshold=0.6,
+        embedder_margin_threshold=0.1,
+    )
+
+    assert result["intent"] == UNSURE_INTENT
+    assert result["predicted_intent"] == "document_question"
+    assert result["abstained"] is True
+    assert result["abstain_reason"] == "llm_fallback_embedder_low_confidence"
+    assert result["source"] == "embedder_abstain"
+    metrics = render_metrics_text()
+    assert "agent_nav_fallback_events_total" in metrics
+    assert 'fallback="llm_missing_embedder_fallback"' in metrics

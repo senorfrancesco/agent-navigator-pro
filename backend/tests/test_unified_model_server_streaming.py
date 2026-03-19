@@ -41,8 +41,10 @@ class _FakeStreamContext:
 
 
 class _FakeAsyncClient:
-    def __init__(self, stream_context):
+    def __init__(self, stream_context, *, headers=None):
         self._stream_context = stream_context
+        self.headers = headers or {}
+        self.calls = []
 
     async def __aenter__(self):
         return self
@@ -51,6 +53,7 @@ class _FakeAsyncClient:
         return False
 
     def stream(self, method, url, json):
+        self.calls.append({"method": method, "url": url, "json": json, "headers": dict(self.headers)})
         return self._stream_context
 
 
@@ -106,3 +109,33 @@ async def test_proxy_sse_stream_closes_upstream_when_consumer_stops_early():
         await stream.aclose()
 
     assert stream_context.exited is True
+
+
+@pytest.mark.asyncio
+async def test_proxy_sse_stream_passes_upstream_headers():
+    response = _FakeResponse(['data: {"choices":[{"text":"Hello"}]}', "data: [DONE]"])
+    stream_context = _FakeStreamContext(response)
+    fake_client = _FakeAsyncClient(stream_context, headers={"Authorization": "Bearer test-token"})
+
+    with patch(
+        "services.model_manager.unified_model_server.httpx.AsyncClient",
+        return_value=fake_client,
+    ):
+        chunks = [
+            chunk async for chunk in ums_server._proxy_sse_stream(
+                "http://vllm.local/v1/completions",
+                {"prompt": "x", "stream": True},
+                asyncio.Semaphore(1),
+                headers={"Authorization": "Bearer test-token"},
+            )
+        ]
+
+    assert chunks[-1] == b"data: [DONE]\n\n"
+    assert fake_client.calls == [
+        {
+            "method": "POST",
+            "url": "http://vllm.local/v1/completions",
+            "json": {"prompt": "x", "stream": True},
+            "headers": {"Authorization": "Bearer test-token"},
+        }
+    ]

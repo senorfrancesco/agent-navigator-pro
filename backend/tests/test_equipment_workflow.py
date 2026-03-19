@@ -21,6 +21,7 @@ import pytest
 import tempfile
 import time
 import httpx
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Пути для импорта
@@ -33,7 +34,7 @@ from orchestrator.workflows.equipment import (
     _normalize_spec_for_polish,
     _build_polish_source_specs,
     _build_polish_batches,
-    _parse_polish_xml_results,
+    _parse_polish_results_json,
     _polish_items_specs_llm,
     _item_to_text,
     _route_after_extract,
@@ -52,6 +53,21 @@ from orchestrator.workflows.equipment import (
     _extract_from_single_chunk,
     _extract_items_llm,
 )
+from orchestrator.equipment_parsing import (
+    _extract_items_from_docx_lines_fallback,
+    extract_items_docx_fallback,
+    load_docx_elements,
+    parse_generic_list_like_elements,
+    parse_offer_like_elements,
+    parse_specification_like_elements,
+    score_document_role,
+)
+from services.observability import render_metrics_text, reset_observability_metrics
+
+
+FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "equipment_docs"
+COMMERCIAL_OFFER_DOCX = FIXTURES_DIR / "commercial_offer_sample.docx"
+SPECIFICATION_DOCX = FIXTURES_DIR / "specification_sample.docx"
 
 
 # ============================================================================
@@ -104,9 +120,17 @@ def base_state():
         "matches": [],
         "analysis_results": [],
         "final_report": "",
+        "extraction_metadata": {},
         "errors": [],
         "session_id": "test-session",
     }
+
+
+@pytest.fixture(autouse=True)
+def _reset_equipment_metrics():
+    reset_observability_metrics()
+    yield
+    reset_observability_metrics()
 
 
 @pytest.fixture
@@ -286,6 +310,126 @@ class TestParseTableRows:
         ]
 
 
+class TestDocxFallbackExtraction:
+
+    def test_score_document_role_detects_offer_like_doc(self):
+        elements = load_docx_elements(str(COMMERCIAL_OFFER_DOCX))
+
+        detection = score_document_role(elements)
+
+        assert detection["role"] == "offer"
+        assert detection["feature_scores"]["offer"] > detection["feature_scores"]["specification"]
+
+    def test_score_document_role_detects_specification_like_doc(self):
+        elements = load_docx_elements(str(SPECIFICATION_DOCX))
+
+        detection = score_document_role(elements)
+
+        assert detection["role"] == "specification"
+        assert detection["feature_scores"]["specification"] > detection["feature_scores"]["offer"]
+
+    def test_extract_items_from_docx_lines_fallback_parses_commercial_offer_rows(self):
+        lines = [
+            "КОММЕРЧЕСКОЕ ПРЕДЛОЖЕНИЕ № 45/ИТ-2024",
+            "№Наименование товара и краткие характеристикиКол-во (шт)Цена за ед. (руб.)Сумма (руб.)",
+            "1Сервер Т-Платформы E-200 (Intel Xeon Silver 4310, 64GB RAM, 2x480GB SSD Enterprise, Rail Kit)2485 000,00970 000,00",
+            "2Рабочая станция «Графит» (Core i7-13700, 32GB RAM, 1TB NVMe, RTX 3060 12GB)5125 000,00625 000,00",
+            "3Монитор 27\" Professional Series (IPS, 2560x1440, 75Hz, HDMI/DP)528 500,00142 500,00",
+            "ИТОГО:1 737 500,00",
+        ]
+
+        items = _extract_items_from_docx_lines_fallback(lines)
+
+        assert len(items) == 3
+        assert items[0]["name"] == "Сервер Т-Платформы E-200"
+        assert items[0]["quantity"] == "2"
+        assert items[0]["price"] == "485 000,00"
+        assert "64GB RAM" in items[0]["specs"]
+        assert items[2]["name"].startswith("Монитор 27")
+        assert items[2]["quantity"] == "5"
+
+    def test_extract_items_from_docx_lines_fallback_parses_tz_specification_blocks(self):
+        lines = [
+            "Часть VI ТЕХНИЧЕСКАЯ ЧАСТЬ ЗАКУПОЧНОЙ ДОКУМЕНТАЦИИ.",
+            "Техническое задание на поставку сетевого и серверного оборудования.",
+            "№ п/п",
+            "Наименование оборудования",
+            "Технические характеристики оборудования/работ",
+            "Кол-во",
+            "Страна происхождения",
+            "1.",
+            "Сетевой коммутатор 10Gb",
+            "Порты:",
+            "Общее число портов 12 шт. Из них:",
+            "Портов 100M/1G/2.5G/5G/10G Ethernet (RJ-45) - 10 шт.",
+            "Портов SFP+ 1G/10G - 2 шт.",
+            "2",
+            "2.",
+            "Сетевой накопитель",
+            "Сетевой накопитель в конфигурации:",
+            "Память не менее 4 ГБ (DDR4)",
+            "Число слотов не менее 8",
+            "1",
+        ]
+
+        items = _extract_items_from_docx_lines_fallback(lines)
+
+        assert len(items) == 2
+        assert items[0]["name"] == "Сетевой коммутатор 10Gb"
+        assert items[0]["quantity"] == "2"
+        assert "Порты:" in items[0]["specs"]
+        assert items[1]["name"] == "Сетевой накопитель"
+        assert items[1]["quantity"] == "1"
+        assert "Память не менее 4 ГБ" in items[1]["specs"]
+
+    def test_parse_offer_like_elements_uses_row_like_strategy(self):
+        elements = [
+            {"type": "title", "text": "КОММЕРЧЕСКОЕ ПРЕДЛОЖЕНИЕ", "page": None, "metadata": {}},
+            {"type": "row_like", "text": "1Сервер Т-Платформы E-200 (Intel Xeon Silver 4310, 64GB RAM, 2x480GB SSD Enterprise, Rail Kit)2485 000,00970 000,00", "page": None, "metadata": {}},
+        ]
+
+        items = parse_offer_like_elements(elements)
+
+        assert len(items) == 1
+        assert items[0]["name"] == "Сервер Т-Платформы E-200"
+
+    def test_parse_specification_like_elements_uses_numbered_blocks(self):
+        elements = [
+            {"type": "title", "text": "№ п/п", "page": None, "metadata": {}},
+            {"type": "paragraph", "text": "Наименование оборудования", "page": None, "metadata": {}},
+            {"type": "paragraph", "text": "Технические характеристики оборудования/работ", "page": None, "metadata": {}},
+            {"type": "paragraph", "text": "Страна происхождения", "page": None, "metadata": {}},
+            {"type": "row_like", "text": "1.", "page": None, "metadata": {}},
+            {"type": "paragraph", "text": "Сетевой коммутатор 10Gb", "page": None, "metadata": {}},
+            {"type": "paragraph", "text": "Порты: 12 шт.", "page": None, "metadata": {}},
+            {"type": "list_item", "text": "2", "page": None, "metadata": {}},
+        ]
+
+        items = parse_specification_like_elements(elements)
+
+        assert len(items) == 1
+        assert items[0]["name"] == "Сетевой коммутатор 10Gb"
+
+    def test_parse_generic_list_like_elements_extracts_numbered_items(self):
+        elements = [
+            {"type": "row_like", "text": "1. Ноутбук для разработчика", "page": None, "metadata": {}},
+            {"type": "row_like", "text": "2. Монитор 27 дюймов", "page": None, "metadata": {}},
+            {"type": "paragraph", "text": "Срок поставки 15 дней", "page": None, "metadata": {}},
+        ]
+
+        items = parse_generic_list_like_elements(elements)
+
+        assert [item["name"] for item in items] == ["Ноутбук для разработчика", "Монитор 27 дюймов"]
+
+    def test_extract_items_docx_fallback_returns_strategy_metadata(self):
+        items, metadata = extract_items_docx_fallback(str(COMMERCIAL_OFFER_DOCX), [])
+
+        assert len(items) == 3
+        assert metadata["strategy_name"] == "offer_like"
+        assert metadata["role"] == "offer"
+        assert metadata["matched_blocks"] == 3
+
+
 # ============================================================================
 # Tests: _polish_items_specs_llm
 # ============================================================================
@@ -349,22 +493,17 @@ class TestPolishItemsSpecsLlm:
         ordered = [entry["item"]["name"] for batch in batches for entry in batch]
         assert ordered == ["A", "B", "C", "D"]
 
-    def test_parse_polish_xml_results_maps_by_id(self):
-        content = (
-            "<results>"
-            "<item id='1'>Второй</item>"
-            "<item id='0'>Первый</item>"
-            "</results>"
-        )
-        assert _parse_polish_xml_results(content, expected_ids=[0, 1]) == {0: "Первый", 1: "Второй"}
+    def test_parse_polish_results_json_maps_by_id(self):
+        content = '{"schema_version":"b3.11.v1","ok":true,"data":{"results":[{"id":1,"text":"Второй"},{"id":0,"text":"Первый"}]},"error":null}'
+        assert _parse_polish_results_json(content, expected_ids=[0, 1]) == {0: "Первый", 1: "Второй"}
 
-    def test_parse_polish_xml_results_rejects_missing_expected_id(self):
-        content = "<results><item id='0'>Первый</item></results>"
-        assert _parse_polish_xml_results(content, expected_ids=[0, 1]) is None
+    def test_parse_polish_results_json_rejects_missing_expected_id(self):
+        content = '{"schema_version":"b3.11.v1","ok":true,"data":{"results":[{"id":0,"text":"Первый"}]},"error":null}'
+        assert _parse_polish_results_json(content, expected_ids=[0, 1]) is None
 
-    def test_parse_polish_xml_results_accepts_code_fence_wrapped_xml(self):
-        content = "```xml\n<results><item id='0'>Первый:</item></results>\n```"
-        assert _parse_polish_xml_results(content, expected_ids=[0]) == {0: "Первый"}
+    def test_parse_polish_results_json_rejects_code_fence_wrapped_payload(self):
+        content = '```json\n{"schema_version":"b3.11.v1","ok":true,"data":{"results":[{"id":0,"text":"Первый"}]},"error":null}\n```'
+        assert _parse_polish_results_json(content, expected_ids=[0]) is None
 
     @pytest.mark.asyncio
     async def test_polish_items_specs_llm_uses_id_mapping_not_position_only(self):
@@ -383,10 +522,10 @@ class TestPolishItemsSpecsLlm:
 
         response = {
             "content": (
-                "<results>"
-                "<item id='1'>Тип корпуса - Rack 19\"</item>"
-                "<item id='0'>Тип устройства - Сервер</item>"
-                "</results>"
+                '{"schema_version":"b3.11.v1","ok":true,"data":{"results":['
+                '{"id":1,"text":"Тип корпуса - Rack 19\\""},'
+                '{"id":0,"text":"Тип устройства - Сервер"}'
+                ']},"error":null}'
             )
         }
 
@@ -414,7 +553,7 @@ class TestPolishItemsSpecsLlm:
         ]
 
         malformed_response = {
-            "content": "<results><item id='0'>Тип устройства - Сервер</item><item>Тип корпуса - Rack 19</item></results>"
+            "content": '{"schema_version":"b3.11.v1","ok":true,"data":{"results":[{"id":0,"text":"Тип устройства - Сервер"},{"text":"Тип корпуса - Rack 19"}]},"error":null}'
         }
 
         with patch("orchestrator.workflows.equipment.ums_client") as mock_ums:
@@ -424,6 +563,10 @@ class TestPolishItemsSpecsLlm:
 
         assert items[0]["specs"] == "Тип устройства: Сервер"
         assert items[1]["specs"] == "Тип корпуса: Rack 19"
+        metrics = render_metrics_text()
+        assert "agent_nav_equipment_fallback_total" in metrics
+        assert 'stage="polisher"' in metrics
+        assert 'reason="parse_failed"' in metrics
 
     @pytest.mark.asyncio
     async def test_polish_items_specs_llm_sends_large_item_in_single_batch(self):
@@ -440,8 +583,8 @@ class TestPolishItemsSpecsLlm:
         items = [large_item, small_item]
 
         responses = [
-            {"content": "<results><item id='0'>Тяжелая спецификация</item></results>"},
-            {"content": "<results><item id='0'>Короткая спецификация</item></results>"},
+            {"content": '{"schema_version":"b3.11.v1","ok":true,"data":{"results":[{"id":0,"text":"Тяжелая спецификация"}]},"error":null}'},
+            {"content": '{"schema_version":"b3.11.v1","ok":true,"data":{"results":[{"id":0,"text":"Короткая спецификация"}]},"error":null}'},
         ]
 
         with patch("orchestrator.workflows.equipment.ums_client") as mock_ums:
@@ -465,13 +608,7 @@ class TestPolishItemsSpecsLlm:
         ]
 
         response = {
-            "content": (
-                "<results>"
-                "<item id='0'>Spec A</item>"
-                "<item id='1'>Spec B</item>"
-                "<item id='2'>Spec C</item>"
-                "</results>"
-            )
+            "content": '{"schema_version":"b3.11.v1","ok":true,"data":{"results":[{"id":0,"text":"Spec A"},{"id":1,"text":"Spec B"},{"id":2,"text":"Spec C"}]},"error":null}'
         }
 
         with patch("orchestrator.workflows.equipment.ums_client") as mock_ums:
@@ -679,6 +816,38 @@ class TestLoadAndExtractNode:
         assert result["items_1"] == []
         assert result["items_2"] == []
 
+    @pytest.mark.asyncio
+    async def test_prefers_docx_fallback_before_llm_when_structured_tables_are_empty(self, base_state):
+        base_state["input_1"] = "/tmp/test_kp.docx"
+        base_state["input_2"] = "/tmp/test_tz.docx"
+
+        fallback_doc1 = [
+            {"name": "Сервер Т-Платформы E-200", "specs": "64GB RAM", "quantity": "2", "price": "485 000,00", "unit": "шт.", "source": "docx_text_fallback", "page": None},
+            {"name": "Рабочая станция Графит", "specs": "32GB RAM", "quantity": "5", "price": "125 000,00", "unit": "шт.", "source": "docx_text_fallback", "page": None},
+        ]
+        fallback_doc2 = [
+            {"name": "Сетевой коммутатор 10Gb", "specs": "Порты: 12 шт.", "quantity": "2", "price": "", "unit": "", "source": "docx_text_fallback", "page": None},
+            {"name": "Сетевой накопитель", "specs": "Память 4 ГБ", "quantity": "1", "price": "", "unit": "", "source": "docx_text_fallback", "page": None},
+        ]
+
+        with patch("orchestrator.workflows.equipment._extract_tables_from_doc", new_callable=AsyncMock) as mock_tables, \
+             patch("orchestrator.workflows.equipment._extract_items_docx_fallback") as mock_fallback, \
+             patch("orchestrator.workflows.equipment._extract_items_llm", new_callable=AsyncMock) as mock_llm, \
+             patch("orchestrator.workflows.equipment._polish_items_specs_llm", new_callable=AsyncMock):
+            mock_tables.return_value = []
+            mock_fallback.side_effect = [
+                (fallback_doc1, {"strategy_name": "offer_like", "role": "offer", "confidence": 0.91, "matched_blocks": 2, "feature_scores": {"offer": 0.9}}),
+                (fallback_doc2, {"strategy_name": "specification_like", "role": "specification", "confidence": 0.88, "matched_blocks": 2, "feature_scores": {"specification": 0.88}}),
+            ]
+
+            result = await load_and_extract_node(base_state)
+
+        assert len(result["items_1"]) == 2
+        assert len(result["items_2"]) == 2
+        assert result["extraction_metadata"]["doc_1"]["strategy_name"] == "offer_like"
+        assert result["extraction_metadata"]["doc_2"]["strategy_name"] == "specification_like"
+        mock_llm.assert_not_awaited()
+
 
 # ============================================================================
 # Tests: match_items_node (mocked)
@@ -848,6 +1017,10 @@ class TestEvaluateComplianceNode:
         results = result["analysis_results"]
         assert len(results) == 1
         assert results[0]["result"] == "ERROR"
+        metrics = render_metrics_text()
+        assert "agent_nav_equipment_fallback_total" in metrics
+        assert 'stage="evaluate"' in metrics
+        assert 'reason="llm_batch_error"' in metrics
 
     @pytest.mark.asyncio
     async def test_smeta_vs_smeta_mode(self, base_state):
@@ -901,6 +1074,9 @@ class TestGenerateEquipmentReportNode:
         assert "Смета КП.pdf" in report
         assert "PASS" in report
         assert "Отчет сохранен" in report
+        assert "Таблица соответствия ТЗ и КП" in report
+        assert "Позиция ТЗ" in report
+        assert "Позиция КП" in report
 
     @pytest.mark.asyncio
     async def test_report_empty_items(self, base_state):
@@ -953,7 +1129,7 @@ class TestGenerateEquipmentReportNode:
 
         # Файл должен быть сохранён в tmpdir
         import glob
-        reports = glob.glob(os.path.join(tmpdir, "Report_Equipment_*.md"))
+        reports = glob.glob(os.path.join(tmpdir, "Report_Equipment_*.pdf"))
         assert len(reports) == 1
 
     @pytest.mark.asyncio
@@ -973,7 +1149,7 @@ class TestGenerateEquipmentReportNode:
         assert "уже сохранен" in result2["final_report"]
 
         import glob
-        reports = glob.glob(os.path.join(tmpdir, "Report_Equipment_*.md"))
+        reports = glob.glob(os.path.join(tmpdir, "Report_Equipment_*.pdf"))
         assert len(reports) == 1  # Только один файл
 
     @pytest.mark.asyncio
@@ -1003,6 +1179,38 @@ class TestGenerateEquipmentReportNode:
         assert "Сервер \\| Lenovo" in report
         assert "CPU: 2x Xeon\nRAM: 256GB" in report
 
+    @pytest.mark.asyncio
+    async def test_report_moves_unmatched_kp_positions_to_separate_section(self, base_state):
+        base_state["items_1"] = [{"name": "Коммутатор"}]
+        base_state["items_2"] = [
+            {"name": "Коммутатор Cisco"},
+            {"name": "ИБП APC", "specs": "3000VA", "quantity": "5", "price": "28000"},
+        ]
+        base_state["analysis_results"] = [
+            {
+                "item_1": {"name": "Коммутатор"},
+                "item_2": {"name": "Коммутатор Cisco"},
+                "result": "PASS",
+                "reason": "Соответствует",
+                "type": "MODIFIED",
+            },
+            {
+                "item_1": None,
+                "item_2": {"name": "ИБП APC", "specs": "3000VA", "quantity": "5", "price": "28000"},
+                "result": "GAP",
+                "reason": "Добавлена",
+                "type": "ADDED",
+            },
+        ]
+
+        with patch.dict(os.environ, {"UPLOADS_DIR": tempfile.mkdtemp()}):
+            result = await generate_equipment_report_node(base_state)
+
+        report = result["final_report"]
+        assert "## Таблица соответствия ТЗ и КП" in report
+        assert "## Дополнительные позиции из КП" in report
+        assert "ИБП APC" in report
+
 
 # ============================================================================
 # Tests: create_equipment_graph
@@ -1015,23 +1223,19 @@ class TestCreateEquipmentGraph:
         graph = create_equipment_graph()
         assert graph is not None
 
-    @pytest.mark.asyncio
-    async def test_empty_extraction_skips_to_report(self, base_state):
-        """Conditional edge: пустые items → сразу report."""
-        with patch("orchestrator.workflows.equipment.load_and_extract_node", new_callable=AsyncMock) as mock_extract, \
-             patch("orchestrator.workflows.equipment.match_items_node", new_callable=AsyncMock) as mock_match, \
-             patch("orchestrator.workflows.equipment.generate_equipment_report_node", new_callable=AsyncMock) as mock_report:
+    def test_graph_contains_conditional_extract_routing(self):
+        """Граф сохраняет conditional routing extract -> match/report без runtime ainvoke."""
+        graph = create_equipment_graph()
+        compiled = graph.get_graph()
 
-            mock_extract.return_value = {"items_1": [], "items_2": [], "errors": ["No items found"]}
-            mock_report.return_value = {"final_report": "Empty report"}
+        edge_pairs = {(edge.source, edge.target, edge.conditional) for edge in compiled.edges}
 
-            graph = create_equipment_graph()
-            result = await graph.ainvoke(base_state)
-
-            mock_extract.assert_called_once()
-            mock_match.assert_not_called()  # Skipped!
-            mock_report.assert_called_once()
-            assert result["final_report"] == "Empty report"
+        assert ("__start__", "extract", False) in edge_pairs
+        assert ("extract", "match", True) in edge_pairs
+        assert ("extract", "report", True) in edge_pairs
+        assert ("match", "evaluate", False) in edge_pairs
+        assert ("evaluate", "report", False) in edge_pairs
+        assert ("report", "__end__", False) in edge_pairs
 
 
 # ============================================================================
@@ -1063,14 +1267,15 @@ class TestDocumentServerEndpoints:
     @pytest.mark.asyncio
     async def test_extract_tables_docx_file_not_found(self):
         """Несуществующий файл → error."""
-        from fastapi.testclient import TestClient
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "services", "document_server"))
 
         try:
             from mcp_document_server import app
-            client = TestClient(app)
-            resp = client.post("/extract_tables_docx", json={"path": "/nonexistent/file.docx"})
-            data = resp.json()
+
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                resp = await client.post("/extract_tables_docx", json={"path": "/nonexistent/file.docx"})
+                data = resp.json()
             assert data["status"] == "error"
             assert "not found" in data["error"].lower()
         except ImportError:
@@ -1082,11 +1287,12 @@ class TestDocumentServerEndpoints:
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "services", "document_server"))
 
         try:
-            from fastapi.testclient import TestClient
             from mcp_document_server import app
-            client = TestClient(app)
-            resp = client.post("/extract_tables_excel", json={"path": "/nonexistent/file.xlsx"})
-            data = resp.json()
+
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                resp = await client.post("/extract_tables_excel", json={"path": "/nonexistent/file.xlsx"})
+                data = resp.json()
             assert data["status"] == "error"
             assert "not found" in data["error"].lower()
         except ImportError:
@@ -1099,7 +1305,6 @@ class TestDocumentServerEndpoints:
 
         try:
             from openpyxl import Workbook
-            from fastapi.testclient import TestClient
             from mcp_document_server import app
 
             # Создаём тестовый xlsx
@@ -1111,9 +1316,10 @@ class TestDocumentServerEndpoints:
             ws.append(["Коммутатор", "45000"])
             wb.save(xlsx_path)
 
-            client = TestClient(app)
-            resp = client.post("/load_document", json={"path": xlsx_path})
-            data = resp.json()
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                resp = await client.post("/load_document", json={"path": xlsx_path})
+                data = resp.json()
             assert data["status"] == "success"
             assert "Коммутатор" in data["text"]
             assert data["format"] == "excel"
@@ -1127,7 +1333,6 @@ class TestDocumentServerEndpoints:
 
         try:
             from openpyxl import Workbook
-            from fastapi.testclient import TestClient
             from mcp_document_server import app
 
             tmpdir = tempfile.mkdtemp()
@@ -1140,9 +1345,10 @@ class TestDocumentServerEndpoints:
             ws.append(["Сервер", "3", "350000"])
             wb.save(xlsx_path)
 
-            client = TestClient(app)
-            resp = client.post("/extract_tables_excel", json={"path": xlsx_path})
-            data = resp.json()
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                resp = await client.post("/extract_tables_excel", json={"path": xlsx_path})
+                data = resp.json()
             assert data["status"] == "success"
             assert data["table_count"] == 1
             assert len(data["tables"][0]["data"]) == 3  # header + 2 rows
@@ -1209,6 +1415,10 @@ class TestChunkText:
             assert len(chunks) >= 2
             for c in chunks:
                 assert len(c) <= MAX_TEXT_FOR_LLM + 200  # допуск на последнюю строку
+        metrics = render_metrics_text()
+        assert "agent_nav_equipment_fallback_total" in metrics
+        assert 'stage="chunking"' in metrics
+        assert 'reason="smart_chunk_failed"' in metrics
 
     @pytest.mark.asyncio
     async def test_oversized_smart_chunk_resplit(self):
@@ -1252,13 +1462,14 @@ class TestExtractFromSingleChunk:
         }
         with patch("orchestrator.workflows.equipment.ums_client") as mock_ums:
             mock_ums.async_infer = AsyncMock(return_value=mock_response)
-            items = await _extract_from_single_chunk(
+            items, model_execution = await _extract_from_single_chunk(
                 chunk_text="Поставить коммутатор Cisco 48 портов 10 шт",
                 chunk_idx=0,
                 total_chunks=1,
                 already_found=[],
             )
             assert len(items) == 1
+            assert model_execution is not None
             assert items[0]["name"] == "Коммутатор Cisco"
             assert items[0]["source"] == "text"
 
@@ -1385,3 +1596,66 @@ class TestChunkedExtraction:
                 items = await _extract_items_llm("/fake/doc.pdf", [])
                 assert len(items) == 1
                 assert items[0]["name"] == "Item OK"
+
+
+class TestEquipmentModelExecutionMetadata:
+
+    @pytest.mark.asyncio
+    async def test_extract_items_llm_records_single_model_execution_event_per_chunk(self):
+        async def _fake_single_chunk(
+            chunk_text,
+            chunk_idx,
+            total_chunks,
+            already_found,
+            model_execution_events=None,
+        ):
+            event = {
+                "role_key": "llm.legal_compare",
+                "primary_model_id": "qwen-14b-llm",
+                "fallback_model_id": "qwen-14b-llm",
+                "used_model_id": "qwen-14b-llm",
+                "fallback_used": False,
+                "attempt_count": 1,
+            }
+            if model_execution_events is not None:
+                model_execution_events.append(dict(event))
+            return (
+                [
+                    {
+                        "name": "Сервер HP",
+                        "specs": "2x Xeon",
+                        "quantity": "2",
+                        "price": "100000",
+                        "unit": "шт",
+                        "source": "text",
+                        "page": None,
+                    }
+                ],
+                event,
+            )
+
+        load_resp = MagicMock()
+        load_resp.status_code = 200
+        load_resp.raise_for_status = MagicMock()
+        load_resp.json.return_value = {"text": "Сервер HP 2x Xeon"}
+
+        async def route_post(url, **kwargs):
+            if "/load_document" in url:
+                return load_resp
+            raise ValueError(f"Unexpected URL: {url}")
+
+        events: list[dict] = []
+        with patch("orchestrator.workflows.equipment.get_shared_client") as mock_get_client, \
+             patch("orchestrator.workflows.equipment._chunk_text", new_callable=AsyncMock) as mock_chunk, \
+             patch("orchestrator.workflows.equipment._extract_from_single_chunk", side_effect=_fake_single_chunk) as mock_single_chunk:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(side_effect=route_post)
+            mock_get_client.return_value = mock_client
+            mock_chunk.return_value = ["chunk-1"]
+
+            items = await _extract_items_llm("/fake/doc.docx", [], model_execution_events=events)
+
+        assert len(items) == 1
+        assert len(events) == 1
+        assert events[0]["used_model_id"] == "qwen-14b-llm"
+        mock_single_chunk.assert_awaited_once()

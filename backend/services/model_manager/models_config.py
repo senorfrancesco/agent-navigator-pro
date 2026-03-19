@@ -1,65 +1,125 @@
-"""
-Конфигурация моделей с поддержкой переменных окружения.
-Загружает пути и параметры из .env файла.
-"""
+"""Конфигурация моделей на основе канонического YAML registry."""
+
+from __future__ import annotations
 
 import os
-from typing import Dict, Any
+from typing import Any, Dict, Mapping, Optional
+
 from dotenv import load_dotenv
 
-# Загружаем переменные из .env
+from services.model_manager.model_registry import (
+    get_model_registry,
+    get_model_spec_by_id,
+)
+
 load_dotenv()
 
-# Конфигурация моделей с загрузкой путей из окружения
-MODEL_CONFIG: Dict[str, Dict[str, Any]] = {
-    "qwen-14b-llm": {
-        "type": "text",
-        "path": os.getenv("MODEL_PATH_QWEN14B", "./models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"),
-        "n_gpu_layers": int(os.getenv("N_GPU_LAYERS_QWEN14B", "-1")),
-        "context_size": int(os.getenv("CONTEXT_SIZE_QWEN14B", "16384")),
-        "api_endpoint": "/v1/completions"
-    },
-    "qwen-vl-8b": {
-        "type": "vision",
-        "path": os.getenv("MODEL_PATH_QWENVL", "./models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"),
-        "mmproj_path": os.getenv("MMPROJ_PATH", "./models/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf"),
-        "n_gpu_layers": int(os.getenv("N_GPU_LAYERS_QWENVL", "-1")),
-        "context_size": int(os.getenv("CONTEXT_SIZE_QWENVL", "16384")),
-        "api_endpoint": "/v1/chat/completions"
-    },
-    "labse-embedding": {
-        "type": "embedding",
-        "path": os.getenv("MODEL_PATH_LABSE", "./models/st/LaBSE"),
-        "n_gpu_layers": int(os.getenv("N_GPU_LAYERS_LABSE", "10")),
-        "context_size": int(os.getenv("CONTEXT_SIZE_LABSE", "512")),
-        "api_endpoint": "/v1/embeddings"
-    }
-}
 
-# Параметры генерации по умолчанию (для борьбы с галлюцинациями)
+def _pick_env_value(source: Mapping[str, str], *names: Optional[str]) -> Optional[str]:
+    for name in names:
+        if not name:
+            continue
+        value = source.get(name)
+        if value:
+            return value
+    return None
+
+
+def resolve_model_path(model_id: str, *, env: Optional[Mapping[str, str]] = None) -> str:
+    source = env if env is not None else os.environ
+    spec = get_model_spec_by_id(model_id, env=source)
+    path_spec = dict(spec.get("path") or {})
+    canonical_env = str(path_spec.get("canonical_env") or "").strip()
+    legacy_envs = [str(name).strip() for name in (path_spec.get("legacy_envs") or []) if str(name).strip()]
+
+    resolved = _pick_env_value(source, canonical_env, *legacy_envs)
+    if resolved:
+        return resolved
+    return ""
+
+
+def get_model_path_env_contract(model_id: str, *, env: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
+    source = env if env is not None else os.environ
+    spec = get_model_spec_by_id(model_id, env=source)
+    path_spec = dict(spec.get("path") or {})
+    canonical_env = str(path_spec.get("canonical_env") or "").strip()
+    legacy_envs = [str(name).strip() for name in (path_spec.get("legacy_envs") or []) if str(name).strip()]
+    return {
+        "canonical_env": canonical_env,
+        "legacy_envs": legacy_envs,
+    }
+
+
+def _build_model_config(*, env: Optional[Mapping[str, str]] = None) -> Dict[str, Dict[str, Any]]:
+    source = env if env is not None else os.environ
+    registry = get_model_registry(env=source)
+    payload: Dict[str, Dict[str, Any]] = {}
+
+    for spec in registry.models.values():
+        model_id = str(spec.get("model_id") or "").strip()
+        runtime = dict(spec.get("runtime") or {})
+        model_kind = str(spec.get("kind") or "").strip()
+        runtime_type = str(spec.get("runtime_type") or "").strip()
+        path = resolve_model_path(model_id, env=source) if spec.get("path") else ""
+
+        config: Dict[str, Any] = {
+            "model_key": next((key for key, value in registry.models.items() if value is spec), None),
+            "kind": model_kind,
+            "runtime_type": runtime_type,
+            "path": path,
+            "api_endpoint": runtime.get("api_endpoint"),
+            "port": runtime.get("port"),
+            "ctx_size": int(
+                _pick_env_value(source, runtime.get("ctx_size_env")) or runtime.get("ctx_size_default") or 0
+            ),
+            "gpu_layers": int(
+                _pick_env_value(source, runtime.get("gpu_layers_env")) or runtime.get("gpu_layers_default") or 0
+            ),
+            "quant": runtime.get("quant_default"),
+        }
+
+        if model_kind == "llm":
+            config["type"] = "text"
+            config["context_size"] = config["ctx_size"]
+            config["n_gpu_layers"] = config["gpu_layers"]
+        elif model_kind == "vision":
+            config["type"] = "vision"
+            config["context_size"] = config["ctx_size"]
+            config["n_gpu_layers"] = config["gpu_layers"]
+            mmproj_envs = [str(item) for item in (runtime.get("mmproj_envs") or [])]
+            config["mmproj_path"] = _pick_env_value(source, *mmproj_envs) or ""
+        elif "embedder" in model_kind or model_kind == "reranker":
+            config["type"] = "embedding" if model_kind != "reranker" else "reranker"
+            config["context_size"] = config["ctx_size"]
+            config["n_gpu_layers"] = config["gpu_layers"]
+        else:
+            config["type"] = model_kind or runtime_type or "component"
+
+        payload[model_id] = config
+
+    return payload
+
+
 DEFAULT_GENERATION_PARAMS = {
-    "temperature": float(os.getenv("TEMPERATURE", "0.5")),  # Снижено для стабильности
+    "temperature": float(os.getenv("TEMPERATURE", "0.5")),
     "top_p": float(os.getenv("TOP_P", "0.9")),
     "repetition_penalty": float(os.getenv("REPETITION_PENALTY", "1.2")),
     "max_tokens": int(os.getenv("MAX_TOKENS", "2048")),
 }
 
-# Текущая активная модель
 ACTIVE_MODEL_ID = os.getenv("ACTIVE_MODEL_ID", "none")
 
 
-def get_model_config(model_id: str) -> Dict[str, Any]:
-    """Получение конфигурации модели по ID."""
-    if model_id not in MODEL_CONFIG:
+def get_model_config(model_id: str, *, env: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
+    model_config = _build_model_config(env=env)
+    if model_id not in model_config:
         raise ValueError(f"Unknown model: {model_id}")
-    return MODEL_CONFIG[model_id]
+    return model_config[model_id]
 
 
-def get_all_models() -> Dict[str, Dict[str, Any]]:
-    """Получение конфигурации всех моделей."""
-    return MODEL_CONFIG
+def get_all_models(*, env: Optional[Mapping[str, str]] = None) -> Dict[str, Dict[str, Any]]:
+    return _build_model_config(env=env)
 
 
 def get_default_params() -> Dict[str, Any]:
-    """Получение параметров генерации по умолчанию."""
     return DEFAULT_GENERATION_PARAMS.copy()

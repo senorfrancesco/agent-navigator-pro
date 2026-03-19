@@ -1,0 +1,206 @@
+- text: "Сравни эти два договора и выдели изменения"
+  label: "compare_documents"
+  difficulty: "easy"
+  cost_sensitive: true
+- text: "Чем отличается новая редакция документа от старой"
+  label: "compare_documents"
+  difficulty: "medium"
+  cost_sensitive: true
+- text: "Покажи разницу между двумя версиями файла"
+  label: "compare_documents"
+  difficulty: "easy"
+  cost_sensitive: true
+- text: "Найди противоречия между этими двумя файлами"
+  label: "compare_documents"
+  difficulty: "hard"
+  cost_sensitive: true
+- text: "Сопоставь эти документы и покажи, что поменялось"
+  label: "compare_documents"
+  difficulty: "medium"
+  cost_sensitive: true
+- text: "Compare these two versions and list the deltas"
+  label: "compare_documents"
+  difficulty: "medium"
+  cost_sensitive: true
+  language: "en"
+- text: "Сравни редакции договора и выпиши, что удалили"
+  label: "compare_documents"
+  difficulty: "hard"
+  cost_sensitive: true
+- text: "Не просто обзор, а именно различия между двумя файлами"
+  label: "compare_documents"
+  difficulty: "hard"
+  cost_sensitive: true
+- text: "Проверь, что из коммерческого предложения подходит под ТЗ"
+  label: "equipment_analysis"
+  difficulty: "easy"
+  cost_sensitive: true
+- text: "Какие позиции из КП соответствуют техническому заданию"
+  label: "equipment_analysis"
+  difficulty: "medium"
+  cost_sensitive: true
+- text: "Сверь смету с ТЗ и отметь несоответствия"
+  label: "equipment_analysis"
+  difficulty: "medium"
+  cost_sensitive: true
+- text: "Подходит ли это оборудование под требования заказчика"
+  label: "equipment_analysis"
+  difficulty: "hard"
+  cost_sensitive: true
+- text: "Что можно взять из КП для закрытия требований ТЗ"
+  label: "equipment_analysis"
+  difficulty: "hard"
+  cost_sensitive: true
+- text: "Проверь соответствие технических характеристик из КП требованиям ТЗ"
+  label: "equipment_analysis"
+  difficulty: "hard"
+  cost_sensitive: true
+- text: "Есть две таблицы: ТЗ и КП. Что из предложенного проходит по требованиям?"
+  label: "equipment_analysis"
+  difficulty: "hard"
+  cost_sensitive: true
+- text: "Сделай compliance check между ТЗ и vendor offer"
+  label: "equipment_analysis"
+  difficulty: "hard"
+  cost_sensitive: true
+  language: "mixed"
+- text: "О чем этот документ"
+  label: "document_analysis"
+  difficulty: "easy"
+  cost_sensitive: false
+- text: "Сделай краткий обзор загруженного файла"
+  label: "document_analysis"
+  difficulty: "easy"
+  cost_sensitive: false
+- text: "Разбери структуру этого документа"
+  label: "document_analysis"
+  difficulty: "medium"
+  cost_sensitive: false
+- text: "Опиши содержание файла по разделам"
+  label: "document_analysis"
+  difficulty: "medium"
+  cost_sensitive: false
+- text: "Сделай резюме по этому документу"
+  label: "document_analysis"
+  difficulty: "easy"
+  cost_sensitive: false
+- text: "Кратко объясни, о чем файл и как он устроен"
+  label: "document_analysis"
+  difficulty: "medium"
+  cost_sensitive: false
+- text: "Дай overview этого документа без сравнения с другими"
+  label: "document_analysis"
+  difficulty: "medium"
+  cost_sensitive: false
+  language: "mixed"
+- text: "Сначала перечисли разделы, потом коротко перескажи каждый"
+  label: "document_analysis"
+  difficulty: "hard"
+  cost_sensitive: false
+- text: "Что написано в документе про штрафы"
+  label: "document_question"
+  difficulty: "easy"
+  cost_sensitive: true
+- text: "Найди в файле пункт о сроках поставки"
+  label: "document_question"
+  difficulty: "medium"
+  cost_sensitive: true
+- text: "Есть ли в документе условия о гарантии"
+  label: "document_question"
+  difficulty: "easy"
+  cost_sensitive: true
+- text: "Сколько единиц оборудования указано в спецификации"
+  label: "document_question"
+  difficulty: "medium"
+  cost_sensitive: true
+- text: "По какой цене идет поставка по договору"
+  label: "document_question"
+  difficulty: "medium"
+  cost_sensitive: true
+- text: "В каком разделе написано про ответственность сторон"
+  label: "document_question"
+  difficulty: "medium"
+  cost_sensitive: true
+- text: "Find the clause about penalties in the uploaded contract"
+  label: "document_question"
+  difficulty: "medium"
+  cost_sensitive: true
+  language: "en"
+- text: "Есть ли в спецификации требование по объему памяти"
+  label: "document_question"
+  difficulty: "hard"
+  cost_sensitive: true
+- text: "Сколько стоит каждая позиция в приложении"
+  label: "document_question"
+  difficulty: "hard"
+  cost_sensitive: true
+- text: "Привет"
+  label: "greeting"
+  difficulty: "easy"
+  cost_sensitive: false
+- text: "Спасибо, понял"
+  label: "greeting"
+  difficulty: "easy"
+  cost_sensitive: false
+- text: "Добрый день"
+  label: "greeting"
+  difficulty: "easy"
+  cost_sensitive: false
+- text: "Хорошо, благодарю"
+  label: "greeting"
+  difficulty: "easy"
+  cost_sensitive: false
+- text: "Ясно, спасибо"
+  label: "greeting"
+  difficulty: "easy"
+  cost_sensitive: false
+- text: "Ок, принято"
+  label: "greeting"
+  difficulty: "easy"
+  cost_sensitive: false
+- text: "Thanks, got it"
+  label: "greeting"
+  difficulty: "easy"
+  cost_sensitive: false
+  language: "en"
+- text: "Понял, дальше"
+  label: "greeting"
+  difficulty: "medium"
+  cost_sensitive: false
+- text: "Что ты умеешь"
+  label: "general_chat"
+  difficulty: "easy"
+  cost_sensitive: false
+- text: "Помоги мне понять, как работает система"
+  label: "general_chat"
+  difficulty: "easy"
+  cost_sensitive: false
+- text: "Напиши пример на Python"
+  label: "general_chat"
+  difficulty: "medium"
+  cost_sensitive: false
+- text: "Переведи этот текст на английский"
+  label: "general_chat"
+  difficulty: "easy"
+  cost_sensitive: false
+- text: "Объясни простыми словами, что такое RAG"
+  label: "general_chat"
+  difficulty: "medium"
+  cost_sensitive: false
+- text: "Помоги придумать архитектуру для нового сервиса"
+  label: "general_chat"
+  difficulty: "medium"
+  cost_sensitive: false
+- text: "How does hybrid search work in simple terms?"
+  label: "general_chat"
+  difficulty: "medium"
+  cost_sensitive: false
+  language: "en"
+- text: "Сравни видеокарты для локальных LLM"
+  label: "general_chat"
+  difficulty: "hard"
+  cost_sensitive: false
+- text: "Объясни, как настроить pytest в проекте"
+  label: "general_chat"
+  difficulty: "medium"
+  cost_sensitive: false
