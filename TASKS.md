@@ -1548,6 +1548,171 @@
   - `pytest backend/tests/test_compare_workflow.py -q`
   - `python -m py_compile backend/orchestrator/workflows/compare.py backend/tests/test_compare_workflow.py`
 
+- [ ] **B3.51a — Harden pair typing до production-grade compare regime selection**
+  Контекст:
+  - production-решения разделяют как минимум `version redline`, `semantic clause comparison`, `playbook/standards review` и `heterogeneous related-document analysis`;
+  - текущий heuristic-first detector (`policy` / `contract` / `other`) закрывает только базовый кейс `policy vs contract`, но недостаточен для mixed corpus, annex/amendment/template/executed docs и near-miss revision pairs.
+  Что сделать:
+  - расширить роли документов:
+    - `policy`
+    - `contract_template`
+    - `executed_contract`
+    - `annex`
+    - `amendment`
+    - `regulation`
+    - `other`
+  - ввести compare regimes:
+    - `redline_compare`
+    - `semantic_compare`
+    - `playbook_compare`
+    - `heterogeneous_alignment`
+  - строить regime selection не только по filename/title, но и по:
+    - title/heading profile;
+    - section numbering overlap;
+    - first-page entity cues;
+    - embedding-level global similarity;
+    - amendment/appendix markers;
+  - при uncertainty хранить confidence и безопасный fallback path.
+  Acceptance:
+  - режим сравнения выбирается явно и воспроизводимо;
+  - heterogeneous pair не попадает в pure redline только из-за похожей темы;
+  - obvious revision pairs не деградируют в overly-generic semantic mode.
+  Verification:
+  - добавить matrix tests для role/regime selection;
+  - протестировать revision, policy-vs-contract, amendment-vs-master, unrelated docs.
+
+- [ ] **B3.51b — Перейти на legal-aware chunking и section metadata для compare**
+  Контекст:
+  - production systems и research consistently показывают, что naive chunking создаёт noise, раздувает `ADDED/DELETED` и ухудшает semantic alignment;
+  - в текущем кейсе compare дробит документы слишком агрессивно, что и создаёт structural-only explosion.
+  Что сделать:
+  - заменить current compare chunking на legal-aware splitter:
+    - section / subclause boundaries;
+    - headings;
+    - numbered clause trees;
+    - paragraph fallback только внутри очень длинных sections;
+  - хранить metadata на chunk:
+    - `section_id`
+    - `section_title`
+    - `doc_role`
+    - `topic_labels`
+    - `page_span`
+  - отдельно ввести text-only normalization mode для compare:
+    - подавление formatting noise;
+    - collapse duplicate whitespace;
+    - optional numbering normalization;
+  - сохранить original text для evidence/appendix.
+  Acceptance:
+  - compare на legal docs меньше распадается на бессмысленные мелкие chunks;
+  - structural diff count снижается на formatting/segmentation noise;
+  - downstream alignment использует section metadata, а не только raw text snippets.
+  Verification:
+  - unit tests на chunk boundaries;
+  - regression на паре `policy vs contract`;
+  - сравнить chunk count / structural diff count до и после.
+
+- [ ] **B3.51c — Построить topic/clause alignment engine вместо raw diff explosion**
+  Контекст:
+  - production compare обычно не ограничивается one-to-one text diff: используются clause/topic alignment, many-to-one matching и semantic grouping;
+  - для heterogeneous pair именно alignment даёт meaningful legal packet для LLM.
+  Что сделать:
+  - поверх embeddings строить alignment graph:
+    - one-to-one;
+    - one-to-many;
+    - many-to-one;
+    - unmatched topic clusters;
+  - агрегировать matches на уровне topics/obligations/rights/procedures;
+  - отделять:
+    - `covered_by_both`
+    - `doc1_only`
+    - `doc2_only`
+    - `possible_conflicts`
+  - не считать каждую unmatched clause автоматически `ADDED/DELETED` до topic consolidation.
+  Acceptance:
+  - heterogeneous pair получает compact alignment packet;
+  - LLM видит не 100+ raw diffs, а curated topic-level comparison;
+  - report quality улучшается по completeness и signal/noise.
+  Verification:
+  - unit tests на grouping/matching;
+  - golden compare cases с many-to-one mapping;
+  - assert на bounded alignment packet size.
+
+- [ ] **B3.51d — Добавить standards/playbook compare и risk layer**
+  Контекст:
+  - production CLM systems (Conga Redline AI, Ironclad playbooks, Kira smart fields/workflows) обычно сравнивают не только две версии, но и документ против стандартов/approved language;
+  - без этого compare остаётся полезным только для redline и related-doc explanation, но не для risk review.
+  Что сделать:
+  - ввести optional compare-against-standard mode:
+    - standard clause library / playbook source;
+    - benchmark clauses;
+    - risk categories;
+  - output должен включать:
+    - deviations from standard;
+    - likely risk areas;
+    - recommended remediation;
+  - спроектировать contract так, чтобы mode можно было использовать и для single-document review, и для pair compare.
+  Acceptance:
+  - compare pipeline поддерживает стандартный legal review use case “что отклоняется от playbook”;
+  - risk summary отделён от raw diff appendix;
+  - user-visible output остаётся bounded и понятным.
+  Verification:
+  - unit tests на deviation/risk classification;
+  - fixture с standard clause + negotiated clause;
+  - smoke on compare workflow with playbook source.
+
+- [ ] **B3.51e — Ужесточить report contract: executive summary + appendix + evidence links**
+  Контекст:
+  - в production инструментах summary и detailed diff почти всегда разделены: сначала executive/risk summary, затем clause-level evidence;
+  - текущий report уже сделал первый шаг, но ещё не содержит formal evidence contract и stable machine-readable sections.
+  Что сделать:
+  - стабилизировать report shape:
+    - `Юридический вывод`
+    - `Ключевые различия`
+    - `Coverage gaps / missing obligations`
+    - `Риски / конфликты`
+    - `Рекомендуемые действия`
+    - `Приложение`
+  - добавить evidence mapping:
+    - links/ids на source chunks or sections;
+    - per-finding supporting snippets;
+  - не позволять workflow завершаться appendix-only report, если compare regime не `redline_compare`;
+  - синхронизировать API metadata и saved report sections.
+  Acceptance:
+  - любой non-redline compare возвращает summary-first output;
+  - каждое ключевое finding имеет source evidence;
+  - report можно безопасно парсить downstream automation without brittle markdown assumptions.
+  Verification:
+  - tests на report rendering contract;
+  - tests на evidence references;
+  - integration check на saved markdown report.
+
+- [ ] **B3.51f — Собрать production eval corpus и live acceptance для compare**
+  Контекст:
+  - без golden corpus и live acceptance compare будет регрессировать незаметно: route selection, alignment quality и report usefulness сложно держать только unit tests;
+  - user-reported PDF pair уже показала, что runtime success не гарантирует useful legal output.
+  Что сделать:
+  - собрать eval set минимум из:
+    - revision vs revision;
+    - policy vs contract;
+    - amendment vs master agreement;
+    - template vs executed contract;
+    - unrelated docs;
+  - для каждого кейса фиксировать:
+    - selected regime;
+    - structural diff count;
+    - semantic alignment count;
+    - final report sections present;
+    - qualitative expectations on findings;
+  - повторить live прогон на проблемной паре PDF после `B3.51a-e`.
+  Acceptance:
+  - compare route selection и output quality проверяются автоматически;
+  - проблемная pair больше не выдаёт useless structural-only result;
+  - новые slices не ломают revision compare path.
+  Verification:
+  - dedicated compare eval script / pytest suite;
+  - live rerun на `2024-Polozhenie-o-distancionnoy-rabote-ecp.pdf` + `employment contract sample for remote work.pdf`;
+  - manual review checkpoint на generated markdown report.
+
 - [ ] **T6.2 P0 — Compose full-stack smoke tests**
   Контекст: runtime/scripts и `docker-compose.yaml` часто меняются, но нет единого black-box gate, который подтверждает что весь stack действительно поднялся и отвечает не только на уровне unit mocks.
   Что сделать:
