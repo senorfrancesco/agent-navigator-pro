@@ -1289,6 +1289,178 @@
     - forced grouped merge при budget overflow;
     - weak-PC policy сохраняет bounded hierarchical path;
     - metadata/logs отражают выбранную reduce strategy
+
+- [ ] **B3.48a — Добавить admission hysteresis / safety margin для fast final merge**
+  Контекст: после базовой реализации `B3.48` fast-path всё ещё может флапать на пограничных payload, потому что решение принимается слишком близко к budget limit. Нужен небольшой запас, чтобы `fast_final_merge` не включался в near-limit cases и не срывался затем в retry/degraded branch.
+  Что сделать:
+  - Ввести `reserve_tokens` и/или `reserve_ratio` для final admission
+  - Разрешать `fast_final_merge` только если payload проходит `fits_with_margin`, а не просто `fits`
+  - В metadata/logs писать:
+    - `final_admission_estimated_tokens`
+    - `final_admission_budget_tokens`
+    - `final_admission_margin_tokens`
+  Acceptance:
+  - fast-path не выбирается на пограничных payload без безопасного запаса;
+  - metadata показывает фактический budget/margin decision;
+  - уменьшается риск flapping между `fast_final_merge` и `hierarchical_merge`
+  Verification:
+  - `pytest backend/tests/test_execution_runtime.py backend/tests/test_document_analysis.py -q`
+  - Добавить tests на near-limit payload, где без margin был бы fast path, а с margin остаётся hierarchy
+
+- [ ] **B3.48b — Перевести reduce admission на token-first contract**
+  Контекст: текущая policy всё ещё частично опирается на char caps как на decision primitive. Это дешёвый precheck, но authoritative admission должен жить вокруг estimated tokens и реального prompt budget.
+  Что сделать:
+  - Оставить `chars` только как cheap precheck / observability field
+  - Перевести shared helper contract на token-first поля:
+    - `joined_payload_tokens_est`
+    - `final_prompt_tokens_est`
+    - `group_prompt_tokens_est`
+    - `reserve_tokens`
+  - Согласовать `documents_summary` и `document_analysis` на одном token-based policy helper
+  Acceptance:
+  - решение `fast_final_merge` vs `hierarchical_merge` определяется token estimate, а не только chars;
+  - chars остаются в metadata лишь как вспомогательное поле;
+  - оба workflow используют один и тот же token-first decision contract
+  Verification:
+  - `pytest backend/tests/test_execution_runtime.py backend/tests/test_document_analysis.py -q`
+  - Добавить tests на cases, где char count misleading, но token estimate даёт правильное решение
+
+- [ ] **B3.48c — Добавить quality regression contour для adaptive reduce policy**
+  Контекст: `B3.48` оптимизирует control flow и latency, но этого недостаточно без проверки качества итоговой сводки. Нужно подтвердить, что fast-path не ухудшает coverage/completeness относительно старого collapse-heavy path.
+  Что сделать:
+  - Собрать маленький golden corpus:
+    - короткий structured doc;
+    - длинный narrative doc;
+    - doc с headings / mixed structure;
+    - case, где промежуточный collapse раньше улучшал coherence
+  - Для каждого кейса сравнивать:
+    - old/conservative path;
+    - new adaptive fast path;
+  - Ввести heuristic checks:
+    - coverage ключевых разделов;
+    - presence critical entities / headings;
+    - отсутствие явной потери секций / truncation;
+    - latency и число model calls не хуже baseline
+  Acceptance:
+  - новый adaptive path не хуже baseline по coverage/completeness;
+  - latency и/или число summary-stage model calls уменьшаются там, где fast-path срабатывает;
+  - quality regressions ловятся отдельным test contour, а не только ручным smoke
+  Verification:
+  - добавить отдельный eval/smoke contour для golden corpus
+  - задокументировать baseline-vs-adaptive comparison procedure
+
+- [ ] **B3.48d — Добавить shadow decision mode для rollout-аналитики**
+  Контекст: после `B3.48` полезно временно иметь режим, где исполняется текущая ветка, но новая strategy recommendation считается параллельно и логирует расхождения. Это нужно для безопасного анализа реальных traffic patterns до более агрессивного rollout fast-path.
+  Что сделать:
+  - Флаг `SUMMARY_REDUCE_STRATEGY_SHADOW_MODE`
+  - В shadow mode логировать:
+    - `executed_strategy`
+    - `recommended_strategy`
+    - `would_skip_levels`
+    - `estimated_token_saving`
+  - Отдельный counter:
+    - `agent_nav_summary_strategy_shadow_diff_total`
+  Acceptance:
+  - можно собрать production-like данные о расхождениях без изменения runtime path;
+  - видно, сколько merge levels были избыточными по новой policy;
+  - rare corner cases можно анализировать без риска для user-facing path
+  Verification:
+  - unit tests на shadow-mode logging/metrics
+  - ручной smoke: shadow mode не меняет фактический executed path
+
+- [x] **B3.48e — Зафиксировать helper invariants и decision trace**
+  Контекст: shared reduce-policy helper теперь используется двумя workflow и будет обрастать исключениями. Нужен явный mini-spec и более подробный decision trace, иначе разбор жалоб вида "почему снова появился L2/L3" быстро станет дорогим.
+  Что сделать:
+  - Зафиксировать invariants helper-а:
+    - `degraded_already_active=true` запрещает fast path;
+    - `low_vram=true` при `SUMMARY_FAST_FINAL_MERGE_LOW_VRAM=0` форсирует hierarchy;
+    - `partial_only` не выбирается до policy-changing retry;
+    - после каждого collapse level обязателен re-admission check;
+  - Добавить richer metadata:
+    - `reduce_decisions[]` с `items_count`, `chars`, `tokens_est`, `strategy_selected`, `reason`
+    - `early_exit_after_level`
+  - Добавить property-style / matrix tests на комбинации policy flags
+  Acceptance:
+  - policy invariants явно описаны и тестируются;
+  - metadata позволяет объяснить, почему fast path был запрещён на конкретном уровне;
+  - future refactor не ломает базовые decision guarantees молча
+  Verification:
+  - `pytest backend/tests/test_execution_runtime.py backend/tests/test_document_analysis.py -q`
+  - отдельные tests на invariant matrix / decision trace shape
+  Status 2026-03-18:
+  - helper contract now returns `reduce_decisions[]` and `early_exit_after_level`
+  - `partial_only` is not emitted by the helper
+  - legacy `final_stage_safe` compatibility retained
+
+### H11 — Adaptive Detail / Expansion Policy (B3.49)
+
+- [ ] **B3.49 — Ввести adaptive quality orchestration: detail ladder + expansion pass**
+  Контекст:
+  - `B3.48` решает задачу reduce safety и adaptive merge policy: когда идти в fast final merge, а когда включать bounded hierarchical path;
+  - но это не покрывает отдельную ось качества ответа: на сильном железе можно не только уменьшать число merge-стадий, но и разрешать более дорогой synthesis path с большей глубиной, связностью и сохранением деталей;
+  - также сейчас follow-up вида `распиши подробнее`, `раскрой пункт 2`, `покажи с примерами` фактически ведёт к повторному orchestration run, вместо controlled expansion поверх уже собранного answer state.
+  Что нужно сделать:
+  - ввести отдельную adaptive quality policy, независимую от `B3.48`:
+    - `quality_profile = weak | normal | strong_gpu`
+    - `response_detail_mode = brief | standard | detailed | exhaustive`
+    - `allow_expansion_from_previous = true|false`
+    - `expansion_scope = section | whole_answer`
+  - добавить hardware-aware quality ceiling:
+    - на weak profile не разрешать дорогой detail path по умолчанию;
+    - на normal profile использовать balanced mode;
+    - на strong GPU profile разрешать:
+      - более высокий synthesis budget;
+      - менее агрессивную компрессию intermediate summaries;
+      - более высокий reasoning/detail setup для final synthesis;
+      - больший output budget для detailed/exhaustive modes;
+  - реализовать two-stage answer policy:
+    - первый ответ: compact but complete;
+    - follow-up на детализацию: отдельный `expansion pass`, а не полный orchestration restart;
+  - сохранять answer state после первого ответа:
+    - `answer_outline`
+    - `detail_level_used`
+    - `covered_sections`
+    - `expandable_sections`
+    - `source_refs` / `chunk_lineage`
+  - expansion pass должен:
+    - брать предыдущий answer state;
+    - локально расширять нужный section или весь ответ;
+    - добирать только релевантные source chunks при необходимости;
+    - не пересобирать весь ответ с нуля без причины;
+  - ввести detail ladder для summarization/analysis:
+    - `brief` — сильнее сжимает, меньше retention;
+    - `standard` — текущий balanced path;
+    - `detailed` — сохраняет больше нюансов и caveats;
+    - `exhaustive` — максимально подробный synthesis с примерами, оговорками и раскрытием секций;
+  - сделать policy-driven control, а не только prompt-text:
+    - detail mode должен задаваться и в metadata/runtime policy, и через UI/user intent;
+    - явный запрос пользователя на подробность должен иметь приоритет;
+  Что не считать решением:
+  - просто увеличить `max_tokens` без quality policy;
+  - безусловно включить detailed mode на сильном железе;
+  - повторно запускать весь workflow на follow-up `распиши подробнее`;
+  - смешивать эту задачу с `B3.48`, где основная цель — reduce safety/bounded merge policy.
+  Acceptance:
+  - `B3.48` и `B3.49` разделены как две независимые оси:
+    - `B3.48` — merge/reduce policy;
+    - `B3.49` — answer depth / quality orchestration;
+  - сильное железо повышает quality ceiling, но не делает длинный ответ default;
+  - follow-up на детализацию может идти через `expansion pass` поверх предыдущего answer state;
+  - detail mode виден в metadata/runtime state и может управляться явно;
+  - summarization/analysis поддерживают ladder `brief|standard|detailed|exhaustive`;
+  - есть тесты на:
+    - compact first answer;
+    - section expansion without full rerun;
+    - whole-answer expansion;
+    - strong_gpu policy raises allowed detail ceiling;
+    - explicit user request for detail overrides default brevity.
+  Verification:
+  - `pytest backend/tests/test_execution_runtime.py backend/tests/test_document_analysis.py -q`
+  - добавить/обновить тесты на:
+    - expansion from previous answer state;
+    - detail ladder behavior;
+    - strong vs weak quality policy;
+    - metadata for detail mode / expansion scope
   Verification:
   - локально: `npx playwright test tests/e2e/chainlit`
   - CI smoke: хотя бы `chromium` project для `chat + upload + reload persistence`

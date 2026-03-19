@@ -1261,6 +1261,124 @@ def test_execute_documents_summary_applies_budget_guard_before_merge_and_global(
     assert len(global_calls[0].args[0]) < 6000
 
 
+def test_execute_documents_summary_uses_fast_final_merge_when_payload_is_safe():
+    deps = _build_minimal_deps()
+    deps.get_all_docs = lambda: [
+        {
+            "document_id": "doc-1",
+            "display_name": "contract.txt",
+            "text": ("А" * 2000) + "\n\n" + ("Б" * 2000),
+        }
+    ]
+    deps.infer_assistant_text = AsyncMock(side_effect=["chunk-1", "chunk-2", "doc-final", "global"])
+
+    response = asyncio.run(
+        _execute_documents_summary(
+            query="Сделай сводку",
+            history=[],
+            effective_settings={"device_mode": "prefer-gpu", "resolved_model_id": "test-model"},
+            deps=deps,
+        )
+    )
+
+    stages = [call.kwargs["summary_stage"] for call in deps.infer_assistant_text.await_args_list]
+    assert stages == ["chunk", "chunk", "merge", "global"]
+    assert response["execution_metadata"]["reduce_strategy"] == "fast_final_merge"
+    assert response["execution_metadata"]["reduce_reason"] == "fits_final_budget"
+    assert response["execution_metadata"]["reduce_levels_used"] == 0
+    assert response["execution_metadata"]["reduce_groups_total"] == 0
+
+
+def test_execute_documents_summary_uses_hierarchical_merge_on_low_vram_even_if_payload_fits():
+    deps = _build_minimal_deps()
+    deps.get_all_docs = lambda: [
+        {
+            "document_id": "doc-1",
+            "display_name": "contract.txt",
+            "text": ("А" * 2000) + "\n\n" + ("Б" * 2000),
+        }
+    ]
+    deps.infer_assistant_text = AsyncMock(side_effect=["chunk-1", "chunk-2", "merge-1", "global"])
+
+    response = asyncio.run(
+        _execute_documents_summary(
+            query="Сделай сводку",
+            history=[],
+            effective_settings={"device_mode": "low-vram", "resolved_model_id": "test-model"},
+            deps=deps,
+        )
+    )
+
+    stages = [call.kwargs["summary_stage"] for call in deps.infer_assistant_text.await_args_list]
+    assert stages == ["chunk", "chunk", "merge", "global"]
+    assert response["execution_metadata"]["reduce_strategy"] == "hierarchical_merge"
+    assert response["execution_metadata"]["reduce_reason"] == "hardware_policy"
+    assert response["execution_metadata"]["reduce_levels_used"] == 1
+    assert response["execution_metadata"]["reduce_groups_total"] == 1
+
+
+def test_execute_documents_summary_uses_hierarchy_when_margin_blocks_fast_path(monkeypatch):
+    deps = _build_minimal_deps()
+    deps.get_all_docs = lambda: [
+        {
+            "document_id": "doc-1",
+            "display_name": "contract.txt",
+            "text": ("А" * 2000) + "\n\n" + ("Б" * 2000),
+        }
+    ]
+    deps.infer_assistant_text = AsyncMock(side_effect=["chunk-1", "chunk-2", "merge-1", "global"])
+
+    def _estimate_tokens(text: str) -> int:
+        if "СУММАРИЗАЦИИ ФРАГМЕНТОВ" in text:
+            return 600
+        return 32
+
+    with patch("orchestrator.execution_runtime._estimate_prompt_tokens", side_effect=_estimate_tokens):
+        response = asyncio.run(
+            _execute_documents_summary(
+                query="Сделай сводку",
+                history=[],
+                effective_settings={"device_mode": "prefer-gpu", "resolved_model_id": "test-model"},
+                deps=deps,
+            )
+        )
+
+    assert response["execution_metadata"]["reduce_strategy"] == "hierarchical_merge"
+    assert response["execution_metadata"]["reduce_reason"] == "budget_overflow"
+    assert response["execution_metadata"]["final_admission_margin_tokens"] > 0
+    assert response["execution_metadata"]["final_admission_estimated_tokens"] > 0
+    assert response["execution_metadata"]["final_admission_budget_tokens"] >= response["execution_metadata"]["final_admission_margin_tokens"]
+
+
+def test_execute_documents_summary_prefers_fast_path_when_chars_are_large_but_token_estimate_is_safe():
+    deps = _build_minimal_deps()
+    deps.get_all_docs = lambda: [
+        {
+            "document_id": "doc-1",
+            "display_name": "contract.txt",
+            "text": ("А" * 2000) + "\n\n" + ("Б" * 2000),
+        }
+    ]
+    long_summary = "X" * 2200
+    deps.infer_assistant_text = AsyncMock(side_effect=[long_summary, long_summary, "doc-final", "global"])
+
+    with patch("orchestrator.execution_runtime._estimate_prompt_tokens", return_value=48):
+        response = asyncio.run(
+            _execute_documents_summary(
+                query="Сделай сводку",
+                history=[],
+                effective_settings={"device_mode": "prefer-gpu", "resolved_model_id": "test-model"},
+                deps=deps,
+            )
+        )
+
+    assert response["execution_metadata"]["reduce_strategy"] == "fast_final_merge"
+    assert response["execution_metadata"]["reduce_reason"] == "fits_final_budget"
+    assert response["execution_metadata"]["fast_path_eligible"] is True
+    assert "final_prompt_tokens_est" in response["execution_metadata"]
+    assert "group_prompt_tokens_est" in response["execution_metadata"]
+
+
 def test_execute_documents_summary_updates_progress_with_partial_results():
     deps = _build_minimal_deps()
     deps.get_all_docs = lambda: [

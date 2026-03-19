@@ -581,6 +581,153 @@ class TestSummarizeNode:
         assert mock_ums.async_infer.await_count == 11
 
     @pytest.mark.asyncio
+    async def test_summarize_uses_fast_final_merge_when_final_payload_is_safe(self, base_state):
+        base_state["full_text"] = "Большой документ"
+        base_state["doc_type"] = "other"
+        base_state["runtime_context"] = {
+            "summary_policy": {
+                "group_size": 2,
+                "group_input_chars": 200,
+                "chunk_input_chars": 120,
+                "final_input_chars": 400,
+                "final_max_tokens": 256,
+                "enable_fast_final_merge": True,
+            }
+        }
+
+        with patch("orchestrator.workflows.document_analysis._chunk_text", new_callable=AsyncMock) as mock_chunk, \
+             patch("orchestrator.workflows.document_analysis.ums_client") as mock_ums:
+            mock_chunk.return_value = ["chunk-1", "chunk-2", "chunk-3"]
+            mock_ums.async_infer = AsyncMock(side_effect=[
+                {"content": "summary-1"},
+                {"content": "summary-2"},
+                {"content": "summary-3"},
+                {"content": "final-summary"},
+            ])
+
+            result = await summarize_node(base_state)
+
+        assert result["summary"] == "final-summary"
+        assert result["summary_metadata"]["reduce_strategy"] == "fast_final_merge"
+        assert result["summary_metadata"]["reduce_reason"] == "fits_final_budget"
+        assert result["summary_metadata"]["reduce_levels_used"] == 0
+        assert result["summary_metadata"]["reduce_groups_total"] == 0
+        assert mock_ums.async_infer.await_count == 4
+
+    @pytest.mark.asyncio
+    async def test_summarize_uses_hierarchical_merge_on_weak_pc_even_if_final_payload_fits(self, base_state):
+        base_state["full_text"] = "Большой документ"
+        base_state["doc_type"] = "other"
+        base_state["runtime_context"] = {
+            "summary_policy": {
+                "weak_pc_mode": True,
+                "group_size": 2,
+                "group_input_chars": 200,
+                "chunk_input_chars": 120,
+                "final_input_chars": 400,
+                "final_max_tokens": 256,
+                "enable_fast_final_merge": True,
+            }
+        }
+
+        with patch("orchestrator.workflows.document_analysis._chunk_text", new_callable=AsyncMock) as mock_chunk, \
+             patch("orchestrator.workflows.document_analysis.ums_client") as mock_ums:
+            mock_chunk.return_value = ["chunk-1", "chunk-2", "chunk-3"]
+            mock_ums.async_infer = AsyncMock(side_effect=[
+                {"content": "summary-1"},
+                {"content": "summary-2"},
+                {"content": "summary-3"},
+                {"content": "merge-1"},
+                {"content": "merge-2"},
+                {"content": "final-summary"},
+            ])
+
+            result = await summarize_node(base_state)
+
+        assert result["summary"] == "final-summary"
+        assert result["summary_metadata"]["reduce_strategy"] == "hierarchical_merge"
+        assert result["summary_metadata"]["reduce_reason"] == "hardware_policy"
+        assert result["summary_metadata"]["reduce_levels_used"] == 1
+        assert result["summary_metadata"]["reduce_groups_total"] == 2
+        assert mock_ums.async_infer.await_count == 6
+
+    @pytest.mark.asyncio
+    async def test_summarize_uses_hierarchy_when_margin_blocks_fast_path(self, base_state):
+        base_state["full_text"] = "Большой документ"
+        base_state["doc_type"] = "other"
+        base_state["runtime_context"] = {
+            "summary_policy": {
+                "group_size": 2,
+                "group_input_chars": 200,
+                "chunk_input_chars": 120,
+                "final_input_chars": 400,
+                "final_max_tokens": 256,
+                "enable_fast_final_merge": True,
+            }
+        }
+
+        def _estimate_tokens(text: str) -> int:
+            if "summary-1" in text and "summary-2" in text:
+                return 300
+            return 24
+
+        with patch("orchestrator.workflows.document_analysis._chunk_text", new_callable=AsyncMock) as mock_chunk, \
+             patch("orchestrator.workflows.document_analysis.ums_client") as mock_ums, \
+             patch("orchestrator.workflows.document_analysis._estimate_tokens", side_effect=_estimate_tokens):
+            mock_chunk.return_value = ["chunk-1", "chunk-2", "chunk-3"]
+            mock_ums.async_infer = AsyncMock(side_effect=[
+                {"content": "summary-1"},
+                {"content": "summary-2"},
+                {"content": "summary-3"},
+                {"content": "merge-1"},
+                {"content": "merge-2"},
+                {"content": "final-summary"},
+            ])
+
+            result = await summarize_node(base_state)
+
+        assert result["summary"] == "final-summary"
+        assert result["summary_metadata"]["reduce_strategy"] == "hierarchical_merge"
+        assert result["summary_metadata"]["reduce_reason"] == "budget_overflow"
+        assert result["summary_metadata"]["final_admission_margin_tokens"] > 0
+        assert result["summary_metadata"]["final_admission_estimated_tokens"] > 0
+
+    @pytest.mark.asyncio
+    async def test_summarize_prefers_fast_path_when_chars_are_large_but_token_estimate_is_safe(self, base_state):
+        base_state["full_text"] = "Большой документ"
+        base_state["doc_type"] = "other"
+        base_state["runtime_context"] = {
+            "summary_policy": {
+                "group_size": 2,
+                "group_input_chars": 200,
+                "chunk_input_chars": 120,
+                "final_input_chars": 400,
+                "final_max_tokens": 256,
+                "enable_fast_final_merge": True,
+            }
+        }
+
+        with patch("orchestrator.workflows.document_analysis._chunk_text", new_callable=AsyncMock) as mock_chunk, \
+             patch("orchestrator.workflows.document_analysis.ums_client") as mock_ums, \
+             patch("orchestrator.workflows.document_analysis._estimate_tokens", return_value=32):
+            mock_chunk.return_value = ["chunk-1", "chunk-2", "chunk-3"]
+            mock_ums.async_infer = AsyncMock(side_effect=[
+                {"content": "summary-" + ("A" * 240)},
+                {"content": "summary-" + ("B" * 240)},
+                {"content": "summary-" + ("C" * 240)},
+                {"content": "final-summary"},
+            ])
+
+            result = await summarize_node(base_state)
+
+        assert result["summary"] == "final-summary"
+        assert result["summary_metadata"]["reduce_strategy"] == "fast_final_merge"
+        assert result["summary_metadata"]["reduce_reason"] == "fits_final_budget"
+        assert result["summary_metadata"]["fast_path_eligible"] is True
+        assert "final_prompt_tokens_est" in result["summary_metadata"]
+        assert "group_prompt_tokens_est" in result["summary_metadata"]
+
+    @pytest.mark.asyncio
     async def test_summarize_honors_cancel_flag_between_chunks(self, base_state):
         base_state["full_text"] = "Большой документ"
         base_state["doc_type"] = "other"

@@ -28,6 +28,10 @@ from services.model_manager.ums_client import ums_client
 from services.observability import inc_metric_counter
 from orchestrator.utils import parse_json_garbage
 from orchestrator.shared.http_client import get_shared_client
+from orchestrator.summary_reduce_policy import (
+    resolve_fast_final_merge_enabled,
+    resolve_reduce_strategy,
+)
 from orchestrator.workflows.equipment import (
     _extract_tables_from_doc,
     _extract_items_llm,
@@ -51,6 +55,8 @@ DOCUMENT_ANALYSIS_SUMMARIZE_MAX_TOKENS = int(
 DOCUMENT_ANALYSIS_REDUCE_MAX_TOKENS = int(
     os.getenv("DOCUMENT_ANALYSIS_REDUCE_MAX_TOKENS", "2000")
 )
+SUMMARY_FINAL_RESERVE_RATIO = float(os.getenv("SUMMARY_FINAL_RESERVE_RATIO", "0.15"))
+SUMMARY_FINAL_RESERVE_TOKENS = int(os.getenv("SUMMARY_FINAL_RESERVE_TOKENS", "128"))
 DOCUMENT_ANALYSIS_SUMMARIZE_SLEEP_S = float(
     os.getenv("DOCUMENT_ANALYSIS_SUMMARIZE_SLEEP_S", "1.0")
 )
@@ -215,6 +221,10 @@ def _get_summary_policy(state: DocumentAnalysisState) -> Dict[str, Any]:
     weak_pc = bool(policy.get("weak_pc_mode"))
     return {
         "weak_pc_mode": weak_pc,
+        "enable_fast_final_merge": resolve_fast_final_merge_enabled(
+            policy=policy,
+            env_var="DOCUMENT_ANALYSIS_ENABLE_FAST_FINAL_MERGE",
+        ),
         "chunk_input_chars": int(policy.get("chunk_input_chars") or (2200 if weak_pc else MAX_TEXT_FOR_LLM)),
         "group_input_chars": int(policy.get("group_input_chars") or (1800 if weak_pc else MAX_TEXT_FOR_LLM)),
         "final_input_chars": int(policy.get("final_input_chars") or (2200 if weak_pc else MAX_TEXT_FOR_LLM)),
@@ -247,6 +257,70 @@ def _estimate_tokens(text: str) -> int:
     return max(1, len(str(text or "")) // 4)
 
 
+def _resolve_summary_reserve_tokens(budget_tokens: int) -> int:
+    if budget_tokens <= 1:
+        return 0
+    ratio_based = int(max(0.0, SUMMARY_FINAL_RESERVE_RATIO) * budget_tokens)
+    reserve = max(int(SUMMARY_FINAL_RESERVE_TOKENS), ratio_based)
+    return min(budget_tokens - 1, reserve)
+
+
+def _build_reduce_admission_snapshot(
+    *,
+    joined_payload: str,
+    final_prompt: str,
+    group_prompt: str,
+    budget_tokens: int,
+) -> Dict[str, Any]:
+    joined_payload_tokens_est = _estimate_tokens(joined_payload)
+    final_prompt_tokens_est = _estimate_tokens(final_prompt)
+    group_prompt_tokens_est = _estimate_tokens(group_prompt)
+    reserve_tokens = _resolve_summary_reserve_tokens(budget_tokens)
+    margin_tokens = max(0, budget_tokens - final_prompt_tokens_est)
+    return {
+        "joined_payload_chars": len(str(joined_payload or "")),
+        "joined_payload_tokens_est": joined_payload_tokens_est,
+        "final_prompt_chars": len(str(final_prompt or "")),
+        "final_prompt_tokens_est": final_prompt_tokens_est,
+        "group_prompt_chars": len(str(group_prompt or "")),
+        "group_prompt_tokens_est": group_prompt_tokens_est,
+        "budget_tokens": int(budget_tokens),
+        "reserve_tokens": int(reserve_tokens),
+        "margin_tokens": int(margin_tokens),
+        "fits_with_margin": final_prompt_tokens_est <= max(0, budget_tokens - reserve_tokens),
+    }
+
+
+def _resolve_reduce_strategy_with_snapshot(
+    *,
+    reduce_items_count: int,
+    low_vram: bool,
+    degraded_active: bool,
+    fast_final_merge_enabled: bool,
+    admission_snapshot: Dict[str, Any],
+) -> Dict[str, Any]:
+    try:
+        strategy_meta = resolve_reduce_strategy(
+            reduce_items_count=reduce_items_count,
+            low_vram=low_vram,
+            degraded_active=degraded_active,
+            fast_final_merge_enabled=fast_final_merge_enabled,
+            admission_snapshot=admission_snapshot,
+        )
+    except TypeError:
+        strategy_meta = resolve_reduce_strategy(
+            reduce_items_count=reduce_items_count,
+            final_stage_safe=bool(admission_snapshot.get("fits_with_margin")),
+            low_vram=low_vram,
+            degraded_active=degraded_active,
+            fast_final_merge_enabled=fast_final_merge_enabled,
+        )
+    normalized = dict(strategy_meta or {})
+    normalized.setdefault("admission_snapshot", dict(admission_snapshot))
+    normalized.setdefault("fast_path_eligible", bool(admission_snapshot.get("fits_with_margin")))
+    return normalized
+
+
 def _init_summary_metadata() -> Dict[str, Any]:
     return {
         "degraded": False,
@@ -255,6 +329,17 @@ def _init_summary_metadata() -> Dict[str, Any]:
         "stage_admission": {},
         "degraded_reason": None,
         "degraded_stage": None,
+        "reduce_strategy": None,
+        "reduce_reason": None,
+        "reduce_levels_used": 0,
+        "reduce_groups_total": 0,
+        "fast_path_eligible": False,
+        "final_admission_estimated_tokens": 0,
+        "final_prompt_tokens_est": 0,
+        "group_prompt_tokens_est": 0,
+        "final_admission_budget_tokens": 0,
+        "final_admission_reserve_tokens": 0,
+        "final_admission_margin_tokens": 0,
     }
 
 
@@ -294,9 +379,9 @@ def _resolve_stage_admission(
 ) -> Dict[str, Any]:
     payload_chars = len(str(payload or ""))
     payload_tokens = _estimate_tokens(payload)
-    combined_budget = payload_tokens + int(output_token_cap)
     token_budget_limit = max(256, _estimate_tokens("x" * input_char_cap) + int(output_token_cap))
-    requires_bounded = payload_chars > input_char_cap or combined_budget > token_budget_limit
+    reserve_tokens = _resolve_summary_reserve_tokens(token_budget_limit)
+    requires_bounded = payload_tokens > max(0, token_budget_limit - reserve_tokens)
     return {
         "stage": stage,
         "admission": "requires_bounded" if requires_bounded else "ok",
@@ -305,6 +390,10 @@ def _resolve_stage_admission(
         "payload_tokens": payload_tokens,
         "input_char_cap": int(input_char_cap),
         "output_token_cap": int(output_token_cap),
+        "budget_tokens": int(token_budget_limit),
+        "reserve_tokens": int(reserve_tokens),
+        "margin_tokens": max(0, token_budget_limit - payload_tokens),
+        "fits_with_margin": not requires_bounded,
     }
 
 
@@ -367,7 +456,7 @@ async def _infer_stage_with_policy_retry(
         input_char_cap=input_char_cap,
         output_token_cap=output_token_cap,
     )
-    prompt_payload = truncate_text(payload, input_char_cap)
+    prompt_payload = str(payload or "")
     try:
         response, model_execution = await _infer_document_analysis_with_failover(
             stage=stage,
@@ -697,17 +786,100 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
     if len(chunk_summaries) == 1:
         summary = chunk_summaries[0]
         summary_metadata["final_synthesis_status"] = "not_needed"
+        summary_metadata["reduce_strategy"] = "single_item"
+        summary_metadata["reduce_reason"] = "not_needed"
     else:
         reduce_items = list(chunk_summaries)
         merge_level = 0
-        while len(reduce_items) > summary_policy["group_size"]:
+        current_admission_snapshot: Dict[str, Any] = {}
+        while len(reduce_items) > 1:
             await _raise_if_cancelled(state)
-            merge_level += 1
-            grouped = _group_items_for_budget(
+            final_payload = "\n\n---\n\n".join(reduce_items)
+            final_admission = _resolve_stage_admission(
+                stage="final_synthesis",
+                payload=final_payload,
+                input_char_cap=summary_policy["final_input_chars"],
+                output_token_cap=summary_policy["final_max_tokens"],
+            )
+            final_prompt = _build_final_synthesis_prompt(type_prompt, final_payload)
+            grouped_preview = _group_items_for_budget(
                 reduce_items,
                 max_chars=summary_policy["group_input_chars"],
                 max_items=summary_policy["group_size"],
             )
+            group_prompt = _build_group_merge_prompt("\n\n---\n\n".join(grouped_preview[0]))
+            admission_snapshot = _build_reduce_admission_snapshot(
+                joined_payload=final_payload,
+                final_prompt=final_prompt,
+                group_prompt=group_prompt,
+                budget_tokens=int(final_admission.get("budget_tokens") or summary_policy["final_max_tokens"]),
+            )
+            strategy_meta = _resolve_reduce_strategy_with_snapshot(
+                reduce_items_count=len(reduce_items),
+                low_vram=summary_policy["weak_pc_mode"],
+                degraded_active=bool(summary_metadata.get("degraded")),
+                fast_final_merge_enabled=bool(summary_policy.get("enable_fast_final_merge")),
+                admission_snapshot=admission_snapshot,
+            )
+            current_admission_snapshot = dict(strategy_meta.get("admission_snapshot") or admission_snapshot)
+            if not summary_metadata.get("reduce_strategy"):
+                summary_metadata["reduce_strategy"] = strategy_meta["strategy"]
+                summary_metadata["reduce_reason"] = strategy_meta["reason"]
+            elif (
+                summary_metadata.get("reduce_reason") == "budget_overflow"
+                and strategy_meta["reason"] == "degraded_mode"
+            ):
+                pass
+            else:
+                summary_metadata["reduce_strategy"] = strategy_meta["strategy"]
+                summary_metadata["reduce_reason"] = strategy_meta["reason"]
+            summary_metadata["fast_path_eligible"] = bool(strategy_meta.get("fast_path_eligible"))
+            summary_metadata["final_admission_estimated_tokens"] = int(
+                current_admission_snapshot.get("joined_payload_tokens_est", 0) or 0
+            )
+            summary_metadata["final_prompt_tokens_est"] = int(
+                current_admission_snapshot.get("final_prompt_tokens_est", 0) or 0
+            )
+            summary_metadata["group_prompt_tokens_est"] = int(
+                current_admission_snapshot.get("group_prompt_tokens_est", 0) or 0
+            )
+            summary_metadata["final_admission_budget_tokens"] = int(
+                current_admission_snapshot.get("budget_tokens", 0) or 0
+            )
+            summary_metadata["final_admission_reserve_tokens"] = int(
+                current_admission_snapshot.get("reserve_tokens", 0) or 0
+            )
+            summary_metadata["final_admission_margin_tokens"] = int(
+                current_admission_snapshot.get("margin_tokens", 0) or 0
+            )
+            logger.info(
+                "document_analysis reduce strategy=%s reason=%s items=%s level=%s weak_pc=%s degraded=%s",
+                strategy_meta["strategy"],
+                strategy_meta["reason"],
+                len(reduce_items),
+                merge_level,
+                summary_policy["weak_pc_mode"],
+                summary_metadata.get("degraded"),
+            )
+            inc_metric_counter(
+                "agent_nav_summary_strategy_total",
+                labels={
+                    "component": "document_analysis",
+                    "strategy": str(strategy_meta["strategy"]),
+                    "reason": str(strategy_meta["reason"]),
+                },
+            )
+            if strategy_meta["strategy"] == "fast_final_merge":
+                _record_stage_admission(summary_metadata, stage="final_synthesis", admission=final_admission)
+                break
+            if len(reduce_items) <= summary_policy["group_size"]:
+                _record_stage_admission(summary_metadata, stage="final_synthesis", admission=final_admission)
+                break
+
+            merge_level += 1
+            grouped = grouped_preview
+            summary_metadata["reduce_levels_used"] = merge_level
+            summary_metadata["reduce_groups_total"] += len(grouped)
             next_reduce_items = []
             try:
                 for group_idx, group in enumerate(grouped, start=1):
@@ -809,6 +981,11 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
                 _mark_degraded(summary_metadata, stage="final_synthesis", reason="retry_exhausted")
                 summary_metadata["final_synthesis_status"] = "failed"
                 summary = _build_partial_summary(reduce_items, max_chars=summary_policy["final_input_chars"])
+        if not summary_metadata.get("reduce_strategy"):
+            summary_metadata["reduce_strategy"] = "hierarchical_merge"
+            summary_metadata["reduce_reason"] = (
+                "hardware_policy" if summary_policy["weak_pc_mode"] else "budget_overflow"
+            )
 
     await _update_summary_progress(
         state,

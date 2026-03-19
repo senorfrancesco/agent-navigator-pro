@@ -20,6 +20,10 @@ from orchestrator.rag.classifier import (
     select_classifier_result,
 )
 from orchestrator.state_store import get_orchestration_state_store
+from orchestrator.summary_reduce_policy import (
+    resolve_fast_final_merge_enabled,
+    resolve_reduce_strategy,
+)
 from orchestrator.ui_control_plane import (
     get_prompt_profile_system_message,
     normalize_inference_device_mode,
@@ -73,6 +77,15 @@ SUMMARY_STAGE_MAX_TOKENS = {
     "merge": {"default": 448, "low_vram": 320},
     "global": {"default": 512, "low_vram": 384},
 }
+SUMMARY_FINAL_RESERVE_RATIO = float(os.getenv("SUMMARY_FINAL_RESERVE_RATIO", "0.15"))
+SUMMARY_FINAL_RESERVE_TOKENS = int(os.getenv("SUMMARY_FINAL_RESERVE_TOKENS", "128"))
+DOCUMENTS_SUMMARY_ENABLE_FAST_FINAL_MERGE = resolve_fast_final_merge_enabled(
+    policy=None,
+    env_var="DOCUMENTS_SUMMARY_ENABLE_FAST_FINAL_MERGE",
+)
+SUMMARY_FAST_FINAL_MERGE_LOW_VRAM = str(
+    os.getenv("SUMMARY_FAST_FINAL_MERGE_LOW_VRAM", "0")
+).strip().lower() not in {"0", "false", "no", "off"}
 DOC_ANALYSIS_CHUNK_INPUT_CHARS = int(os.getenv("DOCUMENT_ANALYSIS_CHUNK_INPUT_CHARS", "3200"))
 DOC_ANALYSIS_WEAK_PC_CHUNK_INPUT_CHARS = int(os.getenv("DOCUMENT_ANALYSIS_WEAK_PC_CHUNK_INPUT_CHARS", "2200"))
 DOC_ANALYSIS_GROUP_INPUT_CHARS = int(os.getenv("DOCUMENT_ANALYSIS_GROUP_INPUT_CHARS", "2600"))
@@ -141,6 +154,73 @@ def _estimate_prompt_tokens(text: str) -> int:
     return max(1, len(str(text or "")) // 4)
 
 
+def _resolve_summary_reserve_tokens(budget_tokens: int) -> int:
+    if budget_tokens <= 1:
+        return 0
+    ratio_based = int(max(0.0, SUMMARY_FINAL_RESERVE_RATIO) * budget_tokens)
+    reserve = max(int(SUMMARY_FINAL_RESERVE_TOKENS), ratio_based)
+    return min(budget_tokens - 1, reserve)
+
+
+def _build_reduce_admission_snapshot(
+    *,
+    joined_payload: str,
+    final_prompt: str,
+    group_prompt: str,
+    budget_tokens: int,
+) -> Dict[str, Any]:
+    joined_payload_tokens_est = _estimate_prompt_tokens(joined_payload)
+    final_prompt_tokens_est = _estimate_prompt_tokens(final_prompt)
+    group_prompt_tokens_est = _estimate_prompt_tokens(group_prompt)
+    reserve_tokens = _resolve_summary_reserve_tokens(budget_tokens)
+    margin_tokens = max(0, budget_tokens - final_prompt_tokens_est)
+    return {
+        "joined_payload_chars": len(str(joined_payload or "")),
+        "joined_payload_tokens_est": joined_payload_tokens_est,
+        "final_prompt_chars": len(str(final_prompt or "")),
+        "final_prompt_tokens_est": final_prompt_tokens_est,
+        "group_prompt_chars": len(str(group_prompt or "")),
+        "group_prompt_tokens_est": group_prompt_tokens_est,
+        "budget_tokens": int(budget_tokens),
+        "reserve_tokens": int(reserve_tokens),
+        "margin_tokens": int(margin_tokens),
+        "fits_with_margin": final_prompt_tokens_est <= max(0, budget_tokens - reserve_tokens),
+    }
+
+
+def _resolve_reduce_strategy_with_snapshot(
+    *,
+    reduce_items_count: int,
+    low_vram: bool,
+    degraded_active: bool,
+    fast_final_merge_enabled: bool,
+    allow_fast_final_merge_on_low_vram: bool,
+    admission_snapshot: Dict[str, Any],
+) -> Dict[str, Any]:
+    try:
+        strategy_meta = resolve_reduce_strategy(
+            reduce_items_count=reduce_items_count,
+            low_vram=low_vram,
+            degraded_active=degraded_active,
+            fast_final_merge_enabled=fast_final_merge_enabled,
+            allow_fast_final_merge_on_low_vram=allow_fast_final_merge_on_low_vram,
+            admission_snapshot=admission_snapshot,
+        )
+    except TypeError:
+        strategy_meta = resolve_reduce_strategy(
+            reduce_items_count=reduce_items_count,
+            final_stage_safe=bool(admission_snapshot.get("fits_with_margin")),
+            low_vram=low_vram,
+            degraded_active=degraded_active,
+            fast_final_merge_enabled=fast_final_merge_enabled,
+            allow_fast_final_merge_on_low_vram=allow_fast_final_merge_on_low_vram,
+        )
+    normalized = dict(strategy_meta or {})
+    normalized.setdefault("admission_snapshot", dict(admission_snapshot))
+    normalized.setdefault("fast_path_eligible", bool(admission_snapshot.get("fits_with_margin")))
+    return normalized
+
+
 def _resolve_summary_stage_plan(
     *,
     stage: str,
@@ -155,11 +235,13 @@ def _resolve_summary_stage_plan(
     low_vram = _is_low_vram_device_mode(effective_settings)
     runtime_admission = (((effective_settings or {}).get("runtime_admission") or {}).get("documents_summary") or {})
     explicit_stage_admission = str(runtime_admission.get(stage) or "").strip().lower()
+    budget_tokens = max(128, default_cap // 4)
+    reserve_tokens = _resolve_summary_reserve_tokens(budget_tokens)
+    fits_with_margin = prompt_tokens <= max(0, budget_tokens - reserve_tokens)
     requires_degraded = (
         explicit_stage_admission == "requires_degraded"
         or low_vram
-        or prompt_chars > int(default_cap * 0.85)
-        or prompt_tokens > max(128, default_cap // 4)
+        or not fits_with_margin
     )
     return {
         "stage": stage,
@@ -170,11 +252,15 @@ def _resolve_summary_stage_plan(
         "input_char_cap": degraded_cap if (degraded or requires_degraded) else default_cap,
         "prompt_chars": prompt_chars,
         "prompt_tokens": prompt_tokens,
+        "budget_tokens": budget_tokens,
+        "reserve_tokens": reserve_tokens,
+        "margin_tokens": max(0, budget_tokens - prompt_tokens),
+        "fits_with_margin": fits_with_margin,
         "overrides": _resolve_summary_stage_overrides(stage, effective_settings, degraded=(degraded or requires_degraded)),
     }
 
 
-def _join_summary_items(items: List[str], *, max_chars: int) -> str:
+def _join_summary_items(items: List[str], *, max_chars: Optional[int]) -> str:
     joined: List[str] = []
     current_len = 0
     for idx, item in enumerate(items, start=1):
@@ -183,7 +269,7 @@ def _join_summary_items(items: List[str], *, max_chars: int) -> str:
             continue
         candidate = f"[{idx}] {normalized}"
         extra = len(candidate) + (2 if joined else 0)
-        if joined and current_len + extra > max_chars:
+        if max_chars is not None and joined and current_len + extra > max_chars:
             break
         joined.append(candidate)
         current_len += extra
@@ -1374,6 +1460,7 @@ async def _execute_documents_summary(
     per_doc: List[Dict[str, str]] = []
     processed_chunks = 0
     degraded_events: List[Dict[str, Any]] = []
+    reduce_strategy_events: List[Dict[str, Any]] = []
     for doc_entry in per_doc_chunks:
         _raise_if_execution_cancelled(deps)
         doc_name = str(doc_entry["name"])
@@ -1431,6 +1518,15 @@ async def _execute_documents_summary(
                 chunk_summary = chunk_summary.strip()
             chunk_summaries.append(chunk_summary.strip())
         if len(chunk_summaries) == 1:
+            reduce_strategy_events.append(
+                {
+                    "doc": doc_name,
+                    "strategy": "single_item",
+                    "reason": "not_needed",
+                    "levels_used": 0,
+                    "groups_total": 0,
+                }
+            )
             per_doc.append({"name": doc_name, "summary": chunk_summaries[0]})
             await deps.update_progress_box(
                 key="documents_summary_progress",
@@ -1439,10 +1535,13 @@ async def _execute_documents_summary(
             )
             continue
         reduce_items = chunk_summaries
+        reduce_levels_used = 0
+        reduce_groups_total = 0
+        current_reduce_reason = "budget_overflow"
+        current_admission_snapshot: Dict[str, Any] = {}
         try:
             while len(reduce_items) > 1:
                 _raise_if_execution_cancelled(deps)
-                next_reduce_items: List[str] = []
                 reduce_group_size = (
                     SUMMARY_DEGRADED_REDUCE_GROUP_SIZE
                     if degraded_events or _is_low_vram_device_mode(effective_settings)
@@ -1453,11 +1552,109 @@ async def _execute_documents_summary(
                     if degraded_events or _is_low_vram_device_mode(effective_settings)
                     else SUMMARY_STAGE_MAX_INPUT_CHARS["merge"]
                 )
-                for batch in _group_summary_items_for_budget(
+                raw_merge_payload = "\n\n".join(
+                    f"[{idx}] {str(item or '').strip()}"
+                    for idx, item in enumerate(reduce_items, start=1)
+                    if str(item or "").strip()
+                )
+                final_merge_prompt = deps.build_prompt(
+                    (
+                        "Объедини суммаризации фрагментов одного документа в итоговую краткую сводку из 4-6 пунктов, "
+                        "без повторов и без домыслов."
+                    ),
+                    [],
+                    (
+                        "Ты аналитик документов. Собери единую сводку строго по промежуточным summary. "
+                        f"Документ: {doc_name}\n\nСУММАРИЗАЦИИ ФРАГМЕНТОВ:\n"
+                        + _join_summary_items(reduce_items, max_chars=None)
+                    ),
+                )
+                grouped_preview = _group_summary_items_for_budget(
                     reduce_items,
                     max_chars=merge_char_cap,
                     max_items=reduce_group_size,
-                ):
+                )
+                group_preview_prompt = deps.build_prompt(
+                    (
+                        "Объедини суммаризации фрагментов одного документа в итоговую краткую сводку из 4-6 пунктов, "
+                        "без повторов и без домыслов."
+                    ),
+                    [],
+                    (
+                        "Ты аналитик документов. Собери единую сводку строго по промежуточным summary. "
+                        f"Документ: {doc_name}\n\nСУММАРИЗАЦИИ ФРАГМЕНТОВ:\n"
+                        + _join_summary_items(grouped_preview[0], max_chars=merge_char_cap)
+                    ),
+                )
+                admission_snapshot = _build_reduce_admission_snapshot(
+                    joined_payload=raw_merge_payload,
+                    final_prompt=final_merge_prompt,
+                    group_prompt=group_preview_prompt,
+                    budget_tokens=max(128, merge_char_cap // 4),
+                )
+                strategy_meta = _resolve_reduce_strategy_with_snapshot(
+                    reduce_items_count=len(reduce_items),
+                    low_vram=_is_low_vram_device_mode(effective_settings),
+                    degraded_active=bool(degraded_events),
+                    fast_final_merge_enabled=DOCUMENTS_SUMMARY_ENABLE_FAST_FINAL_MERGE,
+                    allow_fast_final_merge_on_low_vram=SUMMARY_FAST_FINAL_MERGE_LOW_VRAM,
+                    admission_snapshot=admission_snapshot,
+                )
+                current_admission_snapshot = dict(strategy_meta.get("admission_snapshot") or admission_snapshot)
+                current_reduce_reason = str(strategy_meta["reason"])
+                inc_metric_counter(
+                    "agent_nav_summary_strategy_total",
+                    labels={
+                        "component": "documents_summary",
+                        "strategy": str(strategy_meta["strategy"]),
+                        "reason": str(strategy_meta["reason"]),
+                    },
+                )
+                if strategy_meta["strategy"] == "fast_final_merge":
+                    merged_summary, stage_meta = await _infer_documents_summary_stage(
+                        deps=deps,
+                        prompt=final_merge_prompt,
+                        stage="merge",
+                        effective_settings=effective_settings,
+                    )
+                    if stage_meta.get("degraded"):
+                        degraded_events.append(stage_meta)
+                    reduce_strategy_events.append(
+                        {
+                            "doc": doc_name,
+                            "strategy": "fast_final_merge",
+                            "reason": strategy_meta["reason"],
+                            "levels_used": 0,
+                            "groups_total": 0,
+                            "admission_snapshot": dict(current_admission_snapshot),
+                            "fast_path_eligible": bool(strategy_meta.get("fast_path_eligible")),
+                        }
+                    )
+                    logger.info(
+                        "documents_summary reduce strategy=%s reason=%s doc=%s items=%s chars=%s",
+                        strategy_meta["strategy"],
+                        strategy_meta["reason"],
+                        doc_name,
+                        len(reduce_items),
+                        len(final_merge_prompt),
+                    )
+                    reduce_items = [merged_summary.strip()]
+                    break
+
+                next_reduce_items: List[str] = []
+                grouped_batches = grouped_preview
+                reduce_levels_used += 1
+                reduce_groups_total += len(grouped_batches)
+                logger.info(
+                    "documents_summary reduce strategy=%s reason=%s doc=%s items=%s level=%s groups=%s",
+                    strategy_meta["strategy"],
+                    strategy_meta["reason"],
+                    doc_name,
+                    len(reduce_items),
+                    reduce_levels_used,
+                    len(grouped_batches),
+                )
+                for batch in grouped_batches:
                     _raise_if_execution_cancelled(deps)
                     merge_prompt = deps.build_prompt(
                         (
@@ -1481,6 +1678,18 @@ async def _execute_documents_summary(
                         degraded_events.append(stage_meta)
                     next_reduce_items.append(merged_summary.strip())
                 reduce_items = next_reduce_items
+            if not any(item["strategy"] != "single_item" and item.get("doc") == doc_name for item in reduce_strategy_events):
+                reduce_strategy_events.append(
+                    {
+                        "doc": doc_name,
+                        "strategy": "hierarchical_merge",
+                        "reason": current_reduce_reason,
+                        "levels_used": reduce_levels_used,
+                        "groups_total": reduce_groups_total,
+                        "admission_snapshot": dict(current_admission_snapshot),
+                        "fast_path_eligible": bool(strategy_meta.get("fast_path_eligible")),
+                    }
+                )
             per_doc.append({"name": doc_name, "summary": reduce_items[0]})
             await deps.update_progress_box(
                 key="documents_summary_progress",
@@ -1515,6 +1724,17 @@ async def _execute_documents_summary(
                         "Частичная сводка по документу; этап объединения summary не завершился.\n\n"
                         f"{fallback_summary}"
                     ).strip(),
+                }
+            )
+            reduce_strategy_events.append(
+                {
+                    "doc": doc_name,
+                    "strategy": "partial_only",
+                    "reason": "retry_exhausted",
+                    "levels_used": reduce_levels_used,
+                    "groups_total": reduce_groups_total,
+                    "admission_snapshot": dict(current_admission_snapshot),
+                    "fast_path_eligible": False,
                 }
             )
             await deps.update_progress_box(
@@ -1583,15 +1803,45 @@ async def _execute_documents_summary(
         content=f"Готово: обработано {processed_chunks}/{total_chunks} фрагментов.",
     )
     lines = ["## Сводка по документам", ""]
-    execution_metadata = None
+    strategy_priority = {
+        "partial_only": 3,
+        "hierarchical_merge": 2,
+        "fast_final_merge": 1,
+        "single_item": 0,
+    }
+    primary_reduce_event = max(
+        reduce_strategy_events or [{"strategy": "single_item", "reason": "not_needed", "levels_used": 0, "groups_total": 0}],
+        key=lambda item: strategy_priority.get(str(item.get("strategy") or "single_item"), 0),
+    )
+    execution_metadata = {
+        "reduce_strategy": primary_reduce_event.get("strategy", "single_item"),
+        "reduce_reason": primary_reduce_event.get("reason", "not_needed"),
+        "reduce_levels_used": int(primary_reduce_event.get("levels_used", 0) or 0),
+        "reduce_groups_total": int(primary_reduce_event.get("groups_total", 0) or 0),
+        "fast_path_eligible": bool(primary_reduce_event.get("fast_path_eligible")),
+    }
+    admission_snapshot = dict(primary_reduce_event.get("admission_snapshot") or {})
+    if admission_snapshot:
+        execution_metadata.update(
+            {
+                "final_admission_estimated_tokens": int(admission_snapshot.get("joined_payload_tokens_est", 0) or 0),
+                "final_prompt_tokens_est": int(admission_snapshot.get("final_prompt_tokens_est", 0) or 0),
+                "group_prompt_tokens_est": int(admission_snapshot.get("group_prompt_tokens_est", 0) or 0),
+                "final_admission_budget_tokens": int(admission_snapshot.get("budget_tokens", 0) or 0),
+                "final_admission_reserve_tokens": int(admission_snapshot.get("reserve_tokens", 0) or 0),
+                "final_admission_margin_tokens": int(admission_snapshot.get("margin_tokens", 0) or 0),
+            }
+        )
     if degraded_events:
         final_event = degraded_events[-1]
-        execution_metadata = {
-            "degraded": True,
-            "reason": final_event.get("reason", "low_vram"),
-            "stage": final_event.get("stage", "global"),
-            "policy": final_event.get("policy", "reduced_context"),
-        }
+        execution_metadata.update(
+            {
+                "degraded": True,
+                "reason": final_event.get("reason", "low_vram"),
+                "stage": final_event.get("stage", "global"),
+                "policy": final_event.get("policy", "reduced_context"),
+            }
+        )
         lines.append(
             "Примечание: ответ упрощён из-за ограничений ресурсов; применён reduced-context режим."
         )
@@ -1608,8 +1858,7 @@ async def _execute_documents_summary(
         ]
     )
     result = {"assistant_message": "\n".join(lines).strip()}
-    if execution_metadata is not None:
-        result["execution_metadata"] = execution_metadata
+    result["execution_metadata"] = execution_metadata
     model_execution = _summarize_model_execution_events(_collect_model_execution_events(deps))
     if model_execution is not None:
         result["model_execution"] = model_execution
