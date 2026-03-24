@@ -1,0 +1,170 @@
+services:
+  # Runtime containers are replaceable. Persistent state lives under:
+  # - ./state/backend-data
+  # - ./state/chainlit-data
+  # - ./state/uploads
+  #
+  # Legacy backend/orchestrator/.files is archived under
+  # ./state/legacy-orchestrator-files but is not mounted into v1.0 runtime.
+  agent-api:
+    image: ${BACKEND_APP_IMAGE:-agent-nav-backend-app-offline:v1.0}
+    container_name: agent-nav-agent-api-offline
+    env_file:
+      - ./env.bundle
+    environment:
+      UMS_URL: http://ums:8090
+      DOC_SERVER_URL: http://document-server:8001
+      LEGAL_SERVER_URL: http://legal-server:8002
+      MCP_DOCUMENT_SERVER_URL: http://document-server:8001
+      MCP_LEGAL_SERVER_URL: http://legal-server:8002
+      HOST_UPLOADS_DIR: /app/backend/open_webui_uploads
+    command: ["python", "-m", "uvicorn", "orchestrator.agent_api:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "${AGENT_API_PORT:-8000}:8000"
+    volumes:
+      - ./state/backend-data:/app/backend/.data
+      - ./state/uploads:/app/backend/open_webui_uploads
+      - ./models:/app/backend/models
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()\""]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+
+  document-server:
+    image: ${BACKEND_APP_IMAGE:-agent-nav-backend-app-offline:v1.0}
+    container_name: agent-nav-document-server-offline
+    env_file:
+      - ./env.bundle
+    environment:
+      UMS_URL: http://ums:8090
+    command: ["python", "-m", "uvicorn", "services.document_server.mcp_document_server:app", "--host", "0.0.0.0", "--port", "8001"]
+    ports:
+      - "${DOCUMENT_SERVER_PORT:-8001}:8001"
+    volumes:
+      - ./state/backend-data:/app/backend/.data
+      - ./state/uploads:/app/backend/open_webui_uploads
+      - ./models:/app/backend/models
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=2).read()\""]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+
+  legal-server:
+    image: ${BACKEND_APP_IMAGE:-agent-nav-backend-app-offline:v1.0}
+    container_name: agent-nav-legal-server-offline
+    env_file:
+      - ./env.bundle
+    environment:
+      UMS_URL: http://ums:8090
+    command: ["python", "-m", "uvicorn", "services.legal_server.mcp_legal_server:app", "--host", "0.0.0.0", "--port", "8002"]
+    ports:
+      - "${LEGAL_SERVER_PORT:-8002}:8002"
+    volumes:
+      - ./state/backend-data:/app/backend/.data
+      - ./state/uploads:/app/backend/open_webui_uploads
+      - ./models:/app/backend/models
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=2).read()\""]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+
+  ums:
+    image: ${UMS_IMAGE:-agent-nav-ums-offline:v1.0}
+    container_name: agent-nav-ums-offline
+    env_file:
+      - ./env.bundle
+    command: ["python", "services/model_manager/unified_model_server.py"]
+    ports:
+      - "${UMS_PORT:-8090}:8090"
+    volumes:
+      - ./state/backend-data:/app/backend/.data
+      - ./state/uploads:/app/backend/open_webui_uploads
+      - ./models:/app/backend/models
+    gpus: all
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=2).read()\""]
+      interval: 15s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+
+  chainlit:
+    image: ${CHAINLIT_IMAGE:-agent-nav-chainlit-offline:v1.0}
+    container_name: chainlit-ui-offline
+    env_file:
+      - ./env.bundle
+    environment:
+      UMS_URL: http://ums:8090
+      DOC_SERVER_URL: http://document-server:8001
+      LEGAL_SERVER_URL: http://legal-server:8002
+      MCP_DOCUMENT_SERVER_URL: http://document-server:8001
+      MCP_LEGAL_SERVER_URL: http://legal-server:8002
+      UPLOADS_DIR: /app/uploads
+      HOST_UPLOADS_DIR: /app/uploads
+    ports:
+      - "${CHAINLIT_PORT:-3000}:3000"
+    volumes:
+      - ./state/chainlit-data:/app/backend/.data
+      - ./state/uploads:/app/uploads
+    depends_on:
+      agent-api:
+        condition: service_healthy
+      document-server:
+        condition: service_healthy
+      legal-server:
+        condition: service_healthy
+      ums:
+        condition: service_healthy
+    restart: unless-stopped
+
+  vllm:
+    image: ${VLLM_IMAGE:-agent-nav-vllm-offline:v1.0}
+    container_name: agent-nav-vllm-offline
+    profiles: ["vllm"]
+    env_file:
+      - ./env.bundle
+    ports:
+      - "${VLLM_PORT:-8101}:8000"
+    volumes:
+      - ./models:/models
+    gpus: all
+    ipc: host
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.4.2
+    container_name: agent-nav-prometheus-offline
+    profiles: ["monitoring"]
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    container_name: agent-nav-grafana-offline
+    profiles: ["monitoring"]
+    env_file:
+      - ./env.bundle
+    ports:
+      - "${GRAFANA_PORT:-3002}:3000"
+    depends_on:
+      - prometheus
+    volumes:
+      - ./monitoring/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./monitoring/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    restart: unless-stopped

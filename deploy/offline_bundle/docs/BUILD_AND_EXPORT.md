@@ -2,6 +2,12 @@
 
 Этот документ описывает все скачивания и сборки, которые оператор выполняет **вручную** на connected build-машине.
 
+Важно:
+- `manifest.template.json` относится к source-slice и может храниться в git;
+- generated `manifest.json` относится к build/export output и обычно не коммитится;
+- `host_packages/`, image tar-архивы, exported env/state и локальный `vendor/llama.cpp/`
+  считаются build-side артефактами и не должны автоматически попадать в source commit.
+
 ## 1. Подготовка env
 
 ```bash
@@ -17,22 +23,20 @@ cp env.bundle.example env.bundle
 - для текущего `v1.0` `MODEL_PATH_VLM` и `MMPROJ_PATH` остаются закомментированными;
 - container-side пути должны соответствовать фактическому содержимому `deploy/offline_bundle/models/`.
 
-## 1.1. Подготовить `llama.cpp` source для UMS image
+## 1.1. Зафиксировать источник `llama.cpp` для UMS image
 
-До сборки `UMS` image в bundle должен лежать локальный source tree:
-
-```bash
-deploy/offline_bundle/vendor/llama.cpp/
-```
-
-Минимальная проверка:
+Для текущего source-slice `UMS` image тянет `llama.cpp` из официального репозитория
+через build args:
 
 ```bash
-test -f deploy/offline_bundle/vendor/llama.cpp/CMakeLists.txt
+--build-arg LLAMA_CPP_REPO=https://github.com/ggml-org/llama.cpp.git
+--build-arg LLAMA_CPP_REF=master
 ```
+
+Если нужен fork или pin на конкретный commit/tag, переопределите эти аргументы
+явно при `docker build`.
 
 Важно:
-- build не должен полагаться на `git clone` внутри Docker;
 - для текущего сервера с NVIDIA A4000 в `UMS` image используется `CMAKE_CUDA_ARCHITECTURES="86"`;
 - сборка `llama.cpp` в `UMS` image идёт с `-DCMAKE_BUILD_TYPE=Release` и `cmake --build ... --config Release`;
 - multi-GPU runtime остаётся под контролем `UMS` через его placement logic, а не через статический `docker run`.
@@ -63,6 +67,8 @@ docker build \
 
 docker build \
   -f deploy/offline_bundle/Dockerfile.ums.offline \
+  --build-arg LLAMA_CPP_REPO=https://github.com/ggml-org/llama.cpp.git \
+  --build-arg LLAMA_CPP_REF=master \
   -t agent-nav-ums-offline:v1.0 \
   .
 
@@ -76,7 +82,10 @@ docker build \
 
 ```bash
 docker build -f Dockerfile.backend.offline -t agent-nav-backend-app-offline:v1.0 ../..
-docker build -f Dockerfile.ums.offline -t agent-nav-ums-offline:v1.0 ../..
+docker build -f Dockerfile.ums.offline \
+  --build-arg LLAMA_CPP_REPO=https://github.com/ggml-org/llama.cpp.git \
+  --build-arg LLAMA_CPP_REF=master \
+  -t agent-nav-ums-offline:v1.0 ../..
 docker build -f Dockerfile.chainlit.offline -t agent-nav-chainlit-offline:v1.0 ../..
 ```
 
@@ -92,7 +101,7 @@ docker tag <existing-vllm-image> agent-nav-vllm-offline:v1.0
 - внутри `UMS` `torch==2.8.0` ставится отдельно из `https://download.pytorch.org/whl/cu128`;
 - если `docker build` падает ещё до `COPY` на pull базового образа с `network is unreachable`, это проблема Docker builder/host networking.
 - для такого сбоя не нужно менять `COPY` или build context, пока не починится `docker pull` базового образа.
-- если `UMS` build падает на отсутствии `deploy/offline_bundle/vendor/llama.cpp/CMakeLists.txt`, значит в bundle не положен локальный source tree `llama.cpp`.
+- если `UMS` build падает на `git clone`/checkout `llama.cpp`, нужно проверить доступность репозитория, корректность `LLAMA_CPP_REPO` и `LLAMA_CPP_REF`.
 - если сервер использует несколько A4000, runtime-ограничение heavy path по картам задаётся уже не в Dockerfile, а через `UMS_LLM_GPU_INDICES` в `env.bundle`.
 
 ## 3. Экспорт контейнерных образов в bundle
@@ -204,7 +213,7 @@ bash deploy/offline_bundle/scripts/build_wheelhouse.sh --skip-download
 ```
 
 Что ещё оператор должен подготовить для полноценной оффлайн-сборки и запуска:
-- локальный source tree `deploy/offline_bundle/vendor/llama.cpp/`
+- доступный `llama.cpp` repo/ref для build args `LLAMA_CPP_REPO` и `LLAMA_CPP_REF`
 - базовые Docker image, которые должны успешно `pull/build` на build-машине
 - Python-зависимости из lock-файлов bundle
 - веса моделей в `models/`
@@ -235,7 +244,7 @@ bash deploy/offline_bundle/scripts/build_wheelhouse.sh --skip-download
 - Python-пакеты из `requirements.chainlit.lock.txt`
 - базовые Docker image для `backend-app`, `UMS` и `Chainlit`
 - host `.deb` пакеты для Ubuntu 22.04 и/или 24.04 через `build_host_apt_bundle.sh`
-- локальный source tree `deploy/offline_bundle/vendor/llama.cpp/`
+- доступный `llama.cpp` repo/ref для `UMS` build
 - обязательные веса моделей из `env.bundle`
 - каталоги runtime state из `state/`
 

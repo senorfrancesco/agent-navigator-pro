@@ -1,0 +1,37 @@
+FROM python:3.11-slim-bookworm
+
+WORKDIR /app/backend
+
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONPATH=/app/backend
+
+# Оффлайн-контракт:
+# - финальный bundle должен содержать заранее собранные tar-архивы образов;
+# - этот Dockerfile собирается на подключённой build-машине;
+# - зависимости ставятся из lock-файла для повторяемости.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    git \
+    libgdk-pixbuf-2.0-0 \
+    libglib2.0-0 \
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    shared-mime-info \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY deploy/offline_bundle/requirements.backend.lock.txt /tmp/requirements.backend.lock.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --timeout=120 --retries=3 -r /tmp/requirements.backend.lock.txt
+
+COPY backend /app/backend
+
+RUN mkdir -p /app/backend/.data /app/backend/open_webui_uploads /app/backend/models
+
+EXPOSE 8000 8001 8002 8090
+
+CMD ["python", "-m", "uvicorn", "orchestrator.agent_api:app", "--host", "0.0.0.0", "--port", "8000"]
