@@ -2,6 +2,15 @@
 
 > **Единственный operational backlog.** Планы в `docs/plans/` — исторические артефакты, не operational source.
 
+## Release/v1.0 Transition (2026-03-22)
+
+- [ ] R1.0.1 — Переопределить каноническую основную ветку проекта на `release/v1.0`
+- [ ] R1.0.2 — Ввести `deploy/offline_bundle/` как канонический offline/server deployment slice
+- [ ] R1.0.3 — Собрать новый `docker-first` runtime bundle с export/import/deploy pipeline
+- [ ] R1.0.4 — Включить operator-controlled multi-agent runtime в offline bundle `v1.0`
+- [ ] R1.0.5 — Убрать зависимость нового release path от legacy hybrid compose/runtime
+- [ ] R1.0.6 — Scope guard: в рамках задачи изменять код только внутри `deploy/offline_bundle/`; любые правки вне этой папки делать только после явного предупреждения пользователя
+
 ## Текущее состояние (2026-03-12)
 
 **Ветка:** `codex/orchestration-control-plane-snapshot` (2 коммита от `v3.0`)
