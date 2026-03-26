@@ -1718,9 +1718,9 @@ def _get_intent_decision(
 
 # === File Loading ===
 
-# Пути для обмена файлами между Docker и хостом
-# Внутри контейнера: /app/uploads → на хосте: backend/open_webui_uploads/
-UPLOADS_DIR = os.getenv("UPLOADS_DIR", "/app/uploads")
+# Пути для обмена файлами между Docker и хостом.
+# Канонический runtime path: /app/backend/uploads.
+UPLOADS_DIR = os.getenv("UPLOADS_DIR", "/app/backend/uploads")
 # Хостовый путь, который doc-server на хосте может прочитать
 HOST_UPLOADS_DIR = os.getenv("HOST_UPLOADS_DIR", "")
 

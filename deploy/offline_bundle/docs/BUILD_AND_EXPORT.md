@@ -315,7 +315,7 @@ bash deploy/offline_bundle/scripts/export_state.sh
 
 Скрипт копирует:
 - `backend/.data/*`
-- `backend/open_webui_uploads/`
+- `backend/uploads/`
 - `backend/orchestrator/.files/` в `state/legacy-orchestrator-files/`, если каталог существует
 - `backend/.env`
 - `backend/.env.runtime`
@@ -326,7 +326,7 @@ bash deploy/offline_bundle/scripts/export_state.sh
 Важно:
 - обязательным live-state считаются каталоги `state/backend-data`, `state/chainlit-data`, `state/uploads` и `state/exported-env`;
 - `backend/orchestrator/.files` считается legacy archive-set, а не primary runtime storage;
-- текущий runtime хранит Chainlit file elements в `open_webui_uploads/chainlit-elements/`.
+- текущий runtime хранит uploads, reports и Chainlit file elements в `uploads/`, включая `uploads/chainlit-elements/`.
 - если нужен новый чистый инстанс без старых данных, каталоги `state/backend-data/`, `state/chainlit-data/` и `state/uploads/` можно оставить пустыми;
 - в этом режиме старые `chainlit.db`, `orchestrator_kb.db`, uploads и legacy `.files` не требуются.
 

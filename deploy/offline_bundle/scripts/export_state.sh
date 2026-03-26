@@ -7,7 +7,7 @@ BUNDLE_ROOT="$(dirname "$SCRIPT_DIR")"
 PROJECT_ROOT="$(dirname "$(dirname "$BUNDLE_ROOT")")"
 BACKEND_ROOT="$PROJECT_ROOT/backend"
 STATE_SRC="$BACKEND_ROOT/.data"
-UPLOADS_SRC="$BACKEND_ROOT/open_webui_uploads"
+UPLOADS_SRC="$BACKEND_ROOT/uploads"
 LEGACY_FILES_SRC="$BACKEND_ROOT/orchestrator/.files"
 ENV_SRC="$BACKEND_ROOT"
 
@@ -18,13 +18,21 @@ export_state.sh
 Copies runtime state into bundle-local state/ directories.
 Default source paths:
   backend/.data
-  backend/open_webui_uploads
+  backend/uploads
   backend/orchestrator/.files
   backend/.env*
 
 Flags:
   --source-root <path>   Override repository root
 EOF
+}
+
+resolve_uploads_src() {
+  if [[ -d "$BACKEND_ROOT/uploads" ]]; then
+    UPLOADS_SRC="$BACKEND_ROOT/uploads"
+  else
+    UPLOADS_SRC="$BACKEND_ROOT/open_webui_uploads"
+  fi
 }
 
 while [[ $# -gt 0 ]]; do
@@ -37,18 +45,18 @@ while [[ $# -gt 0 ]]; do
       PROJECT_ROOT="$2"
       BACKEND_ROOT="$PROJECT_ROOT/backend"
       STATE_SRC="$BACKEND_ROOT/.data"
-      UPLOADS_SRC="$BACKEND_ROOT/open_webui_uploads"
       LEGACY_FILES_SRC="$BACKEND_ROOT/orchestrator/.files"
       ENV_SRC="$BACKEND_ROOT"
+      resolve_uploads_src
       shift 2
       ;;
     --source-root=*)
       PROJECT_ROOT="${1#*=}"
       BACKEND_ROOT="$PROJECT_ROOT/backend"
       STATE_SRC="$BACKEND_ROOT/.data"
-      UPLOADS_SRC="$BACKEND_ROOT/open_webui_uploads"
       LEGACY_FILES_SRC="$BACKEND_ROOT/orchestrator/.files"
       ENV_SRC="$BACKEND_ROOT"
+      resolve_uploads_src
       shift
       ;;
     *)
@@ -57,6 +65,8 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+resolve_uploads_src
 
 mkdir -p \
   "$BUNDLE_ROOT/state/backend-data" \

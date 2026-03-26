@@ -30,7 +30,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 COPY backend /app/backend
 
-RUN mkdir -p /app/backend/.data /app/backend/open_webui_uploads /app/backend/models
+RUN mkdir -p /app/backend/.data /app/backend/uploads /app/backend/models
 
 EXPOSE 8000 8001 8002 8090
 

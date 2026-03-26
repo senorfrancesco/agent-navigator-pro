@@ -78,7 +78,7 @@ RUN ldconfig
 
 COPY backend /app/backend
 
-RUN mkdir -p /app/backend/.data /app/backend/open_webui_uploads /app/backend/models
+RUN mkdir -p /app/backend/.data /app/backend/uploads /app/backend/models
 
 EXPOSE 8090
 

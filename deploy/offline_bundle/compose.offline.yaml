@@ -17,13 +17,13 @@ services:
       LEGAL_SERVER_URL: http://legal-server:8002
       MCP_DOCUMENT_SERVER_URL: http://document-server:8001
       MCP_LEGAL_SERVER_URL: http://legal-server:8002
-      HOST_UPLOADS_DIR: /app/backend/open_webui_uploads
+      HOST_UPLOADS_DIR: /app/backend/uploads
     command: ["python", "-m", "uvicorn", "orchestrator.agent_api:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
       - "${AGENT_API_PORT:-8000}:8000"
     volumes:
       - ./state/backend-data:/app/backend/.data
-      - ./state/uploads:/app/backend/open_webui_uploads
+      - ./state/uploads:/app/backend/uploads
       - ./models:/app/backend/models
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()\""]
@@ -45,7 +45,7 @@ services:
       - "${DOCUMENT_SERVER_PORT:-8001}:8001"
     volumes:
       - ./state/backend-data:/app/backend/.data
-      - ./state/uploads:/app/backend/open_webui_uploads
+      - ./state/uploads:/app/backend/uploads
       - ./models:/app/backend/models
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=2).read()\""]
@@ -67,7 +67,7 @@ services:
       - "${LEGAL_SERVER_PORT:-8002}:8002"
     volumes:
       - ./state/backend-data:/app/backend/.data
-      - ./state/uploads:/app/backend/open_webui_uploads
+      - ./state/uploads:/app/backend/uploads
       - ./models:/app/backend/models
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=2).read()\""]
@@ -87,7 +87,7 @@ services:
       - "${UMS_PORT:-8090}:8090"
     volumes:
       - ./state/backend-data:/app/backend/.data
-      - ./state/uploads:/app/backend/open_webui_uploads
+      - ./state/uploads:/app/backend/uploads
       - ./models:/app/backend/models
     gpus: all
     healthcheck:
@@ -109,13 +109,13 @@ services:
       LEGAL_SERVER_URL: http://legal-server:8002
       MCP_DOCUMENT_SERVER_URL: http://document-server:8001
       MCP_LEGAL_SERVER_URL: http://legal-server:8002
-      UPLOADS_DIR: /app/uploads
-      HOST_UPLOADS_DIR: /app/uploads
+      UPLOADS_DIR: /app/backend/uploads
+      HOST_UPLOADS_DIR: /app/backend/uploads
     ports:
       - "${CHAINLIT_PORT:-3000}:3000"
     volumes:
       - ./state/chainlit-data:/app/backend/.data
-      - ./state/uploads:/app/uploads
+      - ./state/uploads:/app/backend/uploads
     depends_on:
       agent-api:
         condition: service_healthy

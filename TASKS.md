@@ -13,6 +13,23 @@
 - [ ] R1.0.7 — Пересобрать `host_packages` для Ubuntu `24.04.4 LTS` / kernel `6.17.0-19-generic` с `--extra-package linux-headers-6.17.0-19-generic`
 - [ ] R1.0.8 — Сделать отдельный TUI или UI-оболочку для offline deploy/build flow, чтобы упростить подготовку wheelhouse, host_packages, image export и server rollout
 
+## План исправления compare/offline bundle багов (2026-03-26 19:18 EDT)
+
+- [ ] R1.0.10 — `compare_workflow`: убрать расхождение между `needs LLM: 5` и фактической LLM-очередью `75`
+  Контекст: в `backend/orchestrator/workflows/compare.py` сейчас в `semantic_candidates` попадает `to_analyze + structural`, из-за чего structural diff'ы ошибочно уходят в `_analyze_compare_batch()`, хотя лог `needs LLM` считает только `to_analyze`.
+  План: либо исключить `structural` из LLM-очереди и обрабатывать их только через `_append_structural_result()`, либо как минимум привести telemetry/logging к честной формулировке `semantic queue / llm_modified / structural`.
+  Verification: таргетный pytest для compare workflow + ручная проверка docker-логов offline bundle, что после фикса количество `LLM batch` соответствует реальному числу LLM-кандидатов.
+
+- [ ] R1.0.11 — `compare_workflow`: стабилизировать strict JSON parsing для single-item LLM batch и убрать `structured output count mismatch batch=1 parsed=0`
+  Контекст: `_analyze_compare_batch()` требует JSON-массив ровно из `len(batch)` объектов; в offline bundle при `analysis_batch_size=1` модель периодически возвращает ответ, который не парсится как массив/объект, и workflow падает в fallback без дополнительного retry.
+  План: для `len(batch) == 1` перейти на prompt c одним JSON-объектом вместо массива, принимать оба формата (`dict` и `[dict]`) на parse-path, добавить минимальный single-item retry с более жёсткой инструкцией `только JSON без markdown/пояснений`.
+  Verification: таргетный pytest для `_analyze_compare_batch()` / compare parser path с кейсами `dict`, `[dict]`, markdown-fenced JSON и garbage-prefix/suffix; затем smoke-run в offline bundle с контролем отсутствия новых `parsed=0` по docker-логам `chainlit`.
+
+- [ ] R1.0.12 — `compare_workflow`: уменьшить runtime деградацию offline bundle при compare-run
+  Контекст: по docker-логам `deploy/offline_bundle` один `POST /infer` в `UMS` занимает примерно `19-71s`, а из-за текущей очереди compare уже дошёл до `LLM batch 14/75` без финального отчёта.
+  План: после исправления очереди и parse-path повторно проверить фактический объём LLM-вызовов, убедиться, что structural diff'ы не гоняются через LLM, и оценить необходимость дополнительного ограничения `COMPARE_ANALYSIS_MAX_TOKENS` / prompt-size для offline режима.
+  Verification: повторный docker log inspection `chainlit` + `ums`, сравнение количества `POST /infer`, latency и времени до `Saved new report`.
+
 ## Текущее состояние (2026-03-12)
 
 **Ветка:** `codex/orchestration-control-plane-snapshot` (2 коммита от `v3.0`)

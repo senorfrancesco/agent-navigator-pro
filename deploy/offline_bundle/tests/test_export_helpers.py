@@ -129,6 +129,7 @@ def test_ums_dockerfile_uses_local_llama_cpp_and_wheelhouse() -> None:
     assert 'torch==${TORCH_VERSION}' in content
     assert 'CMAKE_CUDA_ARCHITECTURES="75;86"' in content
     assert "После локального GPU-smoke" in content
+    assert "/app/backend/uploads" in content
 
 
 def test_connected_ums_dockerfile_keeps_legacy_networked_build_path() -> None:
@@ -140,6 +141,7 @@ def test_connected_ums_dockerfile_keeps_legacy_networked_build_path() -> None:
     assert "download.pytorch.org/whl/cu128" in content
     assert "COPY deploy/offline_bundle/vendor/llama.cpp /opt/llama.cpp" not in content
     assert "COPY deploy/offline_bundle/wheelhouse /opt/wheelhouse" not in content
+    assert "/app/backend/uploads" in content
 
 
 def test_chainlit_dockerfile_copies_runtime_dependencies() -> None:
@@ -149,6 +151,17 @@ def test_chainlit_dockerfile_copies_runtime_dependencies() -> None:
     assert "FROM ${BACKEND_BASE_IMAGE}" in content
     assert "WORKDIR /app/backend/orchestrator" in content
     assert "python -m pip install" in content
+    assert "/app/backend/uploads" in content
+
+
+def test_chainlit_lock_and_compose_keep_tab_api_and_shared_upload_path() -> None:
+    lock_content = (BUNDLE_ROOT / "requirements.chainlit.lock.txt").read_text(encoding="utf-8")
+    compose_content = (BUNDLE_ROOT / "compose.offline.yaml").read_text(encoding="utf-8")
+
+    assert "chainlit==2.9.6" in lock_content
+    assert "UPLOADS_DIR: /app/backend/uploads" in compose_content
+    assert "HOST_UPLOADS_DIR: /app/backend/uploads" in compose_content
+    assert "./state/uploads:/app/backend/uploads" in compose_content
 
 
 def test_ums_requirements_do_not_depend_on_llama_cpp_python() -> None:

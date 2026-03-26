@@ -567,7 +567,9 @@ def _discover_recent_uploaded_files(max_age_seconds: int = 600) -> List[FileAtta
     found_files: List[FileAttachment] = []
     try:
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        uploads_path = os.path.join(base_dir, "open_webui_uploads")
+        uploads_path = os.getenv("UPLOADS_DIR", os.path.join(base_dir, "uploads"))
+        if not os.path.exists(uploads_path):
+            uploads_path = os.path.join(base_dir, "open_webui_uploads")
         if not os.path.exists(uploads_path):
             return found_files
         recent: List[str] = []

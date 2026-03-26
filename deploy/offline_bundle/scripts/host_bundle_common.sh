@@ -63,16 +63,16 @@ print_host_system_info() {
 
 select_host_bundle_distro_interactive() {
   local detected="${1:-}"
-  echo "Выбор пакетной матрицы для host install bundle"
-  print_host_system_info
-  echo
-  echo "Поддерживаемые варианты:"
-  echo "  1) ubuntu-24.04"
-  echo "  2) ubuntu-22.04"
+  echo "Выбор пакетной матрицы для host install bundle" >&2
+  print_host_system_info >&2
+  echo >&2
+  echo "Поддерживаемые варианты:" >&2
+  echo "  1) ubuntu-24.04" >&2
+  echo "  2) ubuntu-22.04" >&2
   if [[ -n "$detected" ]]; then
-    echo "  detected: $detected"
+    echo "  detected: $detected" >&2
   fi
-  echo
+  echo >&2
 
   local default_choice="1"
   if [[ "$detected" == "ubuntu-22.04" ]]; then
@@ -80,7 +80,7 @@ select_host_bundle_distro_interactive() {
   fi
 
   local choice
-  read -r -p "Выберите целевой дистрибутив [${default_choice}]: " choice
+  read -r -p "Выберите целевой дистрибутив [${default_choice}]: " choice >&2
   choice="${choice:-$default_choice}"
 
   case "$choice" in
