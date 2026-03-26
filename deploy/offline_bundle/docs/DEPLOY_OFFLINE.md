@@ -3,6 +3,33 @@
 Этот документ описывает только действия на оффлайн-сервере.
 Все скачивания и сборки должны быть выполнены заранее на build-машине по `BUILD_AND_EXPORT.md`.
 
+## 0. Server Runbook
+
+Короткий маршрут без пояснений для целевого оффлайн-сервера:
+
+```bash
+tar -xzf agent-navigator-offline-bundle-v1.0.tar.gz
+cd deploy/offline_bundle
+
+sudo bash scripts/install_host_apt_bundle.sh --manual-driver
+
+cp env.bundle.example env.bundle
+
+python3 scripts/validate_bundle.py --mode deploy
+python3 scripts/preflight_runtime.py
+
+bash scripts/run_offline_bundle.sh
+
+docker compose -f compose.offline.yaml ps
+tmux list-sessions
+```
+
+Если driver path пакетный, а не manual-driver:
+
+```bash
+sudo bash scripts/install_host_apt_bundle.sh
+```
+
 ## 1. Host requirements
 
 На сервере заранее должны быть установлены:

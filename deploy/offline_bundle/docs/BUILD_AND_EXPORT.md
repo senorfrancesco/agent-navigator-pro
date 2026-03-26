@@ -9,6 +9,55 @@
   и checkout `vendor/llama.cpp/` считаются build-side артефактами и не должны автоматически
   попадать в source commit.
 
+## 0. E2E Runbook
+
+Короткий маршрут без пояснений для connected build-машины:
+
+```bash
+cp deploy/offline_bundle/env.bundle.example deploy/offline_bundle/env.bundle
+
+bash deploy/offline_bundle/scripts/build_host_apt_bundle.sh \
+  --distro ubuntu-24.04 \
+  --extra-package linux-headers-6.17.0-19-generic
+
+bash deploy/offline_bundle/scripts/build_wheelhouse.sh
+
+docker build \
+  -f deploy/offline_bundle/Dockerfile.backend.offline \
+  -t agent-nav-backend-app-offline:v1.0 \
+  .
+
+docker build \
+  -f deploy/offline_bundle/Dockerfile.chainlit.offline \
+  -t agent-nav-chainlit-offline:v1.0 \
+  .
+
+docker build \
+  -f deploy/offline_bundle/Dockerfile.ums.connected \
+  -t agent-nav-ums-offline:v1.0 \
+  .
+
+bash deploy/offline_bundle/scripts/export_models.sh
+bash deploy/offline_bundle/scripts/export_state.sh
+bash deploy/offline_bundle/scripts/export_images.sh --skip-build
+python3 deploy/offline_bundle/scripts/generate_manifest.py
+python3 deploy/offline_bundle/scripts/validate_bundle.py --mode deploy
+
+tar -czf agent-navigator-offline-bundle-v1.0.tar.gz \
+  --exclude='deploy/offline_bundle/wheelhouse' \
+  --exclude='deploy/offline_bundle/vendor/llama.cpp' \
+  deploy/offline_bundle
+```
+
+Если нужен канонический offline `UMS` build вместо fallback connected path:
+
+```bash
+docker build \
+  -f deploy/offline_bundle/Dockerfile.ums.offline \
+  -t agent-nav-ums-offline:v1.0 \
+  .
+```
+
 ## 1. Подготовка env
 
 ```bash
