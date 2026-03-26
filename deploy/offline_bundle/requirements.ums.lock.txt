@@ -6,10 +6,8 @@
 #
 # Тяжёлый GGUF inference обслуживается бинарём `llama-server` из `llama.cpp` внутри image.
 # Этот lock-файл покрывает Python-слой оркестрации `UMS` вокруг этого бинаря.
-# `llama-cpp-python[server]` остаётся parity-зависимостью backend contract, хотя
-# активный heavy runtime для release/v1.0 по-прежнему идёт через внешний `llama-server`.
-# Для `0.3.16` нужен `starlette-context<0.4`, поэтому UMS lock здесь сознательно
-# расходится с backend/runtime-веткой, где допустим `0.4.x`.
+# Для offline `UMS` Python bindings `llama-cpp-python` не требуются:
+# активный heavy runtime для release/v1.0 идёт через внешний `llama-server`.
 
 aiosqlite==0.21.0
 aiofiles==24.1.0
@@ -20,7 +18,6 @@ huggingface_hub==0.34.4
 httpx==0.28.1
 langchain==0.3.27
 langgraph==0.6.7
-llama-cpp-python[server]==0.3.16
 Markdown==3.9
 numpy==2.3.3
 nvidia-ml-py==13.580.82
@@ -44,7 +41,7 @@ SQLAlchemy==2.0.43
 sentence-transformers==5.1.1
 sse-starlette==3.0.2
 starlette==0.48.0
-starlette-context==0.3.6
+starlette-context==0.4.0
 transformers==4.56.2
 uvicorn[standard]==0.37.0
 WeasyPrint==66.0

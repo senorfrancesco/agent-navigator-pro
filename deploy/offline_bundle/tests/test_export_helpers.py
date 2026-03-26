@@ -139,12 +139,12 @@ def test_chainlit_dockerfile_copies_runtime_dependencies() -> None:
     assert "python -m pip install" in content
 
 
-def test_ums_requirements_keep_llama_cpp_python_parity_dependency() -> None:
+def test_ums_requirements_do_not_depend_on_llama_cpp_python() -> None:
     content = (BUNDLE_ROOT / "requirements.ums.lock.txt").read_text(encoding="utf-8")
 
-    assert "llama-cpp-python[server]==0.3.16" in content
+    assert "llama-cpp-python[server]" not in content
     assert "активный heavy runtime" in content
-    assert "starlette-context==0.3.6" in content
+    assert "starlette-context==0.4.0" in content
 
 
 def test_export_state_help_mentions_legacy_files() -> None:
