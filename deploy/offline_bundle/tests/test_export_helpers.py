@@ -115,6 +115,7 @@ def test_ums_dockerfile_uses_local_llama_cpp_and_wheelhouse() -> None:
 
     assert "COPY deploy/offline_bundle/vendor/llama.cpp /opt/llama.cpp" in content
     assert "COPY deploy/offline_bundle/wheelhouse /opt/wheelhouse" in content
+    assert "python3.11" in content
     assert "--no-index" in content
     assert "--find-links /opt/wheelhouse" in content
     assert "llama-server" in content

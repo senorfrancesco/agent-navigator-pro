@@ -32,6 +32,8 @@ WORKDIR /app/backend
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONPATH=/app/backend
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH=/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 #ENV PIP_NO_CACHE_DIR=1
 
 ARG TORCH_VERSION=2.8.0
@@ -47,22 +49,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsm6 \
     libxext6 \
     libxrender1 \
-    python3 \
-    python3-dev \
-    python3-pip \
-    python3-venv \
+    python3.11 \
+    python3.11-dev \
+    python3.11-venv \
     shared-mime-info \
     && rm -rf /var/lib/apt/lists/*
 
-RUN ln -sf /usr/bin/python3 /usr/local/bin/python && \
-    ln -sf /usr/bin/pip3 /usr/local/bin/pip
+RUN /usr/bin/python3.11 -m venv /opt/venv && \
+    /opt/venv/bin/python -m pip --version
 
 COPY deploy/offline_bundle/requirements.ums.lock.txt /tmp/requirements.ums.lock.txt
 COPY deploy/offline_bundle/wheelhouse /opt/wheelhouse
 RUN find /opt/wheelhouse -maxdepth 1 \( -name '*.whl' -o -name '*.tar.gz' -o -name '*.zip' \) | grep -q . || \
     (echo "wheelhouse пуст: сначала выполните deploy/offline_bundle/scripts/build_wheelhouse.sh" >&2 && exit 1)
 RUN --mount=type=cache,id=pip,target=/root/.cache/pip \
-    python3 -m pip install \
+    python -m pip install \
     --break-system-packages \
     --no-index \
     --find-links /opt/wheelhouse \
