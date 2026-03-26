@@ -2,17 +2,15 @@ FROM nvidia/cuda:12.8.1-devel-ubuntu24.04 AS llama-builder
 
 WORKDIR /opt
 
-ARG LLAMA_CPP_REPO=https://github.com/ggml-org/llama.cpp.git
-ARG LLAMA_CPP_REF=master
-
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     cmake \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-RUN git clone --depth 1 --branch "${LLAMA_CPP_REF}" "${LLAMA_CPP_REPO}" /opt/llama.cpp && \
-    test -f /opt/llama.cpp/CMakeLists.txt || (echo "не удалось подготовить llama.cpp из ${LLAMA_CPP_REPO}@${LLAMA_CPP_REF}" >&2 && exit 1)
+COPY deploy/offline_bundle/vendor/llama.cpp /opt/llama.cpp
+
+RUN test -f /opt/llama.cpp/CMakeLists.txt || (echo "не найден локальный source tree llama.cpp по пути deploy/offline_bundle/vendor/llama.cpp" >&2 && exit 1)
 
 # Временно собираем fatbin для sm_75 и sm_86, чтобы bundle можно было
 # локально прогнать на этой build-машине с RTX 2070. После локального GPU-smoke
@@ -37,7 +35,6 @@ ENV PYTHONPATH=/app/backend
 #ENV PIP_NO_CACHE_DIR=1
 
 ARG TORCH_VERSION=2.8.0
-ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
@@ -61,19 +58,14 @@ RUN ln -sf /usr/bin/python3 /usr/local/bin/python && \
     ln -sf /usr/bin/pip3 /usr/local/bin/pip
 
 COPY deploy/offline_bundle/requirements.ums.lock.txt /tmp/requirements.ums.lock.txt
-# RUN --mount=type=cache,target=/root/.cache/pip \
-#     python3 -m pip install --break-system-packages --timeout=120 --retries=3 \
-#     --index-url "${TORCH_INDEX_URL}" \
-#     "torch==${TORCH_VERSION}" && \
-#     python3 -m pip install --break-system-packages --timeout=120 --retries=3 -r /tmp/requirements.ums.lock.txt
+COPY deploy/offline_bundle/wheelhouse /opt/wheelhouse
+RUN find /opt/wheelhouse -maxdepth 1 \( -name '*.whl' -o -name '*.tar.gz' -o -name '*.zip' \) | grep -q . || \
+    (echo "wheelhouse пуст: сначала выполните deploy/offline_bundle/scripts/build_wheelhouse.sh" >&2 && exit 1)
 RUN --mount=type=cache,id=pip,target=/root/.cache/pip \
     python3 -m pip install \
     --break-system-packages \
-    --timeout=120 \
-    --retries=3 \
-    --prefer-binary \
-    --index-url "${TORCH_INDEX_URL}" \
-    --extra-index-url https://pypi.org/simple \
+    --no-index \
+    --find-links /opt/wheelhouse \
     torch==${TORCH_VERSION} \
     -r /tmp/requirements.ums.lock.txt
 

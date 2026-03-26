@@ -19,6 +19,10 @@ export_images.sh
 Builds or exports the expected offline images into images/.
 This script runs on the connected build machine, not on the offline target host.
 
+Для локальной сборки UMS заранее ожидаются:
+  - deploy/offline_bundle/vendor/llama.cpp
+  - deploy/offline_bundle/wheelhouse с torch cu128 и Python wheels
+
 Flags:
   --skip-build   Do not build backend-app/ums/chainlit images before export
 EOF
@@ -43,7 +47,27 @@ done
 
 mkdir -p "$IMAGES_DIR"
 
+require_ums_build_inputs() {
+  if [[ ! -f "$BUNDLE_ROOT/vendor/llama.cpp/CMakeLists.txt" ]]; then
+    echo "missing:vendor/llama.cpp/CMakeLists.txt" >&2
+    echo "hint: clone https://github.com/ggml-org/llama.cpp into deploy/offline_bundle/vendor/llama.cpp" >&2
+    exit 1
+  fi
+  if [[ ! -d "$BUNDLE_ROOT/wheelhouse" ]]; then
+    echo "missing:wheelhouse-dir" >&2
+    echo "hint: run bash deploy/offline_bundle/scripts/build_wheelhouse.sh before building UMS image" >&2
+    exit 1
+  fi
+  if ! find "$BUNDLE_ROOT/wheelhouse" -maxdepth 1 \( -name '*.whl' -o -name '*.tar.gz' -o -name '*.zip' \) | grep -q .; then
+    echo "missing:wheelhouse" >&2
+    echo "hint: run bash deploy/offline_bundle/scripts/build_wheelhouse.sh before building UMS image" >&2
+    exit 1
+  fi
+}
+
 if [[ "$BUILD_IMAGES" -eq 1 ]]; then
+  require_ums_build_inputs
+
   docker build \
     -f "$BUNDLE_ROOT/Dockerfile.backend.offline" \
     -t "$BACKEND_APP_IMAGE" \

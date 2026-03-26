@@ -10,7 +10,7 @@ print_help() {
 build_bundle.sh
 
 Build-side orchestration script for producing the offline bundle.
-Runs local export helpers and generates manifest.json.
+Runs local build/export helpers, generates manifest.json, and validates deploy-ready output.
 
 Отдельный host apt bundle для Ubuntu 24.04 готовится через:
   bash scripts/build_host_apt_bundle.sh
@@ -24,11 +24,11 @@ fi
 
 mkdir -p "$BUNDLE_ROOT/images" "$BUNDLE_ROOT/wheelhouse" "$BUNDLE_ROOT/state"
 
-bash "$SCRIPT_DIR/export_images.sh" --skip-build
+bash "$SCRIPT_DIR/build_wheelhouse.sh"
+bash "$SCRIPT_DIR/export_images.sh"
 bash "$SCRIPT_DIR/export_models.sh"
 bash "$SCRIPT_DIR/export_state.sh"
-bash "$SCRIPT_DIR/build_wheelhouse.sh" --skip-download
 python3 "$SCRIPT_DIR/generate_manifest.py"
-python3 "$SCRIPT_DIR/validate_bundle.py" --mode build
+python3 "$SCRIPT_DIR/validate_bundle.py" --mode deploy
 
 echo "build-bundle:ok"
