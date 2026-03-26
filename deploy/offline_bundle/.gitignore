@@ -1,11 +1,14 @@
 env.bundle
 manifest.json
 host_packages/**
+vendor/llama.cpp/
 vendor/llama.cpp/**
 images/*.tar
 images/*.tar.gz
 images/*.sha256
 wheelhouse/*.whl
+wheelhouse/*.tar.gz
+wheelhouse/*.zip
 wheelhouse/*.txt
 state/backend-data/*
 state/chainlit-data/*
