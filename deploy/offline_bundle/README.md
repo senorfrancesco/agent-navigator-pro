@@ -5,10 +5,10 @@
 Внутри находятся:
 - versioned manifest template и build/export contract;
 - offline-only compose и Dockerfile для `backend-app`, `ums` и `chainlit`;
-- build contract для `llama.cpp`, который нужен для сборки `UMS` image;
+- build-side checkout `vendor/llama.cpp/` как фиксированная локальная зависимость для сборки `UMS` image;
 - export/import/deploy scripts;
 - host-install scripts и contract для локальных apt-bundle под Ubuntu 22.04 / 24.04;
-- каталоги для image archives, wheelhouse, state и models.
+- каталоги для image archives, локального wheelhouse, state и models.
 
 Папка должна быть самодостаточной для серверного runtime:
 - запуск и остановка идут только из неё;
@@ -38,6 +38,11 @@ Legacy `backend/orchestrator/.files` хранится отдельно как ar
 1. На build-хосте следовать `docs/BUILD_AND_EXPORT.md`.
 2. На оффлайн-сервере следовать `docs/DEPLOY_OFFLINE.md`.
 
+Коротко по упаковке:
+- build-side `wheelhouse/` и `vendor/llama.cpp/` обычно не нужно переносить на оффлайн-сервер;
+- на сервер обычно уезжает уже готовый bundle с `images/*.tar`, `host_packages/`, `models/`, `state/`, `scripts/`, `env.bundle` и generated `manifest.json`;
+- рекомендуемый способ переноса: один `tar.gz` архив всей папки `deploy/offline_bundle/` без build-only каталогов.
+
 Основной operator entrypoint:
 - `scripts/run_offline_bundle.sh`
 
@@ -49,4 +54,4 @@ Legacy `backend/orchestrator/.files` хранится отдельно как ar
 - generated `manifest.json`;
 - `host_packages/` после локальной сборки apt bundle;
 - exported payload в `images/`, `models/`, `state/exported-env/`, `wheelhouse/`;
-- локальный mirror или checkout `vendor/llama.cpp/`.
+- локальный checkout `vendor/llama.cpp/`, который используется только на build-side.

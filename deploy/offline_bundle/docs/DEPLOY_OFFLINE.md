@@ -46,6 +46,8 @@
 Что **не требуется** только для запуска bundle:
 - отдельный `CUDA Toolkit` на хосте;
 - локальная установка Python-зависимостей проекта на сервере;
+- сборка или скачивание Python wheelhouse на сервере: bundle уже должен содержать
+  локально подготовленный `deploy/offline_bundle/wheelhouse/`;
 - native runtime репозитория (`run_native.sh`, `conda`, host Python path).
 
 Проверка:
@@ -84,6 +86,40 @@ NVIDIA runtime обязателен прежде всего для `UMS`.
 Для текущего `v1.0` heavy GGUF path ожидает `BACKEND_MODE=llama-server`.
 
 ## 2. Подготовка bundle
+
+На build-машине bundle обычно передают на сервер как один `tar.gz` архив:
+
+```bash
+tar -czf agent-navigator-offline-bundle-v1.0.tar.gz \
+  --exclude='deploy/offline_bundle/wheelhouse' \
+  --exclude='deploy/offline_bundle/vendor/llama.cpp' \
+  deploy/offline_bundle
+```
+
+На сервере:
+
+```bash
+tar -xzf agent-navigator-offline-bundle-v1.0.tar.gz
+cd deploy/offline_bundle
+```
+
+Для deploy-side достаточно, чтобы в распакованном bundle были:
+- `compose.offline.yaml`
+- `env.bundle`
+- `scripts/`
+- `docs/`
+- `images/*.tar`
+- `models/`
+- `state/`
+- `host_packages/`
+- generated `manifest.json`
+- `tmux/`
+- `monitoring/`
+
+Что обычно не нужно переносить на сервер:
+- `wheelhouse/`
+- `vendor/llama.cpp/`
+- исходники всего репозитория вне `deploy/offline_bundle/`
 
 Если на сервере ещё не установлены нужные host packages из bundle:
 
@@ -185,6 +221,97 @@ python3 scripts/preflight_runtime.py
 ```
 
 `--mode deploy` имеет смысл только когда в `images/` уже лежат экспортированные tar-архивы образов.
+
+## 2.0.1. Короткий Порядок Действий На Сервере
+
+После распаковки bundle канонический путь такой:
+
+```bash
+cd deploy/offline_bundle
+sudo bash scripts/install_host_apt_bundle.sh --manual-driver
+cp env.bundle.example env.bundle
+python3 scripts/validate_bundle.py --mode deploy
+python3 scripts/preflight_runtime.py
+bash scripts/run_offline_bundle.sh
+```
+
+Если driver path пакетный, а не manual-driver:
+
+```bash
+sudo bash scripts/install_host_apt_bundle.sh
+```
+
+После старта полезно проверить:
+
+```bash
+docker compose -f compose.offline.yaml ps
+tmux list-sessions
+```
+
+## 2.1. Реестр Флагов Deploy-Side Скриптов
+
+Ниже перечислены все user-facing entrypoint scripts, которые оператор запускает уже
+на сервере или при финальной deploy-подготовке bundle.
+
+`check_host.sh`
+- Отдельных флагов сейчас нет.
+- Назначение: проверить обязательные host prerequisites и наличие `env.bundle`.
+
+`install_host_apt_bundle.sh`
+- `--distro <name>`: выбрать `ubuntu-22.04` или `ubuntu-24.04` без интерактивного меню.
+- `--manual-driver`: не требовать пакетный `nvidia-driver-*`, считать драйвер установленным вручную.
+- `--check-only`: выполнить только audit без установки пакетов.
+- `--skip-runtime-configure`: не вызывать `nvidia-ctk runtime configure --runtime=docker`.
+
+`check_host_packages.py`
+- `--lock-file <path>`: использовать нестандартный `versions.lock.json`.
+- `--distro <name>`: выбрать `auto`, `ubuntu-22.04` или `ubuntu-24.04`.
+- `--manual-driver`: ослабить проверку пакетного `nvidia-driver-*` для manual-driver path.
+- `--json`: вывести machine-readable JSON-report.
+
+`verify_host_runtime.py`
+- `--json`: вывести machine-readable JSON-report по Docker/NVIDIA runtime.
+
+`validate_bundle.py`
+- `--mode {build,deploy}`: `build` проверяет bundle после export; `deploy` дополнительно требует image archives.
+- `--skip-manifest`: пропустить manifest-based validation и проверить только bundle files/env/models.
+- `--env-file <path>`: указать явный env-файл вместо `env.bundle`.
+- `--models-dir <path>`: указать явный каталог моделей вместо `deploy/offline_bundle/models`.
+
+`preflight_runtime.py`
+- `--env-file <path>`: проверить указанный env-файл вместо `env.bundle`.
+- `--report-only`: вывести summary/warnings без жёсткого fail по validation errors.
+
+`load_images.sh`
+- Отдельных флагов сейчас нет.
+- Назначение: загрузить `*.tar` и `*.tar.gz` из `images/` в local Docker daemon.
+
+`restore_state.sh`
+- `--allow-missing-manifest`: разрешить запуск без `manifest.json`.
+
+`deploy.sh`
+- `--skip-image-load`: не вызывать `load_images.sh`.
+- `--skip-host-check`: не вызывать `check_host.sh`.
+
+`run_offline_bundle.sh`
+- `--with-monitoring`: поднять compose profile `monitoring`.
+- `--no-tmux`: не создавать tmux workspace.
+- `--attach-tmux`: после старта сразу подключиться к tmux-сессии.
+- `--skip-image-load`: не вызывать `load_images.sh`.
+- `--skip-host-check`: не вызывать `check_host.sh`.
+- `--tmux-session <name>`: задать имя tmux-сессии.
+- `-h`, `--help`: показать справку.
+
+`launch_tmux_workspace.sh`
+- Позиционный аргумент `<session-name>`: имя tmux-сессии, по умолчанию `agent-nav-offline`.
+- Отдельных флагов сейчас нет.
+
+`stop_offline_bundle.sh`
+- Позиционный аргумент `<session-name>`: имя tmux-сессии, если отличается от стандартного.
+- Отдельных флагов сейчас нет.
+
+`verify_runtime.sh`
+- `--timeout <seconds>`: максимальное время ожидания на группу сервисов, по умолчанию `120`.
 
 ## 3. Импорт образов
 

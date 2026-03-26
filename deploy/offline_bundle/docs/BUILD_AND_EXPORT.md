@@ -5,8 +5,9 @@
 Важно:
 - `manifest.template.json` относится к source-slice и может храниться в git;
 - generated `manifest.json` относится к build/export output и обычно не коммитится;
-- `host_packages/`, image tar-архивы, exported env/state и локальный `vendor/llama.cpp/`
-  считаются build-side артефактами и не должны автоматически попадать в source commit.
+- `host_packages/`, image tar-архивы, exported env/state, локальный `wheelhouse/`
+  и checkout `vendor/llama.cpp/` считаются build-side артефактами и не должны автоматически
+  попадать в source commit.
 
 ## 1. Подготовка env
 
@@ -23,20 +24,14 @@ cp env.bundle.example env.bundle
 - для текущего `v1.0` `MODEL_PATH_VLM` и `MMPROJ_PATH` остаются закомментированными;
 - container-side пути должны соответствовать фактическому содержимому `deploy/offline_bundle/models/`.
 
-## 1.1. Зафиксировать источник `llama.cpp` для UMS image
+## 1.1. Зафиксировать локальный `llama.cpp` checkout для UMS image
 
-Для текущего source-slice `UMS` image тянет `llama.cpp` из официального репозитория
-через build args:
-
-```bash
---build-arg LLAMA_CPP_REPO=https://github.com/ggml-org/llama.cpp.git
---build-arg LLAMA_CPP_REF=master
-```
-
-Если нужен fork или pin на конкретный commit/tag, переопределите эти аргументы
-явно при `docker build`.
+Для текущего contract `UMS` image собирается с локальной build-side зависимостью
+`deploy/offline_bundle/vendor/llama.cpp/`.
 
 Важно:
+- этот checkout должен быть подготовлен заранее на build-машине;
+- он остаётся build-side артефактом и не должен попадать в source commit;
 - для текущего сервера с NVIDIA A4000 в `UMS` image используется `CMAKE_CUDA_ARCHITECTURES="86"`;
 - сборка `llama.cpp` в `UMS` image идёт с `-DCMAKE_BUILD_TYPE=Release` и `cmake --build ... --config Release`;
 - multi-GPU runtime остаётся под контролем `UMS` через его placement logic, а не через статический `docker run`.
@@ -67,8 +62,6 @@ docker build \
 
 docker build \
   -f deploy/offline_bundle/Dockerfile.ums.offline \
-  --build-arg LLAMA_CPP_REPO=https://github.com/ggml-org/llama.cpp.git \
-  --build-arg LLAMA_CPP_REF=master \
   -t agent-nav-ums-offline:v1.0 \
   .
 
@@ -83,8 +76,6 @@ docker build \
 ```bash
 docker build -f Dockerfile.backend.offline -t agent-nav-backend-app-offline:v1.0 ../..
 docker build -f Dockerfile.ums.offline \
-  --build-arg LLAMA_CPP_REPO=https://github.com/ggml-org/llama.cpp.git \
-  --build-arg LLAMA_CPP_REF=master \
   -t agent-nav-ums-offline:v1.0 ../..
 docker build -f Dockerfile.chainlit.offline -t agent-nav-chainlit-offline:v1.0 ../..
 ```
@@ -98,10 +89,11 @@ docker tag <existing-vllm-image> agent-nav-vllm-offline:v1.0
 Важно:
 - `backend-app` и `chainlit` используют `python:3.11-slim-bookworm`;
 - `UMS` собирается отдельно на `nvidia/cuda:12.8.1-*` и включает собранный `llama-server`;
-- внутри `UMS` `torch==2.8.0` ставится отдельно из `https://download.pytorch.org/whl/cu128`;
+- внутри `deploy/offline_bundle/wheelhouse/` заранее собираются все Python wheels, включая `torch cu128`;
+- `UMS` build устанавливает Python-пакеты только из локального `deploy/offline_bundle/wheelhouse/` и не тянет их из внешнего pip index;
 - если `docker build` падает ещё до `COPY` на pull базового образа с `network is unreachable`, это проблема Docker builder/host networking.
 - для такого сбоя не нужно менять `COPY` или build context, пока не починится `docker pull` базового образа.
-- если `UMS` build падает на `git clone`/checkout `llama.cpp`, нужно проверить доступность репозитория, корректность `LLAMA_CPP_REPO` и `LLAMA_CPP_REF`.
+- если `UMS` build падает на локальном `vendor/llama.cpp/`, нужно проверить, что checkout подготовлен и доступен в ожидаемом пути.
 - если сервер использует несколько A4000, runtime-ограничение heavy path по картам задаётся уже не в Dockerfile, а через `UMS_LLM_GPU_INDICES` в `env.bundle`.
 
 ## 3. Экспорт контейнерных образов в bundle
@@ -127,6 +119,78 @@ bash deploy/offline_bundle/scripts/export_images.sh
 ```bash
 python3 deploy/offline_bundle/scripts/validate_bundle.py --mode deploy
 ```
+
+## 3.1. Операторский Маршрут После Готовых `wheelhouse` И `host_packages`
+
+Если `wheelhouse/` уже скачан, а `host_packages/ubuntu-24.04/` уже собран, дальше
+канонический путь такой.
+
+Сначала проверить build-side входы:
+
+```bash
+test -f deploy/offline_bundle/vendor/llama.cpp/CMakeLists.txt && echo ok-llama
+find deploy/offline_bundle/wheelhouse -maxdepth 1 -type f | wc -l
+find deploy/offline_bundle/host_packages/ubuntu-24.04/pool -maxdepth 1 -type f | wc -l
+```
+
+Если нужен только `UMS` image:
+
+```bash
+docker build \
+  -f deploy/offline_bundle/Dockerfile.ums.offline \
+  -t agent-nav-ums-offline:v1.0 \
+  .
+```
+
+Если нужен штатный набор offline images:
+
+```bash
+bash deploy/offline_bundle/scripts/export_images.sh
+```
+
+Если `backend-app` и `chainlit` уже собраны и нужны только tar-архивы:
+
+```bash
+bash deploy/offline_bundle/scripts/export_images.sh --skip-build
+```
+
+После сборки/экспорта проверить, что tar-архивы реально появились:
+
+```bash
+ls -lh deploy/offline_bundle/images
+```
+
+Сгенерировать runtime manifest:
+
+```bash
+python3 deploy/offline_bundle/scripts/generate_manifest.py
+```
+
+Провалидировать готовый deploy bundle:
+
+```bash
+python3 deploy/offline_bundle/scripts/validate_bundle.py --mode deploy
+```
+
+Если нужен архив именно для переноса на оффлайн-сервер, а не полный build-side snapshot:
+
+```bash
+tar -czf agent-navigator-offline-bundle-v1.0.tar.gz \
+  --exclude='deploy/offline_bundle/wheelhouse' \
+  --exclude='deploy/offline_bundle/vendor/llama.cpp' \
+  deploy/offline_bundle
+```
+
+Если нужен полный build-side архив со всеми build inputs:
+
+```bash
+tar -czf agent-navigator-offline-bundle-full-v1.0.tar.gz deploy/offline_bundle
+```
+
+Что важно:
+- `wheelhouse/` и `vendor/llama.cpp/` нужны build-side и обычно не нужны уже на самом оффлайн-сервере;
+- для server deploy обычно переносится bundle с `images/*.tar`, `host_packages/`, `models/`, `state/`, `scripts/`, `env.bundle`, `compose.offline.yaml` и generated `manifest.json`;
+- если на сервер уезжает уже готовый `UMS` image tar, собирать `UMS` на сервере не требуется.
 
 ## 4. Экспорт моделей
 
@@ -200,11 +264,14 @@ bash deploy/offline_bundle/scripts/export_state.sh
 
 ## 6. Wheelhouse
 
-Если нужен host-side Python wheelhouse:
+Если нужен локальный Python wheelhouse для bundle:
 
 ```bash
 bash deploy/offline_bundle/scripts/build_wheelhouse.sh
 ```
+
+Скрипт собирает wheelhouse прямо в `deploy/offline_bundle/wheelhouse/` и должен
+закрывать весь Python stack для offline bundle, включая `torch cu128`.
 
 Если на этом этапе нужен только каркас bundle без скачивания wheel-файлов:
 
@@ -213,9 +280,9 @@ bash deploy/offline_bundle/scripts/build_wheelhouse.sh --skip-download
 ```
 
 Что ещё оператор должен подготовить для полноценной оффлайн-сборки и запуска:
-- доступный `llama.cpp` repo/ref для build args `LLAMA_CPP_REPO` и `LLAMA_CPP_REF`
+- локальный checkout `deploy/offline_bundle/vendor/llama.cpp/`
 - базовые Docker image, которые должны успешно `pull/build` на build-машине
-- Python-зависимости из lock-файлов bundle
+- Python-зависимости из lock-файлов bundle, уже материализованные в `wheelhouse/`
 - веса моделей в `models/`
 - runtime state в `state/`
 - host apt bundle в `host_packages/ubuntu-24.04/`
@@ -223,7 +290,7 @@ bash deploy/offline_bundle/scripts/build_wheelhouse.sh --skip-download
 Что уже покрыто текущими lock-файлами по реальным runtime-imports:
 - `SQLAlchemy` добавлен в Chainlit path для persistence layer
 - `sentence-transformers` остаётся в `UMS` path для embedding/ST runtime
-- `torch==2.8.0` ставится отдельно в `UMS` image из `cu128` wheel index
+- `torch cu128` wheel материализуется в локальный `wheelhouse/` и используется `UMS` build без внешнего pip index
 - `uvicorn[standard]` зафиксирован для `backend-app` и `UMS`
 - `aiofiles` и `asyncpg` добавлены как практический runtime/persistence запас для Chainlit и backend path
 - `huggingface_hub` добавлен в `backend-app` и `UMS` как безопасный companion для `transformers` / `sentence-transformers`
@@ -240,11 +307,11 @@ bash deploy/offline_bundle/scripts/build_wheelhouse.sh --skip-download
 Что скачивать **обязательно** для текущего `v1.0`:
 - Python-пакеты из `requirements.backend.lock.txt`
 - Python-пакеты из `requirements.ums.lock.txt`
-- `torch==2.8.0` из `https://download.pytorch.org/whl/cu128`
+- `torch cu128` wheel для bundle wheelhouse
 - Python-пакеты из `requirements.chainlit.lock.txt`
 - базовые Docker image для `backend-app`, `UMS` и `Chainlit`
 - host `.deb` пакеты для Ubuntu 22.04 и/или 24.04 через `build_host_apt_bundle.sh`
-- доступный `llama.cpp` repo/ref для `UMS` build
+- локальный checkout `deploy/offline_bundle/vendor/llama.cpp/` для `UMS` build
 - обязательные веса моделей из `env.bundle`
 - каталоги runtime state из `state/`
 
@@ -253,6 +320,45 @@ bash deploy/offline_bundle/scripts/build_wheelhouse.sh --skip-download
 - `llama-cpp-python[server]` — не нужен, потому что heavy GGUF path идёт через `llama-server`
 - `onnxscript` — нужен только для export/tooling path, а не для обычного запуска bundle
 - `langchain-mcp-adapters` и `mcp` — в текущем основном runtime-path не импортируются
+
+## 6.2. Реестр Флагов Build-Side Скриптов
+
+Ниже перечислены все user-facing entrypoint scripts build-side части bundle.
+
+`build_bundle.sh`
+- Флагов сейчас нет.
+- Назначение: полный build/export orchestration path с генерацией `manifest.json` и `validate_bundle.py --mode deploy`.
+
+`build_host_apt_bundle.sh`
+- `--distro <name>`: выбрать `ubuntu-22.04` или `ubuntu-24.04`.
+- `--driver-package <name>`: выбрать `nvidia-driver-550-server` или `nvidia-driver-550`.
+- `--output-root <path>`: переопределить каталог `host_packages/<distro>`.
+- `--extra-package <name>`: добавить дополнительный пакет, например kernel headers.
+- `--check-only`: только проверить prereq/candidate path без скачивания.
+- `--dry-run`: показать план скачивания без фактического download.
+
+`build_wheelhouse.sh`
+- `--skip-download`: создать каталог `wheelhouse/` без скачивания wheel-файлов.
+
+`export_images.sh`
+- `--skip-build`: не пересобирать `backend-app`, `UMS` и `Chainlit`, а только экспортировать уже существующие local images.
+- Важно: для локальной сборки `UMS` заранее нужны `deploy/offline_bundle/vendor/llama.cpp/` и заполненный `deploy/offline_bundle/wheelhouse/`.
+
+`export_models.sh`
+- `--source-root <path>`: переопределить root checkout репозитория.
+- `--models-root <path>`: использовать явный каталог моделей вместо `backend/models`.
+- `--env-file <path>`: проверить экспортированный layout против указанного env-файла.
+
+`export_state.sh`
+- `--source-root <path>`: переопределить root checkout репозитория.
+
+`generate_manifest.py`
+- Отдельных флагов сейчас нет.
+- Назначение: сгенерировать build/output `manifest.json` из `manifest.template.json` и текущих build-side артефактов.
+
+`host_bundle_common.sh`
+- Не является direct user entrypoint.
+- Это внутренний helper для host apt bundle scripts; отдельные флаги пользователю не нужны.
 
 ## 6.1. Host apt bundle для Ubuntu 22.04 / 24.04
 
@@ -315,8 +421,8 @@ nvidia-smi || true
 
 ```bash
 bash deploy/offline_bundle/scripts/build_host_apt_bundle.sh \
-  --distro ubuntu-22.04 \
-  --extra-package linux-headers-<kernel-version>
+  --distro ubuntu-24.04 \
+  --extra-package linux-headers-6.17.0-19-generic
 ```
 
 Если нужен bundle под Ubuntu 24.04:
@@ -324,6 +430,12 @@ bash deploy/offline_bundle/scripts/build_host_apt_bundle.sh \
 ```bash
 bash deploy/offline_bundle/scripts/build_host_apt_bundle.sh --distro ubuntu-24.04
 ```
+
+Для уже известного целевого оффлайн-хоста:
+- `Ubuntu 24.04.4 LTS`
+- kernel: `6.17.0-19-generic`
+- architecture: `x86_64`
+- минимально подтверждённый kernel-specific пакет для bundle: `linux-headers-6.17.0-19-generic`
 
 По умолчанию скрипт фиксирует пакетный baseline:
 - `docker-ce`
