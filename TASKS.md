@@ -11,7 +11,10 @@
 - [ ] R1.0.5 — Убрать зависимость нового release path от legacy hybrid compose/runtime
 - [ ] R1.0.6 — Scope guard: в рамках задачи изменять код только внутри `deploy/offline_bundle/`; любые правки вне этой папки делать только после явного предупреждения пользователя
 - [ ] R1.0.7 — Пересобрать `host_packages` для Ubuntu `24.04.4 LTS` / kernel `6.17.0-19-generic` с `--extra-package linux-headers-6.17.0-19-generic`
-- [ ] R1.0.8 — Сделать отдельный TUI или UI-оболочку для offline deploy/build flow, чтобы упростить подготовку wheelhouse, host_packages, image export и server rollout
+- [ ] R1.0.8 — Сделать отдельное operator UI-приложение для `deploy/offline_bundle/`, которое заменяет основной shell UX для build/export/deploy/runtime flow
+  План: `docs/plans/2026-03-26-offline-operator-ui-plan.md`
+- [ ] R1.0.9 — Сделать отдельное operator UI-приложение для native development/runtime path, чтобы упростить локальный запуск, конфигурирование env, мониторинг сервисов и developer workflows
+  План: `docs/plans/2026-03-26-native-dev-operator-ui-plan.md`
 
 ## План исправления compare/offline bundle багов (2026-03-26 19:18 EDT)
 
