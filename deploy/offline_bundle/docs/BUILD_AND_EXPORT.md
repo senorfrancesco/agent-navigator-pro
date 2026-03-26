@@ -133,7 +133,7 @@ find deploy/offline_bundle/wheelhouse -maxdepth 1 -type f | wc -l
 find deploy/offline_bundle/host_packages/ubuntu-24.04/pool -maxdepth 1 -type f | wc -l
 ```
 
-Если нужен только `UMS` image:
+Если нужен только `UMS` image в базовом offline-режиме:
 
 ```bash
 docker build \
@@ -142,10 +142,32 @@ docker build \
   .
 ```
 
+Если нужен альтернативный connected-build вариант, совместимый со старым рабочим
+контрактом:
+
+```bash
+docker build \
+  -f deploy/offline_bundle/Dockerfile.ums.connected \
+  -t agent-nav-ums-offline:v1.0 \
+  .
+```
+
+Что важно по `Dockerfile.ums.connected`:
+- он тянет `llama.cpp` через `git clone`;
+- он ставит Python-зависимости из внешних pip index во время `docker build`;
+- этот вариант полезен как fallback, если именно он уже был подтверждён на вашей build-машине;
+- для полностью самодостаточного offline build contract каноническим всё равно остаётся `Dockerfile.ums.offline`.
+
 Если нужен штатный набор offline images:
 
 ```bash
 bash deploy/offline_bundle/scripts/export_images.sh
+```
+
+Если для `UMS` нужно использовать legacy connected-build вариант:
+
+```bash
+bash deploy/offline_bundle/scripts/export_images.sh --ums-build-mode connected
 ```
 
 Если `backend-app` и `chainlit` уже собраны и нужны только tar-архивы:
@@ -342,6 +364,9 @@ bash deploy/offline_bundle/scripts/build_wheelhouse.sh --skip-download
 
 `export_images.sh`
 - `--skip-build`: не пересобирать `backend-app`, `UMS` и `Chainlit`, а только экспортировать уже существующие local images.
+- `--ums-build-mode <offline|connected>`: выбрать, какой Dockerfile использовать для `UMS`.
+  `offline` использует локальные `vendor/llama.cpp` и `wheelhouse/`;
+  `connected` использует legacy networked build path через `git clone` и внешние pip index.
 - Важно: для локальной сборки `UMS` заранее нужны `deploy/offline_bundle/vendor/llama.cpp/` и заполненный `deploy/offline_bundle/wheelhouse/`.
 
 `export_models.sh`

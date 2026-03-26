@@ -5,6 +5,7 @@
 Внутри находятся:
 - versioned manifest template и build/export contract;
 - offline-only compose и Dockerfile для `backend-app`, `ums` и `chainlit`;
+- два варианта `UMS` Docker build: канонический `Dockerfile.ums.offline` и fallback `Dockerfile.ums.connected`;
 - build-side checkout `vendor/llama.cpp/` как фиксированная локальная зависимость для сборки `UMS` image;
 - export/import/deploy scripts;
 - host-install scripts и contract для локальных apt-bundle под Ubuntu 22.04 / 24.04;

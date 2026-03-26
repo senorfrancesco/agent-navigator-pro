@@ -108,6 +108,7 @@ def test_export_images_help_mentions_backend_app_and_ums() -> None:
     assert "backend-app/ums/chainlit" in result.stdout
     assert "vendor/llama.cpp" in result.stdout
     assert "wheelhouse" in result.stdout
+    assert "--ums-build-mode <offline|connected>" in result.stdout
 
 
 def test_ums_dockerfile_uses_local_llama_cpp_and_wheelhouse() -> None:
@@ -128,6 +129,17 @@ def test_ums_dockerfile_uses_local_llama_cpp_and_wheelhouse() -> None:
     assert 'torch==${TORCH_VERSION}' in content
     assert 'CMAKE_CUDA_ARCHITECTURES="75;86"' in content
     assert "После локального GPU-smoke" in content
+
+
+def test_connected_ums_dockerfile_keeps_legacy_networked_build_path() -> None:
+    content = (BUNDLE_ROOT / "Dockerfile.ums.connected").read_text(encoding="utf-8")
+
+    assert "LLAMA_CPP_REPO" in content
+    assert "LLAMA_CPP_REF=master" in content
+    assert "git clone" in content
+    assert "download.pytorch.org/whl/cu128" in content
+    assert "COPY deploy/offline_bundle/vendor/llama.cpp /opt/llama.cpp" not in content
+    assert "COPY deploy/offline_bundle/wheelhouse /opt/wheelhouse" not in content
 
 
 def test_chainlit_dockerfile_copies_runtime_dependencies() -> None:
@@ -214,6 +226,15 @@ def test_build_bundle_script_requires_real_build_artifacts() -> None:
     assert 'build_wheelhouse.sh" --skip-download' not in content
     assert 'bash "$SCRIPT_DIR/build_wheelhouse.sh"' in content
     assert 'bash "$SCRIPT_DIR/export_images.sh"' in content
+
+
+def test_export_images_script_supports_connected_ums_build_mode() -> None:
+    content = (BUNDLE_ROOT / "scripts" / "export_images.sh").read_text(encoding="utf-8")
+
+    assert 'UMS_BUILD_MODE="${UMS_BUILD_MODE:-offline}"' in content
+    assert '--ums-build-mode' in content
+    assert 'Dockerfile.ums.connected' in content
+    assert 'if [[ "$UMS_BUILD_MODE" == "offline" ]]; then' in content
 
 
 def test_preflight_runtime_help_mentions_writeability_and_summary() -> None:
