@@ -113,9 +113,11 @@ def test_export_images_help_mentions_backend_app_and_ums() -> None:
 def test_ums_dockerfile_uses_local_llama_cpp_and_wheelhouse() -> None:
     content = (BUNDLE_ROOT / "Dockerfile.ums.offline").read_text(encoding="utf-8")
 
+    assert "FROM python:3.11-slim-bookworm AS python-runtime" in content
     assert "COPY deploy/offline_bundle/vendor/llama.cpp /opt/llama.cpp" in content
     assert "COPY deploy/offline_bundle/wheelhouse /opt/wheelhouse" in content
-    assert "python3.11" in content
+    assert "COPY --from=python-runtime /usr/local /usr/local" in content
+    assert "python3.11 -m venv /opt/venv" in content
     assert "--no-index" in content
     assert "--find-links /opt/wheelhouse" in content
     assert "llama-server" in content

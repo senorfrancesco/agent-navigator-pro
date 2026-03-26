@@ -1,3 +1,5 @@
+FROM python:3.11-slim-bookworm AS python-runtime
+
 FROM nvidia/cuda:12.8.1-devel-ubuntu24.04 AS llama-builder
 
 WORKDIR /opt
@@ -49,13 +51,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsm6 \
     libxext6 \
     libxrender1 \
-    python3.11 \
-    python3.11-dev \
-    python3.11-venv \
     shared-mime-info \
     && rm -rf /var/lib/apt/lists/*
 
-RUN /usr/bin/python3.11 -m venv /opt/venv && \
+COPY --from=python-runtime /usr/local /usr/local
+
+RUN python3.11 -m venv /opt/venv && \
     /opt/venv/bin/python -m pip --version
 
 COPY deploy/offline_bundle/requirements.ums.lock.txt /tmp/requirements.ums.lock.txt
