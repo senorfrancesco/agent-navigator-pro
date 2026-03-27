@@ -565,6 +565,7 @@ deploy/offline_bundle/host_packages/<ubuntu-22.04|ubuntu-24.04>/versions.lock.js
 
 На оффлайн-сервере эти пакеты должны ставиться только из локального bundle.
 При успешной сборке рядом с `pool/` должны существовать также:
+- `Packages`
 - `Packages.gz`
 - `Release`
 

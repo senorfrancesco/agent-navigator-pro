@@ -58,6 +58,91 @@ def is_driver_package(name: str) -> bool:
     return name.startswith("nvidia-driver-")
 
 
+def is_manual_driver_excluded_root(name: str) -> bool:
+    return name.startswith("nvidia-driver-") or name.startswith("linux-headers-")
+
+
+def parse_dependency_names(raw_value: str) -> list[str]:
+    names: list[str] = []
+    for chunk in raw_value.split(","):
+        term = chunk.strip()
+        if not term:
+            continue
+        for alternative in term.split("|"):
+            candidate = alternative.strip()
+            if not candidate:
+                continue
+            candidate = candidate.split("(", 1)[0].strip()
+            candidate = candidate.split(":", 1)[0].strip()
+            if candidate:
+                names.append(candidate)
+    return names
+
+
+def read_deb_dependency_map(lock_path: Path, packages: list[dict[str, str]]) -> dict[str, list[str]]:
+    dependency_map: dict[str, list[str]] = {}
+    bundle_packages = {package["name"] for package in packages}
+    host_root = lock_path.parent
+
+    for package in packages:
+        deb_path = host_root / package["filename"]
+        if not deb_path.exists():
+            dependency_map[package["name"]] = []
+            continue
+        result = subprocess.run(
+            ["dpkg-deb", "-f", str(deb_path), "Depends", "Pre-Depends"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            dependency_map[package["name"]] = []
+            continue
+
+        dependency_names: list[str] = []
+        for line in result.stdout.splitlines():
+            if ":" not in line:
+                continue
+            _, raw_value = line.split(":", 1)
+            alternatives = parse_dependency_names(raw_value.strip())
+            selected = next((name for name in alternatives if name in bundle_packages), None)
+            if selected:
+                dependency_names.append(selected)
+        dependency_map[package["name"]] = dependency_names
+
+    return dependency_map
+
+
+def relevant_packages(payload: dict[str, object], lock_path: Path, manual_driver: bool) -> list[dict[str, str]]:
+    packages = list(payload.get("packages", []))
+    if not manual_driver:
+        return packages
+
+    requested = [
+        name
+        for name in payload.get("requested_packages", [])
+        if isinstance(name, str) and not is_manual_driver_excluded_root(name)
+    ]
+    package_map = {package["name"]: package for package in packages}
+    dependency_map = read_deb_dependency_map(lock_path, packages)
+    selected: dict[str, dict[str, str]] = {}
+    queue = [name for name in requested if name in package_map]
+
+    while queue:
+        name = queue.pop()
+        if name in selected:
+            continue
+        package = package_map.get(name)
+        if package is None:
+            continue
+        selected[name] = package
+        for dependency_name in dependency_map.get(name, []):
+            if dependency_name not in selected:
+                queue.append(dependency_name)
+
+    return [package for package in packages if package["name"] in selected]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Проверяет exact версии host packages без runtime-аудита Docker/NVIDIA."
@@ -108,7 +193,7 @@ def main() -> int:
     elif detected != selected_distro:
         issues.append(f"distro-mismatch:selected-{selected_distro}-detected-{detected}")
 
-    for package in payload.get("packages", []):
+    for package in relevant_packages(payload, lock_path, manual_driver):
         name = package["name"]
         version = package["version"]
         if manual_driver and is_driver_package(name):

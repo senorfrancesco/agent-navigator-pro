@@ -23,6 +23,7 @@ validate_host_bundle_layout() {
   local required_paths=(
     "$lock_path"
     "$host_root/pool"
+    "$host_root/Packages"
     "$host_root/Packages.gz"
     "$host_root/Release"
   )
@@ -33,6 +34,25 @@ validate_host_bundle_layout() {
       exit 1
     fi
   done
+}
+
+ensure_host_bundle_indexes() {
+  local host_root="$1"
+
+  if [[ ! -f "$host_root/Packages" && -f "$host_root/Packages.gz" ]]; then
+    gzip -dc "$host_root/Packages.gz" > "$host_root/Packages"
+  fi
+
+  if [[ -f "$host_root/Packages" && ( ! -f "$host_root/Packages.gz" || "$host_root/Packages" -nt "$host_root/Packages.gz" ) ]]; then
+    gzip -9c "$host_root/Packages" > "$host_root/Packages.gz"
+  fi
+
+  if command -v apt-ftparchive >/dev/null 2>&1; then
+    (
+      cd "$host_root"
+      apt-ftparchive release . > Release
+    )
+  fi
 }
 
 usage() {
@@ -129,6 +149,7 @@ if [[ ! -f "$LOCK_PATH" ]]; then
   exit 1
 fi
 
+ensure_host_bundle_indexes "$HOST_ROOT"
 validate_host_bundle_layout "$HOST_ROOT" "$LOCK_PATH"
 
 if [[ "$CHECK_ONLY" -eq 1 ]]; then
@@ -160,9 +181,95 @@ import sys
 from pathlib import Path
 
 lock = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+lock_path = Path(sys.argv[1]).resolve()
 manual_driver = sys.argv[2] == "1"
+
+
+def is_manual_driver_excluded_root(name: str) -> bool:
+    return name.startswith("nvidia-driver-") or name.startswith("linux-headers-")
+
+
+def parse_dependency_names(raw_value: str) -> list[str]:
+    names = []
+    for chunk in raw_value.split(","):
+        term = chunk.strip()
+        if not term:
+            continue
+        for alternative in term.split("|"):
+            candidate = alternative.strip()
+            if not candidate:
+                continue
+            candidate = candidate.split("(", 1)[0].strip()
+            candidate = candidate.split(":", 1)[0].strip()
+            if candidate:
+                names.append(candidate)
+    return names
+
+
+def read_deb_dependency_map(packages: list[dict[str, str]]) -> dict[str, list[str]]:
+    dependency_map = {}
+    bundle_packages = {package["name"] for package in packages}
+    host_root = lock_path.parent
+
+    for package in packages:
+        deb_path = host_root / package["filename"]
+        if not deb_path.exists():
+            dependency_map[package["name"]] = []
+            continue
+        result = subprocess.run(
+            ["dpkg-deb", "-f", str(deb_path), "Depends", "Pre-Depends"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            dependency_map[package["name"]] = []
+            continue
+        dependency_names = []
+        for line in result.stdout.splitlines():
+            if ":" not in line:
+                continue
+            _, raw_value = line.split(":", 1)
+            alternatives = parse_dependency_names(raw_value.strip())
+            selected = next((name for name in alternatives if name in bundle_packages), None)
+            if selected:
+                dependency_names.append(selected)
+        dependency_map[package["name"]] = dependency_names
+
+    return dependency_map
+
+
+def relevant_packages(lock_payload: dict[str, object], manual_driver_enabled: bool) -> list[dict[str, str]]:
+    packages = list(lock_payload.get("packages", []))
+    if not manual_driver_enabled:
+        return packages
+
+    requested = [
+        name
+        for name in lock_payload.get("requested_packages", [])
+        if isinstance(name, str) and not is_manual_driver_excluded_root(name)
+    ]
+    package_map = {package["name"]: package for package in packages}
+    dependency_map = read_deb_dependency_map(packages)
+    selected = {}
+    queue = [name for name in requested if name in package_map]
+
+    while queue:
+        name = queue.pop()
+        if name in selected:
+            continue
+        package = package_map.get(name)
+        if package is None:
+            continue
+        selected[name] = package
+        for dependency_name in dependency_map.get(name, []):
+            if dependency_name not in selected:
+                queue.append(dependency_name)
+
+    return [package for package in packages if package["name"] in selected]
+
 targets = []
-for package in lock.get("packages", []):
+for package in relevant_packages(lock, manual_driver):
     name = package["name"]
     if manual_driver and name.startswith("nvidia-driver-"):
         continue

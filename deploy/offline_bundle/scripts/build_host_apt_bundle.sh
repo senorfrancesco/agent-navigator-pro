@@ -35,7 +35,7 @@ build_host_apt_bundle.sh
   - подключает Docker repo и NVIDIA Container Toolkit repo
   - включает universe
   - скачивает .deb пакеты и зависимости
-  - собирает Packages.gz
+  - собирает Packages и Packages.gz
   - фиксирует exact версии и sha256 в versions.lock.json
 
 Flags:
@@ -163,6 +163,10 @@ BASE_PACKAGES=(
   containerd.io
   docker-buildx-plugin
   docker-compose-plugin
+  dpkg-dev
+  make
+  patch
+  lsb-release
   "$DRIVER_PACKAGE"
   nvidia-container-toolkit
   nvidia-container-toolkit-base
@@ -339,7 +343,8 @@ fi
 (
   cd /out
   log_stage write-package-indexes
-  dpkg-scanpackages pool /dev/null | gzip -9c > Packages.gz
+  dpkg-scanpackages pool /dev/null > Packages
+  gzip -9c Packages > Packages.gz
   apt-ftparchive release . > Release
 )
 

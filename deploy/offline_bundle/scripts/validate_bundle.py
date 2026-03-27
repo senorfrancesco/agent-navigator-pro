@@ -114,7 +114,7 @@ def validate_host_packages(errors: list[str], bundle_root: Path) -> None:
         host_root = bundle_root / "host_packages" / distro
         if not host_root.exists():
             continue
-        for rel_name in ("pool", "versions.lock.json", "manifest.json", "Packages.gz", "Release"):
+        for rel_name in ("pool", "versions.lock.json", "manifest.json", "Packages", "Packages.gz", "Release"):
             path = host_root / rel_name
             if not path.exists():
                 errors.append(f"missing-host-package-path:host_packages/{distro}/{rel_name}")
