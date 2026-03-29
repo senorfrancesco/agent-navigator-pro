@@ -13,6 +13,7 @@ import re
 import uuid
 import logging
 import warnings
+from pathlib import Path
 from typing import Dict, Any, Optional, List, AsyncGenerator, Literal
 from dotenv import load_dotenv
 import numpy as np
@@ -25,6 +26,7 @@ load_dotenv()
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from services.model_manager.ums_client import ums_client
@@ -56,6 +58,7 @@ from orchestrator.ui_control_plane import (
     normalize_inference_device_mode,
     resolve_effective_settings,
 )
+from orchestrator.operator_ui_api import router as operator_ui_router
 
 try:
     from services.resource_monitor import get_system_resources
@@ -73,6 +76,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(ObservabilityMiddleware, service_name="agent_api", logger=logger)
+app.include_router(operator_ui_router)
+
+_OPERATOR_UI_DIR = Path(__file__).resolve().parents[2] / "prototype" / "operator-ui"
+_OPERATOR_ASSETS_DIR = Path(__file__).resolve().parent / "public"
+if _OPERATOR_UI_DIR.exists():
+    app.mount("/operator-ui", StaticFiles(directory=str(_OPERATOR_UI_DIR), html=True), name="operator-ui")
+if _OPERATOR_ASSETS_DIR.exists():
+    app.mount("/operator-assets", StaticFiles(directory=str(_OPERATOR_ASSETS_DIR)), name="operator-assets")
 
 
 def _get_request_trace_id(request: Request) -> str:
