@@ -73,7 +73,21 @@ Flags:
   --manual-driver           Не ставить и не требовать пакетный nvidia-driver-*, считать драйвер установленным вручную
   --check-only              Только проверить, без установки
   --skip-runtime-configure  Не вызывать nvidia-ctk runtime configure
+
+Примечание:
+  - если `nvidia-smi` уже работает на хосте, скрипт автоматически ослабляет exact package audit
+    для драйверного стека и ведёт себя как manual-driver path
 EOF
+}
+
+detect_working_driver_runtime() {
+  if ! command -v nvidia-smi >/dev/null 2>&1; then
+    return 1
+  fi
+
+  local driver_output
+  driver_output="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null || true)"
+  [[ -n "${driver_output//[[:space:]]/}" ]]
 }
 
 while [[ $# -gt 0 ]]; do
@@ -151,6 +165,11 @@ fi
 
 ensure_host_bundle_indexes "$HOST_ROOT"
 validate_host_bundle_layout "$HOST_ROOT" "$LOCK_PATH"
+
+if [[ "$MANUAL_DRIVER" -eq 0 ]] && detect_working_driver_runtime; then
+  MANUAL_DRIVER=1
+  echo "auto-manual-driver:working-nvidia-driver-detected"
+fi
 
 if [[ "$CHECK_ONLY" -eq 1 ]]; then
   check_args=(--distro "$DISTRO")

@@ -13,6 +13,19 @@ DEFAULT_DISTRO = "ubuntu-24.04"
 SUPPORTED_DISTROS = {"ubuntu-22.04", "ubuntu-24.04"}
 LOCK_PATH = BUNDLE_ROOT / "host_packages" / DEFAULT_DISTRO / "versions.lock.json"
 MANUAL_DRIVER_MARKER = BUNDLE_ROOT / "state" / "host-install" / "manual-driver"
+DRIVER_PACKAGE_PREFIXES = (
+    "nvidia-driver-",
+    "nvidia-dkms-",
+    "nvidia-kernel-",
+    "nvidia-utils-",
+    "nvidia-compute-utils-",
+    "nvidia-firmware-",
+    "libnvidia-",
+    "linux-modules-nvidia-",
+    "linux-objects-nvidia-",
+    "linux-signatures-nvidia-",
+    "xserver-xorg-video-nvidia-",
+)
 
 
 def read_os_release() -> dict[str, str]:
@@ -55,11 +68,25 @@ def package_status(name: str, version: str) -> str:
 
 
 def is_driver_package(name: str) -> bool:
-    return name.startswith("nvidia-driver-")
+    return any(name.startswith(prefix) for prefix in DRIVER_PACKAGE_PREFIXES)
 
 
 def is_manual_driver_excluded_root(name: str) -> bool:
-    return name.startswith("nvidia-driver-") or name.startswith("linux-headers-")
+    return is_driver_package(name) or name.startswith("linux-headers-")
+
+
+def detect_working_nvidia_driver() -> bool:
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return False
+
+    return result.returncode == 0 and bool(result.stdout.strip())
 
 
 def parse_dependency_names(raw_value: str) -> list[str]:
@@ -179,11 +206,13 @@ def main() -> int:
 
     payload = json.loads(lock_path.read_text(encoding="utf-8"))
     issues: list[str] = []
-    manual_driver = args.manual_driver or MANUAL_DRIVER_MARKER.exists()
+    detected_working_driver = detect_working_nvidia_driver()
+    manual_driver = args.manual_driver or MANUAL_DRIVER_MARKER.exists() or detected_working_driver
     report: dict[str, object] = {
         "os": {"id": os_release.get("ID", ""), "version_id": os_release.get("VERSION_ID", "")},
         "selected_distro": selected_distro,
         "manual_driver": manual_driver,
+        "driver_runtime_ok": detected_working_driver,
         "packages": [],
     }
 
@@ -208,6 +237,8 @@ def main() -> int:
     if args.json:
         print(json.dumps({"ok": not issues, "issues": issues, "report": report}, ensure_ascii=False, indent=2))
     else:
+        if detected_working_driver and not args.manual_driver and not MANUAL_DRIVER_MARKER.exists():
+            print("auto-manual-driver:working-nvidia-driver-detected")
         for package in report["packages"]:
             print(f"{package['status']}:{package['name']}={package['version']}")
 
