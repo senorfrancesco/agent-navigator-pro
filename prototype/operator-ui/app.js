@@ -343,8 +343,11 @@ let selectedConfigPath = "native";
 let selectedServicesPath = "native";
 let selectedLaunchPath = "native";
 let selectedDeployMode = "build";
+let launchMenuOpen = false;
 let dirtyFields = new Set();
 let stagedFieldValues = new Map();
+let revealedSecretFields = new Set();
+let hiddenSecretFields = new Set();
 let selectedConfigVariantByPath = {
   native: "runtime",
   container: "local_safe_ports",
@@ -354,11 +357,12 @@ let actionCatalogById = {};
 let actionCatalogByTitle = {};
 let jobPollTimers = new Map();
 let jobLogOffsets = new Map();
+let toastTimeouts = new Map();
 let currentLanguage = localStorage.getItem("operatorUiLanguage") || "ru";
 let uiSettings = {
   showLiteralEnvKeys: localStorage.getItem("operatorUiShowLiteralEnvKeys") !== "false",
-  showRecommendedValues: localStorage.getItem("operatorUiShowRecommendedValues") !== "false",
   showSourceFiles: localStorage.getItem("operatorUiShowSourceFiles") !== "false",
+  showSecretValues: false,
   metricsDensity: localStorage.getItem("operatorUiMetricsDensity") || "compact",
 };
 let controlPlaneOnline = false;
@@ -837,7 +841,6 @@ function translatePathPolicy(policy) {
 
 function persistUiSettings() {
   localStorage.setItem("operatorUiShowLiteralEnvKeys", String(uiSettings.showLiteralEnvKeys));
-  localStorage.setItem("operatorUiShowRecommendedValues", String(uiSettings.showRecommendedValues));
   localStorage.setItem("operatorUiShowSourceFiles", String(uiSettings.showSourceFiles));
   localStorage.setItem("operatorUiMetricsDensity", uiSettings.metricsDensity);
 }
@@ -858,14 +861,16 @@ function localizeStaticShell() {
     [".topbar-copy .eyebrow", "Operator Console"],
     [".topbar-copy h1", "System Launch and Control Panel"],
     [".brand-subtitle", "Operator Launch Console"],
+    ["#sidebar-nav-label", "Sections"],
     ['.nav-item[data-target="overview"]', "Overview"],
     ['.nav-item[data-target="launch"]', "Launch"],
     ['.nav-item[data-target="config"]', "Config"],
     ['.nav-item[data-target="services"]', "Services"],
     ['.nav-item[data-target="deploy"]', "Build / Deploy"],
     ['.nav-item[data-target="maintenance"]', "Actions"],
-    ["#ui-settings-button", "UI Settings"],
-    ["#topbar-start-button", "Open launch workspace"],
+    ["#ui-settings-button-label", "UI Settings"],
+    ["#ui-settings-button-note", "Interface language, metrics density, env keys, and secret visibility."],
+    ["#topbar-start-button-label", "Launch"],
     ["#sidebar-hardware-label", "Hardware Environment"],
     ["#sidebar-summary-label", "Status Summary"],
     ["#sidebar-available-paths-label", "Available Paths"],
@@ -930,6 +935,9 @@ function localizeStaticShell() {
     ["#deploy-sources-eyebrow", "Sources"],
     ["#deploy-observability-eyebrow", "Observability"],
     ["#deploy-observability-title", "Metric summary and Grafana links"],
+    ["#deploy-stages-eyebrow", "Flow Stages"],
+    ["#deploy-actions-eyebrow", "Actions"],
+    ["#deploy-artifacts-eyebrow", "Artifacts"],
     ["#deploy-logs-eyebrow", "Logs"],
     ["#maintenance-actions-eyebrow", "Actions"],
     ["#maintenance-actions-title", "Controlled Operator Commands"],
@@ -942,14 +950,16 @@ function localizeStaticShell() {
     [".topbar-copy .eyebrow", "Панель управления оператором"],
     [".topbar-copy h1", "Панель запуска и управления системой"],
     [".brand-subtitle", "Операторская панель запуска"],
+    ["#sidebar-nav-label", "Разделы"],
     ['.nav-item[data-target="overview"]', "Обзор"],
     ['.nav-item[data-target="launch"]', "Запуск"],
     ['.nav-item[data-target="config"]', "Конфиг"],
     ['.nav-item[data-target="services"]', "Сервисы"],
     ['.nav-item[data-target="deploy"]', "Сборка / Деплой"],
     ['.nav-item[data-target="maintenance"]', "Действия"],
-    ["#ui-settings-button", "Настройки UI"],
-    ["#topbar-start-button", "Запустить выбранный путь"],
+    ["#ui-settings-button-label", "Настройки UI"],
+    ["#ui-settings-button-note", "Язык интерфейса, метрики, env keys и показ секретов."],
+    ["#topbar-start-button-label", "Запуск"],
     ["#sidebar-hardware-label", "Аппаратная среда"],
     ["#sidebar-summary-label", "Сводка состояния"],
     ["#sidebar-available-paths-label", "Доступные пути"],
@@ -1013,6 +1023,9 @@ function localizeStaticShell() {
     ["#deploy-sources-eyebrow", "Источники"],
     ["#deploy-observability-eyebrow", "Наблюдаемость"],
     ["#deploy-observability-title", "Сводка метрик и переходы в Grafana"],
+    ["#deploy-stages-eyebrow", "Этапы потока"],
+    ["#deploy-actions-eyebrow", "Действия"],
+    ["#deploy-artifacts-eyebrow", "Артефакты"],
     ["#deploy-logs-eyebrow", "Логи"],
     ["#maintenance-actions-eyebrow", "Действия"],
     ["#maintenance-actions-title", "Контролируемые команды оператора"],
@@ -1026,20 +1039,6 @@ function localizeStaticShell() {
     ["#section-services .panel:nth-of-type(3) h3", "Метрики и переходы в Grafana"],
     ["#section-services .panel:nth-of-type(4) .eyebrow", "Логи"],
     ["#section-services .panel:nth-of-type(4) h3", "Сводный операционный поток"],
-    ["#section-deploy .panel:nth-of-type(1) .eyebrow", "Сводка режима"],
-    ["#section-deploy .panel:nth-of-type(1) h3", "Состояние сборки bundle"],
-    ["#section-deploy .panel:nth-of-type(2) .eyebrow", "Источники"],
-    ["#section-deploy .panel:nth-of-type(2) h3", "Канонические скрипты и корни артефактов"],
-    ["#section-deploy .panel:nth-of-type(3) .eyebrow", "Наблюдаемость"],
-    ["#section-deploy .panel:nth-of-type(3) h3", "Метрики и переходы в Grafana"],
-    ["#section-deploy .panel:nth-of-type(4) .eyebrow", "Этапы потока"],
-    ["#section-deploy .panel:nth-of-type(4) h3", "Стадии сборки и импорта"],
-    ["#section-deploy .panel:nth-of-type(5) .eyebrow", "Действия"],
-    ["#section-deploy .panel:nth-of-type(5) h3", "Действия режима"],
-    ["#section-deploy .panel:nth-of-type(6) .eyebrow", "Артефакты"],
-    ["#section-deploy .panel:nth-of-type(6) h3", "Портативные артефакты и состояние импорта"],
-    ["#section-deploy .panel:nth-of-type(7) .eyebrow", "Логи"],
-    ["#section-deploy .panel:nth-of-type(7) h3", "Лог по стадиям сборки и деплоя"],
     ["#section-maintenance .panel:nth-of-type(1) .eyebrow", "Действия"],
     ["#section-maintenance .panel:nth-of-type(1) h3", "Контролируемые команды оператора"],
     ["#section-maintenance .panel:nth-of-type(2) .eyebrow", "Текущие блокеры"],
@@ -1058,6 +1057,13 @@ function localizeStaticShell() {
       node.textContent = text;
     }
   });
+
+  const launchButton = document.querySelector("#topbar-start-button");
+  if (launchButton) {
+    const label = currentLanguage === "en" ? "Choose runtime path" : "Выбрать путь запуска";
+    launchButton.setAttribute("aria-label", label);
+    launchButton.setAttribute("title", label);
+  }
 }
 
 function setLanguage(nextLanguage) {
@@ -1074,22 +1080,22 @@ function syncUiSettingsControls() {
   if (shellSelect) shellSelect.value = currentLanguage;
   if (settingsSelect) settingsSelect.value = currentLanguage;
   const showKeys = document.querySelector("#settings-show-keys");
-  const showRecommended = document.querySelector("#settings-show-recommended");
   const showSources = document.querySelector("#settings-show-sources");
+  const showSecrets = document.querySelector("#settings-show-secrets");
   const metricsDensity = document.querySelector("#settings-metrics-density");
   if (showKeys) showKeys.checked = uiSettings.showLiteralEnvKeys;
-  if (showRecommended) showRecommended.checked = uiSettings.showRecommendedValues;
   if (showSources) showSources.checked = uiSettings.showSourceFiles;
+  if (showSecrets) showSecrets.checked = uiSettings.showSecretValues;
   if (metricsDensity) metricsDensity.value = uiSettings.metricsDensity;
 
   if (showKeys?.previousElementSibling) {
     showKeys.previousElementSibling.textContent = currentLanguage === "en" ? "Show env keys" : "Показывать env keys";
   }
-  if (showRecommended?.previousElementSibling) {
-    showRecommended.previousElementSibling.textContent = currentLanguage === "en" ? "Show recommended values" : "Показывать рекомендуемые значения";
-  }
   if (showSources?.previousElementSibling) {
     showSources.previousElementSibling.textContent = currentLanguage === "en" ? "Show source files" : "Показывать source files";
+  }
+  if (showSecrets?.previousElementSibling) {
+    showSecrets.previousElementSibling.textContent = currentLanguage === "en" ? "Show secret values" : "Показывать значения секретов";
   }
   if (metricsDensity?.previousElementSibling) {
     metricsDensity.previousElementSibling.textContent = currentLanguage === "en" ? "Metrics mode" : "Режим метрик";
@@ -1109,6 +1115,11 @@ function syncUiSettingsControls() {
 
 function isLaunchable(pathKey) {
   return runtimePaths[pathKey].status !== "unavailable";
+}
+
+function setLaunchPath(pathKey) {
+  selectedLaunchPath = pathKey;
+  rerenderAll();
 }
 
 function rerenderAll() {
@@ -1287,9 +1298,28 @@ function renderSystemStatus() {
       : (currentLanguage === "en" ? "No active job" : "Нет активной задачи"));
 
   const systemPill = document.querySelector("#system-status-pill");
-  systemPill.className = `status-pill ${pillClass}`;
+  const systemButton = document.querySelector("#system-status-button");
+  const systemDot = document.querySelector("#system-status-dot");
+  const jobPill = document.querySelector("#job-status-pill");
+  const jobButton = document.querySelector("#job-status-button");
+  const jobDot = document.querySelector("#job-status-dot");
+
   systemPill.textContent = pillText;
-  document.querySelector("#job-status-pill").textContent = jobPillText;
+  if (systemButton) {
+    systemButton.className = `sidebar-action sidebar-status-card ${pillClass}`;
+  }
+  if (systemDot) {
+    systemDot.className = `sidebar-action-dot ${pillClass}`;
+  }
+
+  jobPill.textContent = jobPillText;
+  const jobTone = activeJob ? "cyan" : (lastJobSummary ? "lime" : "neutral");
+  if (jobButton) {
+    jobButton.className = `sidebar-action sidebar-status-card ${jobTone}`;
+  }
+  if (jobDot) {
+    jobDot.className = `sidebar-action-dot ${jobTone}`;
+  }
   document.querySelector("#sidebar-system-status").textContent = sideTitle;
   document.querySelector("#sidebar-job-status").textContent = sideBody;
 }
@@ -1341,6 +1371,35 @@ function getActionIdForPath(pathKey) {
   if (pathKey === "native") return "runtime.native.launch";
   if (pathKey === "container") return "deploy.runtime.run";
   return null;
+}
+
+function launchPrimaryLabel(path) {
+  return currentLanguage === "en"
+    ? `Launch ${pathTitle(path)}`
+    : `Запустить ${pathTitle(path)}`;
+}
+
+async function triggerLaunchForPath(pathKey) {
+  const path = runtimePaths[pathKey];
+  if (!path) return;
+  selectedLaunchPath = pathKey;
+  rerenderAll();
+  if (!isLaunchable(pathKey)) {
+    switchSection("launch");
+    openReasonModal(pathKey);
+    return;
+  }
+  const actionId = getActionIdForPath(pathKey);
+  if (!actionId) {
+    activityFeed.unshift(`${currentLanguage === "en" ? "No mapped launch action for" : "Действие запуска не сопоставлено для"} ${pathTitle(path)}`);
+    renderActivity();
+    return;
+  }
+  await runOperatorAction(actionId, {
+    surface: "runtime",
+    pathKey,
+    label: pathTitle(path),
+  });
 }
 
 function getActionIdForDeployLabel(label) {
@@ -1787,18 +1846,216 @@ function getFieldValue(pathKey, field) {
   return staged ?? field.applied;
 }
 
+function maskSecretValue(value) {
+  const raw = String(value ?? "");
+  if (!raw) {
+    return currentLanguage === "en" ? "(empty)" : "(пусто)";
+  }
+  return "••••••••";
+}
+
+function displayFieldValue(field, value) {
+  return field?.secret && !uiSettings.showSecretValues ? maskSecretValue(value) : value;
+}
+
+function secretFieldMapKey(pathKey, fieldKey) {
+  return `${pathKey}:${fieldKey}`;
+}
+
+function isSecretFieldVisible(pathKey, field) {
+  if (!field?.secret) return true;
+  const mapKey = secretFieldMapKey(pathKey, field.key);
+  if (hiddenSecretFields.has(mapKey)) return false;
+  if (uiSettings.showSecretValues) return true;
+  return revealedSecretFields.has(mapKey);
+}
+
+function toggleSecretFieldVisibility(pathKey, fieldKey) {
+  const mapKey = secretFieldMapKey(pathKey, fieldKey);
+  if (uiSettings.showSecretValues) {
+    if (hiddenSecretFields.has(mapKey)) {
+      hiddenSecretFields.delete(mapKey);
+    } else {
+      hiddenSecretFields.add(mapKey);
+    }
+    return;
+  }
+  if (revealedSecretFields.has(mapKey)) {
+    revealedSecretFields.delete(mapKey);
+  } else {
+    revealedSecretFields.add(mapKey);
+  }
+  hiddenSecretFields.delete(mapKey);
+}
+
+function randomToken(length, alphabet) {
+  const chars = alphabet || "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+  const bytes = new Uint8Array(length);
+  crypto.getRandomValues(bytes);
+  let output = "";
+  for (let index = 0; index < length; index += 1) {
+    output += chars[bytes[index] % chars.length];
+  }
+  return output;
+}
+
+function generateSecretValue(field) {
+  if (field.key === "CHAINLIT_AUTH_SECRET") {
+    return randomToken(48, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_");
+  }
+  if (field.key === "VLLM_API_KEY") {
+    return `vllm_${randomToken(32, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")}`;
+  }
+  return randomToken(20, "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*");
+}
+
+async function copyToClipboard(value) {
+  await navigator.clipboard.writeText(String(value ?? ""));
+}
+
+function showToast(title, body, tone = "success") {
+  const stack = document.querySelector("#toast-stack");
+  if (!stack) return;
+  const toast = document.createElement("div");
+  const totalLifetime = 2400;
+  const hoverResumeLifetime = 900;
+  const toastId = `toast-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  let remaining = totalLifetime;
+  let startedAt = 0;
+  const startProgress = (duration) => {
+    const progress = toast.querySelector(".toast-progress-bar");
+    if (!progress) return;
+    const ratio = Math.max(0, Math.min(1, duration / totalLifetime));
+    progress.style.transition = "none";
+    progress.style.width = `${ratio * 100}%`;
+    void progress.offsetWidth;
+    progress.style.transition = `width ${duration}ms linear`;
+    progress.style.width = "0%";
+    startedAt = Date.now();
+  };
+  const pauseProgress = () => {
+    const progress = toast.querySelector(".toast-progress-bar");
+    if (!progress) return;
+    const elapsed = startedAt ? Math.max(0, Date.now() - startedAt) : 0;
+    remaining = Math.max(0, remaining - elapsed);
+    const ratio = Math.max(0, Math.min(1, remaining / totalLifetime));
+    progress.style.transition = "none";
+    progress.style.width = `${ratio * 100}%`;
+  };
+  const dismissToast = () => {
+    toast.classList.remove("visible");
+    toast.classList.add("hiding");
+    window.setTimeout(() => {
+      toast.remove();
+      toastTimeouts.delete(toastId);
+    }, 220);
+  };
+  const scheduleDismiss = (delay) => {
+    const existing = toastTimeouts.get(toastId);
+    if (existing) {
+      window.clearTimeout(existing);
+    }
+    const timeout = window.setTimeout(dismissToast, delay);
+    toastTimeouts.set(toastId, timeout);
+  };
+  toast.className = `toast ${tone}`;
+  toast.dataset.toastId = toastId;
+  toast.innerHTML = `
+    <strong>${title}</strong>
+    <span>${body}</span>
+    <div class="toast-progress"><div class="toast-progress-bar"></div></div>
+  `;
+  stack.appendChild(toast);
+  window.setTimeout(() => {
+    toast.classList.add("visible");
+  }, 18);
+  toast.addEventListener("mouseenter", () => {
+    const existing = toastTimeouts.get(toastId);
+    if (existing) {
+      window.clearTimeout(existing);
+      toastTimeouts.delete(toastId);
+    }
+    pauseProgress();
+  });
+  toast.addEventListener("mouseleave", () => {
+    remaining = Math.min(remaining || hoverResumeLifetime, hoverResumeLifetime);
+    startProgress(remaining);
+    scheduleDismiss(remaining);
+  });
+  startProgress(totalLifetime);
+  scheduleDismiss(totalLifetime);
+}
+
 function renderFieldControl(pathKey, field) {
   const value = getFieldValue(pathKey, field);
+  const isVisible = isSecretFieldVisible(pathKey, field);
   if (field.control === "select" && Array.isArray(field.options) && field.options.length) {
     return `
       <select ${field.editable === false ? "disabled" : ""}>
         ${field.options.map((option) => `
-          <option value="${option.value}" ${String(option.value) === String(value) ? "selected" : ""}>${option.label}</option>
+          <option value="${option.value}" ${String(option.value) === String(value) ? "selected" : ""}>${displayLabel(localizedField(option, "label"))}</option>
         `).join("")}
       </select>
     `;
   }
-  return `<input type="text" value="${value}" ${field.editable === false ? "disabled" : ""} />`;
+  const input = `<input type="${field.secret && !isVisible ? "password" : "text"}" value="${value}" ${field.editable === false ? "disabled" : ""} />`;
+  if (field.secret && field.editable !== false) {
+    return `
+      <div class="config-input-row">
+        ${input}
+        <button
+          type="button"
+          class="secret-visibility-button"
+          data-toggle-secret="${field.key}"
+          title="${isVisible ? (currentLanguage === "en" ? "Hide value" : "Скрыть значение") : (currentLanguage === "en" ? "Show value" : "Показать значение")}"
+          aria-label="${isVisible ? (currentLanguage === "en" ? "Hide value" : "Скрыть значение") : (currentLanguage === "en" ? "Show value" : "Показать значение")}"
+        >
+          ${isVisible ? `
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="m3 3 18 18" />
+              <path d="M10.6 10.7a2 2 0 0 0 2.8 2.8" />
+              <path d="M9.4 5.5A10.7 10.7 0 0 1 12 5c5 0 9 4 10 7-0.45 1.35-1.37 2.8-2.7 4.03" />
+              <path d="M6.6 6.7C4.58 8.02 3.3 9.9 2 12c1 3 5 7 10 7 1.73 0 3.33-.48 4.7-1.3" />
+            </svg>
+          ` : `
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />
+              <circle cx="12" cy="12" r="3" />
+            </svg>
+          `}
+        </button>
+        <button
+          type="button"
+          class="secret-copy-button"
+          data-copy-secret="${field.key}"
+          title="${currentLanguage === "en" ? "Copy value" : "Скопировать значение"}"
+          aria-label="${currentLanguage === "en" ? "Copy value" : "Скопировать значение"}"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="9" y="9" width="10" height="10" rx="2" />
+            <path d="M15 9V7a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          class="secret-generate-button"
+          data-generate-secret="${field.key}"
+          title="${currentLanguage === "en" ? "Generate value" : "Сгенерировать значение"}"
+          aria-label="${currentLanguage === "en" ? "Generate value" : "Сгенерировать значение"}"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M5 3v4" />
+            <path d="M3 5h4" />
+            <path d="M18 2l.9 2.1L21 5l-2.1.9L18 8l-.9-2.1L15 5l2.1-.9L18 2Z" />
+            <path d="M8.5 9.5 15 16" />
+            <path d="m14 8 2 2" />
+            <path d="M7 17l-1 4 4-1 9.6-9.6a1.5 1.5 0 0 0 0-2.1l-1.9-1.9a1.5 1.5 0 0 0-2.1 0Z" />
+          </svg>
+        </button>
+      </div>
+    `;
+  }
+  return input;
 }
 
 function setStagedFieldValue(pathKey, fieldKey, value) {
@@ -1850,10 +2107,9 @@ function renderConfig() {
   const presets = selectedVariant?.presets || [];
   presetList.innerHTML = presets.length ? presets.map((preset) => `
     <div class="metric-card">
-      <div class="source-label">${preset.recommended ? (currentLanguage === "en" ? "Recommended Preset" : "Рекомендуемый пресет") : (currentLanguage === "en" ? "Preset" : "Пресет")}</div>
+      <div class="source-label">${currentLanguage === "en" ? "Preset" : "Пресет"}</div>
       <strong>${displayLabel(localizedField(preset, "title"))}</strong>
       <p>${displayText(localizedField(preset, "description"))}</p>
-      <p>${displayText(localizedField(preset, "reason"))}</p>
       <div class="button-row" style="margin-top: 12px;">
         <button class="ghost-button config-preset-button" data-preset-id="${preset.presetId}">${currentLanguage === "en" ? "Stage preset values" : "Подставить в staged"}</button>
       </div>
@@ -1868,9 +2124,12 @@ function renderConfig() {
   const groups = document.querySelector("#config-groups");
   groups.innerHTML = (selectedVariant?.groups || []).map((group) => `
     <section class="config-group">
-      <div>
+      <div class="config-group-copy">
         <div class="eyebrow">${pathTitle(path)}</div>
         <h4>${displayLabel(localizedField(group, "title"))}</h4>
+        <p class="config-group-note">${currentLanguage === "en"
+          ? `${group.fields.length} editable fields in this slice. Review values on the right and apply changes explicitly.`
+          : `${group.fields.length} редактируемых поля в этом срезе. Проверь значения справа и применяй изменения явно.`}</p>
       </div>
       <div class="config-field-grid">
         ${group.fields.map((field) => `
@@ -1879,12 +2138,11 @@ function renderConfig() {
               <span class="config-key">${displayLabel(localizedField(field, "label"))}</span>
               ${uiSettings.showLiteralEnvKeys ? `<span class="config-key-hint">${field.key}</span>` : ""}
             </div>
+            <p class="config-help">${displayText(localizedField(field, "description") || "")}</p>
             ${renderFieldControl(selectedConfigPath, field)}
             <div class="config-meta">
-              ${uiSettings.showRecommendedValues ? `<span>${currentLanguage === "en" ? "Recommended" : "Рекомендуется"}: <span class="mono-line">${field.suggested}</span></span>` : ""}
-              <span>${currentLanguage === "en" ? "Applied" : "Применено"}: <span class="mono-line">${field.applied}</span></span>
+              <span>${currentLanguage === "en" ? "Applied" : "Применено"}: <span class="mono-line">${field.secret && !isSecretFieldVisible(selectedConfigPath, field) ? maskSecretValue(field.applied) : field.applied}</span></span>
               ${uiSettings.showSourceFiles ? `<span>${currentLanguage === "en" ? "Source" : "Источник"}: <span class="mono-line">${field.source}</span></span>` : ""}
-              ${uiSettings.showRecommendedValues ? `<span>${currentLanguage === "en" ? "Why recommended" : "Почему рекомендуется"}: ${displayText(localizedField(field, "recommendedReason") || "")}</span>` : ""}
               ${field.pathPolicy ? `<span>${currentLanguage === "en" ? "Path policy" : "Политика пути"}: ${translatePathPolicy(field.pathPolicy)}</span>` : ""}
               ${field.pathExample ? `<span>${currentLanguage === "en" ? "Example" : "Пример"}: <span class="mono-line">${field.pathExample}</span></span>` : ""}
               ${field.validation ? `<span>${currentLanguage === "en" ? "Validation" : "Проверка"}: ${displayValidationMessage(field.validation.message || "")}</span>` : ""}
@@ -1906,6 +2164,71 @@ function renderConfig() {
   presetList.querySelectorAll(".config-preset-button").forEach((button) => {
     button.addEventListener("click", async () => {
       await previewConfigPreset(selectedConfigPath, button.dataset.presetId);
+    });
+  });
+
+  groups.querySelectorAll("[data-generate-secret]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const fieldNode = button.closest(".config-field");
+      const field = findField(selectedConfigPath, button.dataset.generateSecret);
+      if (!fieldNode || !field) return;
+      const input = fieldNode.querySelector("input");
+      if (!input) return;
+      input.value = generateSecretValue(field);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      showToast(
+        currentLanguage === "en" ? "Value generated" : "Значение сгенерировано",
+        displayLabel(localizedField(field, "label")),
+      );
+      activityFeed.unshift(
+        currentLanguage === "en"
+          ? `Generated value for ${displayLabel(localizedField(field, "label"))}`
+          : `Сгенерировано значение для ${displayLabel(localizedField(field, "label"))}`,
+      );
+      renderActivity();
+    });
+  });
+
+  groups.querySelectorAll("[data-toggle-secret]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const field = findField(selectedConfigPath, button.dataset.toggleSecret);
+      if (!field) return;
+      toggleSecretFieldVisibility(selectedConfigPath, field.key);
+      renderConfig();
+    });
+  });
+
+  groups.querySelectorAll("[data-copy-secret]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const fieldNode = button.closest(".config-field");
+      const field = findField(selectedConfigPath, button.dataset.copySecret);
+      if (!fieldNode || !field) return;
+      const input = fieldNode.querySelector("input");
+      if (!input) return;
+      try {
+        await copyToClipboard(input.value);
+        showToast(
+          currentLanguage === "en" ? "Value copied" : "Значение скопировано",
+          displayLabel(localizedField(field, "label")),
+        );
+        activityFeed.unshift(
+          currentLanguage === "en"
+            ? `Copied value for ${displayLabel(localizedField(field, "label"))}`
+            : `Скопировано значение для ${displayLabel(localizedField(field, "label"))}`,
+        );
+      } catch (_error) {
+        showToast(
+          currentLanguage === "en" ? "Copy failed" : "Не удалось скопировать",
+          displayLabel(localizedField(field, "label")),
+          "error",
+        );
+        activityFeed.unshift(
+          currentLanguage === "en"
+            ? `Could not copy value for ${displayLabel(localizedField(field, "label"))}`
+            : `Не удалось скопировать значение для ${displayLabel(localizedField(field, "label"))}`,
+        );
+      }
+      renderActivity();
     });
   });
 
@@ -2280,18 +2603,7 @@ function wireRuntimeButtons() {
   });
   document.querySelectorAll(".launch-button").forEach((button) => {
     button.addEventListener("click", async () => {
-      selectedLaunchPath = button.dataset.path;
-      const actionId = getActionIdForPath(selectedLaunchPath);
-      if (!actionId) {
-        activityFeed.unshift(`Действие запуска не сопоставлено для ${pathTitle(runtimePaths[selectedLaunchPath])}`);
-        renderActivity();
-        return;
-      }
-      await runOperatorAction(actionId, {
-        surface: "runtime",
-        pathKey: selectedLaunchPath,
-        label: pathTitle(runtimePaths[selectedLaunchPath]),
-      });
+      await triggerLaunchForPath(button.dataset.path);
     });
   });
   document.querySelectorAll(".safe-ports-button").forEach((button) => {
@@ -2324,16 +2636,64 @@ function initLogFilter() {
 
 function updateTopbarAction() {
   const button = document.querySelector("#topbar-start-button");
-  const target = runtimePaths[selectedLaunchPath];
-  button.textContent = isLaunchable(selectedLaunchPath)
-    ? (currentLanguage === "en" ? `Launch ${pathTitle(target)}` : `Запустить ${pathTitle(target)}`)
-    : (currentLanguage === "en" ? `Open ${pathTitle(target)}` : `Открыть ${pathTitle(target)}`);
+  if (!button) return;
+  button.setAttribute("aria-expanded", launchMenuOpen ? "true" : "false");
+  renderTopbarLaunchMenu();
+}
+
+function renderTopbarLaunchMenu() {
+  const menu = document.querySelector("#topbar-launch-menu");
+  if (!menu) return;
+  const orderedPaths = ["native", "container"]
+    .map((key) => runtimePaths[key])
+    .filter(Boolean);
+  menu.hidden = !launchMenuOpen;
+  menu.innerHTML = orderedPaths.map((path) => `
+    <button
+      class="launch-menu-item ${path.key === selectedLaunchPath ? "active" : ""}"
+      type="button"
+      role="menuitem"
+      data-path="${path.key}"
+      ${!isLaunchable(path.key) ? "disabled" : ""}
+    >
+      <span class="launch-menu-copy">
+        <strong>${pathTitle(path)}</strong>
+        <span>${displayText(localizedField(path, "description"))}</span>
+      </span>
+      <span class="status-pill ${chipClass(path.status)}">${cap(path.status)}</span>
+    </button>
+  `).join("");
+  [...menu.querySelectorAll(".launch-menu-item")].forEach((button) => {
+    button.addEventListener("click", async () => {
+      const { path } = button.dataset;
+      launchMenuOpen = false;
+      await triggerLaunchForPath(path);
+    });
+  });
 }
 
 function initTopbarAction() {
-  document.querySelector("#topbar-start-button").addEventListener("click", () => {
-    switchSection("launch");
+  const primaryButton = document.querySelector("#topbar-start-button");
+  const menu = document.querySelector("#topbar-launch-menu");
+  primaryButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    launchMenuOpen = !launchMenuOpen;
+    updateTopbarAction();
   });
+  document.addEventListener("click", (event) => {
+    const group = document.querySelector("#topbar-launch-group");
+    if (!group?.contains(event.target) && launchMenuOpen) {
+      launchMenuOpen = false;
+      updateTopbarAction();
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && launchMenuOpen) {
+      launchMenuOpen = false;
+      updateTopbarAction();
+    }
+  });
+  menu.addEventListener("click", (event) => event.stopPropagation());
   updateTopbarAction();
 }
 
@@ -2353,13 +2713,13 @@ function initUiSettings() {
     persistUiSettings();
     rerenderAll();
   });
-  document.querySelector("#settings-show-recommended").addEventListener("change", (event) => {
-    uiSettings.showRecommendedValues = event.target.checked;
+  document.querySelector("#settings-show-sources").addEventListener("change", (event) => {
+    uiSettings.showSourceFiles = event.target.checked;
     persistUiSettings();
     rerenderAll();
   });
-  document.querySelector("#settings-show-sources").addEventListener("change", (event) => {
-    uiSettings.showSourceFiles = event.target.checked;
+  document.querySelector("#settings-show-secrets").addEventListener("change", (event) => {
+    uiSettings.showSecretValues = event.target.checked;
     persistUiSettings();
     rerenderAll();
   });

@@ -61,6 +61,8 @@
   План: `docs/plans/2026-03-29-operator-ui-frontend-refactor-and-observability-plan.md`
   Scope: убрать дублирование `Overview`/`Launch`, ослабить card-mosaic, перейти к layout-first operator composition, добавить inspector/drawer patterns и превратить `Services` в health+metrics+logs workspace.
   Done: `Overview` переведён на компактные summary cards вместо дублирования launch-cards; `Services` и `Deploy` собраны как более жёсткие workspace-секции с отдельными summary strips, metrics/links surfaces и логами; для shell добавлены стабильные UI hooks под Playwright smoke.
+  Done: системные индикаторы и `UI Settings` вынесены из topbar в нижний sidebar control-cluster как единый вертикальный action-list; topbar разгружен до одного primary launch CTA, а у кнопки настроек появилась встроенная минималистичная gear-иконка.
+  Done: topbar CTA переработан в `split-button`: primary action запускает текущий выбранный runtime path, а chevron-menu позволяет немедленно запустить `Native Runtime` или `Offline Bundle / Containers` без жёсткой привязки к нативному сценарию. Sidebar получил отдельную nav-card и более явную operator-rail иерархию.
 - [x] R1.0.9h — Русифицировать operator UI и ввести единый словарь operational терминов
   План: `docs/plans/2026-03-29-operator-ui-frontend-refactor-and-observability-plan.md`
   Scope: перевести навигацию, CTA, статусы, ошибки и utility copy на русский; сохранить английский только для env keys, script names, URLs и API paths; выровнять backend/frontend wording.
@@ -95,15 +97,23 @@
   Scope: убрать full-page horizontal scroll во вкладке `Services`, ограничить длинные endpoint/source строки, стабилизировать container-path layout и проверить узкие ширины.
   Progress: ослаблены `mono-line`, `source-value`, `service-meta-pill` и `log-console` для wrap/word-break; на узких ширинах `service-row` и `path-card-header` теперь складываются в колонку. Нужен живой browser smoke именно на container-path `Services`.
   Progress: локализована конкретная причина full-width overflow: terminal `pre.log-console` растягивал grid-элемент. Добавлены `white-space: pre-wrap`, `width/max-width/min-width` ограничения для log-console и `min-width: 0` для карточек/workspace-элементов, чтобы длинные log-lines не раздвигали весь shell.
+  Follow-up: во вкладке `Сборка / Деплой` user experience лучше читается, когда `Логи` идут full-width сразу после primary workflow (`Сводка` + `Этапы`), а не ждут завершения длинной правой secondary-колонки. Нужен отдельный layout pass, который сократит side-rail и поднимет лог-терминал выше в потоке.
 - [ ] R1.0.9o — Расширить Native Runtime Config до полного typed runtime/GPU surface
   План: `docs/plans/2026-03-29-operator-ui-runtime-knobs-and-help-plan.md`
   Scope: собрать единый UI-contract поверх `backend/.env`, `backend/.env.runtime` и `backend/.env.hardware.override`, чтобы `Config` умел редактировать `BACKEND_MODE`, `*_DEVICE_MODE`, `GPU_LAYERS_MODE`, `N_GPU_LAYERS_OVERRIDE`, context budgets и per-model runtime knobs без ручного поиска по файлам.
+  Progress: native `Config` уже расширен typed-вариантами `GPU / Placement`, `LLM / Context` и `Model Runtime`; добавлены `LLM/VLM/INTENT/RETRIEVAL *_DEVICE_MODE`, `GPU_LAYERS_MODE`, `N_GPU_LAYERS_OVERRIDE`, context-budget knobs и per-model runtime fields (`CONTEXT_SIZE_*`, `N_GPU_LAYERS_QWEN14B`) с unit coverage.
+  Progress: для `Native Runtime` добавлен отдельный variant `Secrets / Access`, который выводит и позволяет редактировать `CHAINLIT_ADMIN_USER`, `CHAINLIT_ADMIN_PASSWORD`, `CHAINLIT_AUTH_SECRET`, `GF_SECURITY_ADMIN_USER`, `GF_SECURITY_ADMIN_PASSWORD` прямо из `backend/.env`, чтобы локальный admin/operator path не оставался вне operator UI.
 - [ ] R1.0.9p — Расширить Offline Bundle Config для secrets, profiles, GPU placement и Chainlit knobs
   План: `docs/plans/2026-03-29-operator-ui-runtime-knobs-and-help-plan.md`
   Scope: добавить typed/editor support для `deploy/offline_bundle/env.bundle`, включая `CHAINLIT_*`/`GF_*` secrets, `BACKEND_MODE`, `UMS_RUNTIME_PROFILE`, `UMS_LLM_GPU_INDICES`, `GPU_LAYERS_MODE`, `N_GPU_LAYERS_*`, `VLLM_*` и profile-specific Chainlit parameters.
+  Progress: `env.bundle` surface уже расширен variant tabs `Runtime / Backend`, `GPU / Placement`, `Secrets / Access`, `Embedders / Models` и `Chainlit Profiles`; туда выведены `BACKEND_MODE`, `UMS_RUNTIME_PROFILE`, `DEVICE_MODE`, `LLM/VLM/EMBEDDER *_DEVICE_MODE`, `UMS_LLM_GPU_INDICES`, `GPU_LAYERS_MODE`, `N_GPU_LAYERS_*`, `VLLM_*`, `CHAINLIT_*`, `GF_*`, `INTENT_CLASSIFIER_*` и retrieval/model profile knobs с regression test на typed controls.
 - [ ] R1.0.9q — Добавить help-текст по каждому runtime/container параметру и полный bilingual contract
   План: `docs/plans/2026-03-29-operator-ui-runtime-knobs-and-help-plan.md`
   Scope: у каждого поля в `Config` должны быть `description` / `descriptionEn` и `recommendedReason` / `recommendedReasonEn`; UI обязан переключать labels и help-тексты между `RU/EN`, не переводя literal env keys, paths и raw values. Для secrets нужен отдельный `secret` flag и masked rendering по умолчанию.
+  Progress: backend `field` contract уже расширен до `description` / `descriptionEn` и `secret`; UI `Config` теперь показывает help-текст под каждым полем и маскирует `CHAINLIT_*`, `GF_*`, `VLLM_API_KEY` в meta-блоке и input-контроле. Дополнительно в `UI Settings` добавлен локальный reveal-toggle `Show secret values`, который по умолчанию выключен и не влияет на backend state. Следующий шаг внутри этого пункта — visual polish для плотности `Config`.
+  Progress: `Config` визуально пересобран в более читаемый workspace: group sections теперь двуколоночные (`orientation слева / поля справа`), meta-информация собрана в компактную grid-легенду, а variant/path switchers получили более явный container treatment. Это снижает ощущение технического env-dump перед дальнейшим расширением knobs.
+  Progress: для secret-полей добавлена встроенная мини-кнопка генерации прямо внутри input-row. Генерация идёт локально через `crypto.getRandomValues`, значение попадает в staged state и не записывается в env без явного `Применить изменения`.
+  Progress: рядом с генератором добавлена мини-кнопка копирования, чтобы текущее staged/current secret-значение можно было быстро забрать из UI без отдельного ручного выделения.
 
 ## План исправления compare/offline bundle багов (2026-03-26 19:18 EDT)
 

@@ -21,14 +21,17 @@
         </div>
       </div>
 
-      <nav class="nav-list" aria-label="Разделы">
-        <button class="nav-item active" data-target="overview" data-agent-nav-hook="operator-nav-overview">Обзор</button>
-        <button class="nav-item" data-target="launch" data-agent-nav-hook="operator-nav-launch">Запуск</button>
-        <button class="nav-item" data-target="config" data-agent-nav-hook="operator-nav-config">Конфиг</button>
-        <button class="nav-item" data-target="services" data-agent-nav-hook="operator-nav-services">Сервисы</button>
-        <button class="nav-item" data-target="deploy" data-agent-nav-hook="operator-nav-deploy">Сборка / Деплой</button>
-        <button class="nav-item" data-target="maintenance" data-agent-nav-hook="operator-nav-maintenance">Действия</button>
-      </nav>
+      <section class="sidebar-card sidebar-nav-card">
+        <div class="sidebar-label" id="sidebar-nav-label">Разделы</div>
+        <nav class="nav-list" aria-label="Разделы">
+          <button class="nav-item active" data-target="overview" data-agent-nav-hook="operator-nav-overview">Обзор</button>
+          <button class="nav-item" data-target="launch" data-agent-nav-hook="operator-nav-launch">Запуск</button>
+          <button class="nav-item" data-target="config" data-agent-nav-hook="operator-nav-config">Конфиг</button>
+          <button class="nav-item" data-target="services" data-agent-nav-hook="operator-nav-services">Сервисы</button>
+          <button class="nav-item" data-target="deploy" data-agent-nav-hook="operator-nav-deploy">Сборка / Деплой</button>
+          <button class="nav-item" data-target="maintenance" data-agent-nav-hook="operator-nav-maintenance">Действия</button>
+        </nav>
+      </section>
 
       <section class="sidebar-card">
         <div class="sidebar-label" id="sidebar-hardware-label">Аппаратная среда</div>
@@ -52,10 +55,40 @@
         </div>
       </section>
 
-      <section class="sidebar-card">
+      <section class="sidebar-card sidebar-controls">
         <div class="sidebar-label" id="sidebar-system-label">Система</div>
-        <div class="sidebar-stat" id="sidebar-system-status">Ожидание backend</div>
-        <div class="sidebar-note" id="sidebar-job-status">Здесь появится статус текущей задачи и подтверждение, что контур работает.</div>
+        <div class="sidebar-action-list">
+          <div class="sidebar-action sidebar-status-card neutral" id="system-status-button">
+            <span class="sidebar-action-dot neutral" id="system-status-dot" aria-hidden="true"></span>
+            <div class="sidebar-action-copy">
+              <strong class="sidebar-action-title" id="system-status-pill">Контур не подтверждён</strong>
+              <span class="sidebar-action-note" id="sidebar-system-status">Ожидание backend</span>
+            </div>
+          </div>
+          <div class="sidebar-action sidebar-status-card neutral" id="job-status-button">
+            <span class="sidebar-action-dot neutral" id="job-status-dot" aria-hidden="true"></span>
+            <div class="sidebar-action-copy">
+              <strong class="sidebar-action-title" id="job-status-pill">Нет активной задачи</strong>
+              <span class="sidebar-action-note" id="sidebar-job-status">Здесь появится статус текущей задачи и подтверждение, что контур работает.</span>
+            </div>
+          </div>
+          <button class="sidebar-action sidebar-settings-button" id="ui-settings-button" type="button">
+            <span class="sidebar-settings-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 2a10 10 0 0 1 6 2 2 2 0 0 0 2 2 10 10 0 0 1 0 12 2 2 0 0 0-2 2 10 10 0 0 1-12 0 2 2 0 0 0-2-2A10 10 0 0 1 4 6a2 2 0 0 0 2-2 10 10 0 0 1 6-2" />
+                <circle cx="12" cy="12" r="2" />
+                <circle cx="12" cy="20" r="2" />
+                <circle cx="12" cy="4" r="2" />
+                <circle cx="20" cy="12" r="2" />
+                <circle cx="4" cy="12" r="2" />
+              </svg>
+            </span>
+            <span class="sidebar-action-copy">
+              <strong class="sidebar-action-title" id="ui-settings-button-label">Настройки UI</strong>
+              <span class="sidebar-action-note" id="ui-settings-button-note">Язык интерфейса, метрики, env keys и показ секретов.</span>
+            </span>
+          </button>
+        </div>
       </section>
     </aside>
 
@@ -66,10 +99,27 @@
           <h1>Панель запуска и управления системой</h1>
         </div>
         <div class="topbar-actions">
-          <div class="status-pill neutral" id="system-status-pill">Контур не подтверждён</div>
-          <div class="status-pill neutral" id="job-status-pill">Нет активной задачи</div>
-          <button class="ghost-button" id="ui-settings-button" type="button">Настройки UI</button>
-          <button class="primary-button" id="topbar-start-button" data-agent-nav-hook="operator-topbar-start">Запустить выбранный путь</button>
+          <div class="launch-dropdown" id="topbar-launch-group">
+            <button
+              class="primary-button launch-menu-button"
+              id="topbar-start-button"
+              type="button"
+              aria-haspopup="menu"
+              aria-expanded="false"
+              aria-controls="topbar-launch-menu"
+              data-agent-nav-hook="operator-topbar-start"
+            >
+              <span class="launch-button-copy">
+                <span class="launch-button-label" id="topbar-start-button-label">Запуск</span>
+              </span>
+              <span class="launch-button-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="m6 9 6 6 6-6" />
+                </svg>
+              </span>
+            </button>
+            <div class="launch-menu" id="topbar-launch-menu" role="menu" hidden></div>
+          </div>
         </div>
       </header>
 
@@ -320,7 +370,7 @@
 
         <div class="workspace-strip" id="deploy-strip" data-agent-nav-hook="operator-deploy-strip"></div>
 
-        <div class="overview-grid">
+        <div class="deploy-primary-grid">
           <article class="panel">
             <div class="panel-header">
               <div>
@@ -335,56 +385,11 @@
           <article class="panel">
             <div class="panel-header">
               <div>
-                <p class="eyebrow" id="deploy-sources-eyebrow">Источники</p>
-                <h3 id="deploy-sources-title">Канонические scripts и корни артефактов</h3>
+                  <p class="eyebrow" id="deploy-stages-eyebrow">Этапы потока</p>
+                  <h3 id="deploy-stages-title">Стадии сборки</h3>
               </div>
             </div>
-            <div class="source-list" id="deploy-source-list"></div>
-          </article>
-        </div>
-
-        <article class="panel">
-          <div class="panel-header">
-            <div>
-              <p class="eyebrow" id="deploy-observability-eyebrow">Наблюдаемость</p>
-                <h3 id="deploy-observability-title">Сводка метрик и переходы в Grafana</h3>
-            </div>
-          </div>
-          <div class="overview-grid">
-            <div class="deploy-summary-grid" id="deploy-metrics-grid" data-agent-nav-hook="operator-deploy-metrics"></div>
-            <div class="source-list" id="deploy-links-grid" data-agent-nav-hook="operator-deploy-links"></div>
-          </div>
-        </article>
-
-        <article class="panel">
-          <div class="panel-header">
-            <div>
-                <p class="eyebrow">Этапы потока</p>
-                <h3 id="deploy-stages-title">Стадии сборки</h3>
-            </div>
-          </div>
-          <div class="deploy-stage-grid" id="deploy-stage-grid" data-agent-nav-hook="operator-deploy-stages"></div>
-        </article>
-
-        <div class="overview-grid">
-          <article class="panel">
-            <div class="panel-header">
-              <div>
-                <p class="eyebrow">Действия</p>
-                <h3 id="deploy-actions-title">Действия сборки</h3>
-              </div>
-            </div>
-            <div class="action-grid" id="deploy-action-grid"></div>
-          </article>
-
-          <article class="panel">
-            <div class="panel-header">
-              <div>
-                <p class="eyebrow">Артефакты</p>
-                <h3 id="deploy-artifacts-title">Портативные артефакты и состояние импорта</h3>
-              </div>
-            </div>
-            <div class="deploy-artifact-list" id="deploy-artifact-list"></div>
+            <div class="deploy-stage-grid" id="deploy-stage-grid" data-agent-nav-hook="operator-deploy-stages"></div>
           </article>
         </div>
 
@@ -400,6 +405,51 @@
           </div>
           <pre class="log-console" id="deploy-log-console" data-agent-nav-hook="operator-deploy-logs"></pre>
         </article>
+
+        <div class="deploy-secondary-grid">
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow" id="deploy-sources-eyebrow">Источники</p>
+                <h3 id="deploy-sources-title">Канонические scripts и корни артефактов</h3>
+              </div>
+            </div>
+            <div class="source-list" id="deploy-source-list"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow" id="deploy-observability-eyebrow">Наблюдаемость</p>
+                <h3 id="deploy-observability-title">Сводка метрик и переходы в Grafana</h3>
+              </div>
+            </div>
+            <div class="deploy-observability-grid">
+              <div class="deploy-summary-grid" id="deploy-metrics-grid" data-agent-nav-hook="operator-deploy-metrics"></div>
+              <div class="source-list" id="deploy-links-grid" data-agent-nav-hook="operator-deploy-links"></div>
+            </div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow" id="deploy-actions-eyebrow">Действия</p>
+                <h3 id="deploy-actions-title">Действия сборки</h3>
+              </div>
+            </div>
+            <div class="action-grid" id="deploy-action-grid"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow" id="deploy-artifacts-eyebrow">Артефакты</p>
+                <h3 id="deploy-artifacts-title">Портативные артефакты и состояние импорта</h3>
+              </div>
+            </div>
+            <div class="deploy-artifact-list" id="deploy-artifact-list"></div>
+          </article>
+        </div>
       </section>
 
       <section class="page-section" id="section-maintenance" data-agent-nav-hook="operator-section-maintenance">
@@ -471,12 +521,12 @@
           <input id="settings-show-keys" type="checkbox" />
         </label>
         <label class="settings-row">
-          <span>Показывать рекомендуемые значения</span>
-          <input id="settings-show-recommended" type="checkbox" />
-        </label>
-        <label class="settings-row">
           <span>Показывать source files</span>
           <input id="settings-show-sources" type="checkbox" />
+        </label>
+        <label class="settings-row">
+          <span>Показывать значения секретов</span>
+          <input id="settings-show-secrets" type="checkbox" />
         </label>
         <label class="settings-row">
           <span>Режим метрик</span>
@@ -488,6 +538,8 @@
       </div>
     </form>
   </dialog>
+
+  <div class="toast-stack" id="toast-stack" aria-live="polite" aria-atomic="true"></div>
 
   <script src="./app.js"></script>
 </body>
