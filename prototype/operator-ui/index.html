@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="ru" class="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agent Navigator Pro | Панель управления runtime</title>
+  <link rel="icon" href="/operator-assets/favicon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&family=Roboto+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand-block">
+        <img src="/operator-assets/logo_dark.svg" alt="" class="brand-logo" />
+        <div>
+          <div class="brand-title">Agent Navigator</div>
+          <div class="brand-subtitle">Операторская панель запуска</div>
+        </div>
+      </div>
+
+      <nav class="nav-list" aria-label="Разделы">
+        <button class="nav-item active" data-target="overview" data-agent-nav-hook="operator-nav-overview">Обзор</button>
+        <button class="nav-item" data-target="launch" data-agent-nav-hook="operator-nav-launch">Запуск</button>
+        <button class="nav-item" data-target="config" data-agent-nav-hook="operator-nav-config">Конфиг</button>
+        <button class="nav-item" data-target="services" data-agent-nav-hook="operator-nav-services">Сервисы</button>
+        <button class="nav-item" data-target="deploy" data-agent-nav-hook="operator-nav-deploy">Сборка / Деплой</button>
+        <button class="nav-item" data-target="maintenance" data-agent-nav-hook="operator-nav-maintenance">Действия</button>
+      </nav>
+
+      <section class="sidebar-card">
+        <div class="sidebar-label" id="sidebar-hardware-label">Аппаратная среда</div>
+        <div class="sidebar-stat" id="sidebar-host-summary">Ожидание состояния оператора</div>
+        <div class="sidebar-note" id="sidebar-runtime-summary">Аппаратная среда и доступность runtime появятся после гидратации backend.</div>
+      </section>
+
+      <section class="sidebar-card">
+        <div class="sidebar-label" id="sidebar-summary-label">Сводка состояния</div>
+        <div class="mini-metric-row">
+          <span id="sidebar-available-paths-label">Доступные пути</span>
+          <strong id="available-paths-count">1 / 2</strong>
+        </div>
+        <div class="mini-metric-row">
+          <span id="sidebar-healthy-services-label">Здоровые сервисы</span>
+          <strong id="healthy-services-count">4 / 5</strong>
+        </div>
+        <div class="mini-metric-row">
+          <span id="sidebar-dirty-config-label">Незасейвленные правки</span>
+          <strong id="dirty-config-count">0</strong>
+        </div>
+      </section>
+
+      <section class="sidebar-card">
+        <div class="sidebar-label" id="sidebar-system-label">Система</div>
+        <div class="sidebar-stat" id="sidebar-system-status">Ожидание backend</div>
+        <div class="sidebar-note" id="sidebar-job-status">Здесь появится статус текущей задачи и подтверждение, что контур работает.</div>
+      </section>
+    </aside>
+
+    <main class="main-panel">
+      <header class="topbar">
+        <div class="topbar-copy">
+          <p class="eyebrow">Панель управления оператором</p>
+          <h1>Панель запуска и управления системой</h1>
+        </div>
+        <div class="topbar-actions">
+          <div class="status-pill neutral" id="system-status-pill">Контур не подтверждён</div>
+          <div class="status-pill neutral" id="job-status-pill">Нет активной задачи</div>
+          <button class="ghost-button" id="ui-settings-button" type="button">Настройки UI</button>
+          <button class="primary-button" id="topbar-start-button" data-agent-nav-hook="operator-topbar-start">Запустить выбранный путь</button>
+        </div>
+      </header>
+
+      <section class="page-section active" id="section-overview" data-agent-nav-hook="operator-section-overview">
+        <div class="section-hero">
+          <div>
+            <p class="eyebrow">Обзор</p>
+            <h2>Доступность путей, железо, здоровье и парсинг</h2>
+            <p class="support-copy">
+              Это рабочая поверхность оператора для запуска, конфига, состояния сервисов и диагностики без лишней навигации.
+            </p>
+          </div>
+          <div class="hero-chip-row">
+            <div class="hero-chip lime" id="overview-hero-primary">Загрузка runtime-путей</div>
+            <div class="hero-chip cyan" id="overview-hero-secondary">Ожидание конфига</div>
+            <div class="hero-chip orange" id="overview-hero-tertiary">Ожидание диагностики</div>
+          </div>
+        </div>
+
+        <div class="path-card-grid" id="overview-path-cards"></div>
+
+        <article class="panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow" id="overview-metrics-eyebrow">Метрики</p>
+              <h3 id="overview-metrics-title">Ключевые сигналы Prometheus для сводки оператора</h3>
+            </div>
+            <span class="status-pill cyan" id="overview-metrics-pill">Наблюдаемость</span>
+          </div>
+          <div class="deploy-summary-grid" id="overview-metrics-grid" data-agent-nav-hook="operator-overview-metrics"></div>
+        </article>
+
+        <div class="overview-grid">
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow" id="overview-hardware-eyebrow">Железо</p>
+              <h3 id="overview-hardware-title">Обнаруженные возможности и базовые env-настройки</h3>
+              </div>
+              <span class="status-pill cyan" id="overview-hardware-pill">Только справка</span>
+            </div>
+            <div class="hardware-grid" id="hardware-summary"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow" id="overview-warnings-eyebrow">Предупреждения</p>
+                <h3 id="overview-warnings-title">Блокеры парсинга и runtime</h3>
+              </div>
+              <span class="status-pill orange" id="overview-warnings-pill">Требует внимания</span>
+            </div>
+            <div class="warning-list" id="warning-list"></div>
+          </article>
+        </div>
+
+        <div class="overview-grid">
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow" id="overview-health-eyebrow">Здоровье сервисов</p>
+                <h3 id="overview-health-title">Готовность активного пути</h3>
+              </div>
+            </div>
+            <div class="service-overview-list" id="service-overview-list"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow" id="overview-activity-eyebrow">Последние действия</p>
+                <h3 id="overview-activity-title">Недавние runtime и config события</h3>
+              </div>
+            </div>
+            <div class="activity-feed" id="recent-activity"></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="page-section" id="section-launch" data-agent-nav-hook="operator-section-launch">
+        <div class="section-hero">
+          <div>
+            <p class="eyebrow">Запуск</p>
+            <h2>Два равноправных пути запуска с явными источниками</h2>
+            <p class="support-copy">Сначала видна доступность пути запуска, потом источник конфига и только затем кнопка запуска.</p>
+          </div>
+        </div>
+
+        <div class="workspace-strip" id="launch-strip" data-agent-nav-hook="operator-launch-strip"></div>
+
+        <div class="path-card-grid" id="launch-path-cards"></div>
+
+        <div class="overview-grid">
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Профили запуска</p>
+                <h3>Подчинённые пресеты выбранного пути запуска</h3>
+              </div>
+            </div>
+            <div class="profile-grid" id="profile-grid"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Лог запуска</p>
+                <h3>Ход текущей или последней задачи</h3>
+              </div>
+              <div class="panel-actions">
+                <span class="status-pill neutral" id="launch-runtime-pill">Ожидание runtime</span>
+              </div>
+            </div>
+            <pre class="log-console" id="launch-log-console" data-agent-nav-hook="operator-launch-logs"></pre>
+          </article>
+        </div>
+
+        <article class="panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow" id="launch-next-eyebrow">Следующий шаг</p>
+              <h3 id="launch-next-title">Что делать после запуска</h3>
+            </div>
+          </div>
+          <div class="source-list" id="launch-next-steps"></div>
+        </article>
+      </section>
+
+      <section class="page-section" id="section-config" data-agent-nav-hook="operator-section-config">
+        <div class="section-hero">
+          <div>
+            <p class="eyebrow">Конфиг</p>
+            <h2>Редактор env/config с явным применением изменений</h2>
+            <p class="support-copy">Изменения пишутся в реальные источники и не сохраняются автоматически.</p>
+          </div>
+          <div class="path-switcher" id="config-path-switcher"></div>
+        </div>
+
+        <article class="panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Источники конфига</p>
+              <h3>Происхождение выбранного пути</h3>
+            </div>
+            <span class="status-pill lime" id="config-selected-path-label">Нативный запуск</span>
+          </div>
+          <div class="source-list" id="config-source-list"></div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Варианты</p>
+              <h3 id="config-variant-title">Варианты и рекомендуемые пресеты</h3>
+            </div>
+            <span class="status-pill cyan" id="config-variant-description">Пока не выбран вариант</span>
+          </div>
+          <div class="path-switcher" id="config-variant-switcher"></div>
+          <div class="source-list" id="config-preset-list"></div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Поля редактирования</p>
+              <h3>Сгруппированные runtime и parser-настройки</h3>
+            </div>
+            <div class="panel-actions">
+              <span class="status-pill neutral" id="config-dirty-indicator">Нет несохранённых изменений</span>
+              <button class="primary-button" id="apply-config-button">Применить изменения</button>
+            </div>
+          </div>
+          <div class="config-groups" id="config-groups"></div>
+        </article>
+      </section>
+
+      <section class="page-section" id="section-services" data-agent-nav-hook="operator-section-services">
+        <div class="section-hero">
+          <div>
+            <p class="eyebrow">Сервисы и логи</p>
+            <h2>Проверка здоровья, готовности, логов и диагностики</h2>
+            <p class="support-copy" id="services-support-copy">Логи здесь помогают принимать решение, а не просто лежат внизу страницы.</p>
+          </div>
+          <div class="path-switcher" id="services-path-switcher"></div>
+        </div>
+
+        <div class="workspace-strip" id="services-strip" data-agent-nav-hook="operator-services-strip"></div>
+
+        <div class="services-layout">
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow" id="services-status-eyebrow">Сервисы</p>
+                <h3 id="services-status-title">Статус выбранного пути</h3>
+              </div>
+            </div>
+            <div class="service-grid" id="services-grid" data-agent-nav-hook="operator-services-grid"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow" id="services-diagnostics-eyebrow">Диагностика парсера</p>
+                <h3 id="services-diagnostics-title">Проверки для выбранного пути</h3>
+              </div>
+              <span class="status-pill neutral" id="diagnostics-status-pill">Нет runtime-диагностики</span>
+            </div>
+            <div class="diagnostics-list" id="diagnostics-list" data-agent-nav-hook="operator-diagnostics-list"></div>
+          </article>
+        </div>
+
+        <article class="panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow" id="services-observability-eyebrow">Метрики и Grafana</p>
+              <h3 id="services-observability-title">Evidence для health, latency и наблюдаемости runtime</h3>
+            </div>
+          </div>
+          <div class="overview-grid">
+            <div class="deploy-summary-grid" id="services-metrics-grid" data-agent-nav-hook="operator-services-metrics"></div>
+            <div class="source-list" id="services-links-grid" data-agent-nav-hook="operator-services-links"></div>
+          </div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow" id="services-logs-eyebrow">Логи</p>
+              <h3 id="services-logs-title">Сводный поток событий и логов</h3>
+            </div>
+            <div class="panel-actions">
+              <select id="log-filter" class="log-filter"></select>
+            </div>
+          </div>
+          <pre class="log-console" id="log-console" data-agent-nav-hook="operator-services-logs"></pre>
+        </article>
+      </section>
+
+      <section class="page-section" id="section-deploy" data-agent-nav-hook="operator-section-deploy">
+        <div class="section-hero">
+          <div>
+            <p class="eyebrow">Сборка / Деплой</p>
+            <h2>Собирайте bundle, импортируйте архив и поднимайте систему</h2>
+            <p class="support-copy">Эта вкладка повторяет канонический поток `deploy/offline_bundle/scripts`: сборку, экспорт, упаковку, распаковку, проверку, установку, деплой и верификацию.</p>
+          </div>
+          <div class="path-switcher" id="deploy-mode-switcher"></div>
+        </div>
+
+        <div class="workspace-strip" id="deploy-strip" data-agent-nav-hook="operator-deploy-strip"></div>
+
+        <div class="overview-grid">
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow" id="deploy-summary-eyebrow">Сводка режима</p>
+                <h3 id="deploy-summary-title">Статус сборки bundle</h3>
+              </div>
+              <span class="status-pill cyan" id="deploy-summary-pill">Сборка bundle</span>
+            </div>
+            <div class="deploy-summary-grid" id="deploy-summary-grid" data-agent-nav-hook="operator-deploy-summary"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow" id="deploy-sources-eyebrow">Источники</p>
+                <h3 id="deploy-sources-title">Канонические scripts и корни артефактов</h3>
+              </div>
+            </div>
+            <div class="source-list" id="deploy-source-list"></div>
+          </article>
+        </div>
+
+        <article class="panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow" id="deploy-observability-eyebrow">Наблюдаемость</p>
+                <h3 id="deploy-observability-title">Сводка метрик и переходы в Grafana</h3>
+            </div>
+          </div>
+          <div class="overview-grid">
+            <div class="deploy-summary-grid" id="deploy-metrics-grid" data-agent-nav-hook="operator-deploy-metrics"></div>
+            <div class="source-list" id="deploy-links-grid" data-agent-nav-hook="operator-deploy-links"></div>
+          </div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-header">
+            <div>
+                <p class="eyebrow">Этапы потока</p>
+                <h3 id="deploy-stages-title">Стадии сборки</h3>
+            </div>
+          </div>
+          <div class="deploy-stage-grid" id="deploy-stage-grid" data-agent-nav-hook="operator-deploy-stages"></div>
+        </article>
+
+        <div class="overview-grid">
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Действия</p>
+                <h3 id="deploy-actions-title">Действия сборки</h3>
+              </div>
+            </div>
+            <div class="action-grid" id="deploy-action-grid"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Артефакты</p>
+                <h3 id="deploy-artifacts-title">Портативные артефакты и состояние импорта</h3>
+              </div>
+            </div>
+            <div class="deploy-artifact-list" id="deploy-artifact-list"></div>
+          </article>
+        </div>
+
+        <article class="panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow" id="deploy-logs-eyebrow">Логи</p>
+                <h3 id="deploy-logs-title">Лог потока сборки и деплоя</h3>
+            </div>
+            <div class="panel-actions">
+              <select id="deploy-log-filter" class="log-filter"></select>
+            </div>
+          </div>
+          <pre class="log-console" id="deploy-log-console" data-agent-nav-hook="operator-deploy-logs"></pre>
+        </article>
+      </section>
+
+      <section class="page-section" id="section-maintenance" data-agent-nav-hook="operator-section-maintenance">
+        <div class="section-hero">
+          <div>
+            <p class="eyebrow">Действия</p>
+            <h2>Только разрешённые maintenance-сценарии</h2>
+            <p class="support-copy">Безопасные действия оператора остаются видимыми, типизированными и привязанными к выбранному пути запуска.</p>
+          </div>
+        </div>
+
+        <div class="maintenance-layout">
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow" id="maintenance-actions-eyebrow">Действия</p>
+                <h3 id="maintenance-actions-title">Контролируемые команды оператора</h3>
+              </div>
+            </div>
+            <div class="action-grid" id="action-grid"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow" id="maintenance-blockers-eyebrow">Текущие блокеры</p>
+                <h3 id="maintenance-blockers-title">Что мешает полной runtime-паритетности</h3>
+              </div>
+            </div>
+            <div class="blocker-list" id="blocker-list"></div>
+          </article>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="reason-modal" class="reason-modal">
+    <form method="dialog" class="reason-modal-card">
+      <div class="panel-header">
+        <div>
+          <p class="eyebrow" id="reason-modal-eyebrow">Почему недоступно?</p>
+          <h3 id="reason-modal-title">Детали runtime</h3>
+        </div>
+        <button class="ghost-button" id="reason-modal-close" type="button">Закрыть</button>
+      </div>
+      <div id="reason-modal-content" class="reason-modal-content"></div>
+    </form>
+  </dialog>
+
+  <dialog id="ui-settings-modal" class="reason-modal">
+    <form method="dialog" class="reason-modal-card">
+      <div class="panel-header">
+        <div>
+          <p class="eyebrow" id="ui-settings-modal-eyebrow">Настройки интерфейса</p>
+          <h3 id="ui-settings-modal-title">UI Settings</h3>
+        </div>
+        <button class="ghost-button" id="ui-settings-modal-close" type="button">Закрыть</button>
+      </div>
+      <div class="reason-modal-content settings-grid">
+        <label class="settings-row">
+          <span>Язык интерфейса</span>
+          <select id="settings-language-select" class="log-filter">
+            <option value="ru">Русский</option>
+            <option value="en">English</option>
+          </select>
+        </label>
+        <label class="settings-row">
+          <span>Показывать env keys</span>
+          <input id="settings-show-keys" type="checkbox" />
+        </label>
+        <label class="settings-row">
+          <span>Показывать рекомендуемые значения</span>
+          <input id="settings-show-recommended" type="checkbox" />
+        </label>
+        <label class="settings-row">
+          <span>Показывать source files</span>
+          <input id="settings-show-sources" type="checkbox" />
+        </label>
+        <label class="settings-row">
+          <span>Режим метрик</span>
+          <select id="settings-metrics-density" class="log-filter">
+            <option value="compact">Compact</option>
+            <option value="detailed">Detailed</option>
+          </select>
+        </label>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="./app.js"></script>
+</body>
+</html>

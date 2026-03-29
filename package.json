@@ -2,6 +2,7 @@
   "name": "agent-navigator-pro",
   "private": true,
   "scripts": {
+    "prototype:operator-ui": "python3 -m http.server 4173 -d prototype/operator-ui",
     "test:e2e": "playwright test",
     "test:e2e:list": "playwright test --list",
     "test:e2e:headed": "playwright test --headed"
