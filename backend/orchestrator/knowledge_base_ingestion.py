@@ -9,7 +9,7 @@ import numpy as np
 from orchestrator.knowledge_base_store import (
     KnowledgeBaseChunkRecord,
     KnowledgeBaseSourceRecord,
-    SQLiteKnowledgeBaseStore,
+    KnowledgeBaseStoreProtocol,
     get_knowledge_base_store,
 )
 from orchestrator.rag.chunker import LegalDocumentChunker
@@ -30,7 +30,7 @@ def ingest_text_source_sync(
     collection_id: str,
     display_name: str,
     text: str,
-    store: Optional[SQLiteKnowledgeBaseStore] = None,
+    store: Optional[KnowledgeBaseStoreProtocol] = None,
     mime_type: str = "text/plain",
     index_version: str = "v1",
     embedding_model_id: str = "labse",

@@ -7,7 +7,11 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, runtime_checkable
+try:
+    from typing import Protocol
+except ImportError:
+    from typing_extensions import Protocol  # type: ignore[assignment]
 
 import numpy as np
 
@@ -83,6 +87,73 @@ def _deserialize_embedding(blob: Optional[bytes], dim: Optional[int]) -> Optiona
     if array.size != dim:
         return None
     return array.copy()
+
+
+@runtime_checkable
+class KnowledgeBaseStoreProtocol(Protocol):
+    """
+    Interface contract for knowledge base storage backends.
+
+    Any implementation (SQLiteKnowledgeBaseStore, QdrantKnowledgeBaseStore, …) must
+    satisfy this protocol to be a drop-in replacement via get_knowledge_base_store().
+
+    Embedding format: chunk["embedding"] must be Optional[np.ndarray] with dtype float32
+    and shape (embedding_dim,). Qdrant implementations must convert List[float] →
+    np.asarray(vector, dtype=np.float32) before returning KnowledgeBaseChunkRecord.
+    """
+
+    def register_source_sync(
+        self,
+        *,
+        collection_id: str,
+        display_name: str,
+        content_hash: str,
+        mime_type: str,
+        index_version: str,
+        embedding_model_id: str,
+        chunking_version: str,
+        status: str = "indexed",
+    ) -> KnowledgeBaseSourceRecord: ...
+
+    def replace_chunks_sync(
+        self,
+        *,
+        source_id: str,
+        chunks: List[Dict[str, Any]],
+    ) -> None: ...
+
+    def list_sources_sync(
+        self,
+        collection_id: str,
+    ) -> List[KnowledgeBaseSourceRecord]: ...
+
+    def list_chunks_sync(
+        self,
+        collection_id: str,
+        source_ids: Optional[List[str]] = None,
+        include_embeddings: bool = False,
+    ) -> List[KnowledgeBaseChunkRecord]: ...
+
+    async def register_source(self, **kwargs: Any) -> KnowledgeBaseSourceRecord: ...
+
+    async def replace_chunks(
+        self,
+        *,
+        source_id: str,
+        chunks: List[Dict[str, Any]],
+    ) -> None: ...
+
+    async def list_sources(
+        self,
+        collection_id: str,
+    ) -> List[KnowledgeBaseSourceRecord]: ...
+
+    async def list_chunks(
+        self,
+        collection_id: str,
+        source_ids: Optional[List[str]] = None,
+        include_embeddings: bool = False,
+    ) -> List[KnowledgeBaseChunkRecord]: ...
 
 
 class SQLiteKnowledgeBaseStore:
@@ -342,7 +413,7 @@ class SQLiteKnowledgeBaseStore:
         return self.list_chunks_sync(collection_id, source_ids=source_ids, include_embeddings=include_embeddings)
 
 
-def get_knowledge_base_store() -> SQLiteKnowledgeBaseStore:
+def get_knowledge_base_store() -> KnowledgeBaseStoreProtocol:
     global _STORE_SINGLETON
     with _STORE_LOCK:
         if _STORE_SINGLETON is None:

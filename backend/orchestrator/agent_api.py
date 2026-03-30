@@ -22,7 +22,7 @@ warnings.filterwarnings("ignore", category=FutureWarning, module="pynvml")
 
 # Загрузка переменных окружения
 load_dotenv()
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, UploadFile, File as FastAPIFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
@@ -709,12 +709,28 @@ def _compute_openai_dedup_key(*, target_model: str, user_query: str, attachments
     return f"{target_model}:{files_hash}:{query_hash}"
 
 
-async def _stream_openai_compat_response(execution_response: Dict[str, Any]) -> AsyncGenerator[str, None]:
-    yield "data: " + json.dumps({"choices": [{"delta": {"role": "assistant"}, "finish_reason": None}]}) + "\n\n"
+async def _stream_openai_compat_response(
+    execution_response: Dict[str, Any],
+    *,
+    model: str = "agent-navigator",
+) -> AsyncGenerator[str, None]:
+    chunk_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+    created_ts = int(time.time())
+
+    def _chunk(delta: Dict[str, Any], finish_reason: Optional[str] = None) -> str:
+        return "data: " + json.dumps({
+            "id": chunk_id,
+            "object": "chat.completion.chunk",
+            "created": created_ts,
+            "model": model,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+        }) + "\n\n"
+
+    yield _chunk({"role": "assistant"})
     text = str(execution_response.get("assistant_message") or "")
     if text:
-        yield "data: " + json.dumps({"choices": [{"delta": {"content": text}, "finish_reason": None}]}) + "\n\n"
-    yield "data: " + json.dumps({"choices": [{"delta": {}, "finish_reason": "stop"}]}) + "\n\n"
+        yield _chunk({"content": text})
+    yield _chunk({}, finish_reason="stop")
     yield "data: [DONE]\n\n"
 
 
@@ -898,12 +914,43 @@ async def openai_completions(request: Request):
                 payload,
                 deps=_build_api_execution_dependencies(compat_request, effective_settings),
             )
-            async for chunk in _stream_openai_compat_response(response):
+            async for chunk in _stream_openai_compat_response(response, model=target_model):
                 yield chunk
         finally:
             _active_workflows.pop(dedup_key, None)
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+@app.post("/v1/files")
+async def upload_file(file: UploadFile = FastAPIFile(...)):
+    """
+    Open WebUI file upload endpoint (multipart/form-data).
+    Saves the file to open_webui_uploads/ and returns an OpenAI-compatible file object.
+    """
+    try:
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        save_dir = os.path.join(base_dir, "open_webui_uploads")
+        os.makedirs(save_dir, exist_ok=True)
+        safe_name = os.path.basename(file.filename or "upload")
+        dest = os.path.join(save_dir, safe_name)
+        content = await file.read()
+        with open(dest, "wb") as f:
+            f.write(content)
+        file_id = str(uuid.uuid4())
+        return {
+            "id": file_id,
+            "object": "file",
+            "filename": safe_name,
+            "purpose": "assistants",
+            "status": "processed",
+            "created_at": int(time.time()),
+            "size": len(content),
+        }
+    except Exception as exc:
+        logger.error("File upload failed: %s", exc, exc_info=True)
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail=str(exc))
+
 
 if __name__ == "__main__":
     import uvicorn

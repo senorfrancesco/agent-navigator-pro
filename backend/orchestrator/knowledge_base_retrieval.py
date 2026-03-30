@@ -6,7 +6,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 
-from orchestrator.knowledge_base_store import SQLiteKnowledgeBaseStore
+from orchestrator.knowledge_base_store import KnowledgeBaseStoreProtocol
 from orchestrator.rag.chunker import LegalDocumentChunker
 from orchestrator.rag.retriever import HybridRetriever
 
@@ -67,7 +67,7 @@ def _build_session_entries(
 
 
 def _build_kb_entries(
-    kb_store: SQLiteKnowledgeBaseStore,
+    kb_store: KnowledgeBaseStoreProtocol,
     collection_id: Optional[str],
 ) -> List[Dict[str, Any]]:
     if not collection_id:
@@ -236,7 +236,7 @@ def retrieve_merged_chunks(
     session_docs: Dict[str, Any],
     active_doc_ids: List[str],
     embed_fn: Optional[Callable],
-    kb_store: Optional[SQLiteKnowledgeBaseStore],
+    kb_store: Optional[KnowledgeBaseStoreProtocol],
     top_k: int = KB_RETRIEVAL_DEFAULT_TOP_K,
     candidate_budget_per_scope: int = KB_RETRIEVAL_CANDIDATE_BUDGET_PER_SCOPE,
     mode: str = "hybrid",
