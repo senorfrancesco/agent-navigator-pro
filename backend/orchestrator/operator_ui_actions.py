@@ -77,6 +77,14 @@ def build_action_catalog() -> Dict[str, OperatorActionSpec]:
             command=["bash", str(OFFLINE_SCRIPTS_ROOT / "export_images.sh")],
             cwd=offline_repo,
         ),
+        "deploy.bundle.manifest": OperatorActionSpec(
+            action_id="deploy.bundle.manifest",
+            title="Generate Manifest",
+            description="Regenerate manifest.json checksums for the offline bundle.",
+            group="deploy-build",
+            command=["python3", str(OFFLINE_SCRIPTS_ROOT / "generate_manifest.py")],
+            cwd=offline_repo,
+        ),
         "deploy.bundle.validate": OperatorActionSpec(
             action_id="deploy.bundle.validate",
             title="Validate Bundle",
@@ -183,6 +191,9 @@ async def _stream_reader(stream: asyncio.StreamReader, job: OperatorJob, prefix:
 async def _run_job(job: OperatorJob, spec: OperatorActionSpec) -> None:
     JOB_STORE.mark_running(job.job_id)
     JOB_STORE.set_stage(job.job_id, spec.group, "running")
+    JOB_STORE.append_log(job.job_id, spec.group, f"starting:{spec.action_id}", stream="system")
+    JOB_STORE.append_log(job.job_id, spec.group, f"cwd:{spec.cwd}", stream="system")
+    JOB_STORE.append_log(job.job_id, spec.group, f"command:{' '.join(spec.command)}", stream="system")
     process = await asyncio.create_subprocess_exec(
         *spec.command,
         cwd=spec.cwd,
@@ -195,6 +206,12 @@ async def _run_job(job: OperatorJob, spec: OperatorActionSpec) -> None:
     await asyncio.gather(stdout_task, stderr_task)
     JOB_STORE.set_stage(job.job_id, spec.group, "completed" if exit_code == 0 else "failed")
     JOB_STORE.finish_job(job.job_id, exit_code=exit_code)
+    JOB_STORE.append_log(
+        job.job_id,
+        spec.group,
+        f"{'completed' if exit_code == 0 else 'failed'}:{spec.action_id}:exit={exit_code}",
+        stream="system",
+    )
 
 
 async def start_action_job(action_id: str, *, allow_privileged: bool = False) -> OperatorJob:
@@ -211,6 +228,7 @@ async def start_action_job(action_id: str, *, allow_privileged: bool = False) ->
         cwd=spec.cwd,
         privileged=spec.privileged,
     )
+    JOB_STORE.append_log(job.job_id, spec.group, f"queued:{spec.action_id}", stream="system")
     loop = asyncio.get_running_loop()
     loop.create_task(_run_job(job, spec))
     return job

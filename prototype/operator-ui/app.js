@@ -7,8 +7,8 @@ let runtimePaths = {
     launchSource: "scripts/launcher.sh --target native --profile adaptive",
     configSources: [
       { path: "backend/.env", role: "канонический env runtime и сервисов", freshness: "present" },
-      { path: "backend/.env.native", role: "переопределения для нативного пути запуска", freshness: "present" },
-      { path: "backend/.env.runtime", role: "сгенерированный применённый план runtime", freshness: "generated" },
+      { path: "backend/.env.native", role: "переопределения для нативного пути запуска", freshness: "missing" },
+      { path: "backend/.env.runtime", role: "сгенерированный применённый план runtime", freshness: "missing" },
       { path: "backend/.env.hardware.override", role: "постоянные overrides размещения", freshness: "present" },
     ],
     summary: [
@@ -369,6 +369,86 @@ let controlPlaneOnline = false;
 let runningJobs = new Map();
 let lastJobSummary = null;
 let runtimeHealthByPath = {};
+
+function trimUiCopy(value, limit = 96) {
+  const normalized = String(value || "").replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+  if (normalized.length <= limit) return normalized;
+  return `${normalized.slice(0, Math.max(0, limit - 1)).trimEnd()}…`;
+}
+
+function summarizeJobForSidebar(label, detail) {
+  const safeLabel = trimUiCopy(label, 48);
+  const safeDetail = trimUiCopy(detail, 72);
+  if (!safeLabel) {
+    return safeDetail || (currentLanguage === "en" ? "No active job" : "Нет активной задачи");
+  }
+  if (!safeDetail) {
+    return safeLabel;
+  }
+  return `${safeLabel}: ${safeDetail}`;
+}
+
+function mergeUniqueLogs(existing, incoming, keyForItem) {
+  const merged = [];
+  const seen = new Set();
+  [...existing, ...incoming].forEach((item) => {
+    const key = keyForItem(item);
+    if (seen.has(key)) return;
+    seen.add(key);
+    merged.push(item);
+  });
+  return merged;
+}
+
+function summarizeFailureDetail(detail) {
+  const text = String(detail || "").replace(/\s+/g, " ").trim();
+  if (!text) {
+    return currentLanguage === "en" ? "Runtime action failed" : "Ошибка runtime-действия";
+  }
+  if (text.startsWith("unknown-action:")) {
+    const actionId = text.split(":").slice(1).join(":");
+    return currentLanguage === "en"
+      ? `Action is not available in the backend catalog: ${actionId}`
+      : `Действие отсутствует в backend catalog: ${actionId}`;
+  }
+  if (text.includes("missing-checksummed-path:")) {
+    return currentLanguage === "en"
+      ? "Manifest checksums are stale. Regenerate manifest.json before retrying deploy."
+      : "Чексуммы manifest устарели. Пересобери manifest.json перед повторным deploy.";
+  }
+  return text;
+}
+
+function operatorShellHealth() {
+  const controlPlaneRow = serviceRows.find((row) =>
+    row.endpoint === "/operator/state + /operator-ui"
+    || row.name === "Operator Control Plane"
+    || row.nameEn === "Operator Control Plane");
+  if (!controlPlaneOnline) {
+    return {
+      status: "pending",
+      label: currentLanguage === "en" ? "Control plane pending" : "Контур не подтверждён",
+      detail: currentLanguage === "en" ? "The operator backend has not answered yet." : "Operator backend ещё не подтвердил readiness.",
+    };
+  }
+  if (controlPlaneRow?.status === "running") {
+    return {
+      status: "healthy",
+      label: currentLanguage === "en" ? "System running" : "Система работает",
+      detail: currentLanguage === "en"
+        ? "Operator UI and control-plane routes respond."
+        : "Operator UI и control-plane routes отвечают.",
+    };
+  }
+  return {
+    status: "degraded",
+    label: currentLanguage === "en" ? "Operator UI degraded" : "Operator UI в degraded",
+    detail: currentLanguage === "en"
+      ? "The backend answered, but the operator control-plane probe is not healthy."
+      : "Backend ответил, но probe operator control plane не healthy.",
+  };
+}
 
 const sectionButtons = [...document.querySelectorAll(".nav-item")];
 const sections = {
@@ -839,6 +919,80 @@ function translatePathPolicy(policy) {
   return policy;
 }
 
+function configSourceAction(item, pathKey) {
+  if (item.freshness === "missing") {
+    if (item.path.endsWith(".env.native")) {
+      return currentLanguage === "en"
+        ? (pathKey === "native" ? "Create from template or keep absent if the active path does not need native overrides." : "Not required for this runtime path.")
+        : (pathKey === "native" ? "Создай из шаблона или оставь отсутствующим, если текущему пути не нужны native overrides." : "Для этого пути запуска не требуется.");
+    }
+    if (item.path.endsWith(".env.runtime")) {
+      return currentLanguage === "en"
+        ? "This file appears after Apply or the first runtime plan generation."
+        : "Этот файл появится после Apply или первой генерации runtime-плана.";
+    }
+    if (item.path.endsWith(".env.hardware.override")) {
+      return currentLanguage === "en"
+        ? "Create the overrides file before pinning GPU placement or hardware policy."
+        : "Создай файл overrides перед фиксацией GPU placement или hardware policy.";
+    }
+    return currentLanguage === "en" ? "Create the missing source before applying path-specific changes." : "Создай отсутствующий источник перед применением path-specific изменений.";
+  }
+  if (item.freshness === "generated") {
+    return currentLanguage === "en" ? "Regenerate this file from Apply if the runtime plan changed." : "Перегенерируй этот файл через Apply, если runtime-план изменился.";
+  }
+  if (item.freshness === "stale") {
+    return currentLanguage === "en" ? "Refresh this source before treating it as the active runtime truth." : "Обнови источник перед тем как считать его актуальным runtime-состоянием.";
+  }
+  return currentLanguage === "en" ? "No operator action required right now." : "Сейчас дополнительных действий не требуется.";
+}
+
+function summarizeConfigSources(pathKey, sourceFiles) {
+  const missing = sourceFiles.filter((item) => item.freshness === "missing");
+  const stale = sourceFiles.filter((item) => item.freshness === "stale");
+  if (missing.length) {
+    return {
+      title: currentLanguage === "en" ? "What to do next" : "Что делать дальше",
+      tone: "orange",
+      summary: currentLanguage === "en"
+        ? `${missing.length} source file(s) are missing for this runtime path.`
+        : `${missing.length} файла источника отсутствуют для этого пути запуска.`,
+      items: missing.map((item) => ({
+        label: item.path,
+        body: configSourceAction(item, pathKey),
+      })),
+    };
+  }
+  if (stale.length) {
+    return {
+      title: currentLanguage === "en" ? "Refresh before deploy" : "Что обновить перед deploy",
+      tone: "cyan",
+      summary: currentLanguage === "en"
+        ? `${stale.length} source file(s) are readable but no longer current.`
+        : `${stale.length} источника читаются, но уже не являются актуальными.`,
+      items: stale.map((item) => ({
+        label: item.path,
+        body: configSourceAction(item, pathKey),
+      })),
+    };
+  }
+  return {
+    title: currentLanguage === "en" ? "Config chain is ready" : "Цепочка конфига готова",
+    tone: "lime",
+    summary: currentLanguage === "en"
+      ? "The visible config sources are present for this runtime path."
+      : "Видимые источники конфига присутствуют для этого пути запуска.",
+    items: [
+      {
+        label: currentLanguage === "en" ? "Next operator step" : "Следующий шаг",
+        body: currentLanguage === "en"
+          ? "Review variant presets, stage field changes, then apply explicitly."
+          : "Проверь вариант, подготовь изменения в полях и применяй их явно.",
+      },
+    ],
+  };
+}
+
 function persistUiSettings() {
   localStorage.setItem("operatorUiShowLiteralEnvKeys", String(uiSettings.showLiteralEnvKeys));
   localStorage.setItem("operatorUiShowSourceFiles", String(uiSettings.showSourceFiles));
@@ -1252,33 +1406,13 @@ function deriveLaunchRuntimeState(pathKey) {
 
 function renderSystemStatus() {
   const selectedRows = serviceRows.filter((row) => row.path === selectedServicesPath);
-  const runningCount = selectedRows.filter((row) => row.status === "running").length;
   const activeJobCount = [...runningJobs.values()].filter((job) => job.status === "queued" || job.status === "running").length;
+  const shellHealth = operatorShellHealth();
 
-  let pillClass = "neutral";
-  let pillText = currentLanguage === "en" ? "Control plane pending" : "Контур не подтверждён";
-  let sideTitle = currentLanguage === "en" ? "Waiting for backend" : "Ожидание backend";
-  let sideBody = currentLanguage === "en"
-    ? "Current job state and a confirmation that the control plane is alive appear here."
-    : "Здесь появится статус текущей задачи и подтверждение, что контур работает.";
-
-  if (controlPlaneOnline) {
-    pillClass = "cyan";
-    pillText = currentLanguage === "en" ? "Control plane online" : "Контур online";
-    sideTitle = currentLanguage === "en" ? "Control plane online" : "Контур online";
-    sideBody = currentLanguage === "en"
-      ? "Operator backend responds and the shell is hydrated from live state."
-      : "Operator backend отвечает, а shell гидратирован из live state.";
-  }
-
-  if (runningCount > 0) {
-    pillClass = "lime";
-    pillText = currentLanguage === "en" ? "System running" : "Система работает";
-    sideTitle = currentLanguage === "en" ? "System running" : "Система работает";
-    sideBody = currentLanguage === "en"
-      ? `${runningCount} published checks are currently healthy for the active runtime path.`
-      : `${runningCount} опубликованных проверки сейчас выглядят здоровыми для активного пути запуска.`;
-  }
+  let pillClass = shellHealth.status === "healthy" ? "lime" : shellHealth.status === "degraded" ? "orange" : "neutral";
+  let pillText = shellHealth.label;
+  let sideTitle = shellHealth.detail;
+  let sideBody = "";
 
   if (activeJobCount > 0) {
     pillClass = "cyan";
@@ -1291,11 +1425,14 @@ function renderSystemStatus() {
   }
 
   const activeJob = [...runningJobs.values()].find((job) => job.status === "queued" || job.status === "running");
+  const failedJob = !activeJob && lastJobSummary?.outcome === "failed" ? lastJobSummary : null;
   const jobPillText = activeJob
-    ? (currentLanguage === "en" ? `${activeJob.label}: ${activeJob.detail}` : `${activeJob.label}: ${activeJob.detail}`)
-    : (lastJobSummary?.label
-      ? `${lastJobSummary.label}: ${lastJobSummary.detail}`
-      : (currentLanguage === "en" ? "No active job" : "Нет активной задачи"));
+    ? summarizeJobForSidebar(activeJob.label, activeJob.detail)
+    : failedJob?.label
+      ? summarizeJobForSidebar(failedJob.label, summarizeFailureDetail(failedJob.detail))
+      : lastJobSummary?.label
+        ? summarizeJobForSidebar(lastJobSummary.label, lastJobSummary.detail)
+        : (currentLanguage === "en" ? "No active job" : "Нет активной задачи");
 
   const systemPill = document.querySelector("#system-status-pill");
   const systemButton = document.querySelector("#system-status-button");
@@ -1313,7 +1450,7 @@ function renderSystemStatus() {
   }
 
   jobPill.textContent = jobPillText;
-  const jobTone = activeJob ? "cyan" : (lastJobSummary ? "lime" : "neutral");
+  const jobTone = activeJob ? "cyan" : (lastJobSummary?.outcome === "failed" ? "orange" : (lastJobSummary ? "lime" : "neutral"));
   if (jobButton) {
     jobButton.className = `sidebar-action sidebar-status-card ${jobTone}`;
   }
@@ -1614,27 +1751,28 @@ function renderDeployStrip() {
   const runningStages = mode.stages.filter((item) => item.status === "running").length;
   const blockedStages = mode.stages.filter((item) => item.status === "blocked").length;
   const links = collectObservabilityLinks(selectedDeployMode === "build" ? ["deploy", "overview"] : "deploy");
+  const partialStages = mode.stages.filter((item) => item.status === "partial").length;
 
   container.innerHTML = `
-    <div class="workspace-card">
+    <div class="workspace-card deploy-strip-card">
       <div class="source-label">${currentLanguage === "en" ? "Active Mode" : "Активный режим"}</div>
       <strong>${displayLabel(mode.label)}</strong>
-      <p>${displayText("Ниже показаны только этапы, действия и артефакты текущего режима.")}</p>
+      <span class="workspace-caption">${currentLanguage === "en" ? "Current operator surface" : "Текущий операторский режим"}</span>
     </div>
-    <div class="workspace-card">
+    <div class="workspace-card deploy-strip-card">
       <div class="source-label">${currentLanguage === "en" ? "Flow Stages" : "Этапы потока"}</div>
-      <strong>${currentLanguage === "en" ? `${runningStages} running / ${blockedStages} blocked` : `${runningStages} в работе / ${blockedStages} заблокированы`}</strong>
-      <p>${displayText("Сначала проверяй сводку и этапы, затем уже отдельные действия и лог.")}</p>
+      <strong>${currentLanguage === "en" ? `${runningStages} running` : `${runningStages} в работе`}</strong>
+      <span class="workspace-caption">${currentLanguage === "en" ? `${partialStages} partial, ${blockedStages} blocked` : `${partialStages} частично, ${blockedStages} заблокированы`}</span>
     </div>
-    <div class="workspace-card">
+    <div class="workspace-card deploy-strip-card">
       <div class="source-label">${currentLanguage === "en" ? "Actions" : "Действия"}</div>
-      <strong>${currentLanguage === "en" ? `${mode.actions.length} available actions` : `${mode.actions.length} доступных кнопок`}</strong>
-      <p>${displayText("Кнопки режима привязаны к allowlisted operator-командам и Python job model.")}</p>
+      <strong>${currentLanguage === "en" ? `${mode.actions.length} available` : `${mode.actions.length} доступны`}</strong>
+      <span class="workspace-caption">${currentLanguage === "en" ? "Operator commands only" : "Только operator-команды"}</span>
     </div>
-    <div class="workspace-card">
+    <div class="workspace-card deploy-strip-card">
       <div class="source-label">${currentLanguage === "en" ? "Observability" : "Наблюдаемость"}</div>
       <strong>${currentLanguage === "en" ? `${links.length} links` : `${links.length} перехода`}</strong>
-      <p>${displayText("Открывай Grafana или Prometheus прямо из режима сборки и деплоя.")}</p>
+      <span class="workspace-caption">${currentLanguage === "en" ? "Grafana and Prometheus" : "Grafana и Prometheus"}</span>
     </div>
   `;
 }
@@ -1739,6 +1877,12 @@ function renderLaunchStrip() {
   const path = runtimePaths[selectedLaunchPath];
   const state = deriveLaunchRuntimeState(selectedLaunchPath);
   const runtimeJob = [...runningJobs.values()].find((job) => job.pathKey === selectedLaunchPath);
+  const runtimeStateDetail = state.status === "failed" ? summarizeFailureDetail(state.detail) : state.detail;
+  const activeJobDetail = runtimeJob
+    ? runtimeJob.detail
+    : (lastJobSummary?.pathKey === selectedLaunchPath
+      ? (lastJobSummary.outcome === "failed" ? summarizeFailureDetail(lastJobSummary.detail) : lastJobSummary.detail)
+      : (currentLanguage === "en" ? "Launch actions will appear here." : "Здесь появится ход текущего запуска."));
   const nextAction = selectedLaunchPath === "container"
     ? (hasBundlePortConflict()
       ? (currentLanguage === "en" ? "Stage safe local ports before deploy" : "Сначала подставь safe local ports")
@@ -1754,12 +1898,12 @@ function renderLaunchStrip() {
     <div class="workspace-card">
       <div class="source-label">${currentLanguage === "en" ? "Runtime state" : "Состояние runtime"}</div>
       <strong>${runtimeHealthLabel(state.status)}</strong>
-      <p>${state.detail}</p>
+      <p>${runtimeStateDetail}</p>
     </div>
     <div class="workspace-card">
       <div class="source-label">${currentLanguage === "en" ? "Active job" : "Активная задача"}</div>
       <strong>${runtimeJob ? runtimeJob.label : (currentLanguage === "en" ? "No active job" : "Нет активной задачи")}</strong>
-      <p>${runtimeJob ? runtimeJob.detail : (lastJobSummary?.pathKey === selectedLaunchPath ? lastJobSummary.detail : (currentLanguage === "en" ? "Launch actions will appear here." : "Здесь появится ход текущего запуска."))}</p>
+      <p>${activeJobDetail}</p>
     </div>
     <div class="workspace-card">
       <div class="source-label">${currentLanguage === "en" ? "Next step" : "Следующий шаг"}</div>
@@ -2080,13 +2224,36 @@ function renderConfig() {
   document.querySelector("#config-selected-path-label").textContent = pathTitle(path);
   document.querySelector("#config-source-list").closest(".panel").style.display = uiSettings.showSourceFiles ? "" : "none";
   document.querySelector("#config-source-list").innerHTML = pathState.sourceFiles.map((item) => `
-    <div class="metric-card">
-      <div class="source-label">${currentLanguage === "en" ? "Source File" : "Файл-источник"}</div>
+    <div class="metric-card config-source-card config-source-card-${chipClass(item.freshness)}">
+      <div class="config-source-card-head">
+        <div class="source-label">${currentLanguage === "en" ? "Source File" : "Файл-источник"}</div>
+        <span class="status-pill ${chipClass(item.freshness)}">${cap(item.freshness)}</span>
+      </div>
       <strong class="mono-line">${item.path}</strong>
       <p>${displayText(localizedField(item, "role"))}</p>
-      <span class="status-pill ${chipClass(item.freshness)}">${cap(item.freshness)}</span>
+      <div class="config-source-action">
+        <span class="source-label">${currentLanguage === "en" ? "Operator Action" : "Действие оператора"}</span>
+        <p>${configSourceAction(item, selectedConfigPath)}</p>
+      </div>
     </div>
   `).join("");
+
+  const sourceGuidance = summarizeConfigSources(selectedConfigPath, pathState.sourceFiles);
+  document.querySelector("#config-source-guidance").innerHTML = `
+    <div class="config-source-guidance-head">
+      <p class="eyebrow">${sourceGuidance.title}</p>
+      <span class="status-pill ${sourceGuidance.tone}">${pathTitle(path)}</span>
+    </div>
+    <strong>${sourceGuidance.summary}</strong>
+    <div class="config-guidance-list">
+      ${sourceGuidance.items.map((item) => `
+        <div class="config-guidance-item">
+          <div class="source-label">${escapeHtml(item.label)}</div>
+          <p>${escapeHtml(item.body)}</p>
+        </div>
+      `).join("")}
+    </div>
+  `;
 
   const variantSwitcher = document.querySelector("#config-variant-switcher");
   variantSwitcher.innerHTML = (pathState.variants || []).map((variant) => `
@@ -2451,15 +2618,13 @@ function renderDeploy() {
   `).join("");
 
   document.querySelector("#deploy-stage-grid").innerHTML = mode.stages.map((item) => `
-    <div class="service-card">
-      <div class="service-row">
-        <div>
-          <div class="source-label">${item.script}</div>
-          <h4>${displayLabel(localizedField(item, "title"))}</h4>
-          <p>${displayText(localizedField(item, "body"))}</p>
-        </div>
+    <div class="service-card deploy-stage-card">
+      <div class="deploy-stage-head">
+        <div class="source-label mono-line">${item.script}</div>
         <span class="status-pill ${chipClass(item.status)}">${cap(item.status)}</span>
       </div>
+      <h4>${displayLabel(localizedField(item, "title"))}</h4>
+      <p>${displayText(localizedField(item, "body"))}</p>
     </div>
   `).join("");
 
@@ -2780,6 +2945,9 @@ async function responseDetail(response) {
       const [, service, port, ...rest] = String(detail).split(":");
       return rest.join(":") || `${service} conflicts on port ${port}`;
     }
+    if (String(detail).startsWith("unknown-action:")) {
+      return String(detail);
+    }
     return detail;
   } catch (_error) {
     return `http-${response.status}`;
@@ -2803,12 +2971,20 @@ async function hydrateOperatorState() {
     serviceRows = payload.serviceRows || serviceRows;
     configState = payload.configState || configState;
     diagnostics = payload.diagnostics || diagnostics;
-    logLines = payload.logLines || logLines;
+    logLines = mergeUniqueLogs(
+      payload.logLines || [],
+      logLines,
+      (line) => `${line.path || ""}|${line.service || ""}|${line.text || ""}`,
+    );
     maintenanceActions = payload.maintenanceActions || maintenanceActions;
     blockers = payload.blockers || blockers;
     activityFeed = payload.activityFeed || activityFeed;
     deploySurface = payload.deploySurface || deploySurface;
-    deployLogLines = payload.deployLogLines || deployLogLines;
+    deployLogLines = mergeUniqueLogs(
+      payload.deployLogLines || [],
+      deployLogLines,
+      (line) => `${line.mode || ""}|${line.stage || ""}|${line.text || ""}`,
+    );
     metricsSummary = payload.metricsSummary || metricsSummary;
     grafanaLinks = payload.grafanaLinks || grafanaLinks;
     controlPlaneOnline = true;
@@ -2875,6 +3051,10 @@ function appendJobLogs(job, context) {
         text: `[${entry.timestamp}] ${entry.stream}: ${entry.message}`,
       });
     });
+    const deployFilter = document.querySelector("#deploy-log-filter");
+    if (deployFilter && deployFilter.value !== "all") {
+      deployFilter.value = "all";
+    }
     renderDeployLogs(document.querySelector("#deploy-log-filter").value || "all");
     return;
   }
@@ -2886,7 +3066,40 @@ function appendJobLogs(job, context) {
       text: `[${entry.timestamp}] ${entry.stage}/${entry.stream}: ${entry.message}`,
     });
   });
+  const serviceFilter = document.querySelector("#log-filter");
+  if (serviceFilter && serviceFilter.value !== "all") {
+    serviceFilter.value = "all";
+  }
   renderLogs(document.querySelector("#log-filter").value || "all");
+  renderLaunchLogs();
+}
+
+function appendImmediateJobLifecycleLog(context, message) {
+  const timestamp = new Date().toISOString();
+  if (context.surface === "deploy") {
+    deployLogLines.push({
+      mode: context.mode || selectedDeployMode,
+      stage: "queue",
+      text: `[${timestamp}] system: ${message}`,
+    });
+    const deployFilter = document.querySelector("#deploy-log-filter");
+    if (deployFilter && deployFilter.value !== "all") {
+      deployFilter.value = "all";
+    }
+    renderDeployLogs(document.querySelector("#deploy-log-filter").value || "all");
+    return;
+  }
+  logLines.push({
+    path: context.pathKey || selectedLaunchPath,
+    service: "operator",
+    text: `[${timestamp}] queue/system: ${message}`,
+  });
+  const serviceFilter = document.querySelector("#log-filter");
+  if (serviceFilter && serviceFilter.value !== "all") {
+    serviceFilter.value = "all";
+  }
+  renderLogs(document.querySelector("#log-filter").value || "all");
+  renderLaunchLogs();
 }
 
 async function pollJob(jobId, context) {
@@ -2912,14 +3125,22 @@ async function pollJob(jobId, context) {
       clearInterval(jobPollTimers.get(jobId));
       jobPollTimers.delete(jobId);
       runningJobs.delete(jobId);
+      const failureDetail = summarizeFailureDetail(job.logs?.at(-1)?.message || "");
       lastJobSummary = {
         label: context.label,
         pathKey: context.pathKey || selectedLaunchPath,
         outcome: job.status,
         detail: job.status === "completed"
           ? (currentLanguage === "en" ? `completed (${job.current_stage || "done"})` : `завершено (${job.current_stage || "готово"})`)
-          : `${currentLanguage === "en" ? `failed (${job.current_stage || "error"})` : `ошибка (${job.current_stage || "ошибка"})`}: ${job.logs?.at(-1)?.message || ""}`,
+          : `${currentLanguage === "en" ? `failed (${job.current_stage || "error"})` : `ошибка (${job.current_stage || "ошибка"})`}: ${failureDetail}`,
       };
+      if (job.status === "failed") {
+        showToast(
+          currentLanguage === "en" ? "Runtime action failed" : "Ошибка runtime-действия",
+          summarizeFailureDetail(job.logs?.at(-1)?.message || lastJobSummary.detail),
+          "error",
+        );
+      }
       activityFeed.unshift(
         currentLanguage === "en"
           ? `${context.label} ${job.status === "completed" ? "completed" : "failed"} (${job.current_stage || "done"})`
@@ -2930,15 +3151,28 @@ async function pollJob(jobId, context) {
       rerenderAll();
     }
   } catch (_error) {
-      clearInterval(jobPollTimers.get(jobId));
-      jobPollTimers.delete(jobId);
-      runningJobs.delete(jobId);
-      lastJobSummary = {
-        label: context.label,
-        pathKey: context.pathKey || selectedLaunchPath,
-        outcome: "failed",
-        detail: currentLanguage === "en" ? "job polling failed" : "не удалось опросить задачу",
-      };
+    clearInterval(jobPollTimers.get(jobId));
+    jobPollTimers.delete(jobId);
+    runningJobs.delete(jobId);
+    lastJobSummary = {
+      label: context.label,
+      pathKey: context.pathKey || selectedLaunchPath,
+      outcome: "failed",
+      detail: currentLanguage === "en" ? "job polling failed" : "не удалось опросить задачу",
+    };
+    appendImmediateJobLifecycleLog(
+      context,
+      currentLanguage === "en"
+        ? `failed to poll job state for ${context.label}`
+        : `не удалось опросить состояние job для ${context.label}`,
+    );
+    showToast(
+      currentLanguage === "en" ? "Job polling failed" : "Ошибка опроса job",
+      currentLanguage === "en"
+        ? `Could not refresh state for ${context.label}`
+        : `Не удалось обновить состояние для ${context.label}`,
+      "error",
+    );
     activityFeed.unshift(currentLanguage === "en" ? `Could not poll job for ${context.label}` : `Не удалось опросить job для ${context.label}`);
     renderActivity();
     renderSystemStatus();
@@ -2970,6 +3204,12 @@ async function runOperatorAction(actionId, context) {
       status: "queued",
       detail: currentLanguage === "en" ? "queued" : "в очереди",
     });
+    appendImmediateJobLifecycleLog(
+      context,
+      currentLanguage === "en"
+        ? `queued ${context.label} via ${actionId}`
+        : `поставлено в очередь: ${context.label} через ${actionId}`,
+    );
     activityFeed.unshift(currentLanguage === "en" ? `${context.label} queued via ${actionId}` : `${context.label} поставлен в очередь через ${actionId}`);
     renderActivity();
     renderSystemStatus();
@@ -2984,8 +3224,19 @@ async function runOperatorAction(actionId, context) {
       label: context.label,
       pathKey: context.pathKey || selectedLaunchPath,
       outcome: "failed",
-      detail: error.message || (currentLanguage === "en" ? "internal error" : "внутренняя ошибка"),
+      detail: summarizeFailureDetail(error.message || (currentLanguage === "en" ? "internal error" : "внутренняя ошибка")),
     };
+    appendImmediateJobLifecycleLog(
+      context,
+      currentLanguage === "en"
+        ? `failed to start ${context.label}: ${summarizeFailureDetail(error.message || "internal error")}`
+        : `не удалось запустить ${context.label}: ${summarizeFailureDetail(error.message || "внутренняя ошибка")}`,
+    );
+    showToast(
+      currentLanguage === "en" ? "Could not start action" : "Не удалось запустить действие",
+      summarizeFailureDetail(error.message || (currentLanguage === "en" ? "internal error" : "внутренняя ошибка")),
+      "error",
+    );
     activityFeed.unshift(currentLanguage === "en" ? `Could not start action: ${context.label} (${error.message || "internal error"})` : `Не удалось запустить действие: ${context.label} (${error.message || "внутренняя ошибка"})`);
     renderActivity();
     renderSystemStatus();
@@ -2998,6 +3249,10 @@ async function runMaintenanceAction(actionLabel) {
       await hydrateOperatorState();
       await hydrateRuntimeHealth();
       rerenderAll();
+      showToast(
+        currentLanguage === "en" ? "Config reloaded" : "Конфиг перезагружен",
+        currentLanguage === "en" ? "Operator state was refreshed from backend sources." : "Состояние оператора перечитано из backend-источников.",
+      );
       activityFeed.unshift(currentLanguage === "en" ? "Config sources reloaded from Python operator state" : "Источники конфига перезагружены из Python operator state");
       renderActivity();
       return;
@@ -3013,6 +3268,10 @@ async function runMaintenanceAction(actionLabel) {
       runtimePaths = payload.runtimePaths || runtimePaths;
       await hydrateRuntimeHealth();
       rerenderAll();
+      showToast(
+        currentLanguage === "en" ? "Runtime paths updated" : "Пути запуска обновлены",
+        currentLanguage === "en" ? "Availability was recomputed from the operator API." : "Доступность пересчитана из operator API.",
+      );
       activityFeed.unshift(currentLanguage === "en" ? "Runtime paths recomputed from Python operator API" : "Пути запуска пересчитаны из Python operator API");
       renderActivity();
       return;
@@ -3027,6 +3286,10 @@ async function runMaintenanceAction(actionLabel) {
       const payload = await response.json();
       deploySurface[selectedDeployMode] = payload;
       renderDeploy();
+      showToast(
+        currentLanguage === "en" ? "Deploy surface reloaded" : "Deploy surface обновлён",
+        displayLabel(deploySurface[selectedDeployMode].label),
+      );
       activityFeed.unshift(
         currentLanguage === "en"
           ? `Reloaded ${displayLabel(deploySurface[selectedDeployMode].label)} from Python operator API`
@@ -3040,12 +3303,22 @@ async function runMaintenanceAction(actionLabel) {
         ? `No dedicated Python maintenance action is wired for ${displayLabel(actionLabel)} yet`
         : `Для действия ${displayLabel(actionLabel)} пока нет отдельного Python действия обслуживания`,
     );
+    showToast(
+      currentLanguage === "en" ? "Action not wired" : "Действие не подключено",
+      displayLabel(actionLabel),
+      "error",
+    );
     renderActivity();
-  } catch (_error) {
+  } catch (error) {
     activityFeed.unshift(
       currentLanguage === "en"
         ? `Could not execute maintenance action: ${displayLabel(actionLabel)}`
         : `Не удалось выполнить действие обслуживания: ${displayLabel(actionLabel)}`,
+    );
+    showToast(
+      currentLanguage === "en" ? "Maintenance action failed" : "Ошибка maintenance-действия",
+      summarizeFailureDetail(error?.message || displayLabel(actionLabel)),
+      "error",
     );
     renderActivity();
   }

@@ -119,6 +119,19 @@ def build_operator_state() -> Dict[str, Any]:
 
     service_rows = [
         {
+            "name": "Operator Control Plane",
+            "nameEn": "Operator Control Plane",
+            "status": "running",
+            "note": "Agent API обслуживает `/operator/state`, action catalog и static operator UI shell.",
+            "noteEn": "The Agent API serves `/operator/state`, the action catalog, and the static operator UI shell.",
+            "path": "native",
+            "stage": "Готово",
+            "stageEn": "Ready",
+            "endpoint": "/operator/state + /operator-ui",
+            "freshness": "backend route probe",
+            "freshnessEn": "backend route probe",
+        },
+        {
             "name": "Runtime Preflight",
             "nameEn": "Runtime Preflight",
             "status": "running" if (SCRIPTS_ROOT / "runtime_preflight.py").exists() else "blocked",

@@ -57,12 +57,12 @@
 
       <section class="sidebar-card sidebar-controls">
         <div class="sidebar-label" id="sidebar-system-label">Система</div>
-        <div class="sidebar-action-list">
-          <div class="sidebar-action sidebar-status-card neutral" id="system-status-button">
-            <span class="sidebar-action-dot neutral" id="system-status-dot" aria-hidden="true"></span>
-            <div class="sidebar-action-copy">
-              <strong class="sidebar-action-title" id="system-status-pill">Контур не подтверждён</strong>
-              <span class="sidebar-action-note" id="sidebar-system-status">Ожидание backend</span>
+          <div class="sidebar-action-list">
+            <div class="sidebar-action sidebar-status-card neutral" id="system-status-button">
+              <span class="sidebar-action-dot neutral" id="system-status-dot" aria-hidden="true"></span>
+              <div class="sidebar-action-copy">
+                <strong class="sidebar-action-title" id="system-status-pill">Контур не подтверждён</strong>
+                <span class="sidebar-action-note" id="sidebar-system-status">Ожидание backend</span>
             </div>
           </div>
           <div class="sidebar-action sidebar-status-card neutral" id="job-status-button">
@@ -212,7 +212,7 @@
 
         <div class="path-card-grid" id="launch-path-cards"></div>
 
-        <div class="overview-grid">
+        <div class="overview-grid launch-workspace-grid">
           <article class="panel">
             <div class="panel-header">
               <div>
@@ -237,7 +237,7 @@
           </article>
         </div>
 
-        <article class="panel">
+        <article class="panel launch-next-panel">
           <div class="panel-header">
             <div>
               <p class="eyebrow" id="launch-next-eyebrow">Следующий шаг</p>
@@ -258,7 +258,7 @@
           <div class="path-switcher" id="config-path-switcher"></div>
         </div>
 
-        <article class="panel">
+        <article class="panel config-sources-panel">
           <div class="panel-header">
             <div>
               <p class="eyebrow">Источники конфига</p>
@@ -266,7 +266,10 @@
             </div>
             <span class="status-pill lime" id="config-selected-path-label">Нативный запуск</span>
           </div>
-          <div class="source-list" id="config-source-list"></div>
+          <div class="config-sources-layout">
+            <div class="source-list" id="config-source-list"></div>
+            <aside class="workspace-card config-source-guidance" id="config-source-guidance"></aside>
+          </div>
         </article>
 
         <article class="panel">
