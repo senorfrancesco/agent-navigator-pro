@@ -11,7 +11,7 @@
   - `target=native` -> select platform wrapper (`ubuntu`, `ubuntu-server`, `wsl`, `windows`)
   - Linux wrappers -> delegate to `setup_ubuntu.sh`
   - `target=container` -> guidance only, без host install
-- Остальные installer-step scripts добавлены как scaffold-only contracts, без destructive install logic; `scripts/models/install_models.sh` уже реализован отдельно как model provisioning layer
+- Большинство installer-step scripts пока остаются scaffold-only contracts, без destructive install logic; исключения: `scripts/install/build_llamacpp.sh` уже реализован как рабочий build-step, а `scripts/models/install_models.sh` работает как model provisioning layer
 
 ## Platform Matrix
 
@@ -19,7 +19,7 @@
 | --- | --- | --- | --- |
 | Windows host | `powershell -ExecutionPolicy Bypass -File scripts/install/install_windows.ps1 -CheckOnly` | Проверяет WSL / `winget`; в safe mode печатает guided steps и направляет в WSL-based path | Microsoft WSL install docs, Docker Desktop docs |
 | WSL Ubuntu | `./scripts/install/install.sh --platform=wsl` | Делегирует в heavy Ubuntu install flow внутри WSL | Microsoft WSL docs, Ubuntu on WSL docs |
-| Ubuntu Desktop | `./scripts/install/install.sh --platform=ubuntu` | Делегирует в `scripts/setup_ubuntu.sh` | Docker Engine on Ubuntu, Python venv, llama.cpp |
+| Ubuntu Desktop | `./scripts/install/install.sh --platform=ubuntu` | Делегирует в `scripts/setup_ubuntu.sh` | Docker Engine on Ubuntu, Miniconda/Conda, llama.cpp |
 | Ubuntu Server | `./scripts/install/install.sh --platform=ubuntu-server` | Делегирует в `scripts/setup_ubuntu.sh` | Ubuntu Server docs, Docker Engine on Ubuntu, NVIDIA CUDA Linux |
 
 ## Target Layout
@@ -43,7 +43,7 @@ scripts/
 
 - Installer path остаётся additive слоем поверх текущего launcher/bootstrap setup.
 - `scripts/setup_ubuntu.sh` остаётся существующим heavy Linux bootstrap path до отдельного controlled rewrite.
-- Новые scaffold scripts не выполняют реальную установку по умолчанию и намеренно завершаются сообщением `scaffold only`; исключение — `scripts/models/install_models.sh`, который уже выполняет model provisioning.
+- Часть installer-step scripts всё ещё остаётся scaffold-only, но `scripts/install/build_llamacpp.sh` уже является рабочим build step для локального `llama-server`.
 - `install.sh` стал unified coordinator shim, а platform-specific wrappers задают поддерживаемые install entrypoints.
 - Источником правды для runtime orchestration остаётся `launcher.sh`, а не installer path.
 
@@ -53,7 +53,7 @@ scripts/
 
 - Делает: выступает unified coordinator shim для install-path; принимает `target`, определяет `platform` и либо ведёт в platform wrapper, либо печатает guidance для container path.
 - Не делает: не содержит всю install logic inline и не заменяет Linux heavy installer одним большим shell-файлом.
-- Зависимости: `bash`, platform wrappers `scripts/install/install_ubuntu.sh`, `install_ubuntu_server.sh`, `install_wsl.sh`, `install_windows.ps1`; в будущей реализации дополнительно `scripts/install/detect_os.sh`, `scripts/install/install_dependencies.sh`, `scripts/install/verify_system.sh`, опционально `install_cuda.sh`, `build_llamacpp.sh`, `scripts/models/install_models.sh`.
+- Зависимости: `bash`, platform wrappers `scripts/install/install_ubuntu.sh`, `install_ubuntu_server.sh`, `install_wsl.sh`, `install_windows.ps1`; в будущей реализации дополнительно `scripts/install/detect_os.sh`, `scripts/install/install_dependencies.sh`, `scripts/install/verify_system.sh`, опционально `install_cuda.sh`, `scripts/models/install_models.sh`.
 - Успех проверяется через: успешный exit code wrapper path для `native`, корректный dry-run/help output, явный non-destructive guidance output для `container`.
 - Official docs: локальный contract этого слоя должен опираться на [os-release spec](https://www.freedesktop.org/software/systemd/man/249/os-release.html) и профильные vendor docs нижележащих шагов.
 
@@ -79,11 +79,15 @@ scripts/
 - Не делает: не создаёт отдельную desktop-specific install logic поверх `setup_ubuntu.sh`.
 - Зависимости: `scripts/setup_ubuntu.sh`.
 - Успех проверяется через: успешный exit code legacy installer flow.
-- Official docs: Docker Engine on Ubuntu, Python venv, llama.cpp.
+- Official docs: Docker Engine on Ubuntu, Miniconda/Conda, llama.cpp.
 
 ### `scripts/setup_ubuntu.sh`
 
 - Делает: heavy Ubuntu/WSL installer path для зависимостей, Python env и runtime prerequisites.
+- Дополнительно:
+  - ставит Python-зависимости в `conda base`;
+  - предлагает записать managed-block в `~/.bashrc` для `conda`, `CUDA` и локального `llama.cpp` build output;
+  - может вызвать `scripts/install/build_llamacpp.sh` как source-build шаг для `llama-server`.
 - Для `WSL`: Docker step теперь работает как guided check, а не как silent attempt to install Docker Engine inside distro.
 - Если `docker` не виден в `WSL` или daemon недоступен, скрипт:
   - печатает, что ожидается Docker Desktop на Windows host;
@@ -130,10 +134,15 @@ scripts/
 
 ### `scripts/install/build_llamacpp.sh`
 
-- Делает: клонирует или использует pinned source tree `llama.cpp`, собирает `llama-server`/CLI с нужным backend profile, публикует понятный build output path.
+- Делает: клонирует или использует pinned source tree `llama.cpp`, собирает `llama-server` с нужным backend profile, публикует понятный build output path.
 - Не делает: не скачивает модели, не пишет project `.env`, не выбирает context/profile policy за runtime preflight.
 - Зависимости: `git`, `cmake`, C/C++ toolchain, при GPU build дополнительно CUDA toolkit.
-- Успех проверяется через: наличие собранного бинаря `llama-server` или эквивалентного output, успешный `--help`/version smoke test, сохранённый build directory.
+- Текущий contract:
+  - source path по умолчанию: `deploy/offline_bundle/vendor/llama.cpp`
+  - если checkout отсутствует, допускается `git clone --depth 1`
+  - build target: `llama-server`
+  - CUDA path включается автоматически, если найден `nvcc`
+- Успех проверяется через: наличие собранного бинаря `llama-server`, успешный `--help` smoke test, сохранённый build directory.
 - Official docs: [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) и его build documentation; текущая рекомендация выводится из README проекта, где `llama.cpp` предлагает build from source и `llama-server` как OpenAI-compatible API server.
 
 ### `scripts/install/verify_system.sh`
@@ -231,6 +240,7 @@ cd backend && pip install -r requirements.txt
 В текущем installer/runtime contract проект больше не требует обязательного отдельного env `diploma_llm`. Safe path:
 
 ```bash
+source ~/.bashrc
 conda activate base
 cd backend && pip install -r requirements.txt
 ```

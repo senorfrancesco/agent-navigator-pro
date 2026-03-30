@@ -43,6 +43,27 @@ def test_install_dispatcher_reports_platform_in_test_mode():
     assert "coordinator=install_ubuntu.sh" in result.stdout
 
 
+def test_bootstrap_env_uses_python3_when_python_alias_is_missing(tmp_path):
+    env_file = tmp_path / ".env"
+    env_template = tmp_path / ".env.example"
+    env_template.write_text("", encoding="utf-8")
+
+    result = _run_script(
+        ["bash", str(SCRIPTS_DIR / "bootstrap_env.sh"), "--check", "--target=native"],
+        env={
+            "AGENT_NAVIGATOR_TEST_MODE": "1",
+            "AGENT_NAVIGATOR_BACKEND_ENV_FILE": str(env_file),
+            "AGENT_NAVIGATOR_BACKEND_ENV_TEMPLATE_FILE": str(env_template),
+            "PATH": os.environ["PATH"],
+        },
+    )
+
+    assert result.returncode == 0
+    assert "bootstrap:test-mode mode=check target=native" in result.stdout
+    assert env_file.exists()
+    assert "CHAINLIT_AUTH_SECRET=" in env_file.read_text(encoding="utf-8")
+
+
 def test_launcher_install_forwards_platform_to_dispatcher():
     result = _run_script(
         ["bash", str(SCRIPTS_DIR / "launcher.sh"), "--install", "--platform=ubuntu-server"],
@@ -92,6 +113,9 @@ def test_setup_ubuntu_uses_canonical_runtime_and_model_steps_in_final_guidance()
     assert "./scripts/stop_native.sh" in script
     assert "docker logs open-webui" not in script
     assert "CLAUDE_MEMORY.md" not in script
+    assert 'echo -e "1. ${BLUE}Скачайте модели или проверьте их наличие:${NC}"' in script
+    assert 'echo "   source ~/.bashrc"' in script
+    assert 'echo "   source activate_env.sh"' not in script
 
 
 def test_setup_ubuntu_tracks_docker_relogin_without_stale_reply_variable():
@@ -108,6 +132,11 @@ def test_setup_ubuntu_uses_conda_base_instead_of_creating_diploma_env():
     assert 'conda activate base' in script
     assert "Conda base активирована" in script
     assert "conda tos accept" in script
+    assert 'find_existing_conda_sh()' in script
+    assert '"$HOME/miniconda3/etc/profile.d/conda.sh"' in script
+    assert 'mktemp "${TMPDIR:-/tmp}/agent-nav-miniconda-' in script
+    assert 'trap cleanup_miniconda_installer EXIT' in script
+    assert 'wget -O miniconda_installer.sh' not in script
 
 
 def test_setup_ubuntu_targets_cuda_12_8_and_driver_r570_baseline():
@@ -134,6 +163,44 @@ def test_setup_ubuntu_installs_pytorch_2_10_cu128_on_gpu_path():
     assert "https://download.pytorch.org/whl/cpu" in script
 
 
+def test_setup_ubuntu_uses_importlib_metadata_for_package_checks_and_honest_llamacpp_summary():
+    script = (SCRIPTS_DIR / "setup_ubuntu.sh").read_text(encoding="utf-8")
+    assert "from importlib.metadata import PackageNotFoundError, version" in script
+    assert 'print_python_package_version "langgraph" "LangGraph"' in script
+    assert "resolve_nvcc_bin" in script
+    assert 'CMAKE_ARGS="-DGGML_CUDA=ON"' in script
+    assert "LLAMA_CUBLAS" not in script
+    assert 'echo "llama-cpp backend install mode: ${LLAMA_CPP_INSTALL_MODE}"' in script
+    assert 'echo "llama.cpp source build: ${LLAMA_CPP_BUILD_STATUS} (${LLAMA_CPP_BUILD_MESSAGE})"' in script
+
+
+def test_setup_ubuntu_wires_llamacpp_build_and_prompted_bashrc_management():
+    script = (SCRIPTS_DIR / "setup_ubuntu.sh").read_text(encoding="utf-8")
+    assert 'bash "$PROJECT_ROOT/scripts/install/build_llamacpp.sh"' in script
+    assert "Добавить managed Agent Navigator block в ~/.bashrc" in script
+    assert "conda activate base >/dev/null 2>&1 || true" in script
+    assert 'agent_nav_prepend_path "$LLAMA_CPP_BUILD_DIR/bin"' in script
+    assert "activate_env.sh" not in script
+
+
+def test_build_llamacpp_script_supports_clone_and_cuda_build_flags():
+    script = (SCRIPTS_DIR / "install" / "build_llamacpp.sh").read_text(encoding="utf-8")
+    assert "git clone --depth 1 --branch" in script
+    assert "-DGGML_CUDA=ON" in script
+    assert '--target llama-server' in script
+    assert "build-llamacpp:ok" in script
+
+
+def test_build_llamacpp_checks_for_cmake_and_setup_ubuntu_installs_it():
+    build_script = (SCRIPTS_DIR / "install" / "build_llamacpp.sh").read_text(encoding="utf-8")
+    setup_script = (SCRIPTS_DIR / "setup_ubuntu.sh").read_text(encoding="utf-8")
+
+    assert 'command -v cmake >/dev/null 2>&1' in build_script
+    assert "Требуется cmake для сборки llama.cpp" in build_script
+    assert "sudo apt-get install -y \\" in setup_script
+    assert "    cmake \\" in setup_script
+
+
 def test_model_downloader_dry_run_supports_custom_models_root(tmp_path):
     result = _run_script(
         [
@@ -148,6 +215,21 @@ def test_model_downloader_dry_run_supports_custom_models_root(tmp_path):
     assert "models:plan" in result.stdout
     assert str(tmp_path / "gguf" / "qwen-14b" / "Qwen2.5-14B-Instruct-Q4_K_M.gguf") in result.stdout
     assert str(tmp_path / "st" / "Qwen3-Embedding-0.6B") in result.stdout
+
+
+def test_model_downloader_uses_python3_when_python_alias_is_missing(tmp_path):
+    result = _run_script(
+        [
+            "bash",
+            str(SCRIPTS_DIR / "models" / "install_models.sh"),
+            "--dry-run",
+            f"--models-root={tmp_path}",
+        ],
+        env={"PATH": os.environ["PATH"]},
+    )
+
+    assert result.returncode == 0
+    assert "models:plan" in result.stdout
 
 
 def test_model_downloader_help_mentions_models_root_example():

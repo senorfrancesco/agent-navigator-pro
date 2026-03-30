@@ -34,6 +34,14 @@ NVIDIA_DRIVER_STATUS="missing"
 NVIDIA_DRIVER_VERSION=""
 PYTORCH_INSTALL_TARGET="cpu"
 LLAMA_CPP_CUDA_REBUILD_STATUS="skipped"
+LLAMA_CPP_INSTALL_MODE="pip-package"
+LLAMA_CPP_SOURCE_DIR="$PROJECT_ROOT/deploy/offline_bundle/vendor/llama.cpp"
+LLAMA_CPP_BUILD_DIR="$LLAMA_CPP_SOURCE_DIR/build"
+LLAMA_CPP_SERVER_BIN="$LLAMA_CPP_BUILD_DIR/bin/llama-server"
+LLAMA_CPP_BUILD_STATUS="not-run"
+LLAMA_CPP_BUILD_MESSAGE="not-started"
+NVCC_BIN=""
+MINICONDA_INSTALLER_TMP=""
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     cat <<EOF
@@ -91,6 +99,196 @@ version_ge() {
     local required="$2"
     [ "$current" = "$required" ] && return 0
     [ "$(printf '%s\n%s\n' "$required" "$current" | sort -V | head -n 1)" = "$required" ]
+}
+
+resolve_nvcc_bin() {
+    local candidate=""
+
+    if command -v nvcc >/dev/null 2>&1; then
+        NVCC_BIN="$(command -v nvcc)"
+        return 0
+    fi
+
+    for candidate in \
+        "/usr/local/cuda/bin/nvcc" \
+        "/usr/local/cuda-${CUDA_TOOLKIT_TARGET}/bin/nvcc"
+    do
+        if [ -x "$candidate" ]; then
+            NVCC_BIN="$candidate"
+            export PATH="$(dirname "$candidate"):$PATH"
+            return 0
+        fi
+    done
+
+    candidate="$(find /usr/local -maxdepth 3 -path '*/bin/nvcc' -type f 2>/dev/null | sort -V | tail -n 1)"
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+        NVCC_BIN="$candidate"
+        export PATH="$(dirname "$candidate"):$PATH"
+        return 0
+    fi
+
+    NVCC_BIN=""
+    return 1
+}
+
+detect_cuda_version() {
+    if ! resolve_nvcc_bin; then
+        return 1
+    fi
+
+    "$NVCC_BIN" --version | grep "release" | awk '{print $5}' | cut -d',' -f1
+}
+
+print_python_package_version() {
+    local package_name="$1"
+    local display_name="$2"
+
+    python - <<PY
+from importlib.metadata import PackageNotFoundError, version
+
+package_name = ${package_name@Q}
+display_name = ${display_name@Q}
+
+try:
+    print(f"{display_name}: {version(package_name)}")
+except PackageNotFoundError:
+    raise SystemExit(1)
+PY
+}
+
+find_existing_conda_sh() {
+    local candidate=""
+
+    for candidate in \
+        "$HOME/miniconda3/etc/profile.d/conda.sh" \
+        "$HOME/anaconda3/etc/profile.d/conda.sh" \
+        "/opt/conda/etc/profile.d/conda.sh" \
+        "/opt/anaconda3/etc/profile.d/conda.sh" \
+        "/usr/local/anaconda3/etc/profile.d/conda.sh"
+    do
+        if [ -f "$candidate" ]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+
+    if command -v conda >/dev/null 2>&1; then
+        local conda_bin
+        local conda_root
+        conda_bin="$(command -v conda)"
+        conda_root="$(dirname "$(dirname "$conda_bin")")"
+        candidate="$conda_root/etc/profile.d/conda.sh"
+        if [ -f "$candidate" ]; then
+            echo "$candidate"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+upsert_managed_block() {
+    local target_file="$1"
+    local block_name="$2"
+    local block_content="$3"
+    local begin_marker="# >>> ${block_name} >>>"
+    local end_marker="# <<< ${block_name} <<<"
+    local tmp_file
+    tmp_file="$(mktemp)"
+
+    if [ -f "$target_file" ]; then
+        awk -v begin="$begin_marker" -v end="$end_marker" '
+            $0 == begin { skip = 1; next }
+            $0 == end { skip = 0; next }
+            skip != 1 { print }
+        ' "$target_file" > "$tmp_file"
+    fi
+
+    {
+        cat "$tmp_file" 2>/dev/null || true
+        if [ -s "$tmp_file" ]; then
+            printf "\n"
+        fi
+        printf "%s\n" "$begin_marker"
+        printf "%s\n" "$block_content"
+        printf "%s\n" "$end_marker"
+    } > "${tmp_file}.next"
+
+    mv "${tmp_file}.next" "$target_file"
+    rm -f "$tmp_file"
+}
+
+configure_shell_environment() {
+    local bashrc_path="$HOME/.bashrc"
+    local block_name="Agent Navigator managed env"
+    local block_content
+
+    read -r -d '' block_content <<EOF || true
+agent_nav_prepend_path() {
+    case ":\$PATH:" in
+        *":\$1:"*) ;;
+        *) PATH="\$1:\$PATH" ;;
+    esac
+}
+
+cleanup_miniconda_installer() {
+    if [ -n "${MINICONDA_INSTALLER_TMP:-}" ] && [ -f "$MINICONDA_INSTALLER_TMP" ]; then
+        rm -f "$MINICONDA_INSTALLER_TMP"
+    fi
+}
+
+agent_nav_prepend_ld_path() {
+    case ":\${LD_LIBRARY_PATH:-}:" in
+        *":\$1:"*) ;;
+        *)
+            if [ -n "\${LD_LIBRARY_PATH:-}" ]; then
+                LD_LIBRARY_PATH="\$1:\$LD_LIBRARY_PATH"
+            else
+                LD_LIBRARY_PATH="\$1"
+            fi
+            ;;
+    esac
+}
+
+if [ -d "\$HOME/miniconda3/bin" ]; then
+    agent_nav_prepend_path "\$HOME/miniconda3/bin"
+fi
+if [ -d "\$HOME/anaconda3/bin" ]; then
+    agent_nav_prepend_path "\$HOME/anaconda3/bin"
+fi
+if [ -f "\$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
+    source "\$HOME/miniconda3/etc/profile.d/conda.sh"
+    conda activate base >/dev/null 2>&1 || true
+elif [ -f "\$HOME/anaconda3/etc/profile.d/conda.sh" ]; then
+    source "\$HOME/anaconda3/etc/profile.d/conda.sh"
+    conda activate base >/dev/null 2>&1 || true
+fi
+
+if [ -d "/usr/local/cuda/bin" ]; then
+    agent_nav_prepend_path "/usr/local/cuda/bin"
+fi
+if [ -d "/usr/local/cuda/lib64" ]; then
+    agent_nav_prepend_ld_path "/usr/local/cuda/lib64"
+fi
+if [ -d "$LLAMA_CPP_BUILD_DIR/bin" ]; then
+    agent_nav_prepend_path "$LLAMA_CPP_BUILD_DIR/bin"
+    agent_nav_prepend_ld_path "$LLAMA_CPP_BUILD_DIR/bin"
+fi
+
+export PATH
+export LD_LIBRARY_PATH
+unset -f agent_nav_prepend_path
+unset -f agent_nav_prepend_ld_path
+EOF
+
+    if prompt_yes_no "Добавить managed Agent Navigator block в ~/.bashrc для conda base, CUDA toolkit и llama.cpp paths?" "y"; then
+        upsert_managed_block "$bashrc_path" "$block_name" "$block_content"
+        echo -e "${GREEN}[OK]${NC} Обновлён ~/.bashrc managed-block для Agent Navigator"
+        echo "Чтобы применить сейчас:"
+        echo "  source ~/.bashrc"
+    else
+        echo -e "${YELLOW}[SKIP]${NC} ~/.bashrc оставлен без изменений"
+    fi
 }
 
 resolve_cuda_repo_slug() {
@@ -379,15 +577,14 @@ if command -v nvidia-smi &> /dev/null; then
     fi
 
     # Проверка CUDA Toolkit
-    if command -v nvcc &> /dev/null; then
-        CUDA_VERSION=$(nvcc --version | grep "release" | awk '{print $5}' | cut -d',' -f1)
+    if CUDA_VERSION="$(detect_cuda_version)"; then
         if [[ "$CUDA_VERSION" == ${CUDA_TOOLKIT_TARGET}* ]]; then
             CUDA_TOOLKIT_READY=true
             CUDA_TOOLKIT_STATUS="ok"
-            echo -e "${GREEN}[OK]${NC} CUDA toolkit ${CUDA_VERSION} установлен"
+            echo -e "${GREEN}[OK]${NC} CUDA toolkit ${CUDA_VERSION} установлен (${NVCC_BIN})"
         else
             CUDA_TOOLKIT_STATUS="mismatch"
-            echo -e "${YELLOW}[WARNING]${NC} Обнаружен CUDA toolkit ${CUDA_VERSION}, но baseline проекта ожидает ${CUDA_TOOLKIT_TARGET}.x"
+            echo -e "${YELLOW}[WARNING]${NC} Обнаружен CUDA toolkit ${CUDA_VERSION} (${NVCC_BIN}), но baseline проекта ожидает ${CUDA_TOOLKIT_TARGET}.x"
         fi
     else
         CUDA_TOOLKIT_STATUS="missing"
@@ -404,13 +601,12 @@ if command -v nvidia-smi &> /dev/null; then
                 CUDA_TOOLKIT_STATUS="manual-required"
             else
                 install_cuda_toolkit_12_8 "$CUDA_REPO_SLUG"
-                if command -v nvcc &> /dev/null; then
-                    CUDA_VERSION=$(nvcc --version | grep "release" | awk '{print $5}' | cut -d',' -f1)
+                if CUDA_VERSION="$(detect_cuda_version)"; then
                     if [[ "$CUDA_VERSION" == ${CUDA_TOOLKIT_TARGET}* ]]; then
                         CUDA_TOOLKIT_READY=true
                         CUDA_TOOLKIT_STATUS="ok"
-                        echo -e "${GREEN}[OK]${NC} CUDA toolkit ${CUDA_VERSION} установлен"
-                        echo -e "${YELLOW}[!]${NC} Добавьте в ~/.bashrc:"
+                        echo -e "${GREEN}[OK]${NC} CUDA toolkit ${CUDA_VERSION} установлен (${NVCC_BIN})"
+                        echo -e "${YELLOW}[!]${NC} При необходимости добавьте в ~/.bashrc:"
                         echo 'export PATH=/usr/local/cuda/bin:$PATH'
                         echo 'export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH'
                     else
@@ -419,7 +615,7 @@ if command -v nvidia-smi &> /dev/null; then
                     fi
                 else
                     CUDA_TOOLKIT_STATUS="missing"
-                    echo -e "${YELLOW}[WARNING]${NC} CUDA toolkit installation завершилась без доступного nvcc"
+                    echo -e "${YELLOW}[WARNING]${NC} CUDA toolkit installation завершилась без доступного nvcc в стандартных путях"
                 fi
             fi
         fi
@@ -445,7 +641,9 @@ echo -e "${BLUE}Шаг 6: Установка Anaconda/Miniconda${NC}"
 echo -e "${BLUE}============================================================${NC}"
 echo ""
 
-if command -v conda &> /dev/null; then
+EXISTING_CONDA_SH="$(find_existing_conda_sh || true)"
+if [ -n "$EXISTING_CONDA_SH" ]; then
+    source "$EXISTING_CONDA_SH"
     CONDA_VERSION=$(conda --version)
     echo -e "${GREEN}[OK]${NC} Conda уже установлена: $CONDA_VERSION"
 else
@@ -462,18 +660,21 @@ else
         exit 1
     fi
 
+    MINICONDA_INSTALLER_TMP="$(mktemp "${TMPDIR:-/tmp}/agent-nav-miniconda-XXXXXX.sh")"
+    trap cleanup_miniconda_installer EXIT
+
     echo "Скачивание Miniconda для $ARCH..."
-    wget -O miniconda_installer.sh "$MINICONDA_URL"
+    wget -O "$MINICONDA_INSTALLER_TMP" "$MINICONDA_URL"
 
     echo "Установка Miniconda..."
-    bash miniconda_installer.sh -b -p "$HOME/miniconda3"
+    bash "$MINICONDA_INSTALLER_TMP" -b -p "$HOME/miniconda3"
 
     # Инициализация conda
     source "$HOME/miniconda3/etc/profile.d/conda.sh"
     conda init bash
 
-    # Удаление установщика
-    rm miniconda_installer.sh
+    cleanup_miniconda_installer
+    trap - EXIT
 
     echo -e "${GREEN}[OK]${NC} Miniconda установлена"
 fi
@@ -568,15 +769,42 @@ else
 fi
 
 # Специальная установка llama-cpp-python с поддержкой CUDA (если доступна)
-if command -v nvcc &> /dev/null; then
+if resolve_nvcc_bin; then
     echo ""
     echo "Переустановка llama-cpp-python с поддержкой CUDA (native build path, требуется CUDA toolkit)..."
-    CMAKE_ARGS="-DLLAMA_CUBLAS=on" pip install llama-cpp-python[server] --force-reinstall --no-cache-dir
+    CMAKE_ARGS="-DGGML_CUDA=ON" pip install llama-cpp-python[server] --force-reinstall --no-cache-dir
     LLAMA_CPP_CUDA_REBUILD_STATUS="done"
 fi
 
 cd ..
 echo -e "${GREEN}[OK]${NC} Python зависимости установлены"
+
+# ============================================================
+# Шаг 8.1: Сборка llama.cpp / llama-server
+# ============================================================
+
+echo ""
+echo -e "${BLUE}============================================================${NC}"
+echo -e "${BLUE}Шаг 8.1: Сборка llama.cpp / llama-server${NC}"
+echo -e "${BLUE}============================================================${NC}"
+echo ""
+
+if prompt_yes_no "Собрать локальный llama-server через scripts/install/build_llamacpp.sh?" "y"; then
+    if bash "$PROJECT_ROOT/scripts/install/build_llamacpp.sh"; then
+        LLAMA_CPP_BUILD_STATUS="done"
+        LLAMA_CPP_BUILD_MESSAGE="$LLAMA_CPP_SERVER_BIN"
+        LLAMA_CPP_INSTALL_MODE="source-build"
+        echo -e "${GREEN}[OK]${NC} llama-server собран: $LLAMA_CPP_SERVER_BIN"
+    else
+        LLAMA_CPP_BUILD_STATUS="failed"
+        LLAMA_CPP_BUILD_MESSAGE="build-llamacpp-failed"
+        echo -e "${YELLOW}[WARNING]${NC} Сборка llama.cpp завершилась ошибкой; installer продолжит остальные шаги"
+    fi
+else
+    LLAMA_CPP_BUILD_STATUS="skipped"
+    LLAMA_CPP_BUILD_MESSAGE="user-skipped"
+    echo -e "${YELLOW}[SKIP]${NC} Сборка llama.cpp пропущена"
+fi
 
 # ============================================================
 # Шаг 9: Создание структуры директорий
@@ -622,38 +850,16 @@ else
 fi
 
 # ============================================================
-# Шаг 11: Создание скрипта активации окружения
+# Шаг 11: Managed shell environment
 # ============================================================
 
 echo ""
 echo -e "${BLUE}============================================================${NC}"
-echo -e "${BLUE}Шаг 11: Создание вспомогательных скриптов${NC}"
+echo -e "${BLUE}Шаг 11: Настройка shell environment${NC}"
 echo -e "${BLUE}============================================================${NC}"
 echo ""
 
-# Создание скрипта быстрой активации
-cat > activate_env.sh << 'EOF'
-#!/bin/bash
-# Быстрая активация conda base
-
-if [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
-    source "$HOME/miniconda3/etc/profile.d/conda.sh"
-elif [ -f "$HOME/anaconda3/etc/profile.d/conda.sh" ]; then
-    source "$HOME/anaconda3/etc/profile.d/conda.sh"
-else
-    echo "ERROR: Conda не найдена"
-    exit 1
-fi
-
-conda activate base
-
-echo "Conda base активирована"
-echo "Python: $(python --version)"
-echo "Путь: $(which python)"
-EOF
-
-chmod +x activate_env.sh
-echo -e "${GREEN}[OK]${NC} Создан скрипт activate_env.sh"
+configure_shell_environment
 
 # ============================================================
 # Проверка установки
@@ -674,10 +880,10 @@ echo "Conda окружение: $(conda info --envs | grep '*')"
 # Проверка ключевых пакетов
 echo ""
 echo "Проверка установленных пакетов..."
-python -c "import fastapi; print('FastAPI:', fastapi.__version__)" || echo -e "${RED}[ERROR]${NC} FastAPI не установлен"
-python -c "import langchain; print('LangChain:', langchain.__version__)" || echo -e "${RED}[ERROR]${NC} LangChain не установлен"
-python -c "import langgraph; print('LangGraph:', langgraph.__version__)" || echo -e "${RED}[ERROR]${NC} LangGraph не установлен"
-python -c "import torch; print('PyTorch:', torch.__version__)" || echo -e "${RED}[ERROR]${NC} PyTorch не установлен"
+print_python_package_version "fastapi" "FastAPI" || echo -e "${RED}[ERROR]${NC} FastAPI не установлен"
+print_python_package_version "langchain" "LangChain" || echo -e "${RED}[ERROR]${NC} LangChain не установлен"
+print_python_package_version "langgraph" "LangGraph" || echo -e "${RED}[ERROR]${NC} LangGraph не установлен"
+print_python_package_version "torch" "PyTorch" || echo -e "${RED}[ERROR]${NC} PyTorch не установлен"
 
 echo ""
 echo -e "${BLUE}GPU / CUDA readiness summary${NC}"
@@ -704,6 +910,8 @@ else
 fi
 echo "PyTorch build target: ${PYTORCH_INSTALL_TARGET}"
 echo "llama-cpp-python CUDA rebuild: ${LLAMA_CPP_CUDA_REBUILD_STATUS}"
+echo "llama-cpp backend install mode: ${LLAMA_CPP_INSTALL_MODE}"
+echo "llama.cpp source build: ${LLAMA_CPP_BUILD_STATUS} (${LLAMA_CPP_BUILD_MESSAGE})"
 
 # ============================================================
 # Завершение
@@ -716,30 +924,29 @@ echo -e "${BLUE}============================================================${NC
 echo ""
 echo -e "${YELLOW}Следующие шаги:${NC}"
 echo ""
-echo "1. ${BLUE}Скачайте модели или проверьте их наличие:${NC}"
+echo -e "1. ${BLUE}Скачайте модели или проверьте их наличие:${NC}"
 echo "   ./scripts/models/install_models.sh --dry-run"
 echo "   ./scripts/models/install_models.sh --ensure-present"
 echo ""
-echo "2. ${BLUE}Настройте конфигурацию:${NC}"
+echo -e "2. ${BLUE}Настройте конфигурацию:${NC}"
 echo "   nano backend/.env"
 echo "   # Укажите пути к моделям и при необходимости admin/grafana пароли"
 echo "   ./scripts/bootstrap_env.sh --check --target=native"
 echo "   # Если CHAINLIT_AUTH_SECRET пустой или дефолтный, bootstrap сам его сгенерирует/обновит"
 echo ""
-echo "3. ${BLUE}Активируйте окружение:${NC}"
-echo "   source activate_env.sh"
-echo "   # или"
+echo -e "3. ${BLUE}Активируйте окружение:${NC}"
+echo "   source ~/.bashrc"
 echo "   conda activate base"
 echo ""
-echo "4. ${BLUE}Запустите систему:${NC}"
+echo -e "4. ${BLUE}Запустите систему:${NC}"
 echo "   ./scripts/launcher.sh --target native"
 echo ""
-echo "5. ${BLUE}При необходимости используйте compatibility / legacy scripts:${NC}"
+echo -e "5. ${BLUE}При необходимости используйте compatibility / legacy scripts:${NC}"
 echo "   ./scripts/run_native.sh"
 echo "   ./scripts/run_all.sh"
 echo "   ./scripts/run_openwebui.sh   # legacy path"
 echo ""
-echo "6. ${BLUE}Откройте браузер:${NC}"
+echo -e "6. ${BLUE}Откройте браузер:${NC}"
 echo "   http://localhost:3000"
 echo ""
 echo -e "${YELLOW}Документация:${NC}"

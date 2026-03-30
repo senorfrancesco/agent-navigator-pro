@@ -11,16 +11,17 @@
 - [ ] R1.0.5 — Убрать зависимость нового release path от legacy hybrid compose/runtime
 - [ ] R1.0.6 — Scope guard: в рамках задачи изменять код только внутри `deploy/offline_bundle/`; любые правки вне этой папки делать только после явного предупреждения пользователя
 - [ ] R1.0.7 — Пересобрать `host_packages` для Ubuntu `24.04.4 LTS` / kernel `6.17.0-19-generic` с `--extra-package linux-headers-6.17.0-19-generic`
-- [ ] R1.0.8 — Сделать отдельное operator UI-приложение для `deploy/offline_bundle/`, которое заменяет основной shell UX для build/export/deploy/runtime flow
+- [x] R1.0.8 — Сделать offline deploy/build/runtime surface частью единого operator UI, который заменяет shell UX для `deploy/offline_bundle`
   План: `docs/plans/2026-03-26-offline-operator-ui-plan.md`
   Progress: в Stitch создан отдельный экран `Deploy / Build Control` (`9104511724d04a739cd23d2c5969116c`), а в `prototype/operator-ui` добавлена отдельная вкладка `Deploy / Build` с режимами `Build Bundle` и `Import / Deploy`, привязанными к каноническим scripts из `deploy/offline_bundle/scripts`.
   Progress: host package audit больше не требует exact package version для NVIDIA driver stack, если на сервере уже есть рабочий драйвер и `nvidia-smi` проходит. `check_host_packages.py` и `install_host_apt_bundle.sh` автоматически переходят в manual-driver semantics и убирают ложные блокеры вроде `missing:xserver-xorg-video-nvidia-570-server=...`.
   Решение: не расширять `scripts/launcher.sh` до полного offline bundle lifecycle; вместо этого вести UI через отдельный Python operator runner/action registry, который оркестрирует allowlisted native/container runtime actions и `deploy/offline_bundle/scripts`.
-- [ ] R1.0.9 — Сделать отдельное operator UI-приложение для native development/runtime path, чтобы упростить локальный запуск, конфигурирование env, мониторинг сервисов и developer workflows
+  Done: offline/container workflow больше не живёт как отдельное приложение; он встроен в единый `prototype/operator-ui` и покрывает `Build Bundle`, `Import / Deploy`, runtime actions, job tracking и observability через общий Python control plane.
+- [ ] R1.0.9 — Довести единый operator UI для native development/runtime path и offline/container path до production-ready состояния
   План: `docs/plans/2026-03-26-native-dev-operator-ui-plan.md`
   Runtime-control UI logic: `docs/plans/2026-03-29-runtime-control-operator-ui-logic.md`
   Frontend/observability refactor: `docs/plans/2026-03-29-operator-ui-frontend-refactor-and-observability-plan.md`
-  Решение: native path и offline/container path считаются равноправными; UI показывает availability обоих path, не скрывает unavailable state, а объясняет его через `Why unavailable?` drawer и редактирует реальные env/config sources выбранного path через explicit apply flow.
+  Решение: не делать два разных UI-приложения; native path и offline/container path считаются равноправными внутри одного operator shell. UI показывает availability обоих path, не скрывает unavailable state, а объясняет его через `Why unavailable?` drawer и редактирует реальные env/config sources выбранного path через explicit apply flow.
   Deliverability: текущий `prototype/operator-ui` — web-first static prototype; позже его можно поднять как отдельное web-приложение или упаковать в desktop-shell (`Electron`/`Tauri`) без смены UX-контракта.
   Progress: начат реальный web-first slice — `agent_api` теперь монтирует `/operator-ui/` и `/operator-assets/`, а `prototype/operator-ui` умеет гидратироваться из backend endpoint `GET /operator/state`.
   Progress: `Config` переведён на path-aware variants и preset preview flow; для `native` и `container` появились отдельные variant tabs, staged-presets без auto-write и `Local safe ports` / `Target default ports` для `env.bundle`.
