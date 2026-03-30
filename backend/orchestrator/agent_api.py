@@ -22,7 +22,7 @@ warnings.filterwarnings("ignore", category=FutureWarning, module="pynvml")
 
 # Загрузка переменных окружения
 load_dotenv()
-from fastapi import FastAPI, Request, UploadFile, File as FastAPIFile
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File as FastAPIFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
@@ -928,14 +928,15 @@ async def upload_file(file: UploadFile = FastAPIFile(...)):
     Saves the file to open_webui_uploads/ and returns an OpenAI-compatible file object.
     """
     try:
+        import aiofiles
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         save_dir = os.path.join(base_dir, "open_webui_uploads")
         os.makedirs(save_dir, exist_ok=True)
         safe_name = os.path.basename(file.filename or "upload")
         dest = os.path.join(save_dir, safe_name)
         content = await file.read()
-        with open(dest, "wb") as f:
-            f.write(content)
+        async with aiofiles.open(dest, "wb") as f:
+            await f.write(content)
         file_id = str(uuid.uuid4())
         return {
             "id": file_id,
@@ -948,7 +949,6 @@ async def upload_file(file: UploadFile = FastAPIFile(...)):
         }
     except Exception as exc:
         logger.error("File upload failed: %s", exc, exc_info=True)
-        from fastapi import HTTPException
         raise HTTPException(status_code=500, detail=str(exc))
 
 
