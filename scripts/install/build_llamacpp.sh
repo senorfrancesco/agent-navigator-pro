@@ -51,6 +51,18 @@ build_llamacpp.sh
 EOF
 }
 
+require_command() {
+  local command_name="$1"
+  local package_hint="${2:-$1}"
+
+  if command -v "$command_name" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "Требуется $command_name для сборки llama.cpp. Установите пакет '$package_hint' и повторите попытку." >&2
+  exit 1
+}
+
 resolve_nvcc_bin() {
   local candidate=""
 
@@ -147,6 +159,9 @@ case "$USE_CUDA" in
     exit 1
     ;;
 esac
+
+require_command git git
+require_command cmake cmake
 
 prepare_source_tree
 
