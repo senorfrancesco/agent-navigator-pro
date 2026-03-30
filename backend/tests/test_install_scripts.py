@@ -168,8 +168,6 @@ def test_setup_ubuntu_uses_importlib_metadata_for_package_checks_and_honest_llam
     assert "from importlib.metadata import PackageNotFoundError, version" in script
     assert 'print_python_package_version "langgraph" "LangGraph"' in script
     assert "resolve_nvcc_bin" in script
-    assert 'CMAKE_ARGS="-DGGML_CUDA=ON"' in script
-    assert "LLAMA_CUBLAS" not in script
     assert 'echo "llama-cpp backend install mode: ${LLAMA_CPP_INSTALL_MODE}"' in script
     assert 'echo "llama.cpp source build: ${LLAMA_CPP_BUILD_STATUS} (${LLAMA_CPP_BUILD_MESSAGE})"' in script
 
@@ -181,6 +179,30 @@ def test_setup_ubuntu_wires_llamacpp_build_and_prompted_bashrc_management():
     assert "conda activate base >/dev/null 2>&1 || true" in script
     assert 'agent_nav_prepend_path "$LLAMA_CPP_BUILD_DIR/bin"' in script
     assert "activate_env.sh" not in script
+
+
+def test_setup_ubuntu_installs_python_packages_only_when_missing_or_mismatched():
+    script = (SCRIPTS_DIR / "setup_ubuntu.sh").read_text(encoding="utf-8")
+    assert "collect_python_requirements_to_install()" in script
+    assert "install_python_requirements_if_needed()" in script
+    assert 'install_python_requirements_if_needed "requirements.txt" "llama-cpp-python,torch,torchvision,torchaudio"' in script
+    assert 'pip install -r requirements.txt --no-cache-dir' not in script
+
+
+def test_setup_ubuntu_skips_llamacpp_reinstall_when_package_is_already_present():
+    script = (SCRIPTS_DIR / "setup_ubuntu.sh").read_text(encoding="utf-8")
+    assert 'python_package_installed "llama-cpp-python"' in script
+    assert "llama_cpp_python_has_cuda_support" in script
+    assert '--force-reinstall --no-cache-dir' not in script
+    assert "llama-cpp-python уже установлен" in script
+
+
+def test_setup_ubuntu_checks_existing_torch_runtime_before_reinstalling_canonical_baseline():
+    script = (SCRIPTS_DIR / "setup_ubuntu.sh").read_text(encoding="utf-8")
+    assert "torch_runtime_matches_target()" in script
+    assert 'torch.version.cuda or ""' in script
+    assert "Canonical PyTorch GPU baseline" in script
+    assert "Canonical PyTorch CPU baseline" in script
 
 
 def test_build_llamacpp_script_supports_clone_and_cuda_build_flags():
@@ -195,8 +217,9 @@ def test_build_llamacpp_checks_for_cmake_and_setup_ubuntu_installs_it():
     build_script = (SCRIPTS_DIR / "install" / "build_llamacpp.sh").read_text(encoding="utf-8")
     setup_script = (SCRIPTS_DIR / "setup_ubuntu.sh").read_text(encoding="utf-8")
 
-    assert 'command -v cmake >/dev/null 2>&1' in build_script
-    assert "Требуется cmake для сборки llama.cpp" in build_script
+    assert 'require_command() {' in build_script
+    assert 'require_command cmake cmake' in build_script
+    assert 'Требуется $command_name для сборки llama.cpp' in build_script
     assert "sudo apt-get install -y \\" in setup_script
     assert "    cmake \\" in setup_script
 

@@ -137,10 +137,36 @@ upsert_env_var() {
   mv "$tmp_file" "$BACKEND_ENV_FILE"
 }
 
+read_env_var_from_file() {
+  local key="$1"
+
+  if [ ! -f "$BACKEND_ENV_FILE" ]; then
+    return 1
+  fi
+
+  awk -F= -v key="$key" '
+    $1 == key {
+      value = substr($0, index($0, "=") + 1)
+      gsub(/^"/, "", value)
+      gsub(/"$/, "", value)
+      print value
+      found = 1
+      exit
+    }
+    END {
+      if (!found) {
+        exit 1
+      }
+    }
+  ' "$BACKEND_ENV_FILE"
+}
+
 ensure_chainlit_auth_secret() {
   local env_created="$1"
-  local current="${CHAINLIT_AUTH_SECRET:-}"
+  local current=""
   local event=""
+
+  current="$(read_env_var_from_file "CHAINLIT_AUTH_SECRET" || true)"
 
   if [ -z "$current" ]; then
     event="secret-generated"

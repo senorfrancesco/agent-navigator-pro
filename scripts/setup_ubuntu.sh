@@ -156,6 +156,131 @@ except PackageNotFoundError:
 PY
 }
 
+python_package_installed() {
+    local package_name="$1"
+
+    python - <<PY
+from importlib.metadata import PackageNotFoundError, version
+
+package_name = ${package_name@Q}
+
+try:
+    version(package_name)
+except PackageNotFoundError:
+    raise SystemExit(1)
+PY
+}
+
+collect_python_requirements_to_install() {
+    local requirements_file="$1"
+    local excluded_packages_csv="${2:-}"
+
+    python - "$requirements_file" "$excluded_packages_csv" <<'PY'
+import sys
+from importlib.metadata import PackageNotFoundError, version
+
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+
+requirements_file = sys.argv[1]
+excluded_packages_csv = sys.argv[2]
+excluded_packages = {
+    canonicalize_name(item.strip())
+    for item in excluded_packages_csv.split(",")
+    if item.strip()
+}
+
+with open(requirements_file, encoding="utf-8") as handle:
+    for raw_line in handle:
+        line = raw_line.strip()
+        if not line or line.startswith("#") or line.startswith("-"):
+            continue
+
+        requirement = Requirement(line)
+        if canonicalize_name(requirement.name) in excluded_packages:
+            continue
+
+        try:
+            installed_version = version(requirement.name)
+        except PackageNotFoundError:
+            print(line)
+            continue
+
+        if requirement.specifier and not requirement.specifier.contains(installed_version, prereleases=True):
+            print(line)
+PY
+}
+
+install_python_requirements_if_needed() {
+    local requirements_file="$1"
+    local excluded_packages_csv="${2:-}"
+    local -a requirements_to_install
+
+    mapfile -t requirements_to_install < <(
+        collect_python_requirements_to_install "$requirements_file" "$excluded_packages_csv"
+    )
+
+    if [ "${#requirements_to_install[@]}" -eq 0 ]; then
+        echo "requirements:${requirements_file}:already-satisfied"
+        return 0
+    fi
+
+    echo "requirements:${requirements_file}:install ${requirements_to_install[*]}"
+    pip install --no-cache-dir "${requirements_to_install[@]}"
+}
+
+torch_runtime_matches_target() {
+    local target="$1"
+
+    python - "$target" "$PYTORCH_VERSION" "$TORCHVISION_VERSION" "$TORCHAUDIO_VERSION" "$CUDA_TOOLKIT_TARGET" <<'PY'
+import sys
+
+target, expected_torch, expected_torchvision, expected_torchaudio, expected_cuda = sys.argv[1:]
+
+try:
+    import torch
+    import torchaudio
+    import torchvision
+except Exception:
+    raise SystemExit(1)
+
+torch_version = torch.__version__.split("+", 1)[0]
+torchvision_version = torchvision.__version__.split("+", 1)[0]
+torchaudio_version = torchaudio.__version__.split("+", 1)[0]
+cuda_version = torch.version.cuda or ""
+
+if torch_version != expected_torch:
+    raise SystemExit(1)
+if torchvision_version != expected_torchvision:
+    raise SystemExit(1)
+if torchaudio_version != expected_torchaudio:
+    raise SystemExit(1)
+
+if target == "cu128":
+    raise SystemExit(0 if cuda_version.startswith(expected_cuda) else 1)
+
+if target == "cpu":
+    raise SystemExit(0 if not cuda_version else 1)
+
+raise SystemExit(1)
+PY
+}
+
+llama_cpp_python_has_cuda_support() {
+    python - <<'PY'
+from pathlib import Path
+
+try:
+    import llama_cpp
+except Exception:
+    raise SystemExit(1)
+
+package_dir = Path(llama_cpp.__file__).resolve().parent
+cuda_libs = list(package_dir.glob("libggml-cuda.so*"))
+raise SystemExit(0 if cuda_libs else 1)
+PY
+}
+
 find_existing_conda_sh() {
     local candidate=""
 
@@ -401,6 +526,7 @@ sudo apt-get install -y \
     wget \
     curl \
     git \
+    cmake \
     build-essential \
     software-properties-common \
     ca-certificates \
@@ -734,8 +860,8 @@ echo ""
 echo "Установка зависимостей из requirements.txt..."
 cd backend
 
-# Установка с детальным выводом
-if ! pip install -r requirements.txt --no-cache-dir; then
+# Установка только отсутствующих или несовместимых пакетов
+if ! install_python_requirements_if_needed "requirements.txt" "llama-cpp-python,torch,torchvision,torchaudio"; then
     echo ""
     echo -e "${RED}[ERROR]${NC} Не удалось установить Python зависимости"
     echo "Если ошибка связана с Conda Terms of Service, выполните официальные команды:"
@@ -750,30 +876,51 @@ fi
 echo ""
 if [ "$GPU_RUNTIME_READY" = true ]; then
     echo "Canonical PyTorch GPU baseline: torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 via cu128"
-    echo "Установка PyTorch ${PYTORCH_VERSION} (CUDA 12.8 / cu128)..."
-    pip install --no-cache-dir \
-        --index-url "$PYTORCH_CUDA_INDEX_URL" \
-        "torch==${PYTORCH_VERSION}" \
-        "torchvision==${TORCHVISION_VERSION}" \
-        "torchaudio==${TORCHAUDIO_VERSION}"
     PYTORCH_INSTALL_TARGET="cu128"
+    if torch_runtime_matches_target "$PYTORCH_INSTALL_TARGET"; then
+        echo "PyTorch canonical baseline уже установлен; пропускаем переустановку"
+    else
+        echo "Установка PyTorch ${PYTORCH_VERSION} (CUDA 12.8 / cu128)..."
+        pip install --no-cache-dir \
+            --index-url "$PYTORCH_CUDA_INDEX_URL" \
+            "torch==${PYTORCH_VERSION}" \
+            "torchvision==${TORCHVISION_VERSION}" \
+            "torchaudio==${TORCHAUDIO_VERSION}"
+    fi
 else
     echo "Canonical PyTorch CPU baseline: torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 via cpu"
-    echo "Установка PyTorch ${PYTORCH_VERSION} (CPU only)..."
-    pip install --no-cache-dir \
-        --index-url "$PYTORCH_CPU_INDEX_URL" \
-        "torch==${PYTORCH_VERSION}" \
-        "torchvision==${TORCHVISION_VERSION}" \
-        "torchaudio==${TORCHAUDIO_VERSION}"
     PYTORCH_INSTALL_TARGET="cpu"
+    if torch_runtime_matches_target "$PYTORCH_INSTALL_TARGET"; then
+        echo "PyTorch canonical baseline уже установлен; пропускаем переустановку"
+    else
+        echo "Установка PyTorch ${PYTORCH_VERSION} (CPU only)..."
+        pip install --no-cache-dir \
+            --index-url "$PYTORCH_CPU_INDEX_URL" \
+            "torch==${PYTORCH_VERSION}" \
+            "torchvision==${TORCHVISION_VERSION}" \
+            "torchaudio==${TORCHAUDIO_VERSION}"
+    fi
 fi
 
-# Специальная установка llama-cpp-python с поддержкой CUDA (если доступна)
-if resolve_nvcc_bin; then
+# Специальная установка llama-cpp-python
+if python_package_installed "llama-cpp-python"; then
     echo ""
-    echo "Переустановка llama-cpp-python с поддержкой CUDA (native build path, требуется CUDA toolkit)..."
-    CMAKE_ARGS="-DGGML_CUDA=ON" pip install llama-cpp-python[server] --force-reinstall --no-cache-dir
-    LLAMA_CPP_CUDA_REBUILD_STATUS="done"
+    echo "llama-cpp-python уже установлен; пропускаем переустановку"
+    if llama_cpp_python_has_cuda_support; then
+        LLAMA_CPP_CUDA_REBUILD_STATUS="already-installed-cuda"
+    else
+        LLAMA_CPP_CUDA_REBUILD_STATUS="already-installed"
+    fi
+elif resolve_nvcc_bin; then
+    echo ""
+    echo "Установка llama-cpp-python с поддержкой CUDA (native build path, требуется CUDA toolkit)..."
+    CMAKE_ARGS="-DGGML_CUDA=ON" pip install --no-cache-dir "llama-cpp-python[server]>=0.2.0"
+    LLAMA_CPP_CUDA_REBUILD_STATUS="installed-cuda"
+else
+    echo ""
+    echo "Установка llama-cpp-python без CUDA..."
+    pip install --no-cache-dir "llama-cpp-python[server]>=0.2.0"
+    LLAMA_CPP_CUDA_REBUILD_STATUS="installed-cpu"
 fi
 
 cd ..
