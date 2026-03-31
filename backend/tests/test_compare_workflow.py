@@ -623,3 +623,157 @@ async def test_compare_report_renders_semantic_meaning_for_structural_entries():
     assert "**Влияние:** Меняется регуляторная рамка." in report
     assert "### ✅ ДОБАВЛЕНО" in report
     assert "**Суть:** Добавлен новый объект правового регулирования." in report
+
+
+# R1.0.10: Test that structural items don't go through LLM queue
+@pytest.mark.asyncio
+async def test_compare_r1_0_10_structural_items_excluded_from_llm_queue():
+    """R1.0.10: Verify that ADDED/DELETED items are not sent to LLM for analysis."""
+    state = {
+        "input_1": "/tmp/old.pdf",
+        "input_2": "/tmp/new.pdf",
+        "name_1": "old.pdf",
+        "name_2": "new.pdf",
+        "text_1": "Old document text.",
+        "text_2": "New document text.",
+        "document_role_1": "other",
+        "document_role_2": "other",
+        "pair_relation_type": "unknown",
+        "compare_mode_selected": "redline_compare",
+        "chunks_old": [],
+        "chunks_new": [],
+        "matches": [
+            {"type": "ADDED", "old_text": "", "new_text": "New structural addition."},
+            {"type": "DELETED", "old_text": "Old structural deletion.", "new_text": ""},
+            {"type": "MODIFIED", "old_text": "Old штраф 1000 рублей", "new_text": "New штраф 2000 рублей", "similarity_score": 0.3},
+        ],
+        "analysis_results": [],
+        "final_report": "",
+        "errors": [],
+        "session_id": "session-1",
+    }
+
+    with patch("orchestrator.workflows.compare.ums_client.async_infer", new_callable=AsyncMock) as mock_infer:
+        mock_infer.return_value = {
+            "content": '[{"is_critical": true, "diff": "Штраф увеличен с 1000 до 2000 рублей", "impact": "Ужесточение санкций"}]'
+        }
+
+        result = await analyze_differences_node(state)
+
+    # Only MODIFIED item should have been sent to LLM (1 call)
+    # ADDED and DELETED should be handled structurally without LLM
+    assert mock_infer.await_count == 1
+
+    # Verify results contain all three items
+    assert len(result["analysis_results"]) == 3
+
+    # Find the MODIFIED item that went through LLM
+    modified_items = [r for r in result["analysis_results"] if r.get("type") == "MODIFIED"]
+    assert len(modified_items) == 1
+    assert "штраф" in modified_items[0]["diff"].lower()
+
+
+# R1.0.11: Test single-item batch JSON parsing strictness
+@pytest.mark.asyncio
+async def test_compare_r1_0_11_single_item_batch_handles_dict_response():
+    """R1.0.11: Verify that single-item batch correctly handles dict (non-list) JSON response."""
+    state = {
+        "input_1": "/tmp/law_2021.pdf",
+        "input_2": "/tmp/law_2023.pdf",
+        "name_1": "law_2021.pdf",
+        "name_2": "law_2023.pdf",
+        "text_1": "Закон 2021",
+        "text_2": "Закон 2023",
+        "document_role_1": "other",
+        "document_role_2": "other",
+        "pair_relation_type": "same_base_law_amendments",
+        "compare_mode_selected": "semantic_compare",
+        "chunks_old": [],
+        "chunks_new": [],
+        "matches": [
+            {"type": "MODIFIED", "old_text": "Старая норма об аккредитации.", "new_text": "Новая норма об аккредитации.", "similarity_score": 0.2},
+        ],
+        "analysis_results": [],
+        "final_report": "",
+        "errors": [],
+        "session_id": "session-1",
+    }
+
+    with patch("orchestrator.workflows.compare.ums_client.async_infer", new_callable=AsyncMock) as mock_infer:
+        # Return a dict instead of a list (common LLM response for single item)
+        mock_infer.return_value = {
+            "content": '{"is_critical": true, "diff": "Изменены требования к аккредитации", "impact": "Меняется порядок получения аккредитации"}'
+        }
+
+        result = await analyze_differences_node(state)
+
+    # Should successfully parse the dict response for single-item batch
+    assert len(result["analysis_results"]) == 1
+    assert result["analysis_results"][0]["type"] == "MODIFIED"
+    assert "аккредитац" in result["analysis_results"][0]["diff"].lower()
+    assert result["analysis_results"][0]["is_critical"] is True
+
+
+@pytest.mark.asyncio
+async def test_compare_r1_0_11_single_item_batch_handles_empty_parse():
+    """R1.0.11: Verify that single-item batch with empty parse creates error result."""
+    state = {
+        "input_1": "/tmp/law_2021.pdf",
+        "input_2": "/tmp/law_2023.pdf",
+        "name_1": "law_2021.pdf",
+        "name_2": "law_2023.pdf",
+        "text_1": "Закон 2021",
+        "text_2": "Закон 2023",
+        "document_role_1": "other",
+        "document_role_2": "other",
+        "pair_relation_type": "same_base_law_amendments",
+        "compare_mode_selected": "semantic_compare",
+        "chunks_old": [],
+        "chunks_new": [],
+        "matches": [
+            {"type": "MODIFIED", "old_text": "Старая норма.", "new_text": "Новая норма.", "similarity_score": 0.2},
+        ],
+        "analysis_results": [],
+        "final_report": "",
+        "errors": [],
+        "session_id": "session-1",
+    }
+
+    with patch("orchestrator.workflows.compare.ums_client.async_infer", new_callable=AsyncMock) as mock_infer:
+        # Return unparseable garbage
+        mock_infer.return_value = {
+            "content": 'This is not JSON at all, just text'
+        }
+
+        result = await analyze_differences_node(state)
+
+    # Should create an error result for failed parse
+    assert len(result["analysis_results"]) == 1
+    assert result["analysis_results"][0]["type"] == "MODIFIED"
+    assert "ошибка анализа" in result["analysis_results"][0]["diff"].lower()
+
+    # Verify fallback metric was recorded
+    metrics = render_metrics_text()
+    assert "agent_nav_fallback_events_total" in metrics
+    assert 'fallback="analyze_parse_single_failed"' in metrics
+
+
+# R1.0.12: Test offline mode token optimization
+def test_compare_r1_0_12_offline_mode_reduces_token_budget(monkeypatch):
+    """R1.0.12: Verify that offline mode (BACKEND_MODE=llama-cpp-python) reduces token budget."""
+    import importlib
+
+    # Set offline mode
+    monkeypatch.setenv("BACKEND_MODE", "llama-cpp-python")
+    monkeypatch.setenv("COMPARE_ANALYSIS_MAX_TOKENS", "600")
+    monkeypatch.setenv("COMPARE_TRUNCATE_CHARS", "2000")
+
+    # Reload module to pick up env changes
+    import orchestrator.workflows.compare as compare_module
+    importlib.reload(compare_module)
+
+    # In offline mode, tokens should be reduced to max 400
+    assert compare_module.COMPARE_ANALYSIS_MAX_TOKENS <= 400
+    # In offline mode, truncate chars should be reduced to max 1200
+    assert compare_module.COMPARE_TRUNCATE_CHARS <= 1200
+

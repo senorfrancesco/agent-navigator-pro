@@ -31,6 +31,14 @@ COMPARE_SECTION_MAX_CHARS = int(os.getenv("COMPARE_SECTION_MAX_CHARS", "2000"))
 COMPARE_MIN_CHUNK_CHARS = int(os.getenv("COMPARE_MIN_CHUNK_CHARS", "40"))
 COMPARE_ANALYSIS_MAX_TOKENS = int(os.getenv("COMPARE_ANALYSIS_MAX_TOKENS", "600"))
 COMPARE_ANALYSIS_TEMPERATURE = float(os.getenv("COMPARE_ANALYSIS_TEMPERATURE", "0.1"))
+
+# R1.0.12: Offline bundle optimization - limit prompt size for resource-constrained environments
+COMPARE_OFFLINE_MODE = os.getenv("BACKEND_MODE", "").lower() in {"llama-cpp-python", "llama-server"}
+if COMPARE_OFFLINE_MODE:
+    # In offline/CPU mode, reduce token budget and truncate more aggressively
+    COMPARE_ANALYSIS_MAX_TOKENS = int(os.getenv("COMPARE_ANALYSIS_MAX_TOKENS_OFFLINE", str(min(COMPARE_ANALYSIS_MAX_TOKENS, 400))))
+    COMPARE_TRUNCATE_CHARS = int(os.getenv("COMPARE_TRUNCATE_CHARS_OFFLINE", str(min(COMPARE_TRUNCATE_CHARS, 1200))))
+
 logger = logging.getLogger("compare_workflow")
 _LEGAL_COMPARE_SELECTION = resolve_model_selection("llm.legal_compare")
 
@@ -321,7 +329,49 @@ is_critical, diff, impact.<|im_end|>
 
     content = _extract_compare_response_content(response)
     parsed = parse_json_garbage(content)
-    parsed_list = parsed if isinstance(parsed, list) else ([parsed] if isinstance(parsed, dict) else [])
+
+    # R1.0.11 Fix: For single-item batch, ensure we get exactly one valid result
+    if len(batch) == 1:
+        # Single-item batch: expect a dict or a list with one item
+        if isinstance(parsed, list):
+            if len(parsed) == 1 and isinstance(parsed[0], dict):
+                parsed_list = parsed
+            elif len(parsed) == 0:
+                # Empty list - parsing failed
+                logger.warning(
+                    "Compare analyze fallback: single-item batch returned empty list",
+                )
+                inc_metric_counter(
+                    "agent_nav_fallback_events_total",
+                    labels={"component": "compare_workflow", "fallback": "analyze_parse_single_empty", "source": "workflow"},
+                )
+                parsed_list = []
+            else:
+                # Multiple items returned for single-item batch - take first one
+                logger.warning(
+                    "Compare analyze fallback: single-item batch returned %s items, taking first",
+                    len(parsed),
+                )
+                inc_metric_counter(
+                    "agent_nav_fallback_events_total",
+                    labels={"component": "compare_workflow", "fallback": "analyze_parse_single_extra", "source": "workflow"},
+                )
+                parsed_list = [parsed[0]] if parsed and isinstance(parsed[0], dict) else []
+        elif isinstance(parsed, dict):
+            parsed_list = [parsed]
+        else:
+            # Failed to parse anything valid
+            logger.warning(
+                "Compare analyze fallback: single-item batch JSON parse failed completely",
+            )
+            inc_metric_counter(
+                "agent_nav_fallback_events_total",
+                labels={"component": "compare_workflow", "fallback": "analyze_parse_single_failed", "source": "workflow"},
+            )
+            parsed_list = []
+    else:
+        # Multi-item batch: use existing logic
+        parsed_list = parsed if isinstance(parsed, list) else ([parsed] if isinstance(parsed, dict) else [])
 
     if len(parsed_list) < len(batch):
         logger.warning(
@@ -625,7 +675,9 @@ async def analyze_differences_node(state: CompareState):
                 labels={"component": "compare_workflow", "fallback": "semantic_compare_error", "source": "workflow"},
             )
 
-    semantic_candidates = _prioritize_semantic_candidates(to_analyze + structural)
+    # R1.0.10 Fix: Only prioritize items that actually need LLM analysis
+    # structural items (ADDED/DELETED) are handled separately and don't need LLM
+    semantic_candidates = _prioritize_semantic_candidates(to_analyze)
 
     # Batch LLM анализ: по BATCH_SIZE различий в одном промпте
     analysis_batch_size = _resolve_analysis_batch_size(state)
