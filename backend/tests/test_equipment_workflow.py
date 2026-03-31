@@ -1102,6 +1102,18 @@ class TestGenerateEquipmentReportNode:
         assert "Сравнение смет" in result["final_report"]
 
     @pytest.mark.asyncio
+    async def test_report_renders_elapsed_time_from_runtime_context(self, base_state):
+        base_state["items_1"] = [{"name": "X"}]
+        base_state["items_2"] = [{"name": "Y"}]
+        base_state["runtime_context"] = {"started_at_monotonic": 100.0}
+
+        with patch.dict(os.environ, {"UPLOADS_DIR": tempfile.mkdtemp()}):
+            with patch("orchestrator.workflows.equipment.time.monotonic", return_value=225.0):
+                result = await generate_equipment_report_node(base_state)
+
+        assert "**Время выполнения:** 2 мин. 5 сек." in result["final_report"]
+
+    @pytest.mark.asyncio
     async def test_report_includes_errors(self, base_state):
         base_state["errors"] = ["Table extraction failed: timeout"]
         base_state["items_1"] = [{"name": "X"}]

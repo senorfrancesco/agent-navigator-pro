@@ -623,3 +623,31 @@ async def test_compare_report_renders_semantic_meaning_for_structural_entries():
     assert "**Влияние:** Меняется регуляторная рамка." in report
     assert "### ✅ ДОБАВЛЕНО" in report
     assert "**Суть:** Добавлен новый объект правового регулирования." in report
+
+
+@pytest.mark.asyncio
+async def test_compare_report_renders_elapsed_time_from_runtime_context():
+    state = {
+        "input_1": "/tmp/old.pdf",
+        "input_2": "/tmp/new.pdf",
+        "name_1": "old.pdf",
+        "name_2": "new.pdf",
+        "document_role_1": "other",
+        "document_role_2": "other",
+        "pair_relation_type": "unknown",
+        "compare_mode_selected": "unknown",
+        "chunks_old": [],
+        "chunks_new": [],
+        "matches": [],
+        "analysis_results": [],
+        "final_report": "",
+        "errors": [],
+        "runtime_context": {"started_at_monotonic": 100.0},
+        "session_id": "session-1",
+    }
+
+    with patch("orchestrator.workflows.compare.time.monotonic", return_value=225.0):
+        result = await generate_report_node(state)
+
+    report = result["final_report"]
+    assert "**Время выполнения:** 2 мин. 5 сек." in report

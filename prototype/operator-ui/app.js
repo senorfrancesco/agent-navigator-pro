@@ -367,6 +367,7 @@ let actionCatalogById = {};
 let actionCatalogByTitle = {};
 let jobPollTimers = new Map();
 let jobLogOffsets = new Map();
+let jobPollFailures = new Map();
 let toastTimeouts = new Map();
 let currentLanguage = localStorage.getItem("operatorUiLanguage") || "ru";
 let uiSettings = {
@@ -379,6 +380,7 @@ let controlPlaneOnline = false;
 let runningJobs = new Map();
 let lastJobSummary = null;
 let runtimeHealthByPath = {};
+let localRuntimeStateOverrides = new Map();
 
 function trimUiCopy(value, limit = 96) {
   const normalized = String(value || "").replace(/\s+/g, " ").trim();
@@ -397,6 +399,21 @@ function summarizeJobForSidebar(label, detail) {
     return safeLabel;
   }
   return `${safeLabel}: ${safeDetail}`;
+}
+
+function setLocalRuntimeOverride(pathKey, override) {
+  if (!pathKey) return;
+  if (!override) {
+    localRuntimeStateOverrides.delete(pathKey);
+    return;
+  }
+  localRuntimeStateOverrides.set(pathKey, override);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
 }
 
 function mergeUniqueLogs(existing, incoming, keyForItem) {
@@ -431,11 +448,6 @@ function summarizeFailureDetail(detail) {
 }
 
 function operatorShellHealth() {
-  const controlPlaneRow = serviceRows.find((row) =>
-    row.endpoint === "/operator/state + /operator-ui"
-    || row.name === "Контур управления оператором"
-    || row.name === "Operator Control Plane"
-    || row.nameEn === "Operator Control Plane");
   if (!controlPlaneOnline) {
     return {
       status: "pending",
@@ -443,22 +455,28 @@ function operatorShellHealth() {
       detail: currentLanguage === "en" ? "The operator backend has not answered yet." : "Operator backend ещё не подтвердил readiness.",
     };
   }
-  if (controlPlaneRow?.status === "running") {
-    return {
-      status: "healthy",
-      label: currentLanguage === "en" ? "System running" : "Система работает",
-      detail: currentLanguage === "en"
-        ? "Operator UI and control-plane routes respond."
-        : "Operator UI и control-plane routes отвечают.",
-    };
-  }
   return {
-    status: "degraded",
-    label: currentLanguage === "en" ? "Operator UI degraded" : "Operator UI в degraded",
+    status: "healthy",
+    label: currentLanguage === "en" ? "System running" : "Система работает",
     detail: currentLanguage === "en"
-      ? "The backend answered, but the operator control-plane probe is not healthy."
-      : "Backend ответил, но probe operator control plane не healthy.",
+      ? "Operator UI and control-plane routes respond."
+      : "Operator UI и control-plane routes отвечают.",
   };
+}
+
+async function settleRuntimeState(pathKey, expectRunning, attempts = 8, delayMs = 1000) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    await hydrateOperatorState();
+    await hydrateRuntimeHealth();
+    rerenderAll();
+    const state = deriveLaunchRuntimeState(pathKey);
+    const running = isPathRunning(pathKey);
+    if (expectRunning ? running : !running) {
+      return state;
+    }
+    await sleep(delayMs);
+  }
+  return deriveLaunchRuntimeState(pathKey);
 }
 
 const sectionButtons = [...document.querySelectorAll(".nav-item")];
@@ -473,7 +491,7 @@ const sections = {
 
 function chipClass(status) {
   if (["available", "running", "present", "configured", "generated", "ready", "passed"].includes(status)) return "lime";
-  if (["partial", "degraded", "stale", "readable", "warmup"].includes(status)) return "cyan";
+  if (["partial", "degraded", "stale", "readable", "warmup", "not_started"].includes(status)) return "cyan";
   if (["blocked", "unavailable", "missing"].includes(status)) return "orange";
   return "neutral";
 }
@@ -482,6 +500,7 @@ function cap(value) {
   const translated = currentLanguage === "en" ? {
     available: "Ready",
     running: "Running",
+    not_started: "Not started",
     present: "Present",
     configured: "Configured",
     generated: "Generated",
@@ -507,6 +526,7 @@ function cap(value) {
   } : {
     available: "Готово",
     running: "В работе",
+    not_started: "Не запущено",
     present: "Есть",
     configured: "Настроено",
     generated: "Сгенерировано",
@@ -1002,6 +1022,142 @@ function translateSeedLogLine(message) {
   return translated;
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function normalizeAnsiText(text) {
+  return String(text ?? "").replace(/␛(?=\[)/g, "\u001b");
+}
+
+function stripAnsi(text) {
+  return normalizeAnsiText(text).replace(/\u001b\[[0-9;]*m/g, "");
+}
+
+function detectLogTone(text, stream = "") {
+  const plain = stripAnsi(text).toLowerCase();
+  const streamKey = String(stream || "").toLowerCase();
+  if (streamKey.includes("stderr")) return "error";
+  if (/(traceback|attributeerror|exception|ошибка|error|failed:|порт.*конфликт|port-conflict|missing)/.test(plain)) return "error";
+  if (/(warning|warn|degraded|устар|fallback|требует внимания)/.test(plain)) return "warning";
+  if (/(models:skip|\bskip\b|пропуск)/.test(plain)) return "skip";
+  if (/(✓|готов|loaded|загружен|ok\b|models:ok|completed:)/.test(plain)) return "ok";
+  return streamKey.includes("system") ? "info" : "neutral";
+}
+
+function ansiClassesFromState(state) {
+  return [
+    state.bold ? "ansi-bold" : "",
+    state.dim ? "ansi-dim" : "",
+    state.fg ? `ansi-${state.fg}` : "",
+  ].filter(Boolean).join(" ");
+}
+
+function renderAnsiMarkup(text) {
+  const input = normalizeAnsiText(text);
+  const ansiRegex = /\u001b\[([0-9;]*)m/g;
+  const colorMap = {
+    30: "black",
+    31: "red",
+    32: "green",
+    33: "yellow",
+    34: "blue",
+    35: "magenta",
+    36: "cyan",
+    37: "white",
+    90: "muted",
+    91: "red",
+    92: "green",
+    93: "yellow",
+    94: "blue",
+    95: "magenta",
+    96: "cyan",
+    97: "white",
+  };
+  const state = { fg: "", bold: false, dim: false };
+  const parts = [];
+  let lastIndex = 0;
+
+  function pushChunk(chunk) {
+    if (!chunk) return;
+    const classes = ansiClassesFromState(state);
+    const content = escapeHtml(chunk);
+    parts.push(classes ? `<span class="${classes}">${content}</span>` : content);
+  }
+
+  for (const match of input.matchAll(ansiRegex)) {
+    pushChunk(input.slice(lastIndex, match.index));
+    const codes = String(match[1] || "0")
+      .split(";")
+      .map((code) => Number(code || 0));
+    if (!codes.length) {
+      codes.push(0);
+    }
+    codes.forEach((code) => {
+      if (code === 0) {
+        state.fg = "";
+        state.bold = false;
+        state.dim = false;
+      } else if (code === 1) {
+        state.bold = true;
+      } else if (code === 2) {
+        state.dim = true;
+      } else if (code === 22) {
+        state.bold = false;
+        state.dim = false;
+      } else if (code === 39) {
+        state.fg = "";
+      } else if (colorMap[code]) {
+        state.fg = colorMap[code];
+      }
+    });
+    lastIndex = match.index + match[0].length;
+  }
+
+  pushChunk(input.slice(lastIndex));
+  return parts.join("");
+}
+
+function renderLogBody(text, tone) {
+  const markup = renderAnsiMarkup(text);
+  const toneClass = tone && tone !== "neutral" ? ` log-body-${tone}` : "";
+  return `<span class="log-body${toneClass}">${markup}</span>`;
+}
+
+function renderLogLine(lineText) {
+  const translated = translateSeedLogLine(lineText);
+  const normalized = normalizeAnsiText(translated);
+  const match = normalized.match(/^\[([^\]]+)\]\s+([^:]+):\s?(.*)$/);
+  const timestamp = match?.[1] || "";
+  const stream = match?.[2] || "";
+  const body = match?.[3] ?? normalized;
+  const tone = detectLogTone(body, stream);
+  const streamClass = String(stream).toLowerCase().includes("stderr")
+    ? "log-stream-error"
+    : String(stream).toLowerCase().includes("system")
+      ? "log-stream-system"
+      : "log-stream-runtime";
+  return `<span class="log-entry log-entry-${tone}">`
+    + `${timestamp ? `<span class="log-timestamp">[${escapeHtml(timestamp)}]</span>` : ""}`
+    + `${stream ? `<span class="log-stream ${streamClass}">${escapeHtml(stream)}</span>` : ""}`
+    + `${renderLogBody(body, tone)}`
+    + `</span>`;
+}
+
+function renderLogConsole(node, lines, emptyText) {
+  if (!node) return;
+  if (!lines.length) {
+    node.textContent = emptyText;
+    return;
+  }
+  node.innerHTML = lines.map((line) => renderLogLine(line)).join("");
+}
+
 function translatePathPolicy(policy) {
   if (!policy) return "";
   if (currentLanguage === "en") {
@@ -1318,7 +1474,7 @@ function localizeStaticShell() {
 
   const launchButton = document.querySelector("#topbar-start-button");
   if (launchButton) {
-    const label = currentLanguage === "en" ? "Choose runtime path" : "Выбрать путь запуска";
+    const label = currentLanguage === "en" ? "Launch or stop the selected runtime path" : "Запустить или остановить выбранный путь запуска";
     launchButton.setAttribute("aria-label", label);
     launchButton.setAttribute("title", label);
   }
@@ -1441,6 +1597,7 @@ function renderSidebarState() {
 function runtimeHealthTone(status) {
   if (["running", "healthy"].includes(status)) return "lime";
   if (["building", "deploying", "not_started"].includes(status)) return "cyan";
+  if (status === "not_started") return "cyan";
   if (["degraded", "unknown"].includes(status)) return "orange";
   return "orange";
 }
@@ -1473,6 +1630,7 @@ function runtimeHealthLabel(status) {
 }
 
 function deriveLaunchRuntimeState(pathKey) {
+  const localOverride = localRuntimeStateOverrides.get(pathKey);
   const runtimeHealth = runtimeHealthByPath[pathKey];
   const runtimeJob = [...runningJobs.values()].find((job) => job.pathKey === pathKey);
   const pathLogs = logLines.filter((line) => line.path === pathKey);
@@ -1496,6 +1654,9 @@ function deriveLaunchRuntimeState(pathKey) {
         ? (currentLanguage === "en" ? "Inspect the launch log, then verify Docker, ports, and bundle diagnostics." : "Сначала смотри журнал запуска, затем проверь Docker, порты и диагностику офлайн-бандла.")
         : (currentLanguage === "en" ? "Inspect the launch log and service checks before retrying." : "Сначала смотри журнал запуска и проверки сервисов перед повтором."),
     };
+  }
+  if (localOverride) {
+    return localOverride;
   }
   if (runtimeHealth?.status && runtimeHealth.status !== "unknown") {
     return {
@@ -1634,25 +1795,44 @@ function getActionIdForPath(pathKey) {
   return null;
 }
 
-function launchPrimaryLabel(path) {
-  return currentLanguage === "en"
-    ? `Launch ${pathTitle(path)}`
-    : `Запустить ${pathTitle(path)}`;
+function getStopActionIdForPath(pathKey) {
+  if (pathKey === "native") return "runtime.native.stop";
+  if (pathKey === "container") return "runtime.container.stop";
+  return null;
 }
 
-async function triggerLaunchForPath(pathKey) {
+function isPathRunning(pathKey) {
+  const state = deriveLaunchRuntimeState(pathKey);
+  return ["healthy", "running"].includes(state.status);
+}
+
+function launchPrimaryLabel(pathKey) {
+  const activeJob = [...runningJobs.values()].find((job) => job.pathKey === pathKey && (job.status === "queued" || job.status === "running"));
+  if (activeJob?.actionKind === "stop") {
+    return currentLanguage === "en" ? "Stopping..." : "Остановка...";
+  }
+  if (activeJob?.actionKind === "start") {
+    return currentLanguage === "en" ? "Starting..." : "Запуск...";
+  }
+  return isPathRunning(pathKey)
+    ? (currentLanguage === "en" ? "Stop" : "Остановить")
+    : (currentLanguage === "en" ? "Launch" : "Запуск");
+}
+
+async function triggerPrimaryActionForPath(pathKey) {
   const path = runtimePaths[pathKey];
   if (!path) return;
   selectedLaunchPath = pathKey;
   rerenderAll();
-  if (!isLaunchable(pathKey)) {
+  const shouldStop = isPathRunning(pathKey);
+  if (!shouldStop && !isLaunchable(pathKey)) {
     switchSection("launch");
     openReasonModal(pathKey);
     return;
   }
-  const actionId = getActionIdForPath(pathKey);
+  const actionId = shouldStop ? getStopActionIdForPath(pathKey) : getActionIdForPath(pathKey);
   if (!actionId) {
-    activityFeed.unshift(`${currentLanguage === "en" ? "No mapped launch action for" : "Действие запуска не сопоставлено для"} ${pathTitle(path)}`);
+    activityFeed.unshift(`${currentLanguage === "en" ? "No mapped action for" : "Действие не сопоставлено для"} ${pathTitle(path)}`);
     renderActivity();
     return;
   }
@@ -1660,6 +1840,7 @@ async function triggerLaunchForPath(pathKey) {
     surface: "runtime",
     pathKey,
     label: pathTitle(path),
+    actionKind: shouldStop ? "stop" : "start",
   });
 }
 
@@ -1697,12 +1878,25 @@ function formatConfigSources(sources) {
 
 function renderPathCard(path, includeProfiles = true) {
   const showSafePortsButton = path.key === "container" && hasBundlePortConflict();
-  const primaryLabel = path.key === "container"
-    ? (currentLanguage === "en" ? "Run Bundle" : "Запустить офлайн-бандл")
-    : (currentLanguage === "en" ? "Launch" : "Запустить");
+  const runtimeState = deriveLaunchRuntimeState(path.key);
+  const runtimeJob = [...runningJobs.values()].find((job) => job.pathKey === path.key && (job.status === "queued" || job.status === "running"));
+  const isRunning = ["healthy", "running"].includes(runtimeState.status);
+  const primaryLabel = runtimeJob?.actionKind === "stop"
+    ? (currentLanguage === "en" ? "Stopping..." : "Остановка...")
+    : runtimeJob?.actionKind === "start"
+      ? (currentLanguage === "en" ? "Starting..." : "Запуск...")
+      : isRunning
+        ? (currentLanguage === "en" ? "Stop" : "Остановить")
+        : path.key === "container"
+          ? (currentLanguage === "en" ? "Run Bundle" : "Запустить офлайн-бандл")
+          : (currentLanguage === "en" ? "Launch" : "Запустить");
   const blockedLabel = path.key === "container"
     ? (currentLanguage === "en" ? "Bundle Run Blocked" : "Запуск офлайн-бандла заблокирован")
     : (currentLanguage === "en" ? "Launch Blocked" : "Запуск заблокирован");
+  const statusPillClass = isRunning ? "lime" : runtimeHealthTone(runtimeState.status);
+  const statusPillText = isRunning
+    ? (currentLanguage === "en" ? "Running" : "Запущено")
+    : runtimeHealthLabel(runtimeState.status);
   const card = document.createElement("article");
   card.className = `runtime-card ${path.status === "unavailable" ? "unavailable" : ""}`;
   card.innerHTML = `
@@ -1712,7 +1906,7 @@ function renderPathCard(path, includeProfiles = true) {
         <h3>${pathTitle(path)}</h3>
         <p>${displayText(localizedField(path, "description"))}</p>
       </div>
-      <span class="status-pill ${chipClass(path.status)}">${cap(path.status)}</span>
+      <span class="status-pill ${statusPillClass}">${statusPillText}</span>
     </div>
     <div class="path-summary-grid">
       ${path.summary.map((item) => `
@@ -1740,7 +1934,7 @@ function renderPathCard(path, includeProfiles = true) {
       </div>
     ` : ""}
     <div class="button-row">
-      <button class="primary-button launch-button" data-path="${path.key}" ${!isLaunchable(path.key) ? "disabled" : ""}>
+      <button class="primary-button launch-button" data-path="${path.key}" ${(!isLaunchable(path.key) && !isRunning) || runtimeJob ? "disabled" : ""}>
         ${!isLaunchable(path.key) ? blockedLabel : primaryLabel}
       </button>
       ${showSafePortsButton ? `
@@ -2086,11 +2280,13 @@ function renderLaunchLogs() {
 
   runtimePill.className = `status-pill ${runtimeHealthTone(runtimeState.status)}`;
   runtimePill.textContent = runtimeHealthLabel(runtimeState.status);
-  logConsole.textContent = lines.length
-    ? lines.join("\n")
-    : (currentLanguage === "en"
+  renderLogConsole(
+    logConsole,
+    lines,
+    currentLanguage === "en"
       ? "No launch log for this runtime path yet."
-      : "Для этого пути запуска пока нет launch-лога.");
+      : "Для этого пути запуска пока нет launch-лога.",
+  );
 
   const nextSteps = document.querySelector("#launch-next-steps");
   const items = selectedLaunchPath === "container"
@@ -3142,7 +3338,11 @@ function renderLogs(filter) {
     .filter((line) => line.path === selectedServicesPath)
     .filter((line) => filter === "all" || line.service === filter)
     .map((line) => translateSeedLogLine(line.text));
-  logConsole.textContent = visibleLines.length ? visibleLines.join("\n") : displayText("Для этого пути запуска ещё нет загруженных логов. Сначала проверь диагностику и состояние сервисов выше.");
+  renderLogConsole(
+    logConsole,
+    visibleLines,
+    displayText("Для этого пути запуска ещё нет загруженных логов. Сначала проверь диагностику и состояние сервисов выше."),
+  );
 }
 
 function renderDeploy() {
@@ -3249,11 +3449,14 @@ function refreshDeployLogFilterOptions() {
 
 function renderDeployLogs(filter) {
   const logConsole = document.querySelector("#deploy-log-console");
-  logConsole.textContent = deployLogLines
-    .filter((line) => line.mode === selectedDeployMode)
-    .filter((line) => filter === "all" || line.stage === filter)
-    .map((line) => line.text)
-    .join("\n");
+  renderLogConsole(
+    logConsole,
+    deployLogLines
+      .filter((line) => line.mode === selectedDeployMode)
+      .filter((line) => filter === "all" || line.stage === filter)
+      .map((line) => line.text),
+    currentLanguage === "en" ? "No deploy log loaded yet." : "Лог деплоя пока не загружен.",
+  );
 }
 
 function renderMaintenance() {
@@ -3323,7 +3526,7 @@ function wireRuntimeButtons() {
   });
   document.querySelectorAll(".launch-button").forEach((button) => {
     button.addEventListener("click", async () => {
-      await triggerLaunchForPath(button.dataset.path);
+      await triggerPrimaryActionForPath(button.dataset.path);
     });
   });
   document.querySelectorAll(".safe-ports-button").forEach((button) => {
@@ -3356,8 +3559,33 @@ function initLogFilter() {
 
 function updateTopbarAction() {
   const button = document.querySelector("#topbar-start-button");
+  const label = document.querySelector("#topbar-start-button-label");
+  const note = document.querySelector("#topbar-start-button-note");
+  const path = runtimePaths[selectedLaunchPath];
   if (!button) return;
   button.setAttribute("aria-expanded", launchMenuOpen ? "true" : "false");
+  if (label) {
+    label.textContent = launchPrimaryLabel(selectedLaunchPath);
+  }
+  if (note) {
+    note.textContent = pathTitle(path);
+  }
+  const isRunning = isPathRunning(selectedLaunchPath);
+  const activeJob = [...runningJobs.values()].find((job) => job.pathKey === selectedLaunchPath && (job.status === "queued" || job.status === "running"));
+  button.dataset.mode = isPathRunning(selectedLaunchPath) ? "stop" : "launch";
+  button.disabled = Boolean(activeJob);
+  const actionLabel = activeJob?.actionKind === "stop"
+    ? (currentLanguage === "en" ? "Stop runtime" : "Остановить среду")
+    : activeJob?.actionKind === "start"
+      ? (currentLanguage === "en" ? "Launch runtime" : "Запустить среду")
+      : isRunning
+        ? (currentLanguage === "en" ? "Stop runtime" : "Остановить среду")
+        : (currentLanguage === "en" ? "Launch runtime" : "Запустить среду");
+  button.setAttribute(
+    "title",
+    `${actionLabel}: ${pathTitle(path)}`,
+  );
+  button.setAttribute("aria-label", `${actionLabel}: ${pathTitle(path)}`);
   renderTopbarLaunchMenu();
 }
 
@@ -3374,20 +3602,20 @@ function renderTopbarLaunchMenu() {
       type="button"
       role="menuitem"
       data-path="${path.key}"
-      ${!isLaunchable(path.key) ? "disabled" : ""}
     >
       <span class="launch-menu-copy">
         <strong>${pathTitle(path)}</strong>
         <span>${displayText(localizedField(path, "description"))}</span>
       </span>
-      <span class="status-pill ${chipClass(path.status)}">${cap(path.status)}</span>
+      <span class="status-pill ${isPathRunning(path.key) ? "lime" : chipClass(path.status)}">${isPathRunning(path.key) ? (currentLanguage === "en" ? "Running" : "Запущено") : cap(path.status)}</span>
     </button>
   `).join("");
   [...menu.querySelectorAll(".launch-menu-item")].forEach((button) => {
     button.addEventListener("click", async () => {
       const { path } = button.dataset;
       launchMenuOpen = false;
-      await triggerLaunchForPath(path);
+      selectedLaunchPath = path;
+      rerenderAll();
     });
   });
 }
@@ -3397,8 +3625,14 @@ function initTopbarAction() {
   const menu = document.querySelector("#topbar-launch-menu");
   primaryButton.addEventListener("click", (event) => {
     event.stopPropagation();
-    launchMenuOpen = !launchMenuOpen;
+    if (event.target.closest(".launch-button-icon")) {
+      launchMenuOpen = !launchMenuOpen;
+      updateTopbarAction();
+      return;
+    }
+    launchMenuOpen = false;
     updateTopbarAction();
+    triggerPrimaryActionForPath(selectedLaunchPath);
   });
   document.addEventListener("click", (event) => {
     const group = document.querySelector("#topbar-launch-group");
@@ -3588,6 +3822,11 @@ async function hydrateRuntimeHealth() {
     }),
   );
   runtimeHealthByPath = Object.fromEntries(entries);
+  Object.entries(runtimeHealthByPath).forEach(([pathKey, payload]) => {
+    if (payload?.status && payload.status !== "unknown") {
+      localRuntimeStateOverrides.delete(pathKey);
+    }
+  });
 }
 
 function appendJobLogs(job, context) {
@@ -3668,9 +3907,13 @@ async function pollJob(jobId, context) {
       throw new Error(`job-poll-failed:${response.status}`);
     }
     const job = await response.json();
+    const existingJob = runningJobs.get(jobId);
+    jobPollFailures.delete(jobId);
     runningJobs.set(jobId, {
       label: context.label,
+      pathKey: context.pathKey || selectedLaunchPath,
       status: job.status,
+      actionKind: existingJob?.actionKind || context.actionKind || "start",
       detail: job.current_stage || (currentLanguage === "en" ? "processing" : "выполнение"),
     });
     appendJobLogs(job, context);
@@ -3679,6 +3922,7 @@ async function pollJob(jobId, context) {
     if (job.status === "completed" || job.status === "failed") {
       clearInterval(jobPollTimers.get(jobId));
       jobPollTimers.delete(jobId);
+      jobPollFailures.delete(jobId);
       runningJobs.delete(jobId);
       const failureDetail = summarizeFailureDetail(job.logs?.at(-1)?.message || "");
       lastJobSummary = {
@@ -3701,34 +3945,106 @@ async function pollJob(jobId, context) {
           ? `${context.label} ${job.status === "completed" ? "completed" : "failed"} (${job.current_stage || "done"})`
           : `${context.label} ${job.status === "completed" ? "завершён" : "завершился с ошибкой"} (${job.current_stage || "done"})`,
       );
+      if (job.status === "completed" && context.actionKind === "stop") {
+        setLocalRuntimeOverride(context.pathKey || selectedLaunchPath, {
+          status: "not_started",
+          detail: currentLanguage === "en" ? "Runtime was stopped." : "Среда остановлена.",
+          reason: currentLanguage === "en" ? "The selected runtime path is no longer running." : "Выбранный путь запуска больше не работает.",
+          nextAction: currentLanguage === "en" ? "Start the selected path when needed." : "При необходимости снова запусти выбранный путь.",
+        });
+      }
       await hydrateOperatorState();
       await hydrateRuntimeHealth();
       rerenderAll();
+      if (job.status === "completed") {
+        const targetPath = context.pathKey || selectedLaunchPath;
+        if (context.actionKind === "start") {
+          await settleRuntimeState(targetPath, true);
+        } else if (context.actionKind === "stop") {
+          await settleRuntimeState(targetPath, false, 4, 500);
+        }
+      }
     }
-  } catch (_error) {
+  } catch (error) {
+    const failures = (jobPollFailures.get(jobId) || 0) + 1;
+    jobPollFailures.set(jobId, failures);
+    if (failures < 3) {
+      runningJobs.set(jobId, {
+        label: context.label,
+        pathKey: context.pathKey || selectedLaunchPath,
+        status: "running",
+        detail: currentLanguage === "en" ? "refreshing state" : "обновление состояния",
+      });
+      renderSystemStatus();
+      return;
+    }
     clearInterval(jobPollTimers.get(jobId));
     jobPollTimers.delete(jobId);
+    jobPollFailures.delete(jobId);
     runningJobs.delete(jobId);
+    if (context.actionKind === "stop") {
+      setLocalRuntimeOverride(context.pathKey || selectedLaunchPath, {
+        status: "not_started",
+        detail: currentLanguage === "en" ? "Runtime stop completed; control plane became unavailable." : "Остановка завершена; control plane стал недоступен.",
+        reason: currentLanguage === "en" ? "The stop action likely brought down the selected runtime path together with its local control plane." : "Операция остановки, вероятно, завершила выбранный путь запуска вместе с локальным control plane.",
+        nextAction: currentLanguage === "en" ? "Use Launch to start the path again when needed." : "Используй «Запуск», чтобы при необходимости поднять путь снова.",
+      });
+      lastJobSummary = {
+        label: context.label,
+        pathKey: context.pathKey || selectedLaunchPath,
+        outcome: "completed",
+        detail: currentLanguage === "en" ? "stopped (control plane unavailable after stop)" : "остановлено (control plane недоступен после stop)",
+      };
+      appendImmediateJobLifecycleLog(
+        context,
+        currentLanguage === "en"
+          ? `stop completed for ${context.label}; control plane became unavailable`
+          : `остановка завершена для ${context.label}; control plane стал недоступен`,
+      );
+      activityFeed.unshift(
+        currentLanguage === "en"
+          ? `${context.label} stopped; control plane became unavailable`
+          : `${context.label} остановлен; control plane стал недоступен`,
+      );
+      showToast(
+        currentLanguage === "en" ? "Runtime stopped" : "Среда остановлена",
+        pathTitle(runtimePaths[context.pathKey || selectedLaunchPath]),
+        "success",
+      );
+      renderActivity();
+      renderSystemStatus();
+      rerenderAll();
+      return;
+    }
+    const failureDetail = summarizeFailureDetail(
+      error?.message || (currentLanguage === "en" ? "operation refresh failed" : "ошибка обновления состояния"),
+    );
     lastJobSummary = {
       label: context.label,
       pathKey: context.pathKey || selectedLaunchPath,
       outcome: "failed",
-      detail: currentLanguage === "en" ? "job polling failed" : "не удалось опросить задачу",
+      detail: currentLanguage === "en"
+        ? `could not refresh operation state: ${failureDetail}`
+        : `не удалось обновить состояние операции: ${failureDetail}`,
     };
     appendImmediateJobLifecycleLog(
       context,
       currentLanguage === "en"
-        ? `failed to poll job state for ${context.label}`
-        : `не удалось опросить состояние job для ${context.label}`,
+        ? `could not refresh operation state for ${context.label}: ${failureDetail}`
+        : `не удалось обновить состояние операции для ${context.label}: ${failureDetail}`,
     );
     showToast(
-      currentLanguage === "en" ? "Job polling failed" : "Ошибка опроса job",
+      currentLanguage === "en" ? "Operation refresh failed" : "Ошибка обновления операции",
       currentLanguage === "en"
         ? `Could not refresh state for ${context.label}`
         : `Не удалось обновить состояние для ${context.label}`,
       "error",
     );
-    activityFeed.unshift(currentLanguage === "en" ? `Could not poll job for ${context.label}` : `Не удалось опросить job для ${context.label}`);
+    activityFeed.unshift(
+      currentLanguage === "en"
+        ? `Could not refresh operation for ${context.label}`
+        : `Не удалось обновить состояние операции для ${context.label}`,
+    );
     renderActivity();
     renderSystemStatus();
   }
@@ -3757,18 +4073,35 @@ async function runOperatorAction(actionId, context) {
       label: context.label,
       pathKey: context.pathKey || selectedLaunchPath,
       status: "queued",
+      actionKind: context.actionKind || "start",
       detail: currentLanguage === "en" ? "queued" : "в очереди",
     });
     appendImmediateJobLifecycleLog(
       context,
-      currentLanguage === "en"
-        ? `queued ${context.label} via ${actionId}`
-        : `поставлено в очередь: ${context.label} через ${actionId}`,
+      context.actionKind === "stop"
+        ? (currentLanguage === "en"
+          ? `queued stop for ${context.label} via ${actionId}`
+          : `поставлена в очередь остановка: ${context.label} через ${actionId}`)
+        : (currentLanguage === "en"
+          ? `queued ${context.label} via ${actionId}`
+          : `поставлено в очередь: ${context.label} через ${actionId}`),
     );
-    activityFeed.unshift(currentLanguage === "en" ? `${context.label} queued via ${actionId}` : `${context.label} поставлен в очередь через ${actionId}`);
+    activityFeed.unshift(
+      context.actionKind === "stop"
+        ? (currentLanguage === "en" ? `${context.label} stop queued via ${actionId}` : `${context.label} поставлен на остановку через ${actionId}`)
+        : (currentLanguage === "en" ? `${context.label} queued via ${actionId}` : `${context.label} поставлен в очередь через ${actionId}`),
+    );
+    showToast(
+      context.actionKind === "stop"
+        ? (currentLanguage === "en" ? "Runtime is stopping" : "Среда останавливается")
+        : (currentLanguage === "en" ? "Runtime is starting" : "Среда запускается"),
+      pathTitle(runtimePaths[context.pathKey || selectedLaunchPath]),
+      "info",
+    );
     renderActivity();
     renderSystemStatus();
     jobLogOffsets.set(job.job_id, 0);
+    jobPollFailures.set(job.job_id, 0);
     const timerId = setInterval(() => {
       pollJob(job.job_id, context);
     }, 1000);
@@ -3783,16 +4116,26 @@ async function runOperatorAction(actionId, context) {
     };
     appendImmediateJobLifecycleLog(
       context,
-      currentLanguage === "en"
-        ? `failed to start ${context.label}: ${summarizeFailureDetail(error.message || "internal error")}`
-        : `не удалось запустить ${context.label}: ${summarizeFailureDetail(error.message || "внутренняя ошибка")}`,
+      context.actionKind === "stop"
+        ? (currentLanguage === "en"
+          ? `failed to stop ${context.label}: ${summarizeFailureDetail(error.message || "internal error")}`
+          : `не удалось остановить ${context.label}: ${summarizeFailureDetail(error.message || "внутренняя ошибка")}`)
+        : (currentLanguage === "en"
+          ? `failed to start ${context.label}: ${summarizeFailureDetail(error.message || "internal error")}`
+          : `не удалось запустить ${context.label}: ${summarizeFailureDetail(error.message || "внутренняя ошибка")}`),
     );
     showToast(
-      currentLanguage === "en" ? "Could not start action" : "Не удалось запустить действие",
+      context.actionKind === "stop"
+        ? (currentLanguage === "en" ? "Could not stop runtime" : "Не удалось остановить среду")
+        : (currentLanguage === "en" ? "Could not start runtime" : "Не удалось запустить среду"),
       summarizeFailureDetail(error.message || (currentLanguage === "en" ? "internal error" : "внутренняя ошибка")),
       "error",
     );
-    activityFeed.unshift(currentLanguage === "en" ? `Could not start action: ${context.label} (${error.message || "internal error"})` : `Не удалось запустить действие: ${context.label} (${error.message || "внутренняя ошибка"})`);
+    activityFeed.unshift(
+      context.actionKind === "stop"
+        ? (currentLanguage === "en" ? `Could not stop runtime: ${context.label} (${error.message || "internal error"})` : `Не удалось остановить среду: ${context.label} (${error.message || "внутренняя ошибка"})`)
+        : (currentLanguage === "en" ? `Could not start runtime: ${context.label} (${error.message || "internal error"})` : `Не удалось запустить среду: ${context.label} (${error.message || "внутренняя ошибка"})`),
+    );
     renderActivity();
     renderSystemStatus();
   }

@@ -23,3 +23,10 @@ async def test_start_action_job_queues_under_running_event_loop(monkeypatch):
     assert stored is not None
     assert stored.job_id == job.job_id
     assert stored.status in {"queued", "running", "completed"}
+
+
+def test_action_catalog_exposes_runtime_stop_actions():
+    actions = operator_ui_actions.build_action_catalog()
+
+    assert actions["runtime.native.stop"].command[-1].endswith("scripts/stop_native.sh")
+    assert actions["runtime.container.stop"].command[-1].endswith("deploy/offline_bundle/scripts/stop_offline_bundle.sh")

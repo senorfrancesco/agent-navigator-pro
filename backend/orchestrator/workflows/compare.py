@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import asyncio
+import time
 import httpx
 from typing import TypedDict, List, Dict, Any, Annotated, Optional
 import operator
@@ -19,6 +20,7 @@ from services.model_manager.ums_client import ums_client
 from services.observability import inc_metric_counter
 from orchestrator.utils import parse_json_garbage
 from orchestrator.shared.http_client import get_shared_client
+from orchestrator.telemetry_runtime import record_current_duration
 
 # Настройки URL серверов (через переменные окружения)
 MCP_DOCUMENT_SERVER_URL = os.getenv("MCP_DOCUMENT_SERVER_URL", "http://localhost:8001")
@@ -36,12 +38,20 @@ _LEGAL_COMPARE_SELECTION = resolve_model_selection("llm.legal_compare")
 
 
 async def _infer_compare_llm(prompt: str, payload: Dict[str, Any]) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+    started = time.monotonic()
     response = await ums_client.async_infer(
         "llm.legal_compare",
         {
             **payload,
             "prompt": prompt,
         },
+    )
+    record_current_duration(
+        name="ums_compare_infer",
+        elapsed_seconds=time.monotonic() - started,
+        kind="tool",
+        category="llm",
+        meta={"role_key": "llm.legal_compare"},
     )
     model_execution = response.get("model_execution") if isinstance(response, dict) else None
     if not isinstance(model_execution, dict):
@@ -80,9 +90,25 @@ class CompareState(TypedDict):
     final_report: str
     errors: List[str]
     model_execution: Annotated[List[Dict[str, Any]], operator.add]
+    runtime_context: Dict[str, Any]
     session_id: str  # Привязка workflow к сессии (для дедупликации)
 
 # === Nodes ===
+
+def _get_runtime_context(state: CompareState) -> Dict[str, Any]:
+    raw = state.get("runtime_context") or {}
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _format_elapsed_seconds(elapsed_seconds: float) -> str:
+    clamped = max(0.0, float(elapsed_seconds))
+    if clamped < 60:
+        return f"{clamped:.1f} сек."
+    minutes, seconds = divmod(int(round(clamped)), 60)
+    if minutes < 60:
+        return f"{minutes} мин. {seconds} сек."
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} ч. {minutes} мин. {seconds} сек."
 
 def truncate_text(text: str, max_chars: int = COMPARE_TRUNCATE_CHARS) -> str:
     if len(text) <= max_chars:
@@ -467,14 +493,30 @@ async def load_documents_node(state: CompareState):
     client = await get_shared_client()
     try:
         # Загружаем первый документ
+        started = time.monotonic()
         resp1 = await client.post(f"{MCP_DOCUMENT_SERVER_URL}/load_document", json={"path": state['input_1']})
         resp1.raise_for_status()
         text1 = resp1.json().get("text", "")
+        record_current_duration(
+            name="document_server.load_document",
+            elapsed_seconds=time.monotonic() - started,
+            kind="tool",
+            category="service",
+            meta={"document": state.get("name_1") or os.path.basename(state["input_1"])},
+        )
         
         # Загружаем второй документ
+        started = time.monotonic()
         resp2 = await client.post(f"{MCP_DOCUMENT_SERVER_URL}/load_document", json={"path": state['input_2']})
         resp2.raise_for_status()
         text2 = resp2.json().get("text", "")
+        record_current_duration(
+            name="document_server.load_document",
+            elapsed_seconds=time.monotonic() - started,
+            kind="tool",
+            category="service",
+            meta={"document": state.get("name_2") or os.path.basename(state["input_2"])},
+        )
         
         # Разбиваем на чанки
         def dc_smart_chunk(text: str) -> List[str]:
@@ -539,12 +581,20 @@ async def match_chunks_node(state: CompareState):
     try:
         threshold = _resolve_match_threshold(state)
         # Вызываем новый батчевый эндпоинт
+        started = time.monotonic()
         resp = await client.post(f"{MCP_LEGAL_SERVER_URL}/match_batches", json={
             "list_old": state['chunks_old'],
             "list_new": state['chunks_new'],
             "threshold": threshold,
         })
         resp.raise_for_status()
+        record_current_duration(
+            name="legal_server.match_batches",
+            elapsed_seconds=time.monotonic() - started,
+            kind="tool",
+            category="service",
+            meta={"old_chunks": len(state["chunks_old"]), "new_chunks": len(state["chunks_new"])},
+        )
         data = resp.json()
 
         if data.get("status") == "error":
@@ -674,14 +724,22 @@ async def analyze_differences_node(state: CompareState):
 
 async def generate_report_node(state: CompareState):
     """Формирует финальный Markdown отчет и сохраняет его."""
-    import time
     import glob as glob_mod
 
     name_1 = state.get('name_1') or os.path.basename(state['input_1'])
     name_2 = state.get('name_2') or os.path.basename(state['input_2'])
+    runtime_context = _get_runtime_context(state)
 
     report = "# Отчет о сравнении документов\n\n"
     report += f"**Дата:** {time.strftime('%Y-%m-%d %H:%M')}\n"
+    started_at_monotonic = runtime_context.get("started_at_monotonic")
+    if started_at_monotonic is not None:
+        try:
+            elapsed_seconds = time.monotonic() - float(started_at_monotonic)
+        except (TypeError, ValueError):
+            elapsed_seconds = None
+        if elapsed_seconds is not None:
+            report += f"**Время выполнения:** {_format_elapsed_seconds(elapsed_seconds)}\n"
     report += f"**Файлы:**\n- Старая версия: {name_1}\n- Новая версия: {name_2}\n\n"
     report += f"**Найдено изменений:** {len(state['analysis_results'])}\n\n"
     legal_summaries = [r for r in state["analysis_results"] if r.get("type") == "LEGAL_SUMMARY"]

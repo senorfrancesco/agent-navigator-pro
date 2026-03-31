@@ -53,11 +53,21 @@ def test_operator_ui_state_exposes_observability_contract():
 
 
 def test_operator_metrics_and_grafana_endpoints_return_payloads():
-    metrics_payload = operator_metrics_summary()
-    grafana_payload = operator_grafana_links()
+    request = SimpleNamespace(url=SimpleNamespace(port=18000))
+    metrics_payload = operator_metrics_summary(request)
+    grafana_payload = operator_grafana_links(request)
 
     assert {"overview", "services", "deploy"} <= set(metrics_payload.keys())
     assert "links" in grafana_payload
+
+
+def test_operator_metrics_summary_exposes_timing_summary():
+    metrics_payload = operator_metrics_summary(SimpleNamespace(url=SimpleNamespace(port=18000)))
+
+    for section in ("overview", "services", "deploy"):
+        assert isinstance(metrics_payload[section], list)
+    assert "timingSummary" in metrics_payload
+    assert {"latest", "by_executor"} <= set(metrics_payload["timingSummary"].keys())
 
 
 def test_operator_config_apply_rejects_unknown_path():
@@ -85,7 +95,7 @@ def test_operator_config_variants_and_preset_preview_return_payloads():
 
 
 def test_operator_runtime_health_returns_summary_for_path():
-    payload = operator_runtime_health("native")
+    payload = operator_runtime_health("native", SimpleNamespace(url=SimpleNamespace(port=18000)))
 
     assert payload["pathKey"] == "native"
     assert "status" in payload
@@ -96,13 +106,60 @@ def test_operator_runtime_health_returns_summary_for_path():
 
 
 def test_operator_runtime_health_marks_container_as_blocked_with_actionable_summary():
-    payload = operator_runtime_health("container")
+    payload = operator_runtime_health("container", SimpleNamespace(url=SimpleNamespace(port=8000)))
 
     assert payload["pathKey"] == "container"
     assert payload["status"] == "blocked"
     assert payload["reason"]
     assert payload["summary"]
     assert payload["nextAction"]
+
+
+def test_operator_runtime_health_does_not_mark_native_running_from_static_files(monkeypatch):
+    def fake_probe(url: str, timeout: float = 0.75) -> bool:
+        return False
+
+    monkeypatch.setattr("orchestrator.operator_ui_api._http_probe", fake_probe)
+
+    payload = operator_runtime_health("native", SimpleNamespace(url=SimpleNamespace(port=18000)))
+
+    assert payload["pathKey"] == "native"
+    assert payload["status"] == "not_started"
+    assert payload["runningChecks"] == 0
+
+
+def test_operator_runtime_health_marks_native_running_from_live_primary_probes(monkeypatch):
+    def fake_probe(url: str, timeout: float = 0.75) -> bool:
+        return any(port in url for port in (":8000", ":3000", ":8090"))
+
+    monkeypatch.setattr("orchestrator.operator_ui_api._http_probe", fake_probe)
+
+    payload = operator_runtime_health("native", SimpleNamespace(url=SimpleNamespace(port=18000)))
+
+    assert payload["pathKey"] == "native"
+    assert payload["status"] == "running"
+
+
+def test_operator_state_marks_container_rows_not_started_without_bundle_runtime(monkeypatch):
+    monkeypatch.setattr("orchestrator.operator_ui_api._offline_bundle_running_services", lambda _root: set())
+    monkeypatch.setattr("orchestrator.operator_ui_api._http_probe", lambda _url, timeout=0.75: True)
+
+    state = build_operator_state(18000)
+    container_rows = [row for row in state["serviceRows"] if row["path"] == "container"]
+
+    assert container_rows
+    assert all(row["status"] == "not_started" for row in container_rows)
+
+
+def test_operator_state_marks_partial_container_runtime_when_compose_services_missing(monkeypatch):
+    monkeypatch.setattr("orchestrator.operator_ui_api._offline_bundle_running_services", lambda _root: {"agent-api", "chainlit"})
+    monkeypatch.setattr("orchestrator.operator_ui_api._http_probe", lambda _url, timeout=0.75: True)
+
+    state = build_operator_state(18000)
+    container_rows = [row for row in state["serviceRows"] if row["path"] == "container"]
+
+    degraded = [row for row in container_rows if row["status"] == "degraded"]
+    assert degraded
 
 
 @pytest.mark.asyncio
@@ -126,6 +183,29 @@ async def test_operator_action_run_returns_job_snapshot(monkeypatch):
 
     assert payload["job_id"] == "job-123"
     assert payload["status"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_operator_action_run_accepts_runtime_stop_action(monkeypatch):
+    fake_job = SimpleNamespace(
+        to_dict=lambda: {
+            "job_id": "job-stop-123",
+            "action_id": "runtime.native.stop",
+            "status": "queued",
+        }
+    )
+    monkeypatch.setattr(
+        "orchestrator.operator_ui_api.start_action_job",
+        AsyncMock(return_value=fake_job),
+    )
+
+    payload = await operator_action_run(
+        SimpleNamespace(url=SimpleNamespace(port=9000)),
+        OperatorActionRequest(action_id="runtime.native.stop"),
+    )
+
+    assert payload["job_id"] == "job-stop-123"
+    assert payload["action_id"] == "runtime.native.stop"
 
 
 def test_operator_path_browser_lists_allowed_roots():

@@ -45,6 +45,14 @@ def build_action_catalog() -> Dict[str, OperatorActionSpec]:
             command=["bash", str(SCRIPTS_ROOT / "launcher.sh"), "--target", "native", "--profile", "adaptive"],
             cwd=repo,
         ),
+        "runtime.native.stop": OperatorActionSpec(
+            action_id="runtime.native.stop",
+            title="Stop Native Runtime",
+            description="Stop the canonical native runtime tmux session and related processes.",
+            group="runtime",
+            command=["bash", str(SCRIPTS_ROOT / "stop_native.sh")],
+            cwd=repo,
+        ),
         "runtime.container.launch": OperatorActionSpec(
             action_id="runtime.container.launch",
             title="Launch Dev Container Runtime",
@@ -52,6 +60,14 @@ def build_action_catalog() -> Dict[str, OperatorActionSpec]:
             group="runtime",
             command=["bash", str(SCRIPTS_ROOT / "launcher.sh"), "--target", "container", "--profile", "default"],
             cwd=repo,
+        ),
+        "runtime.container.stop": OperatorActionSpec(
+            action_id="runtime.container.stop",
+            title="Stop Offline Bundle Runtime",
+            description="Stop the offline bundle tmux session and related runtime services.",
+            group="runtime",
+            command=["bash", str(OFFLINE_SCRIPTS_ROOT / "stop_offline_bundle.sh")],
+            cwd=offline_repo,
         ),
         "deploy.bundle.build": OperatorActionSpec(
             action_id="deploy.bundle.build",

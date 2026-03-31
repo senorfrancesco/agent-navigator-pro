@@ -37,6 +37,7 @@ from orchestrator.equipment_parsing import (
     parse_specification_like_elements,
     score_document_role,
 )
+from orchestrator.telemetry_runtime import record_current_duration
 
 # URLs серверов
 MCP_DOCUMENT_SERVER_URL = os.getenv("MCP_DOCUMENT_SERVER_URL", "http://localhost:8001")
@@ -112,12 +113,20 @@ async def _infer_equipment_llm_with_failover(
     prompt: str,
     payload: Dict[str, Any],
 ) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    started = time.monotonic()
     response = await ums_client.async_infer(
         "llm.legal_compare",
         {
             **payload,
             "prompt": prompt,
         },
+    )
+    record_current_duration(
+        name="ums_equipment_infer",
+        elapsed_seconds=time.monotonic() - started,
+        kind="tool",
+        category="llm",
+        meta={"stage": stage},
     )
     model_execution = response.get("model_execution") if isinstance(response, dict) else None
     if not isinstance(model_execution, dict):
@@ -209,6 +218,7 @@ class EquipmentState(TypedDict):
     extraction_metadata: Dict[str, Any]
     model_execution: Annotated[List[Dict[str, Any]], operator.add]
     errors: Annotated[List[str], operator.add]  # Накопление через reducer
+    runtime_context: Dict[str, Any]
     session_id: str
 
 
@@ -228,6 +238,22 @@ def _load_parsers_config() -> Dict:
 _CONFIG = _load_parsers_config()
 _HEADER_KEYWORDS = _CONFIG.get("header_keywords", {})
 _GARBAGE_VALUES = _CONFIG.get("garbage_values", [])
+
+
+def _get_runtime_context(state: EquipmentState) -> Dict[str, Any]:
+    raw = state.get("runtime_context") or {}
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _format_elapsed_seconds(elapsed_seconds: float) -> str:
+    clamped = max(0.0, float(elapsed_seconds))
+    if clamped < 60:
+        return f"{clamped:.1f} сек."
+    minutes, seconds = divmod(int(round(clamped)), 60)
+    if minutes < 60:
+        return f"{minutes} мин. {seconds} сек."
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} ч. {minutes} мин. {seconds} сек."
 
 
 def _detect_header_columns(header_row: List[str]) -> Dict[str, int]:
@@ -778,11 +804,19 @@ async def _chunk_text(text: str) -> List[str]:
 
     client = await get_shared_client()
     try:
+        started = time.monotonic()
         resp = await client.post(
             f"{MCP_DOCUMENT_SERVER_URL}/smart_chunk",
             json={"text": text, "max_tokens": CHUNK_MAX_TOKENS, "overlap": CHUNK_OVERLAP},
         )
         resp.raise_for_status()
+        record_current_duration(
+            name="document_server.smart_chunk",
+            elapsed_seconds=time.monotonic() - started,
+            kind="tool",
+            category="service",
+            meta={"text_chars": len(text)},
+        )
         data = resp.json()
         chunks = data.get("chunks", [])
         if chunks:
@@ -877,6 +911,7 @@ async def _extract_tables_from_doc(path: str) -> List[Dict[str, Any]]:
 
     client = await get_shared_client()
     try:
+        started = time.monotonic()
         if ext == ".pdf":
             resp = await client.post(f"{MCP_DOCUMENT_SERVER_URL}/extract_tables", json={"path": path})
         elif ext == ".docx":
@@ -887,6 +922,13 @@ async def _extract_tables_from_doc(path: str) -> List[Dict[str, Any]]:
             return []
 
         resp.raise_for_status()
+        record_current_duration(
+            name="document_server.extract_tables",
+            elapsed_seconds=time.monotonic() - started,
+            kind="tool",
+            category="service",
+            meta={"path": path, "ext": ext},
+        )
         data = resp.json()
         if data.get("status") == "error":
             raise RuntimeError(data.get("error", "Unknown error from document server"))
@@ -960,8 +1002,16 @@ async def _extract_items_llm(
     """Извлекает позиции из текста документа через LLM (Pass 2, Map-Reduce)."""
     client = await get_shared_client()
     try:
+        started = time.monotonic()
         resp = await client.post(f"{MCP_DOCUMENT_SERVER_URL}/load_document", json={"path": path})
         resp.raise_for_status()
+        record_current_duration(
+            name="document_server.load_document",
+            elapsed_seconds=time.monotonic() - started,
+            kind="tool",
+            category="service",
+            meta={"path": path},
+        )
         text = resp.json().get("text", "")
         if not text.strip():
             return []
@@ -1166,12 +1216,20 @@ async def match_items_node(state: EquipmentState) -> dict:
 
     client = await get_shared_client()
     try:
+        started = time.monotonic()
         resp = await client.post(f"{MCP_LEGAL_SERVER_URL}/match_batches", json={
             "list_old": list_old,
             "list_new": list_new,
             "threshold": MATCH_SIMILARITY_THRESHOLD,
         })
         resp.raise_for_status()
+        record_current_duration(
+            name="legal_server.match_batches",
+            elapsed_seconds=time.monotonic() - started,
+            kind="tool",
+            category="service",
+            meta={"old_items": len(list_old), "new_items": len(list_new)},
+        )
         data = resp.json()
 
         if data.get("status") == "error":
@@ -1339,6 +1397,7 @@ async def generate_equipment_report_node(state: EquipmentState) -> dict:
     name_1 = state.get("name_1") or os.path.basename(state["input_1"])
     name_2 = state.get("name_2") or os.path.basename(state["input_2"])
     mode = state.get("mode", "tz_vs_smeta")
+    runtime_context = _get_runtime_context(state)
     errors = state.get("errors", [])
     items_1 = state.get("items_1", [])
     items_2 = state.get("items_2", [])
@@ -1352,6 +1411,14 @@ async def generate_equipment_report_node(state: EquipmentState) -> dict:
 
     report = f"# {title}\n\n"
     report += f"**Дата:** {time.strftime('%Y-%m-%d %H:%M')}\n"
+    started_at_monotonic = runtime_context.get("started_at_monotonic")
+    if started_at_monotonic is not None:
+        try:
+            elapsed_seconds = time.monotonic() - float(started_at_monotonic)
+        except (TypeError, ValueError):
+            elapsed_seconds = None
+        if elapsed_seconds is not None:
+            report += f"**Время выполнения:** {_format_elapsed_seconds(elapsed_seconds)}\n"
     report += f"**Документ 1:** {name_1}\n"
     report += f"**Документ 2:** {name_2}\n"
     report += f"**Режим:** {mode}\n\n"

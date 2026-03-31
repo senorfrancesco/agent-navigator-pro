@@ -30,6 +30,15 @@ from orchestrator.ui_control_plane import (
     resolve_effective_settings,
 )
 from orchestrator.workflows.equipment import detect_equipment_mode
+from orchestrator.telemetry_runtime import (
+    append_telemetry_footer,
+    begin_execution_telemetry,
+    finish_current_span,
+    record_current_duration,
+    record_quality_signals,
+    reset_execution_telemetry,
+    start_current_span,
+)
 from services.observability import inc_metric_counter
 from services.model_manager.model_selection import resolve_model_selection
 from services.model_manager.ums_client import UMSBusyError, create_ums_embed_fn, ums_client
@@ -1202,9 +1211,143 @@ def _derive_run_status(response: Dict[str, Any]) -> str:
     return "decision_ready"
 
 
+def _extract_quality_signals_from_result(
+    *,
+    executor: str,
+    result: Dict[str, Any],
+    response: Dict[str, Any],
+) -> Dict[str, Any]:
+    signals = dict(result.get("quality_signals") or {})
+    assistant_message = str(result.get("assistant_message") or "")
+    citations_count = len(re.findall(r"\[(\d+)\]", assistant_message))
+    if citations_count:
+        signals.setdefault("citations_count", citations_count)
+    signals.setdefault("report_generated", bool(result.get("generated_report")))
+    signals.setdefault("sources_count", len(result.get("sources") or response.get("sources") or []))
+    model_execution = result.get("model_execution")
+    if isinstance(model_execution, list):
+        model_execution = _summarize_model_execution_events(
+            [event for event in model_execution if isinstance(event, dict)]
+        )
+    elif not isinstance(model_execution, dict):
+        model_execution = None
+    signals.setdefault("fallback_used", bool((model_execution or {}).get("fallback_used")))
+    if executor == "chat":
+        signals.setdefault("structured_output_ok", None)
+    return signals
+
+
+def _instrument_execution_dependencies(deps: ExecutionDependencies) -> ExecutionDependencies:
+    async def _infer_assistant_text(*args: Any, **kwargs: Any) -> str:
+        span = start_current_span(
+            name="assistant_inference",
+            kind="tool",
+            category="llm",
+            meta={"summary_stage": kwargs.get("summary_stage")},
+        )
+        try:
+            result = await deps.infer_assistant_text(*args, **kwargs)
+        except Exception:
+            finish_current_span(span, status="error")
+            raise
+        finish_current_span(span, status="ok")
+        return result
+
+    async def _ensure_rag_index_for_doc_ids(*args: Any, **kwargs: Any) -> Any:
+        span = start_current_span(name="ensure_rag_index", kind="tool", category="tool")
+        try:
+            result = await deps.ensure_rag_index_for_doc_ids(*args, **kwargs)
+        except Exception:
+            finish_current_span(span, status="error")
+            raise
+        finish_current_span(span, status="ok")
+        return result
+
+    async def _attach_and_register_report(*args: Any, **kwargs: Any) -> Any:
+        span = start_current_span(name="attach_and_register_report", kind="tool", category="report")
+        try:
+            result = await deps.attach_and_register_report(*args, **kwargs)
+        except Exception:
+            finish_current_span(span, status="error")
+            raise
+        finish_current_span(span, status="ok")
+        return result
+
+    def _get_retrieval_embed_fn() -> Any:
+        embed_fn = deps.get_retrieval_embed_fn()
+        if embed_fn is None or getattr(embed_fn, "_telemetry_wrapped", False):
+            return embed_fn
+
+        def _wrapped(texts: List[str]) -> Any:
+            started = time.monotonic()
+            try:
+                result = embed_fn(texts)
+            except Exception:
+                record_current_duration(
+                    name="retrieval_embeddings",
+                    elapsed_seconds=time.monotonic() - started,
+                    kind="tool",
+                    category="embedding",
+                    status="error",
+                    meta={"batch_size": len(texts or [])},
+                )
+                raise
+            record_current_duration(
+                name="retrieval_embeddings",
+                elapsed_seconds=time.monotonic() - started,
+                kind="tool",
+                category="embedding",
+                status="ok",
+                meta={"batch_size": len(texts or [])},
+            )
+            return result
+
+        setattr(_wrapped, "_telemetry_wrapped", True)
+        return _wrapped
+
+    return ExecutionDependencies(
+        infer_assistant_text=_infer_assistant_text,
+        build_prompt=deps.build_prompt,
+        get_profile_system_prompt=deps.get_profile_system_prompt,
+        has_retrieval_adapter=deps.has_retrieval_adapter,
+        get_retrieval_embed_fn=_get_retrieval_embed_fn,
+        get_knowledge_base_store=deps.get_knowledge_base_store,
+        get_active_doc_ids=deps.get_active_doc_ids,
+        get_all_docs=deps.get_all_docs,
+        get_active_docs=deps.get_active_docs,
+        get_report_docs=deps.get_report_docs,
+        resolve_target_doc_name=deps.resolve_target_doc_name,
+        is_report_query=deps.is_report_query,
+        ensure_rag_index_for_doc_ids=_ensure_rag_index_for_doc_ids,
+        get_rag_pipeline=deps.get_rag_pipeline,
+        build_sources_from_rag_result=deps.build_sources_from_rag_result,
+        reindex_sources=deps.reindex_sources,
+        build_doc_question_deterministic_fallback=deps.build_doc_question_deterministic_fallback,
+        render_doc_question_markdown=deps.render_doc_question_markdown,
+        build_doc_question_prompt_with_sources=deps.build_doc_question_prompt_with_sources,
+        citations_are_valid=deps.citations_are_valid,
+        needs_doc_question_regen=deps.needs_doc_question_regen,
+        extract_citation_ids=deps.extract_citation_ids,
+        has_sufficient_evidence=deps.has_sufficient_evidence,
+        compute_confidence_v1=deps.compute_confidence_v1,
+        strip_model_source_sections=deps.strip_model_source_sections,
+        to_host_path=deps.to_host_path,
+        active_set_status_line=deps.active_set_status_line,
+        attach_and_register_report=_attach_and_register_report,
+        update_progress_box=deps.update_progress_box,
+        clear_progress_box=deps.clear_progress_box,
+        is_cancelled=deps.is_cancelled,
+        record_model_execution=deps.record_model_execution,
+        get_model_execution_events=deps.get_model_execution_events,
+    )
+
+
 async def _run_graph(workflow: Any, initial_state: Dict[str, Any]) -> Dict[str, Any]:
     final_state: Dict[str, Any] = {}
+    graph_started = time.monotonic()
+    last_completed = graph_started
     async for event in workflow.astream(initial_state):
+        event_completed = time.monotonic()
         for _, output in event.items():
             if "errors" in output and "errors" in final_state:
                 existing = final_state["errors"]
@@ -1213,6 +1356,14 @@ async def _run_graph(workflow: Any, initial_state: Dict[str, Any]) -> Dict[str, 
                     output = dict(output)
                     output["errors"] = existing + new
             final_state.update(output)
+        for node_name in event.keys():
+            record_current_duration(
+                name=str(node_name),
+                elapsed_seconds=max(0.0, event_completed - last_completed),
+                kind="stage",
+                category="workflow",
+            )
+            last_completed = event_completed
     return final_state
 
 
@@ -1292,10 +1443,18 @@ async def _execute_compare(
             "analysis_results": [],
             "final_report": "",
             "errors": [],
+            "runtime_context": {
+                "started_at_monotonic": time.monotonic(),
+            },
         },
     )
     report = final_state.get("final_report", "")
     errors = final_state.get("errors", [])
+    quality_signals = {
+        "structured_output_ok": not bool(errors),
+        "coverage_signals": len(final_state.get("analysis_results") or []),
+        "parsed_items": len(final_state.get("matches") or []),
+    }
     summary_metadata = final_state.get("summary_metadata") or {}
     model_execution = final_state.get("model_execution") or _summarize_model_execution_events(
         _collect_model_execution_events(deps)
@@ -1338,6 +1497,7 @@ async def _execute_compare(
             "assistant_message": report,
             "generated_report": report,
             "execution_metadata": execution_metadata,
+            "quality_signals": quality_signals,
             **({"model_execution": model_execution} if model_execution is not None else {}),
         }
     if errors:
@@ -1381,11 +1541,19 @@ async def _execute_equipment(
             "analysis_results": [],
             "final_report": "",
             "errors": [],
+            "runtime_context": {
+                "started_at_monotonic": time.monotonic(),
+            },
             "session_id": "",
         },
     )
     report = final_state.get("final_report", "")
     errors = final_state.get("errors", [])
+    quality_signals = {
+        "structured_output_ok": not bool(errors),
+        "coverage_signals": len(final_state.get("analysis_results") or []),
+        "parsed_items": len(final_state.get("items_1") or []) + len(final_state.get("items_2") or []),
+    }
     summary_metadata = final_state.get("summary_metadata") or {}
     model_execution = final_state.get("model_execution") or _summarize_model_execution_events(
         _collect_model_execution_events(deps)
@@ -1406,6 +1574,7 @@ async def _execute_equipment(
             "assistant_message": report,
             "generated_report": report,
             "execution_metadata": execution_metadata,
+            "quality_signals": quality_signals,
             **({"model_execution": model_execution} if model_execution is not None else {}),
         }
     if errors:
@@ -1451,6 +1620,11 @@ async def _execute_document_analysis(
     )
     report = final_state.get("final_report", "")
     errors = final_state.get("errors", [])
+    quality_signals = {
+        "structured_output_ok": not bool(errors),
+        "coverage_signals": len(final_state.get("summary") or ""),
+        "parsed_items": len(final_state.get("items") or []),
+    }
     summary_metadata = final_state.get("summary_metadata") or {}
     model_execution = final_state.get("model_execution") or _summarize_model_execution_events(
         _collect_model_execution_events(deps)
@@ -1471,6 +1645,7 @@ async def _execute_document_analysis(
             "assistant_message": report,
             "generated_report": report,
             "execution_metadata": execution_metadata,
+            "quality_signals": quality_signals,
             **({"model_execution": model_execution} if model_execution is not None else {}),
         }
     if errors:
@@ -2070,6 +2245,11 @@ async def _execute_documents_summary(
     )
     result = {"assistant_message": "\n".join(lines).strip()}
     result["execution_metadata"] = execution_metadata
+    result["quality_signals"] = {
+        "structured_output_ok": True,
+        "coverage_signals": len(per_doc),
+        "parsed_items": processed_chunks,
+    }
     model_execution = _summarize_model_execution_events(_collect_model_execution_events(deps))
     if model_execution is not None:
         result["model_execution"] = model_execution
@@ -2108,6 +2288,7 @@ async def _execute_doc_question(
     source_scope_summary = "session" if rag_scope == "session_rag" else "knowledge_base"
 
     if rag_scope in {"session_rag", "knowledge_base_rag"}:
+        merged_started = time.monotonic()
         merged = retrieve_merged_chunks(
             query=query,
             rag_scope=rag_scope,
@@ -2118,6 +2299,14 @@ async def _execute_doc_question(
             kb_store=deps.get_knowledge_base_store(),
             top_k=max(20, int(getattr(deps.get_rag_pipeline() or object(), "top_k", 5)) * 4) if target_doc_name else 20,
             candidate_budget_per_scope=12,
+        )
+        record_current_duration(
+            name="retrieve_merged_chunks",
+            elapsed_seconds=time.monotonic() - merged_started,
+            kind="tool",
+            category="tool",
+            status="ok",
+            meta={"rag_scope": rag_scope},
         )
         kb_sources = merged.get("chunks")
         source_scope_summary = str(merged.get("source_scope_summary") or source_scope_summary)
@@ -2152,11 +2341,27 @@ async def _execute_doc_question(
 
     if not sources and rag is not None and getattr(rag, "_indexed", False):
         try:
+            rag_started = time.monotonic()
             retrieve_top_k = max(20, int(getattr(rag, "top_k", 5)) * 4) if target_doc_name else None
             rag_result = await asyncio.to_thread(rag.retrieve, query, retrieve_top_k)
+            record_current_duration(
+                name="rag_retrieve",
+                elapsed_seconds=time.monotonic() - rag_started,
+                kind="tool",
+                category="tool",
+                status="ok",
+                meta={"top_k": retrieve_top_k},
+            )
             rag_meta = getattr(rag_result, "metadata", None) or {}
             rag_mode = str(rag_meta.get("mode", "simple"))
         except Exception as exc:
+            record_current_duration(
+                name="rag_retrieve",
+                elapsed_seconds=time.monotonic() - rag_started,
+                kind="tool",
+                category="tool",
+                status="error",
+            )
             logger.warning("RAG retrieve failed in doc_question path: %s", exc, exc_info=True)
             inc_metric_counter(
                 "agent_nav_fallback_events_total",
@@ -2179,6 +2384,12 @@ async def _execute_doc_question(
         return {
             "assistant_message": deps.render_doc_question_markdown(payload),
             "sources": payload.get("sources", []),
+            "quality_signals": {
+                "structured_output_ok": False,
+                "coverage_signals": 0,
+                "parsed_items": 0,
+                "used_rag": retrieval_available,
+            },
         }
 
     if rag_result is None and not sources:
@@ -2190,7 +2401,13 @@ async def _execute_doc_question(
             "assistant_message": (
                 "По текущему запросу не удалось получить проверяемые источники из RAG. "
                 "Уточните формулировку или вопрос к конкретной позиции."
-            )
+            ),
+            "quality_signals": {
+                "structured_output_ok": False,
+                "coverage_signals": 0,
+                "parsed_items": 0,
+                "used_rag": True,
+            },
         }
 
     if not sources:
@@ -2221,6 +2438,12 @@ async def _execute_doc_question(
         return {
             "assistant_message": deps.render_doc_question_markdown(payload),
             "sources": payload.get("sources", []),
+            "quality_signals": {
+                "structured_output_ok": False,
+                "coverage_signals": len(sources),
+                "parsed_items": len(sources),
+                "used_rag": True,
+            },
             **({"model_execution": _summarize_model_execution_events(_collect_model_execution_events(deps))} if _collect_model_execution_events(deps) else {}),
         }
 
@@ -2358,6 +2581,13 @@ async def _execute_doc_question(
     return {
         "assistant_message": deps.render_doc_question_markdown(payload),
         "sources": payload.get("sources", []),
+        "quality_signals": {
+            "structured_output_ok": payload.get("fallback_type") in {None, "none"},
+            "coverage_signals": len(sources),
+            "parsed_items": len(sources),
+            "used_rag": True,
+            "citations_count": len(cited_ids),
+        },
         **({"model_execution": _summarize_model_execution_events(_collect_model_execution_events(deps))} if _collect_model_execution_events(deps) else {}),
     }
 
@@ -2411,6 +2641,11 @@ async def _execute_general_chat(
             answer = _extract_clean_sentence_for_script(answer, _detect_dominant_script(query))
     model_execution = _summarize_model_execution_events(_collect_model_execution_events(deps))
     response = {"assistant_message": answer}
+    response["quality_signals"] = {
+        "structured_output_ok": True,
+        "coverage_signals": 1,
+        "parsed_items": 0,
+    }
     if model_execution is not None:
         response["model_execution"] = model_execution
     return response
@@ -2421,149 +2656,197 @@ async def execute_orchestration(
     *,
     deps: Optional[ExecutionDependencies] = None,
 ) -> Dict[str, Any]:
+    telemetry_collector, telemetry_token = begin_execution_telemetry()
     request = copy.deepcopy(request)
-    session_docs = request.get("session_docs") or {}
-    attachments_meta = request.get("attachments_meta") or []
-    history = request.get("history") or []
-
-    effective_settings = copy.deepcopy(request.get("effective_settings") or resolve_effective_settings(_collect_raw_control_plane(request)))
-    runtime_mode = resolve_request_runtime_mode(request, effective_settings)
-    state_store = get_orchestration_state_store()
-    run_record = await state_store.get_or_create_run(
-        thread_id=request.get("thread_id"),
-        session_id=request.get("session_id"),
-        workflow_type=_resolve_workflow_type(request),
-        idempotency_key=request.get("idempotency_key"),
-    )
-    request["run_id"] = run_record.run_id
-    request["state_ref"] = run_record.state_ref
-    request["state_version"] = run_record.version
-    classifier_result = request.get("classifier_result")
-    if classifier_result is None and not request.get("forced_route"):
-        classifier_result = await _resolve_classifier_result_for_request(
-            query=str(request.get("message", "") or ""),
-            effective_settings=effective_settings,
-        )
-    request["classifier_result"] = classifier_result
-    runtime_budget_metadata = request.get("runtime_budget_metadata")
-    if isinstance(runtime_budget_metadata, dict):
-        effective_settings["runtime_budget_metadata"] = copy.deepcopy(runtime_budget_metadata)
-
-    decision = decide_orchestration(
-        query=request.get("message", ""),
-        trace_id=request.get("trace_id"),
-        runtime_mode=runtime_mode,
-        rag_scope=str(effective_settings.get("rag_scope") or "off"),
-        knowledge_collection_id=effective_settings.get("knowledge_collection_id"),
-        file_count=int(request.get("file_count", 0)),
-        has_session_docs=bool(request.get("has_session_docs", False)),
-        session_docs=session_docs,
-        classifier_result=classifier_result,
-        new_files=attachments_meta,
-        active_doc_ids=request.get("active_doc_ids") or [],
-        forced_route=request.get("forced_route"),
-    )
-    response = _with_execution_metadata(decision, request=request, effective_settings=effective_settings)
-
-    if response.get("action_required"):
-        updated = await state_store.save_run(
-            run_id=run_record.run_id,
-            status=_derive_run_status(response),
-            pending_action_id=response.get("pending_action_id"),
-            resume_state_blob=_merge_resume_state_blob(request, response),
-            checkpoint_blob=_build_checkpoint_blob(request, response),
-            expected_version=run_record.version,
-        )
-        response["state_version"] = updated.version
-        return response
-
-    if deps is None:
-        updated = await state_store.save_run(
-            run_id=run_record.run_id,
-            status=_derive_run_status(response),
-            pending_action_id=response.get("pending_action_id"),
-            resume_state_blob=_merge_resume_state_blob(request, response),
-            checkpoint_blob=_build_checkpoint_blob(request, response),
-            expected_version=run_record.version,
-        )
-        response["state_version"] = updated.version
-        return response
-
-    executor = response.get("executor") or "chat"
     try:
-        if executor == "compare_documents":
-            result = await _execute_compare(new_files=attachments_meta, session_docs=session_docs, deps=deps)
-        elif executor == "equipment_analysis":
-            result = await _execute_equipment(
-                query=request.get("message", ""),
-                new_files=attachments_meta,
-                session_docs=session_docs,
-                deps=deps,
-            )
-        elif executor == "document_analysis":
-            result = await _execute_document_analysis(
-                new_files=attachments_meta,
-                session_docs=session_docs,
-                effective_settings=effective_settings,
-                deps=deps,
-            )
-        elif executor == "document_question":
-            result = await _execute_doc_question(
-                query=request.get("message", ""),
-                history=history,
-                session_docs=session_docs,
-                effective_settings=effective_settings,
-                deps=deps,
-            )
-        elif executor == "documents_summary":
-            result = await _execute_documents_summary(
-                query=request.get("message", ""),
-                history=history,
-                effective_settings=effective_settings,
-                deps=deps,
-            )
-        else:
-            result = await _execute_general_chat(
-                query=request.get("message", ""),
-                history=history,
-                session_docs=session_docs,
-                effective_settings=effective_settings,
-                deps=deps,
-            )
-    except asyncio.CancelledError:
-        result = {
-            "assistant_message": "Запрос остановлен пользователем.",
-            "execution_metadata": {"status": "cancelled"},
-        }
-    except UMSBusyError:
-        result = {
-            "assistant_message": "Модель занята предыдущим тяжёлым запросом. Дождитесь освобождения слота или остановите активный запуск.",
-            "execution_metadata": {"status": "busy"},
-        }
-    except Exception as exc:
-        result = {"assistant_message": f"Ошибка выполнения сценария: {exc}"}
+        session_docs = request.get("session_docs") or {}
+        attachments_meta = request.get("attachments_meta") or []
+        history = request.get("history") or []
 
-    if result.get("generated_report"):
-        response["ui_effects"]["generated_report"] = result["generated_report"]
-    response["assistant_message"] = result.get("assistant_message") or response.get("assistant_message")
-    response["sources"] = result.get("sources", response.get("sources", []))
-    if result.get("execution_metadata"):
-        response["execution_metadata"] = result["execution_metadata"]
-    if result.get("model_execution"):
-        response["model_execution"] = result["model_execution"]
-    elif deps is not None:
-        collected_model_execution = _summarize_model_execution_events(_collect_model_execution_events(deps))
-        if collected_model_execution is not None:
-            response["model_execution"] = collected_model_execution
-    status = _derive_run_status(response)
-    updated = await state_store.save_run(
-        run_id=run_record.run_id,
-        status=status,
-        pending_action_id=response.get("pending_action_id"),
-        resume_state_blob=_merge_resume_state_blob(request, response),
-        checkpoint_blob=_build_checkpoint_blob(request, response),
-        last_error=response.get("assistant_message") if status == "failed" else None,
-        expected_version=run_record.version,
-    )
-    response["state_version"] = updated.version
-    return response
+        effective_settings = copy.deepcopy(request.get("effective_settings") or resolve_effective_settings(_collect_raw_control_plane(request)))
+        runtime_mode = resolve_request_runtime_mode(request, effective_settings)
+        state_store = get_orchestration_state_store()
+        run_record = await state_store.get_or_create_run(
+            thread_id=request.get("thread_id"),
+            session_id=request.get("session_id"),
+            workflow_type=_resolve_workflow_type(request),
+            idempotency_key=request.get("idempotency_key"),
+        )
+        request["run_id"] = run_record.run_id
+        request["state_ref"] = run_record.state_ref
+        request["state_version"] = run_record.version
+        classifier_result = request.get("classifier_result")
+        if classifier_result is None and not request.get("forced_route"):
+            classifier_span = start_current_span(name="resolve_classifier_result", kind="stage", category="tool")
+            classifier_result = await _resolve_classifier_result_for_request(
+                query=str(request.get("message", "") or ""),
+                effective_settings=effective_settings,
+            )
+            finish_current_span(classifier_span, status="ok")
+        request["classifier_result"] = classifier_result
+        runtime_budget_metadata = request.get("runtime_budget_metadata")
+        if isinstance(runtime_budget_metadata, dict):
+            effective_settings["runtime_budget_metadata"] = copy.deepcopy(runtime_budget_metadata)
+
+        decision_span = start_current_span(name="decide_orchestration", kind="stage", category="tool")
+        decision = decide_orchestration(
+            query=request.get("message", ""),
+            trace_id=request.get("trace_id"),
+            runtime_mode=runtime_mode,
+            rag_scope=str(effective_settings.get("rag_scope") or "off"),
+            knowledge_collection_id=effective_settings.get("knowledge_collection_id"),
+            file_count=int(request.get("file_count", 0)),
+            has_session_docs=bool(request.get("has_session_docs", False)),
+            session_docs=session_docs,
+            classifier_result=classifier_result,
+            new_files=attachments_meta,
+            active_doc_ids=request.get("active_doc_ids") or [],
+            forced_route=request.get("forced_route"),
+        )
+        finish_current_span(decision_span, status="ok")
+        response = _with_execution_metadata(decision, request=request, effective_settings=effective_settings)
+
+        if response.get("action_required"):
+            updated = await state_store.save_run(
+                run_id=run_record.run_id,
+                status=_derive_run_status(response),
+                pending_action_id=response.get("pending_action_id"),
+                resume_state_blob=_merge_resume_state_blob(request, response),
+                checkpoint_blob=_build_checkpoint_blob(request, response),
+                expected_version=run_record.version,
+            )
+            response["state_version"] = updated.version
+            response["telemetry"] = telemetry_collector.finalize(
+                executor=str(response.get("executor") or "decision"),
+                route=str(response.get("route") or "decision"),
+                response=response,
+                quality_signals={"structured_output_ok": True, "coverage_signals": 0, "parsed_items": 0},
+            )
+            return response
+
+        if deps is None:
+            updated = await state_store.save_run(
+                run_id=run_record.run_id,
+                status=_derive_run_status(response),
+                pending_action_id=response.get("pending_action_id"),
+                resume_state_blob=_merge_resume_state_blob(request, response),
+                checkpoint_blob=_build_checkpoint_blob(request, response),
+                expected_version=run_record.version,
+            )
+            response["state_version"] = updated.version
+            response["telemetry"] = telemetry_collector.finalize(
+                executor=str(response.get("executor") or "decision"),
+                route=str(response.get("route") or "decision"),
+                response=response,
+                quality_signals={"structured_output_ok": True, "coverage_signals": 0, "parsed_items": 0},
+            )
+            return response
+
+        deps = _instrument_execution_dependencies(deps)
+        executor = response.get("executor") or "chat"
+        exec_span = start_current_span(name=str(executor), kind="stage", category="workflow")
+        try:
+            if executor == "compare_documents":
+                result = await _execute_compare(new_files=attachments_meta, session_docs=session_docs, deps=deps)
+            elif executor == "equipment_analysis":
+                result = await _execute_equipment(
+                    query=request.get("message", ""),
+                    new_files=attachments_meta,
+                    session_docs=session_docs,
+                    deps=deps,
+                )
+            elif executor == "document_analysis":
+                result = await _execute_document_analysis(
+                    new_files=attachments_meta,
+                    session_docs=session_docs,
+                    effective_settings=effective_settings,
+                    deps=deps,
+                )
+            elif executor == "document_question":
+                result = await _execute_doc_question(
+                    query=request.get("message", ""),
+                    history=history,
+                    session_docs=session_docs,
+                    effective_settings=effective_settings,
+                    deps=deps,
+                )
+            elif executor == "documents_summary":
+                result = await _execute_documents_summary(
+                    query=request.get("message", ""),
+                    history=history,
+                    effective_settings=effective_settings,
+                    deps=deps,
+                )
+            else:
+                result = await _execute_general_chat(
+                    query=request.get("message", ""),
+                    history=history,
+                    session_docs=session_docs,
+                    effective_settings=effective_settings,
+                    deps=deps,
+                )
+            finish_current_span(exec_span, status="ok")
+        except asyncio.CancelledError:
+            finish_current_span(exec_span, status="cancelled")
+            result = {
+                "assistant_message": "Запрос остановлен пользователем.",
+                "execution_metadata": {"status": "cancelled"},
+                "quality_signals": {"structured_output_ok": False, "coverage_signals": 0, "parsed_items": 0},
+            }
+        except UMSBusyError:
+            finish_current_span(exec_span, status="busy")
+            result = {
+                "assistant_message": "Модель занята предыдущим тяжёлым запросом. Дождитесь освобождения слота или остановите активный запуск.",
+                "execution_metadata": {"status": "busy"},
+                "quality_signals": {"structured_output_ok": False, "coverage_signals": 0, "parsed_items": 0},
+            }
+        except Exception as exc:
+            finish_current_span(exec_span, status="error")
+            result = {
+                "assistant_message": f"Ошибка выполнения сценария: {exc}",
+                "execution_metadata": {"status": "failed"},
+                "quality_signals": {"structured_output_ok": False, "coverage_signals": 0, "parsed_items": 0},
+            }
+
+        if result.get("generated_report"):
+            response["ui_effects"]["generated_report"] = result["generated_report"]
+        response["assistant_message"] = result.get("assistant_message") or response.get("assistant_message")
+        response["sources"] = result.get("sources", response.get("sources", []))
+        if result.get("execution_metadata"):
+            response["execution_metadata"] = result["execution_metadata"]
+        if result.get("model_execution"):
+            response["model_execution"] = result["model_execution"]
+        elif deps is not None:
+            collected_model_execution = _summarize_model_execution_events(_collect_model_execution_events(deps))
+            if collected_model_execution is not None:
+                response["model_execution"] = collected_model_execution
+        quality_signals = _extract_quality_signals_from_result(
+            executor=str(executor),
+            result=result,
+            response=response,
+        )
+        record_quality_signals(**quality_signals)
+        response["telemetry"] = telemetry_collector.finalize(
+            executor=str(executor),
+            route=str(response.get("route") or executor),
+            response=response,
+            quality_signals=quality_signals,
+        )
+        response["assistant_message"] = append_telemetry_footer(
+            response["assistant_message"],
+            response["telemetry"],
+        )
+        status = _derive_run_status(response)
+        updated = await state_store.save_run(
+            run_id=run_record.run_id,
+            status=status,
+            pending_action_id=response.get("pending_action_id"),
+            resume_state_blob=_merge_resume_state_blob(request, response),
+            checkpoint_blob=_build_checkpoint_blob(request, response),
+            last_error=response.get("assistant_message") if status == "failed" else None,
+            expected_version=run_record.version,
+        )
+        response["state_version"] = updated.version
+        return response
+    finally:
+        reset_execution_telemetry(telemetry_token)

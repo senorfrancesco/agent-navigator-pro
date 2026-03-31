@@ -153,6 +153,19 @@
   План: после исправления очереди и parse-path повторно проверить фактический объём LLM-вызовов, убедиться, что structural diff'ы не гоняются через LLM, и оценить необходимость дополнительного ограничения `COMPARE_ANALYSIS_MAX_TOKENS` / prompt-size для offline режима.
   Verification: повторный docker log inspection `chainlit` + `ums`, сравнение количества `POST /infer`, latency и времени до `Saved new report`.
 
+## Instrumentation / Reporting (2026-03-31)
+
+- [ ] R1.0.13 — Сквозная телеметрия времени и качества для ответа, workflow и инструментов
+  Контекст: для отчёта нужна измеримая текущая скорость обработки и понятный суррогат качества ответа без редизайна уже работающего чата. Изменение должно затрагивать только telemetry-contract, сбор таймингов и компактный footer после ответа.
+  План: добавить единый telemetry payload (`started_at`, `completed_at`, `elapsed_ms`, `queue_ms`, `service_ms`, `tool_ms`, `llm_ms`, `embedding_ms`, `report_ms`, `stage_timings`, `tool_timings`, `quality_signals`, `quality_summary`), собирать его в `execution_runtime.py`, workflow helper-функциях и сервисных вызовах (`UMS`, `document_server`, `legal_server`, RAG/embeddings), а затем выводить компактный блок `Timing / Quality` после основного ответа.
+  Progress: добавлен context-local collector `backend/orchestrator/telemetry_runtime.py`, который собирает stage/tool spans, quality-signals и in-memory aggregate summary `latest/by_executor` для operator path.
+  Progress: `execute_orchestration()` теперь финализирует `response["telemetry"]`, добавляет компактный footer `Timing / Quality` к `assistant_message` и не меняет остальную продуктовую логику кроме вывода времени/качества после ответа.
+  Progress: `compare`, `equipment`, `document_analysis`, `doc_question`, `documents_summary` и `general_chat` уже публикуют practical quality-signals (`used_llm`, `used_rag`, `sources_count`, `citations_count`, `structured_output_ok`, `parsed_items`, `coverage_signals`, `report_generated`, `fallback_used`) и stage/tool timings.
+  Progress: workflow/service instrumentation добавлена для `UMS` inference, `document_server` (`load_document`, `load_pages`, `extract_tables`, `smart_chunk`), `legal_server.match_batches`, RAG retrieve и embeddings path.
+  Progress: `operator_metrics_summary()` теперь включает `timingSummary`, а `scripts/benchmark.py` подхватывает telemetry details из `execute_orchestration` response для `doc_question`, `compare` и `equipment`.
+  Surrogate metrics: `quality_signals.coverage_signals`, `parsed_items`, `structured_output_ok`, `fallback_used` и `quality_summary` сейчас считаются временными runtime-surrogate сигналами для отчёта.
+  Canonical metrics: `elapsed_ms`, `llm_ms`, `embedding_ms`, `service_ms`, `report_ms`, `stage_timings`, `tool_timings`, `sources_count`, `citations_count`, `report_generated` считаются каноническими telemetry-полями текущего instrumentation slice.
+
 ## Текущее состояние (2026-03-12)
 
 **Ветка:** `codex/orchestration-control-plane-snapshot` (2 коммита от `v3.0`)

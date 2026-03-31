@@ -41,6 +41,7 @@ from orchestrator.workflows.equipment import (
     truncate_text,
     _polish_items_specs_llm,
 )
+from orchestrator.telemetry_runtime import record_current_duration
 
 # URLs серверов
 MCP_DOCUMENT_SERVER_URL = os.getenv("MCP_DOCUMENT_SERVER_URL", "http://localhost:8001")
@@ -71,12 +72,20 @@ async def _infer_document_analysis_with_failover(
     prompt: str,
     payload: Dict[str, Any],
 ) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+    started = time.monotonic()
     response = await ums_client.async_infer(
         "llm.legal_compare",
         {
             **payload,
             "prompt": prompt,
         },
+    )
+    record_current_duration(
+        name="ums_document_analysis_infer",
+        elapsed_seconds=time.monotonic() - started,
+        kind="tool",
+        category="llm",
+        meta={"stage": stage},
     )
     model_execution = response.get("model_execution") if isinstance(response, dict) else None
     if not isinstance(model_execution, dict):
@@ -580,11 +589,19 @@ async def classify_and_load_node(state: DocumentAnalysisState) -> dict:
     client = await get_shared_client()
     # Загрузка текста
     try:
+        started = time.monotonic()
         resp = await client.post(
             f"{MCP_DOCUMENT_SERVER_URL}/load_document",
             json={"path": path},
         )
         resp.raise_for_status()
+        record_current_duration(
+            name="document_server.load_document",
+            elapsed_seconds=time.monotonic() - started,
+            kind="tool",
+            category="service",
+            meta={"path": path},
+        )
         data = resp.json()
         if data.get("status") == "error":
             errors.append(f"Document load error: {data.get('error')}")
@@ -601,11 +618,19 @@ async def classify_and_load_node(state: DocumentAnalysisState) -> dict:
     # Количество страниц (PDF)
     if ext == ".pdf":
         try:
+            started = time.monotonic()
             resp = await client.post(
                 f"{MCP_DOCUMENT_SERVER_URL}/load_pages",
                 json={"path": path},
             )
             resp.raise_for_status()
+            record_current_duration(
+                name="document_server.load_pages",
+                elapsed_seconds=time.monotonic() - started,
+                kind="tool",
+                category="service",
+                meta={"path": path},
+            )
             data = resp.json()
             pages = data.get("total_pages", 0)
         except Exception as e:
@@ -618,11 +643,19 @@ async def classify_and_load_node(state: DocumentAnalysisState) -> dict:
 
     # Количество таблиц
     try:
+        started = time.monotonic()
         resp = await client.post(
             f"{MCP_DOCUMENT_SERVER_URL}/extract_tables",
             json={"path": path},
         )
         resp.raise_for_status()
+        record_current_duration(
+            name="document_server.extract_tables",
+            elapsed_seconds=time.monotonic() - started,
+            kind="tool",
+            category="service",
+            meta={"path": path},
+        )
         data = resp.json()
         if data.get("status") != "error":
             tables_count = len(data.get("tables", []))

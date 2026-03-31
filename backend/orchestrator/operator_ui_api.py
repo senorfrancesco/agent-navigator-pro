@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -14,12 +17,14 @@ try:
     from orchestrator.operator_deploy_service import OperatorDeployService
     from orchestrator.operator_observability_service import OperatorObservabilityService
     from orchestrator.operator_runtime_service import OperatorRuntimeService, env_value, file_freshness, parse_env_file
+    from orchestrator.telemetry_runtime import get_timing_summary
 except ModuleNotFoundError:  # pragma: no cover - direct module import fallback
     from backend.orchestrator.operator_ui_actions import get_action, get_job, list_actions, start_action_job
     from backend.orchestrator.operator_config_service import OperatorConfigService
     from backend.orchestrator.operator_deploy_service import OperatorDeployService
     from backend.orchestrator.operator_observability_service import OperatorObservabilityService
     from backend.orchestrator.operator_runtime_service import OperatorRuntimeService, env_value, file_freshness, parse_env_file
+    from backend.orchestrator.telemetry_runtime import get_timing_summary
 
 
 router = APIRouter(prefix="/operator", tags=["operator-ui"])
@@ -35,6 +40,76 @@ PATH_BROWSER_ROOTS = [
     Path("/mnt"),
     Path("/media"),
 ]
+
+
+def _http_probe(url: str, timeout: float = 0.75) -> bool:
+    try:
+        request = urllib.request.Request(url, headers={"User-Agent": "agent-operator-ui/1.0"})
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return 200 <= getattr(response, "status", 0) < 500
+    except (urllib.error.URLError, TimeoutError, ValueError):
+        return False
+
+
+def _probe_row(
+    *,
+    name: str,
+    name_en: str,
+    path: str,
+    url: str,
+    note: str,
+    note_en: str,
+    primary: bool = False,
+) -> Dict[str, Any]:
+    is_running = _http_probe(url)
+    return {
+        "name": name,
+        "nameEn": name_en,
+        "status": "running" if is_running else "blocked",
+        "note": note,
+        "noteEn": note_en,
+        "path": path,
+        "stage": "Готово" if is_running else "Не отвечает",
+        "stageEn": "Ready" if is_running else "Unavailable",
+        "endpoint": url,
+        "freshness": "живой HTTP probe" if is_running else "живой HTTP probe не пройден",
+        "freshnessEn": "live HTTP probe" if is_running else "live HTTP probe failed",
+        "primary": primary,
+    }
+
+
+def _offline_bundle_running_services(bundle_root: Path) -> set[str]:
+    compose_file = bundle_root / "compose.offline.yaml"
+    env_file = bundle_root / "env.bundle"
+    if not compose_file.exists() or not env_file.exists():
+        return set()
+    if not shutil.which("docker"):
+        return set()
+    try:
+        result = subprocess.run(
+            [
+                "docker",
+                "compose",
+                "-f",
+                str(compose_file),
+                "--env-file",
+                str(env_file),
+                "ps",
+                "--services",
+                "--status",
+                "running",
+            ],
+            cwd=str(bundle_root),
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except Exception:
+        return set()
+    if result.returncode != 0:
+        return set()
+    return {line.strip() for line in result.stdout.splitlines() if line.strip()}
 
 
 class OperatorActionRequest(BaseModel):
@@ -235,17 +310,20 @@ def _bundle_runtime_port_conflict(request_port: int | None) -> Dict[str, str] | 
     return None
 
 
-def build_operator_state() -> Dict[str, Any]:
+def build_operator_state(request_port: int | None = None) -> Dict[str, Any]:
     runtime_service = OperatorRuntimeService(REPO_ROOT)
     config_service = OperatorConfigService(REPO_ROOT)
     deploy_service = OperatorDeployService(REPO_ROOT)
     observability_service = OperatorObservabilityService(REPO_ROOT)
     runtime_paths = runtime_service.get_runtime_paths()
+    envs = runtime_service.load_env_payloads()
     hardware_metrics = runtime_service.get_hardware_metrics()
     archive_name = runtime_service.get_archive_name()
     docker_socket = runtime_service.docker_socket_path
     docker_binary = runtime_service.find_binary("docker")
-    bundle_env = parse_env_file(DEPLOY_ROOT / "env.bundle")
+    backend_env = envs["backend_env"]
+    bundle_env = envs["bundle_env"]
+    offline_running_services = _offline_bundle_running_services(DEPLOY_ROOT)
 
     warnings = []
     if not docker_binary:
@@ -267,86 +345,134 @@ def build_operator_state() -> Dict[str, Any]:
             }
         )
 
+    native_agent_api_port = env_value(backend_env, "AGENT_API_PORT", default="8000")
+    native_chainlit_port = env_value(backend_env, "CHAINLIT_PORT", default="3000")
+    native_doc_port = env_value(backend_env, "DOC_PORT", "DOCUMENT_SERVER_PORT", default="8001")
+    native_legal_port = env_value(backend_env, "LEGAL_PORT", "LEGAL_SERVER_PORT", default="8002")
+    native_ums_port = env_value(backend_env, "UMS_PORT", default="8090")
+
+    container_agent_api_port = env_value(bundle_env, "AGENT_API_PORT", default="8000")
+    container_chainlit_port = env_value(bundle_env, "CHAINLIT_PORT", default="3000")
+    container_doc_port = env_value(bundle_env, "DOCUMENT_SERVER_PORT", default="8001")
+    container_legal_port = env_value(bundle_env, "LEGAL_SERVER_PORT", default="8002")
+    container_ums_port = env_value(bundle_env, "UMS_PORT", default="8090")
+
     service_rows = [
-        {
-            "name": "Контур управления оператором",
-            "nameEn": "Operator Control Plane",
-            "status": "running",
-            "note": "API оператора обслуживает `/operator/state`, каталог действий и статическую оболочку панели оператора.",
-            "noteEn": "The Agent API serves `/operator/state`, the action catalog, and the static operator UI shell.",
-            "path": "native",
-            "stage": "Готово",
-            "stageEn": "Ready",
-            "endpoint": "/operator/state + /operator-ui",
-            "freshness": "проверка backend-маршрута",
-            "freshnessEn": "backend route probe",
-        },
-        {
-            "name": "Предпроверка запуска",
-            "nameEn": "Runtime Preflight",
-            "status": "running" if (SCRIPTS_ROOT / "runtime_preflight.py").exists() else "blocked",
-            "note": "Канонический вход для предпроверки и планирования нативного запуска.",
-            "noteEn": "Canonical entrypoint for native runtime preflight and planning.",
-            "path": "native",
-            "stage": "Готово" if (SCRIPTS_ROOT / "runtime_preflight.py").exists() else "Заблокировано",
-            "stageEn": "Ready" if (SCRIPTS_ROOT / "runtime_preflight.py").exists() else "Blocked",
-            "endpoint": "scripts/runtime_preflight.py",
-            "freshness": "проверка файловой системы",
-            "freshnessEn": "filesystem probe",
-        },
-        {
-            "name": "Сценарий запуска",
-            "nameEn": "Launcher",
-            "status": "running" if (SCRIPTS_ROOT / "launcher.sh").exists() else "blocked",
-            "note": "Канонический сценарий запуска для нативного и контейнерного путей.",
-            "noteEn": "Canonical launcher for native and container runtime paths.",
-            "path": "native",
-            "stage": "Готово" if (SCRIPTS_ROOT / "launcher.sh").exists() else "Заблокировано",
-            "stageEn": "Ready" if (SCRIPTS_ROOT / "launcher.sh").exists() else "Blocked",
-            "endpoint": "scripts/launcher.sh",
-            "freshness": "проверка файловой системы",
-            "freshnessEn": "filesystem probe",
-        },
-        {
-            "name": "Манифест офлайн-бандла",
-            "nameEn": "Bundle Manifest",
-            "status": "running" if (DEPLOY_ROOT / "manifest.json").exists() else "blocked",
-            "note": "Манифест артефактов для deploy/offline_bundle.",
-            "noteEn": "Artifact manifest for deploy/offline_bundle.",
-            "path": "container",
-            "stage": "Читается" if (DEPLOY_ROOT / "manifest.json").exists() else "Отсутствует",
-            "stageEn": "Readable" if (DEPLOY_ROOT / "manifest.json").exists() else "Missing",
-            "endpoint": "deploy/offline_bundle/manifest.json",
-            "freshness": "проверка файловой системы",
-            "freshnessEn": "filesystem probe",
-        },
-        {
-            "name": "Бинарник Docker",
-            "nameEn": "Docker Binary",
-            "status": "running" if docker_binary else "blocked",
-            "note": "Бинарник Docker нужен для загрузки архивов образов, `docker compose config` и реального запуска контейнеров.",
-            "noteEn": "The Docker binary is required for bundle image loading, `docker compose config`, and real container deploy/run flows.",
-            "path": "container",
-            "stage": "Готово" if docker_binary else "Заблокировано",
-            "stageEn": "Ready" if docker_binary else "Blocked",
-            "endpoint": docker_binary or "docker",
-            "freshness": "проверка бинарника на хосте",
-            "freshnessEn": "host binary probe",
-        },
-        {
-            "name": "Docker Socket",
-            "nameEn": "Docker Socket",
-            "status": "running" if docker_socket.exists() else "blocked",
-            "note": "Запуск контейнеров и загрузка образов зависят от доступа к сокету Docker на хосте.",
-            "noteEn": "Container startup and image loading depend on Docker socket access on the host.",
-            "path": "container",
-            "stage": "Готово" if docker_socket.exists() else "Заблокировано",
-            "stageEn": "Ready" if docker_socket.exists() else "Blocked",
-            "endpoint": "/var/run/docker.sock",
-            "freshness": "проверка файловой системы",
-            "freshnessEn": "filesystem probe",
-        },
+        _probe_row(
+            name="Agent API",
+            name_en="Agent API",
+            path="native",
+            url=f"http://127.0.0.1:{native_agent_api_port}/health",
+            note="Живой backend API нативного пути запуска.",
+            note_en="Live backend API for the native runtime path.",
+            primary=True,
+        ),
+        _probe_row(
+            name="Chainlit UI",
+            name_en="Chainlit UI",
+            path="native",
+            url=f"http://127.0.0.1:{native_chainlit_port}",
+            note="Основной UI нативного запуска.",
+            note_en="Primary UI for the native runtime path.",
+            primary=True,
+        ),
+        _probe_row(
+            name="Document Server",
+            name_en="Document Server",
+            path="native",
+            url=f"http://127.0.0.1:{native_doc_port}/health",
+            note="Сервис разбора документов для нативного пути.",
+            note_en="Document parsing service for the native runtime path.",
+        ),
+        _probe_row(
+            name="Legal Server",
+            name_en="Legal Server",
+            path="native",
+            url=f"http://127.0.0.1:{native_legal_port}/health",
+            note="Сервис юридического сопоставления для нативного пути.",
+            note_en="Legal matching service for the native runtime path.",
+        ),
+        _probe_row(
+            name="UMS",
+            name_en="UMS",
+            path="native",
+            url=f"http://127.0.0.1:{native_ums_port}/health",
+            note="Unified Model Server нативного пути запуска.",
+            note_en="Unified Model Server for the native runtime path.",
+            primary=True,
+        ),
+        _probe_row(
+            name="Agent API",
+            name_en="Agent API",
+            path="container",
+            url=f"http://127.0.0.1:{container_agent_api_port}/health",
+            note="Опубликованный backend API офлайн-бандла.",
+            note_en="Published backend API for the offline bundle runtime.",
+            primary=True,
+        ),
+        _probe_row(
+            name="Chainlit UI",
+            name_en="Chainlit UI",
+            path="container",
+            url=f"http://127.0.0.1:{container_chainlit_port}",
+            note="Опубликованный UI офлайн-бандла.",
+            note_en="Published UI for the offline bundle runtime.",
+            primary=True,
+        ),
+        _probe_row(
+            name="Document Server",
+            name_en="Document Server",
+            path="container",
+            url=f"http://127.0.0.1:{container_doc_port}/health",
+            note="Опубликованный document-service офлайн-бандла.",
+            note_en="Published document service for the offline bundle runtime.",
+        ),
+        _probe_row(
+            name="Legal Server",
+            name_en="Legal Server",
+            path="container",
+            url=f"http://127.0.0.1:{container_legal_port}/health",
+            note="Опубликованный legal-service офлайн-бандла.",
+            note_en="Published legal service for the offline bundle runtime.",
+        ),
+        _probe_row(
+            name="UMS",
+            name_en="UMS",
+            path="container",
+            url=f"http://127.0.0.1:{container_ums_port}/health",
+            note="Опубликованный Unified Model Server офлайн-бандла.",
+            note_en="Published Unified Model Server for the offline bundle runtime.",
+            primary=True,
+        ),
     ]
+
+    if not offline_running_services:
+        for row in service_rows:
+            if row["path"] != "container":
+                continue
+            row["status"] = "not_started"
+            row["stage"] = "Не запущено"
+            row["stageEn"] = "Not started"
+            row["freshness"] = "offline bundle ещё не поднят через compose"
+            row["freshnessEn"] = "offline bundle is not up through compose yet"
+    else:
+        compose_service_map = {
+            "Agent API": "agent-api",
+            "Document Server": "document-server",
+            "Legal Server": "legal-server",
+            "UMS": "ums",
+            "Chainlit UI": "chainlit",
+        }
+        for row in service_rows:
+            if row["path"] != "container":
+                continue
+            compose_service = compose_service_map.get(row["nameEn"], "")
+            if compose_service and compose_service not in offline_running_services:
+                row["status"] = "degraded"
+                row["stage"] = "Частично"
+                row["stageEn"] = "Partial"
+                row["freshness"] = "compose-service не в running"
+                row["freshnessEn"] = "compose service is not running"
 
     config_state = config_service.get_config_state(runtime_paths)
 
@@ -373,14 +499,21 @@ def build_operator_state() -> Dict[str, Any]:
                 "tone": "orange",
             }
         )
-    if env_value(bundle_env, "AGENT_API_PORT", default="8000") == "8000":
+    bundle_port_conflict = _bundle_runtime_port_conflict(request_port)
+    if bundle_port_conflict:
         diagnostics.append(
             {
                 "path": "container",
                 "title": "Нужен безопасный профиль портов перед локальным deploy",
                 "titleEn": "A safe port profile is needed before local deploy",
-                "body": "Текущий `AGENT_API_PORT=8000` конфликтует с этой панелью на том же хосте. Для локального запуска сначала подставь локальные безопасные порты.",
-                "bodyEn": "The current `AGENT_API_PORT=8000` conflicts with the operator UI on this host. Stage safe local ports before local smoke or deploy.",
+                "body": (
+                    "Текущий `{service}` публикуется на порту `{port}` и конфликтует с этой панелью на том же хосте. "
+                    "Для локального запуска сначала подставь локальные безопасные порты."
+                ).format(service=bundle_port_conflict["service"], port=bundle_port_conflict["port"]),
+                "bodyEn": (
+                    "The current `{service}` is published on port `{port}` and conflicts with the operator UI on this host. "
+                    "Stage safe local ports before local smoke or deploy."
+                ).format(service=bundle_port_conflict["service"], port=bundle_port_conflict["port"]),
                 "tone": "cyan",
             }
         )
@@ -403,13 +536,19 @@ def build_operator_state() -> Dict[str, Any]:
         blockers.append({"title": "Docker отсутствует", "titleEn": "Docker binary is missing", "body": "Сценарий сборки и деплоя контейнеров останется частично заблокированным, пока Docker не будет установлен.", "bodyEn": "The container build/deploy flow stays partially blocked until Docker is installed."})
     if not docker_socket.exists():
         blockers.append({"title": "Сокет Docker недоступен", "titleEn": "Docker socket is unavailable", "body": "Действия деплоя контейнеров не смогут завершиться без доступа к сокету Docker на хосте.", "bodyEn": "Container deploy actions cannot finish without Docker socket access on the host."})
-    if env_value(bundle_env, "AGENT_API_PORT", default="8000") == "8000":
+    if bundle_port_conflict:
         blockers.append(
             {
                 "title": "Контейнерный деплой делит порт с текущим operator UI",
                 "titleEn": "Container deploy shares a port with the current operator UI",
-                "body": "Если запускать офлайн-бандл из этого же локального backend на `8000`, контейнерный `agent-api` попытается занять тот же порт. Для безопасного запуска нужен другой порт или отдельное окружение.",
-                "bodyEn": "If the bundle starts from this same local backend on `8000`, its container `agent-api` will try to take the same port. Use a different port profile or a separate environment.",
+                "body": (
+                    "Если запускать офлайн-бандл из этого же локального backend, контейнерный `{service}` попытается "
+                    "занять тот же порт `{port}`. Для безопасного запуска нужен другой порт или отдельное окружение."
+                ).format(service=bundle_port_conflict["service"], port=bundle_port_conflict["port"]),
+                "bodyEn": (
+                    "If the bundle starts from this same local backend, its container `{service}` will try to take "
+                    "the same port `{port}`. Use a different port profile or a separate environment."
+                ).format(service=bundle_port_conflict["service"], port=bundle_port_conflict["port"]),
             }
         )
 
@@ -422,6 +561,7 @@ def build_operator_state() -> Dict[str, Any]:
     deploy_log_lines = deploy_service.get_deploy_log_lines(archive_name)
     metrics_summary = observability_service.get_metrics_summary()
     grafana_links = observability_service.get_grafana_links()
+    timing_summary = get_timing_summary()
 
     return {
         "delivery": _build_delivery_contract(),
@@ -438,6 +578,7 @@ def build_operator_state() -> Dict[str, Any]:
         "deploySurface": deploy_surface,
         "deployLogLines": deploy_log_lines,
         "metricsSummary": metrics_summary,
+        "timingSummary": timing_summary,
         "grafanaLinks": grafana_links,
     }
 
@@ -449,9 +590,13 @@ def _build_runtime_health(state: Dict[str, Any], path_key: str) -> Dict[str, Any
 
     path = runtime_paths[path_key]
     rows = [item for item in state["serviceRows"] if item["path"] == path_key]
+    primary_rows = [item for item in rows if item.get("primary")]
     running = sum(1 for item in rows if item["status"] == "running")
     blocked = sum(1 for item in rows if item["status"] == "blocked")
     degraded = sum(1 for item in rows if item["status"] == "degraded")
+    running_primary = sum(1 for item in primary_rows if item["status"] == "running")
+    blocked_primary = sum(1 for item in primary_rows if item["status"] == "blocked")
+    degraded_primary = sum(1 for item in primary_rows if item["status"] == "degraded")
     active_warnings = sum(1 for item in state["warnings"] if path_key == "container" or "runtime" in item["title"].lower())
     diagnostics = [item for item in state.get("diagnostics", []) if item.get("path") == path_key]
     warnings = state.get("warnings", [])
@@ -494,7 +639,15 @@ def _build_runtime_health(state: Dict[str, Any], path_key: str) -> Dict[str, Any
             summary_en = "The container runtime should not start on top of the local backend on the same port."
             next_action = "Во вкладке Конфиг подставь безопасные локальные порты перед локальным деплоем или запуском."
             next_action_en = "Stage safe local ports in Config before a local deploy or run."
-        elif degraded or any(item.get("tone") == "orange" for item in diagnostics):
+        elif running_primary and blocked_primary == 0 and degraded_primary == 0:
+            status = "running"
+            reason = "Опубликованные сервисы офлайн-бандла отвечают на ожидаемых портах."
+            reason_en = "Published offline bundle services respond on the expected ports."
+            summary = "Контейнерный путь выглядит поднятым: основные сервисы офлайн-бандла доступны по опубликованным endpoint."
+            summary_en = "The container runtime looks live: the primary offline bundle services respond on their published endpoints."
+            next_action = "Проверь логи и сервисы, если менялись конфиг, образы или mount-пути."
+            next_action_en = "Check logs and services if config, images, or mount paths changed."
+        elif running_primary or degraded or degraded_primary or any(item.get("tone") == "orange" for item in diagnostics):
             status = "degraded"
             reason = "Есть сигналы среды выполнения и диагностики, требующие внимания."
             reason_en = "Runtime and diagnostics signals require attention."
@@ -519,7 +672,15 @@ def _build_runtime_health(state: Dict[str, Any], path_key: str) -> Dict[str, Any
             summary_en = "Required files for the native runtime path are missing."
             next_action = "Проверь `scripts/launcher.sh`, `scripts/runtime_preflight.py` и цепочку backend env-файлов."
             next_action_en = "Check `scripts/launcher.sh`, `scripts/runtime_preflight.py`, and the backend env chain."
-        elif degraded:
+        elif running_primary:
+            status = "running"
+            reason = "Живые проверки нативного пути отвечают на ожидаемых портах."
+            reason_en = "Live native probes respond on the expected ports."
+            summary = "Нативный путь выглядит рабочим по живым проверкам сервисов."
+            summary_en = "The native runtime path looks healthy according to live service probes."
+            next_action = "Проверь сервисы и логи, если менялся профиль запуска или режим устройства."
+            next_action_en = "Check services and logs if the runtime profile or device mode changed."
+        elif degraded or degraded_primary:
             status = "degraded"
             reason = "Нативный путь запуска виден, но часть проверок находится в сниженном состоянии."
             reason_en = "The native runtime path is visible, but some probes are degraded."
@@ -527,20 +688,12 @@ def _build_runtime_health(state: Dict[str, Any], path_key: str) -> Dict[str, Any
             summary_en = "The native runtime is available, but some operator checks require attention."
             next_action = "Проверь Сервисы и журнал запуска перед повторным запуском."
             next_action_en = "Check Services and the launch log before retrying."
-        elif running:
-            status = "running"
-            reason = "Канонические проверки нативного пути доступны."
-            reason_en = "Canonical native probes are available."
-            summary = "Нативный путь выглядит рабочим по опубликованным операторским проверкам."
-            summary_en = "The native runtime path looks healthy according to the published operator checks."
-            next_action = "Проверь сервисы и логи, если менялся профиль запуска или режим устройства."
-            next_action_en = "Check services and logs if the runtime profile or device mode changed."
         else:
             status = "not_started"
-            reason = "Backend ещё не прислал операторские проверки для нативного пути."
-            reason_en = "The backend has not published native runtime checks yet."
-            summary = "Нативный путь виден, но полноценный сигнал о состоянии среды ещё не опубликован."
-            summary_en = "The native runtime path is visible, but a full runtime signal is not published yet."
+            reason = "Живые сервисы нативного пути пока не отвечают на ожидаемых портах."
+            reason_en = "Live native services do not respond on the expected ports yet."
+            summary = "Нативный путь доступен как сценарий запуска, но сама среда ещё не поднята."
+            summary_en = "The native runtime path is available as a launch path, but the runtime itself is not up yet."
             next_action = "Запусти нативный путь и затем проверь журнал запуска."
             next_action_en = "Start the native path and then inspect the launch log."
 
@@ -574,18 +727,18 @@ def operator_health() -> Dict[str, Any]:
 
 
 @router.get("/state")
-def operator_state() -> Dict[str, Any]:
-    return build_operator_state()
+def operator_state(request: Request) -> Dict[str, Any]:
+    return build_operator_state(getattr(request.url, "port", None))
 
 
 @router.get("/runtime/paths")
-def operator_runtime_paths() -> Dict[str, Any]:
-    return {"runtimePaths": build_operator_state()["runtimePaths"]}
+def operator_runtime_paths(request: Request) -> Dict[str, Any]:
+    return {"runtimePaths": build_operator_state(getattr(request.url, "port", None))["runtimePaths"]}
 
 
 @router.get("/runtime/summary")
-def operator_runtime_summary() -> Dict[str, Any]:
-    state = build_operator_state()
+def operator_runtime_summary(request: Request) -> Dict[str, Any]:
+    state = build_operator_state(getattr(request.url, "port", None))
     return {
         "hardwareMetrics": state["hardwareMetrics"],
         "warnings": state["warnings"],
@@ -594,8 +747,8 @@ def operator_runtime_summary() -> Dict[str, Any]:
 
 
 @router.get("/runtime/health/{path_key}")
-def operator_runtime_health(path_key: str) -> Dict[str, Any]:
-    state = build_operator_state()
+def operator_runtime_health(path_key: str, request: Request) -> Dict[str, Any]:
+    state = build_operator_state(getattr(request.url, "port", None))
     try:
         return _build_runtime_health(state, path_key)
     except KeyError as exc:
@@ -603,33 +756,36 @@ def operator_runtime_health(path_key: str) -> Dict[str, Any]:
 
 
 @router.get("/metrics/summary")
-def operator_metrics_summary() -> Dict[str, Any]:
-    return build_operator_state()["metricsSummary"]
+def operator_metrics_summary(request: Request) -> Dict[str, Any]:
+    state = build_operator_state(getattr(request.url, "port", None))
+    payload = dict(state["metricsSummary"])
+    payload["timingSummary"] = state["timingSummary"]
+    return payload
 
 
 @router.get("/metrics/runtime")
-def operator_metrics_runtime() -> Dict[str, Any]:
-    return {"overview": build_operator_state()["metricsSummary"]["overview"]}
+def operator_metrics_runtime(request: Request) -> Dict[str, Any]:
+    return {"overview": build_operator_state(getattr(request.url, "port", None))["metricsSummary"]["overview"]}
 
 
 @router.get("/metrics/services")
-def operator_metrics_services() -> Dict[str, Any]:
-    return {"services": build_operator_state()["metricsSummary"]["services"]}
+def operator_metrics_services(request: Request) -> Dict[str, Any]:
+    return {"services": build_operator_state(getattr(request.url, "port", None))["metricsSummary"]["services"]}
 
 
 @router.get("/metrics/deploy")
-def operator_metrics_deploy() -> Dict[str, Any]:
-    return {"deploy": build_operator_state()["metricsSummary"]["deploy"]}
+def operator_metrics_deploy(request: Request) -> Dict[str, Any]:
+    return {"deploy": build_operator_state(getattr(request.url, "port", None))["metricsSummary"]["deploy"]}
 
 
 @router.get("/links/grafana")
-def operator_grafana_links() -> Dict[str, Any]:
-    return build_operator_state()["grafanaLinks"]
+def operator_grafana_links(request: Request) -> Dict[str, Any]:
+    return build_operator_state(getattr(request.url, "port", None))["grafanaLinks"]
 
 
 @router.get("/config/{path_key}")
-def operator_config(path_key: str) -> Dict[str, Any]:
-    state = build_operator_state()
+def operator_config(path_key: str, request: Request) -> Dict[str, Any]:
+    state = build_operator_state(getattr(request.url, "port", None))
     if path_key not in state["configState"]:
         raise HTTPException(status_code=404, detail=f"unknown-path:{path_key}")
     return state["configState"][path_key]
@@ -685,8 +841,8 @@ def operator_path_browser_validate(path: str, kind: str = "file", field_key: str
 
 
 @router.get("/services/{path_key}")
-def operator_services(path_key: str) -> Dict[str, Any]:
-    state = build_operator_state()
+def operator_services(path_key: str, request: Request) -> Dict[str, Any]:
+    state = build_operator_state(getattr(request.url, "port", None))
     return {
         "services": [item for item in state["serviceRows"] if item["path"] == path_key],
         "diagnostics": [item for item in state["diagnostics"] if item["path"] == path_key],
@@ -694,8 +850,8 @@ def operator_services(path_key: str) -> Dict[str, Any]:
 
 
 @router.get("/deploy/{mode}")
-def operator_deploy_mode(mode: str) -> Dict[str, Any]:
-    state = build_operator_state()
+def operator_deploy_mode(mode: str, request: Request) -> Dict[str, Any]:
+    state = build_operator_state(getattr(request.url, "port", None))
     if mode not in state["deploySurface"]:
         raise HTTPException(status_code=404, detail=f"unknown-mode:{mode}")
     return state["deploySurface"][mode]
