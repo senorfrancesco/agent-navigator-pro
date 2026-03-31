@@ -36,6 +36,7 @@ SUPPORTED_BACKEND_MODES = {"llama-cpp-python", "llama-server", "vllm"}
 SUPPORTED_RUNTIME_PROFILES = {"default", "adaptive", "manual"}
 SUPPORTED_DEVICE_MODES = {"cpu", "gpu", "hybrid"}
 SUPPORTED_GPU_LAYERS_MODES = {"auto", "max", "manual"}
+SUPPORTED_MODEL_SOURCE_MODES = {"bundle_layout", "external_host_mounts"}
 PLACEHOLDER_SECRET_VALUES = {
     "change-me-before-deploy",
     "agent-navigator-secret-key-change-me",
@@ -57,6 +58,13 @@ RUNTIME_PLAN_KEYS = [
     "N_GPU_LAYERS_OVERRIDE",
     "RAG_MODE_OVERRIDE",
 ]
+
+BUNDLE_REQUIRED_FILE_KEYS = ["MODEL_PATH_LLM"]
+BUNDLE_OPTIONAL_FILE_KEYS = ["MODEL_PATH_VLM", "MMPROJ_PATH"]
+BUNDLE_REQUIRED_DIR_KEYS = ["MODEL_PATH_EMBEDDING_INTENT", "MODEL_PATH_EMBEDDING_RETRIEVAL"]
+EXTERNAL_REQUIRED_FILE_KEYS = ["HOST_MODEL_PATH_LLM"]
+EXTERNAL_OPTIONAL_FILE_KEYS = ["HOST_MODEL_PATH_VLM", "HOST_MMPROJ_PATH"]
+EXTERNAL_REQUIRED_DIR_KEYS = ["HOST_MODEL_PATH_EMBEDDING_INTENT", "HOST_MODEL_PATH_EMBEDDING_RETRIEVAL"]
 
 
 def parse_env(path: Path) -> dict[str, str]:
@@ -235,6 +243,10 @@ def validate_env(payload: dict[str, str], errors: list[str], warnings: list[str]
     if gpu_layers_mode and gpu_layers_mode not in SUPPORTED_GPU_LAYERS_MODES:
         errors.append(f"invalid-gpu-layers-mode:{gpu_layers_mode}")
 
+    model_source_mode = payload.get("MODEL_SOURCE_MODE", "bundle_layout").strip().lower() or "bundle_layout"
+    if model_source_mode not in SUPPORTED_MODEL_SOURCE_MODES:
+        errors.append(f"invalid-model-source-mode:{model_source_mode}")
+
     for key in [
         "DEVICE_MODE",
         "LLM_DEVICE_MODE",
@@ -253,6 +265,116 @@ def validate_env(payload: dict[str, str], errors: list[str], warnings: list[str]
     ]:
         if payload.get(key, "").strip() in PLACEHOLDER_SECRET_VALUES:
             warnings.append(f"placeholder-secret:{key}")
+
+    vlm_path = payload.get("MODEL_PATH_VLM", "").strip()
+    mmproj_path = payload.get("MMPROJ_PATH", "").strip()
+    if bool(vlm_path) != bool(mmproj_path):
+        errors.append("incomplete-vlm-config:MODEL_PATH_VLM-and-MMPROJ_PATH-must-both-be-set-or-empty")
+
+    if model_source_mode == "bundle_layout":
+        models_root = BUNDLE_ROOT / "models"
+        if not models_root.exists():
+            errors.append("missing-required-dir:models")
+            return
+
+        def resolve_bundle_path(container_path: str) -> Path:
+            prefix = "/app/backend/models/"
+            if not container_path.startswith(prefix):
+                raise ValueError(f"model-path-outside-bundle-layout:{container_path}")
+            return models_root / container_path[len(prefix):].strip("/")
+
+        for key in BUNDLE_REQUIRED_FILE_KEYS:
+            value = payload.get(key, "").strip()
+            if not value:
+                errors.append(f"missing-env:{key}")
+                continue
+            try:
+                resolved = resolve_bundle_path(value)
+            except ValueError as exc:
+                errors.append(str(exc))
+                continue
+            if not resolved.is_file():
+                errors.append(f"missing-model-file:{key}:{resolved}")
+
+        for key in BUNDLE_OPTIONAL_FILE_KEYS:
+            value = payload.get(key, "").strip()
+            if not value:
+                continue
+            try:
+                resolved = resolve_bundle_path(value)
+            except ValueError as exc:
+                errors.append(str(exc))
+                continue
+            if not resolved.is_file():
+                errors.append(f"missing-model-file:{key}:{resolved}")
+
+        for key in BUNDLE_REQUIRED_DIR_KEYS:
+            value = payload.get(key, "").strip()
+            if not value:
+                errors.append(f"missing-env:{key}")
+                continue
+            try:
+                resolved = resolve_bundle_path(value)
+            except ValueError as exc:
+                errors.append(str(exc))
+                continue
+            if not resolved.is_dir():
+                errors.append(f"missing-model-dir:{key}:{resolved}")
+        return
+
+    host_vlm = payload.get("HOST_MODEL_PATH_VLM", "").strip()
+    host_mmproj = payload.get("HOST_MMPROJ_PATH", "").strip()
+    if bool(host_vlm) != bool(host_mmproj):
+        errors.append("incomplete-external-vlm-config:HOST_MODEL_PATH_VLM-and-HOST_MMPROJ_PATH-must-both-be-set-or-empty")
+
+    for key in BUNDLE_REQUIRED_FILE_KEYS:
+        value = payload.get(key, "").strip()
+        if not value:
+            errors.append(f"missing-env:{key}")
+        elif not value.startswith("/"):
+            errors.append(f"invalid-container-path:{key}:{value}")
+    for key in BUNDLE_OPTIONAL_FILE_KEYS:
+        value = payload.get(key, "").strip()
+        if value and not value.startswith("/"):
+            errors.append(f"invalid-container-path:{key}:{value}")
+    for key in BUNDLE_REQUIRED_DIR_KEYS:
+        value = payload.get(key, "").strip()
+        if not value:
+            errors.append(f"missing-env:{key}")
+        elif not value.startswith("/"):
+            errors.append(f"invalid-container-path:{key}:{value}")
+
+    for key in EXTERNAL_REQUIRED_FILE_KEYS:
+        value = payload.get(key, "").strip()
+        if not value:
+            errors.append(f"missing-env:{key}")
+            continue
+        candidate = Path(value)
+        if not candidate.is_absolute():
+            errors.append(f"invalid-host-path-not-absolute:{key}:{value}")
+        elif not candidate.is_file():
+            errors.append(f"missing-host-model-file:{key}:{candidate}")
+
+    for key in EXTERNAL_OPTIONAL_FILE_KEYS:
+        value = payload.get(key, "").strip()
+        if not value:
+            continue
+        candidate = Path(value)
+        if not candidate.is_absolute():
+            errors.append(f"invalid-host-path-not-absolute:{key}:{value}")
+        elif not candidate.is_file():
+            errors.append(f"missing-host-model-file:{key}:{candidate}")
+
+    for key in EXTERNAL_REQUIRED_DIR_KEYS:
+        value = payload.get(key, "").strip()
+        if not value:
+            errors.append(f"missing-env:{key}")
+            continue
+        candidate = Path(value)
+        if not candidate.is_absolute():
+            errors.append(f"invalid-host-path-not-absolute:{key}:{value}")
+        elif not candidate.is_dir():
+            errors.append(f"missing-host-model-dir:{key}:{candidate}")
 
 
 def print_summary(payload: dict[str, str]) -> None:

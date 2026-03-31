@@ -8,7 +8,7 @@ BUNDLE_ROOT="$(dirname "$SCRIPT_DIR")"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/host_bundle_common.sh"
 
-DRIVER_PACKAGE="nvidia-driver-550-server"
+DRIVER_PACKAGE="nvidia-driver-590-server"
 MANUAL_DRIVER_VERSION="590.48.01"
 NVIDIA_CONTAINER_TOOLKIT_VERSION="1.19.0-1"
 DISTRO="ubuntu-24.04"
@@ -40,14 +40,14 @@ build_host_apt_bundle.sh
 
 Flags:
   --distro <name>           ubuntu-22.04 или ubuntu-24.04 (default: ubuntu-24.04)
-  --driver-package <name>   nvidia-driver-550-server (default) или nvidia-driver-550
+  --driver-package <name>   nvidia-driver-590-server (default) или nvidia-driver-590
   --output-root <path>      Переопределить host_packages/<distro>
   --extra-package <name>    Добавить явный пакет в bundle (флаг можно повторять)
   --check-only              Только проверить prerequisites и apt candidates
   --dry-run                 Показать, что будет скачано, без скачивания
 
 Жёстко фиксируем:
-  - пакетный драйверный baseline: nvidia-driver-550-server или nvidia-driver-550
+  - пакетный драйверный baseline: nvidia-driver-590-server или nvidia-driver-590
   - ручной NVIDIA Data Center Driver baseline: 590.48.01
   - NVIDIA Container Toolkit: 1.19.0-1
 
@@ -114,7 +114,7 @@ done
 assert_supported_host_bundle_distro "$DISTRO"
 
 case "$DRIVER_PACKAGE" in
-  nvidia-driver-550|nvidia-driver-550-server)
+  nvidia-driver-590|nvidia-driver-590-server)
     ;;
   *)
     echo "unsupported-driver-package:$DRIVER_PACKAGE" >&2

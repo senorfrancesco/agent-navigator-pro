@@ -31,12 +31,19 @@ def test_build_host_apt_bundle_help_mentions_driver_and_check_modes() -> None:
     )
 
     assert result.returncode == 0
-    assert "nvidia-driver-550-server" in result.stdout
+    assert "nvidia-driver-590-server" in result.stdout
     assert "590.48.01" in result.stdout
     assert "1.19.0-1" in result.stdout
     assert "--distro" in result.stdout
     assert "--check-only" in result.stdout
     assert "--dry-run" in result.stdout
+
+
+def test_build_host_apt_bundle_defaults_and_supported_driver_packages_match_590_baseline() -> None:
+    content = (BUNDLE_ROOT / "scripts" / "build_host_apt_bundle.sh").read_text(encoding="utf-8")
+
+    assert 'DRIVER_PACKAGE="nvidia-driver-590-server"' in content
+    assert "nvidia-driver-590|nvidia-driver-590-server" in content
 
 
 def test_install_host_apt_bundle_help_mentions_local_bundle_install() -> None:

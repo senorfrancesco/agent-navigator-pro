@@ -210,14 +210,25 @@
 
         <div class="workspace-strip" id="launch-strip" data-agent-nav-hook="operator-launch-strip"></div>
 
+        <article class="panel launch-fail-summary" id="launch-fail-summary" hidden>
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow" id="launch-fail-eyebrow">Статус запуска</p>
+              <h3 id="launch-fail-title">Сводка текущего состояния</h3>
+            </div>
+            <span class="status-pill neutral" id="launch-fail-pill">Ожидание</span>
+          </div>
+          <div class="source-list" id="launch-fail-list"></div>
+        </article>
+
         <div class="path-card-grid" id="launch-path-cards"></div>
 
         <div class="overview-grid launch-workspace-grid">
           <article class="panel">
             <div class="panel-header">
               <div>
-                <p class="eyebrow">Профили запуска</p>
-                <h3>Подчинённые пресеты выбранного пути запуска</h3>
+                <p class="eyebrow" id="launch-profiles-eyebrow">Профили запуска</p>
+                <h3 id="launch-profiles-title">Подчинённые пресеты выбранного пути запуска</h3>
               </div>
             </div>
             <div class="profile-grid" id="profile-grid"></div>
@@ -226,8 +237,8 @@
           <article class="panel">
             <div class="panel-header">
               <div>
-                <p class="eyebrow">Лог запуска</p>
-                <h3>Ход текущей или последней задачи</h3>
+                <p class="eyebrow" id="launch-log-eyebrow">Лог запуска</p>
+                <h3 id="launch-log-title">Ход текущей или последней задачи</h3>
               </div>
               <div class="panel-actions">
                 <span class="status-pill neutral" id="launch-runtime-pill">Ожидание runtime</span>
@@ -282,6 +293,7 @@
           </div>
           <div class="path-switcher" id="config-variant-switcher"></div>
           <div class="source-list" id="config-preset-list"></div>
+          <div id="config-variant-helper"></div>
         </article>
 
         <article class="panel">
@@ -365,7 +377,7 @@
         <div class="section-hero">
           <div>
             <p class="eyebrow">Сборка / Деплой</p>
-            <h2>Собирайте bundle, импортируйте архив и поднимайте систему</h2>
+            <h2>Собирайте офлайн-бандл, импортируйте архив и поднимайте систему</h2>
             <p class="support-copy">Эта вкладка повторяет канонический поток `deploy/offline_bundle/scripts`: сборку, экспорт, упаковку, распаковку, проверку, установку, деплой и верификацию.</p>
           </div>
           <div class="path-switcher" id="deploy-mode-switcher"></div>
@@ -378,9 +390,9 @@
             <div class="panel-header">
               <div>
                 <p class="eyebrow" id="deploy-summary-eyebrow">Сводка режима</p>
-                <h3 id="deploy-summary-title">Статус сборки bundle</h3>
+                <h3 id="deploy-summary-title">Статус сборки офлайн-бандла</h3>
               </div>
-              <span class="status-pill cyan" id="deploy-summary-pill">Сборка bundle</span>
+              <span class="status-pill cyan" id="deploy-summary-pill">Сборка офлайн-бандла</span>
             </div>
             <div class="deploy-summary-grid" id="deploy-summary-grid" data-agent-nav-hook="operator-deploy-summary"></div>
           </article>
@@ -538,6 +550,25 @@
             <option value="detailed">Detailed</option>
           </select>
         </label>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="path-browser-modal" class="reason-modal">
+    <form method="dialog" class="reason-modal-card">
+      <div class="panel-header">
+        <div>
+          <p class="eyebrow" id="path-browser-eyebrow">Выбор пути</p>
+          <h3 id="path-browser-title">Путь модели</h3>
+        </div>
+        <button class="ghost-button" id="path-browser-close" type="button">Закрыть</button>
+      </div>
+      <div class="reason-modal-content path-browser-modal-content">
+        <div class="path-browser-toolbar">
+          <div class="path-browser-current-path mono-line" id="path-browser-current-path"></div>
+          <button type="button" class="ghost-button" id="path-browser-select-current">Выбрать эту папку</button>
+        </div>
+        <div class="path-browser-entry-list" id="path-browser-entry-list"></div>
       </div>
     </form>
   </dialog>

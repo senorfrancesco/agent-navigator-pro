@@ -55,12 +55,26 @@ class OperatorConfigService:
         secret: bool = False,
         path_policy: str | None = None,
         path_example: str | None = None,
+        visible_when: Dict[str, str] | None = None,
+        picker_kind: str | None = None,
+        picker_label: str | None = None,
+        picker_label_en: str | None = None,
     ) -> Dict[str, object]:
         applied = env_value(env, key, default=applied_default or default or suggested)
         validation = self._validate_field_value(
             key=key,
             value=applied,
             source=source,
+            path_policy=path_policy,
+        )
+        default_description, default_description_en = self._default_field_description(
+            key=key,
+            path_policy=path_policy,
+        )
+        resolved_control = self._resolved_control(
+            key=key,
+            control=control,
+            secret=secret,
             path_policy=path_policy,
         )
         return {
@@ -71,18 +85,222 @@ class OperatorConfigService:
             "suggested": suggested,
             "applied": applied,
             "source": source,
-            "description": description or recommended_reason,
-            "descriptionEn": description_en or recommended_reason_en,
+            "description": description or default_description,
+            "descriptionEn": description_en or default_description_en,
             "recommendedReason": recommended_reason,
             "recommendedReasonEn": recommended_reason_en,
             "editable": editable,
-            "control": control,
+            "control": resolved_control,
             "options": options or [],
             "secret": secret,
             "pathPolicy": path_policy,
             "pathExample": path_example,
+            "visibleWhen": visible_when,
+            "pickerKind": picker_kind,
+            "pickerLabel": picker_label,
+            "pickerLabelEn": picker_label_en,
             "validation": validation,
         }
+
+    def _resolved_control(
+        self,
+        *,
+        key: str,
+        control: str,
+        secret: bool,
+        path_policy: str | None,
+    ) -> str:
+        if control != "text":
+            return control
+        if secret:
+            return "text"
+        if path_policy:
+            return "text"
+
+        normalized = key.upper()
+        explicit_text = {
+            "UMS_LLM_GPU_INDICES",
+            "CHAINLIT_DEFAULT_MODEL_PROFILE",
+            "CHAINLIT_LEGAL_COMPARE_MODEL_PROFILE",
+            "CHAINLIT_MODEL_PROFILE_DEFAULT_CHAT_MODEL",
+            "CHAINLIT_MODEL_PROFILE_LONG_CONTEXT_MODEL",
+            "CHAINLIT_MODEL_PROFILE_LEGAL_COMPARE_MODEL",
+            "CHAINLIT_MODEL_PROFILE_LOW_VRAM_MODEL",
+            "CHAINLIT_INTENT_EMBEDDER_PROFILE_DEFAULT_MODEL",
+            "CHAINLIT_RETRIEVAL_EMBEDDER_PROFILE_LEGAL_DEFAULT_MODEL",
+            "CHAINLIT_RETRIEVAL_EMBEDDER_PROFILE_LOW_VRAM_MODEL",
+            "INTENT_CLASSIFIER_EMBEDDER_MODEL",
+            "INTENT_CLASSIFIER_LLM_MODEL",
+            "LEGAL_EMBEDDER_MODEL",
+            "VLLM_MODEL_ID_QWEN_14B_LLM",
+            "VLLM_MODEL_SOURCE_QWEN_14B_LLM",
+            "CHAINLIT_REPORT_PDF_DISPLAY",
+        }
+        if normalized in explicit_text:
+            return "text"
+        if "_URL" in normalized:
+            return "url"
+        if normalized in {
+            "UMS_LLAMA_CACHE_PROMPT",
+            "CHAINLIT_ENABLE_DATA_LAYER",
+            "UMS_FAIL_FAST_ON_SATURATION",
+        } or normalized.endswith("_STRICT_JSON") or normalized.endswith("_REQUIRED"):
+            return "toggle"
+        numeric_tokens = (
+            "_PORT",
+            "_TOKENS",
+            "TEMPERATURE",
+            "TOP_P",
+            "PENALTY",
+            "CONTEXT_SIZE",
+            "N_GPU_LAYERS",
+            "VRAM",
+            "THRESHOLD",
+            "TIMEOUT",
+            "CONCURRENCY",
+            "TENSOR_PARALLEL",
+            "UTILIZATION",
+            "MAX_MODEL_LEN",
+            "RATIO",
+            "RESERVE",
+        )
+        if any(token in normalized for token in numeric_tokens):
+            return "number"
+        return "text"
+
+    def _default_field_description(self, *, key: str, path_policy: str | None = None) -> tuple[str, str]:
+        normalized = key.upper()
+
+        description_overrides = {
+            "MODEL_SOURCE_MODE": (
+                "Выбирает, откуда контейнеры берут модели: из self-contained bundle layout или через read-only mount с хоста.",
+                "Selects where containers read models from: the self-contained bundle layout or read-only host mounts.",
+            ),
+            "MODEL_PATH_LLM": (
+                "Путь внутри контейнера к основному GGUF-файлу LLM. Runtime читает именно этот container path, а не путь хоста.",
+                "Container-side path to the main GGUF LLM file. The runtime reads this container path, not the host path.",
+            ),
+            "MODEL_PATH_VLM": (
+                "Путь внутри контейнера к GGUF-файлу multimodal-модели. Используется только вместе с `MMPROJ_PATH`.",
+                "Container-side path to the multimodal GGUF model file. Use it together with `MMPROJ_PATH`.",
+            ),
+            "MMPROJ_PATH": (
+                "Путь внутри контейнера к `mmproj` для VLM. Если включён VLM, этот путь должен быть заполнен вместе с `MODEL_PATH_VLM`.",
+                "Container-side path to the VLM `mmproj` file. When VLM is enabled, fill this together with `MODEL_PATH_VLM`.",
+            ),
+            "MODEL_PATH_EMBEDDING_INTENT": (
+                "Путь внутри контейнера к директории intent-embedder. Обычно это каталог модели SentenceTransformer или совместимого эмбеддера.",
+                "Container-side path to the intent embedder directory. This is usually a SentenceTransformer or compatible embedder folder.",
+            ),
+            "MODEL_PATH_EMBEDDING_RETRIEVAL": (
+                "Путь внутри контейнера к директории retrieval-embedder. Runtime ожидает здесь готовую директорию модели, а не отдельный файл.",
+                "Container-side path to the retrieval embedder directory. The runtime expects a ready model directory here, not a single file.",
+            ),
+            "HOST_MODEL_PATH_LLM": (
+                "Файл на хосте, который будет read-only смонтирован как основной LLM. Обычно это `.gguf` файл вне `deploy/offline_bundle/models`.",
+                "Host-side file that will be mounted read-only as the main LLM. This is usually a `.gguf` file outside `deploy/offline_bundle/models`.",
+            ),
+            "HOST_MODEL_PATH_VLM": (
+                "Файл multimodal-модели на хосте для read-only mount. Если указываешь этот путь, рядом должен быть и `HOST_MMPROJ_PATH`.",
+                "Host-side multimodal model file used as a read-only mount. If you set this path, provide `HOST_MMPROJ_PATH` as well.",
+            ),
+            "HOST_MMPROJ_PATH": (
+                "Файл `mmproj` на хосте для read-only mount. Используется в паре с `HOST_MODEL_PATH_VLM`.",
+                "Host-side `mmproj` file used as a read-only mount. It is paired with `HOST_MODEL_PATH_VLM`.",
+            ),
+            "HOST_MODEL_PATH_EMBEDDING_INTENT": (
+                "Директория модели intent-embedder на хосте. В контейнер монтируется именно папка модели целиком.",
+                "Host-side intent embedder directory. The whole model folder is mounted into the container.",
+            ),
+            "HOST_MODEL_PATH_EMBEDDING_RETRIEVAL": (
+                "Директория модели retrieval-embedder на хосте. Указывай папку модели, а не отдельный файл внутри неё.",
+                "Host-side retrieval embedder directory. Point to the model folder, not to a single file inside it.",
+            ),
+            "BUNDLE_MODEL_ROOT": (
+                "Корень каталога моделей внутри bundle layout. Меняй только если осознанно меняешь внутреннюю структуру offline bundle.",
+                "Root directory for models inside the bundle layout. Change this only if you intentionally change the internal offline bundle structure.",
+            ),
+            "BUNDLE_UPLOADS_ROOT": (
+                "Корень каталога загрузок внутри bundle layout. Сервисы используют его как общий uploads-root.",
+                "Root uploads directory inside the bundle layout. Services use it as a shared uploads root.",
+            ),
+            "BUNDLE_REPORTS_ROOT": (
+                "Корень каталога отчётов внутри bundle layout. Здесь лежат generated reports и runtime artifacts.",
+                "Root reports directory inside the bundle layout. Generated reports and runtime artifacts live here.",
+            ),
+        }
+        if normalized in description_overrides:
+            return description_overrides[normalized]
+
+        if path_policy == "host_path_flexible" or any(token in normalized for token in ("_PATH", "_ROOT")):
+            return (
+                f"Задаёт путь для `{key}` в текущем пути запуска.",
+                f"Sets the path used for `{key}` in the current runtime path.",
+            )
+        if "_URL" in normalized:
+            return (
+                f"Задаёт адрес, который использует `{key}` в текущем пути запуска.",
+                f"Sets the address used by `{key}` in the current runtime path.",
+            )
+        if "_PORT" in normalized:
+            return (
+                f"Задаёт порт, который публикует или слушает `{key}`.",
+                f"Sets the port published or listened to by `{key}`.",
+            )
+        if "PASSWORD" in normalized:
+            return (
+                f"Хранит пароль, который использует `{key}` для доступа и аутентификации.",
+                f"Stores the password used by `{key}` for access and authentication.",
+            )
+        if normalized.endswith("_USER") or normalized.endswith("_USERNAME"):
+            return (
+                f"Хранит логин, который использует `{key}` для доступа.",
+                f"Stores the user name used by `{key}` for access.",
+            )
+        if "SECRET" in normalized or "API_KEY" in normalized:
+            return (
+                f"Хранит секрет или токен, который использует `{key}` для аутентификации.",
+                f"Stores the secret or token used by `{key}` for authentication.",
+            )
+        if "DEVICE_MODE" in normalized:
+            return (
+                f"Определяет, на каком устройстве работает `{key}`.",
+                f"Controls which device placement is used for `{key}`.",
+            )
+        if normalized.endswith("_PROFILE") or "_PROFILE_" in normalized:
+            return (
+                f"Выбирает профиль, который использует `{key}`.",
+                f"Selects the profile used by `{key}`.",
+            )
+        if normalized == "MODEL_SOURCE_MODE":
+            return (
+                "Определяет, брать ли модели из layout bundle или монтировать их с хоста.",
+                "Controls whether models come from the bundle layout or from external host mounts.",
+            )
+        if "MODEL" in normalized:
+            return (
+                f"Определяет модель или модельный идентификатор для `{key}`.",
+                f"Controls the model or model identifier used by `{key}`.",
+            )
+        if any(token in normalized for token in ("CONTEXT", "TOKENS", "TOP_P", "TEMPERATURE", "RATIO", "VRAM", "LAYER")):
+            return (
+                f"Задаёт runtime-параметр `{key}` для контекста, ресурсов или генерации.",
+                f"Controls the runtime tuning value `{key}` for context, resources, or generation.",
+            )
+        if normalized.endswith("_MODE"):
+            return (
+                f"Определяет режим работы для `{key}`.",
+                f"Controls the operating mode used by `{key}`.",
+            )
+        if normalized.endswith("_REQUIRED") or normalized.endswith("_STRICT_JSON"):
+            return (
+                f"Включает или отключает поведение `{key}`.",
+                f"Turns `{key}` behavior on or off.",
+            )
+        return (
+            f"Определяет текущее значение параметра `{key}` для этого пути запуска.",
+            f"Controls the current `{key}` setting for this runtime path.",
+        )
 
     def _validate_field_value(
         self,
@@ -98,7 +316,7 @@ class OperatorConfigService:
         raw_value = str(value).strip()
         if not raw_value:
             return {
-                "status": "missing",
+                "status": "info",
                 "message": "Value is empty and must be set explicitly.",
             }
 
@@ -108,16 +326,58 @@ class OperatorConfigService:
                 candidate = (self.repo_root / raw_value).resolve()
 
             if candidate.exists():
+                if key in {"HOST_MODEL_PATH_LLM", "HOST_MODEL_PATH_VLM", "HOST_MMPROJ_PATH"} and candidate.suffix.lower() != ".gguf":
+                    return {
+                        "status": "warning",
+                        "message": f"Resolved host path exists but is not a .gguf file: {candidate}",
+                    }
+                if key in {"HOST_MODEL_PATH_EMBEDDING_INTENT", "HOST_MODEL_PATH_EMBEDDING_RETRIEVAL"}:
+                    markers = [
+                        "config.json",
+                        "modules.json",
+                        "tokenizer.json",
+                        "tokenizer_config.json",
+                    ]
+                    found_markers = [marker for marker in markers if (candidate / marker).exists()]
+                    if not found_markers:
+                        return {
+                            "status": "warning",
+                            "message": f"Resolved host directory exists but common model markers were not found yet: {candidate}",
+                        }
                 return {
                     "status": "ok",
                     "message": f"Resolved host path exists: {candidate}",
                 }
             return {
-                "status": "missing",
+                "status": "error",
                 "message": f"Resolved host path does not exist yet: {candidate}",
             }
 
         if path_policy == "bundle_internal_path":
+            if key in {
+                "MODEL_PATH_LLM",
+                "MODEL_PATH_VLM",
+                "MMPROJ_PATH",
+                "MODEL_PATH_EMBEDDING_INTENT",
+                "MODEL_PATH_EMBEDDING_RETRIEVAL",
+            }:
+                if raw_value.startswith("/app/backend/models/"):
+                    bundle_relative = raw_value.removeprefix("/app/backend/models/").lstrip("/")
+                    bundle_candidate = self.repo_root / "deploy" / "offline_bundle" / "models" / bundle_relative
+                    if bundle_candidate.exists():
+                        return {
+                            "status": "ok",
+                            "message": f"Bundle-relative model path resolves locally: {bundle_candidate}",
+                        }
+                    return {
+                        "status": "warning",
+                        "message": f"Bundle-relative model path is not present in deploy/offline_bundle/models yet: {bundle_candidate}",
+                    }
+                if raw_value.startswith("/opt/agent-nav/external/"):
+                    return {
+                        "status": "info",
+                        "message": "This container target is expected to be filled by an external host mount before startup.",
+                    }
             return {
                 "status": "info",
                 "message": "This value is interpreted inside the offline bundle/container layout.",
@@ -195,7 +455,7 @@ class OperatorConfigService:
                 "runtime",
                 "Runtime / Profile",
                 "Runtime / Profile",
-                "Профиль запуска, backend mode и общий режим устройства.",
+                "Профиль запуска, режим backend и общий режим устройства.",
                 "Launch profile, backend mode, and overall device mode.",
                 [
                     {
@@ -234,7 +494,7 @@ class OperatorConfigService:
                                 "Backend mode",
                                 "backend/.env",
                                 suggested=env_value(backend_env, "BACKEND_MODE", default="llama-server"),
-                                recommended_reason="Используй текущий backend mode репозитория, если нет отдельного performance requirement.",
+                                recommended_reason="Используй текущий режим backend репозитория, если нет отдельного требования по производительности.",
                                 recommended_reason_en="Keep the repository backend mode unless you have a separate performance requirement.",
                                 control="select",
                                 options=self._select_options(["llama-cpp-python", "llama-server", "vllm"]),
@@ -245,9 +505,9 @@ class OperatorConfigService:
                 [
                     self._preset(
                         "native-adaptive",
-                        "Adaptive recommended",
+                        "Адаптивный набор",
                         "Adaptive Recommended",
-                        "Подставляет рекомендованные значения для обычного локального запуска.",
+                        "Подставляет значения для обычного локального запуска.",
                         "Stages the recommended values for a standard local runtime.",
                         "runtime",
                         {
@@ -260,10 +520,10 @@ class OperatorConfigService:
                     ),
                     self._preset(
                         "native-cpu-fallback",
-                        "CPU fallback",
+                        "CPU-режим",
                         "CPU Fallback",
-                        "Переводит runtime в CPU-oriented режим, когда GPU path нежелателен.",
-                        "Moves the runtime into a CPU-oriented mode when the GPU path is not desirable.",
+                        "Переводит runtime в CPU-режим, когда GPU-путь нежелателен.",
+                        "Moves the runtime into CPU mode when the GPU path is not desirable.",
                         "runtime",
                         {
                             "UMS_RUNTIME_PROFILE": "conservative",
@@ -276,14 +536,14 @@ class OperatorConfigService:
             ),
             self._variant(
                 "models",
-                "Model Registry & Paths",
+                "Реестр моделей и пути",
                 "Model Registry & Paths",
                 "Пути к моделям и registry-конфигу. Здесь обычно правки ручные, но рекомендации видны рядом.",
                 "Model and registry paths. These are usually edited manually, with recommendations shown next to the fields.",
                 [
                     {
                         "groupId": "model_paths",
-                        "title": "Model Registry & Paths",
+                        "title": "Реестр моделей и пути",
                         "titleEn": "Model Registry & Paths",
                         "fields": [
                             self._field(
@@ -324,6 +584,18 @@ class OperatorConfigService:
                             ),
                             self._field(
                                 backend_env_native or backend_env,
+                                "MMPROJ_PATH",
+                                "mmproj path",
+                                "mmproj path",
+                                "backend/.env.native",
+                                suggested=env_value(backend_env_native or backend_env, "MMPROJ_PATH", default="/models/mmproj.gguf"),
+                                recommended_reason="Если включён VLM, рядом должен быть и путь к mmproj.",
+                                recommended_reason_en="When VLM is enabled, the matching mmproj path must also be present.",
+                                path_policy="host_path_flexible",
+                                path_example="/mnt/models/mmproj.gguf",
+                            ),
+                            self._field(
+                                backend_env_native or backend_env,
                                 "MODEL_PATH_EMBEDDING_INTENT",
                                 "Intent embedder path",
                                 "Intent embedder path",
@@ -353,14 +625,14 @@ class OperatorConfigService:
             ),
             self._variant(
                 "gpu",
-                "GPU / Placement",
+                "GPU / Размещение",
                 "GPU / Placement",
                 "Размещение моделей и ограничения по GPU. Здесь часть параметров меняется пресетами, часть вручную.",
                 "Model placement and GPU limits. Some values come from presets, others remain manual.",
                 [
                     {
                         "groupId": "gpu_placement",
-                        "title": "GPU / Placement",
+                        "title": "GPU / Размещение",
                         "titleEn": "GPU / Placement",
                         "fields": [
                             self._field(
@@ -484,14 +756,14 @@ class OperatorConfigService:
             ),
             self._variant(
                 "runtime_tuning",
-                "LLM / Context",
+                "LLM / Контекст",
                 "LLM / Context",
                 "Бюджет контекста и генерации для текущего native runtime path.",
                 "Context and generation budget for the current native runtime path.",
                 [
                     {
                         "groupId": "runtime_tuning",
-                        "title": "LLM / Context",
+                        "title": "LLM / Контекст",
                         "titleEn": "LLM / Context",
                         "fields": [
                             self._field(
@@ -531,14 +803,14 @@ class OperatorConfigService:
             ),
             self._variant(
                 "model_runtime",
+                "Параметры моделей",
                 "Model Runtime",
-                "Model Runtime",
-                "Per-model runtime knobs для контекста и числа GPU-слоёв.",
+                "Параметры моделей для контекста и числа GPU-слоёв.",
                 "Per-model runtime knobs for context size and GPU layer count.",
                 [
                     {
                         "groupId": "model_runtime",
-                        "title": "Model Runtime",
+                        "title": "Параметры моделей",
                         "titleEn": "Model Runtime",
                         "fields": [
                             self._field(
@@ -573,6 +845,16 @@ class OperatorConfigService:
                             ),
                             self._field(
                                 backend_env,
+                                "N_GPU_LAYERS_QWENVL",
+                                "QwenVL GPU layers",
+                                "QwenVL GPU layers",
+                                "backend/.env",
+                                suggested=env_value(backend_env, "N_GPU_LAYERS_QWENVL", default="-1"),
+                                recommended_reason="Per-model override числа GPU-слоёв для VLM path.",
+                                recommended_reason_en="Per-model GPU-layer override for the VLM path.",
+                            ),
+                            self._field(
+                                backend_env,
                                 "CONTEXT_SIZE_LABSE",
                                 "LaBSE context size",
                                 "LaBSE context size",
@@ -580,6 +862,16 @@ class OperatorConfigService:
                                 suggested=env_value(backend_env, "CONTEXT_SIZE_LABSE", default="512"),
                                 recommended_reason="Контекст embedders обычно невелик; увеличивай только при реальной необходимости.",
                                 recommended_reason_en="Embedder context is usually small; increase it only when needed.",
+                            ),
+                            self._field(
+                                backend_env,
+                                "N_GPU_LAYERS_LABSE",
+                                "LaBSE GPU layers",
+                                "LaBSE GPU layers",
+                                "backend/.env",
+                                suggested=env_value(backend_env, "N_GPU_LAYERS_LABSE", default="10"),
+                                recommended_reason="Используй только если retrieval embedder действительно должен идти в GPU-offload path.",
+                                recommended_reason_en="Use only if the retrieval embedder really needs a GPU offload path.",
                             ),
                             self._field(
                                 backend_env,
@@ -610,6 +902,16 @@ class OperatorConfigService:
                         "fields": [
                             self._field(
                                 backend_env,
+                                "AGENT_API_PORT",
+                                "Agent API port",
+                                "Agent API port",
+                                "backend/.env",
+                                suggested=env_value(backend_env, "AGENT_API_PORT", default="8000"),
+                                recommended_reason="Порт локального FastAPI/agent API пути.",
+                                recommended_reason_en="Published port for the local FastAPI/agent API path.",
+                            ),
+                            self._field(
+                                backend_env,
                                 "CHAINLIT_PORT",
                                 "Chainlit port",
                                 "Chainlit port",
@@ -630,11 +932,21 @@ class OperatorConfigService:
                             ),
                             self._field(
                                 backend_env,
-                                "DOCUMENT_SERVER_URL",
+                                "UMS_URL",
+                                "UMS URL",
+                                "UMS URL",
+                                "backend/.env",
+                                suggested=env_value(backend_env, "UMS_URL", default="http://localhost:8090"),
+                                recommended_reason="Внутренний URL, по которому backend обращается к UMS.",
+                                recommended_reason_en="Internal URL used by the backend to reach UMS.",
+                            ),
+                            self._field(
+                                backend_env,
+                                "DOC_SERVER_URL",
                                 "Document server URL",
                                 "Document server URL",
                                 "backend/.env",
-                                suggested=env_value(backend_env, "DOCUMENT_SERVER_URL", default="http://127.0.0.1:8001"),
+                                suggested=env_value(backend_env, "DOC_SERVER_URL", default="http://127.0.0.1:8001"),
                                 recommended_reason="Должен указывать на локальный document server path.",
                                 recommended_reason_en="Should point to the local document server path.",
                             ),
@@ -654,15 +966,72 @@ class OperatorConfigService:
                 [],
             ),
             self._variant(
+                "generation",
+                "Генерация",
+                "Generation",
+                "Основные sampling-параметры и лимит ответа для native runtime.",
+                "Primary sampling controls and response limits for the native runtime.",
+                [
+                    {
+                        "groupId": "native_generation",
+                        "title": "Генерация",
+                        "titleEn": "Generation",
+                        "fields": [
+                            self._field(
+                                backend_env,
+                                "TEMPERATURE",
+                                "Temperature",
+                                "Temperature",
+                                "backend/.env",
+                                suggested=env_value(backend_env, "TEMPERATURE", default="0.5"),
+                                recommended_reason="Общий sampling-параметр для generation path.",
+                                recommended_reason_en="General sampling control for the generation path.",
+                            ),
+                            self._field(
+                                backend_env,
+                                "TOP_P",
+                                "Top-p",
+                                "Top-p",
+                                "backend/.env",
+                                suggested=env_value(backend_env, "TOP_P", default="0.9"),
+                                recommended_reason="Ограничивает nucleus sampling для основного generation path.",
+                                recommended_reason_en="Controls nucleus sampling for the main generation path.",
+                            ),
+                            self._field(
+                                backend_env,
+                                "REPETITION_PENALTY",
+                                "Repetition penalty",
+                                "Repetition penalty",
+                                "backend/.env",
+                                suggested=env_value(backend_env, "REPETITION_PENALTY", default="1.2"),
+                                recommended_reason="Сдерживает повторения в выходном тексте.",
+                                recommended_reason_en="Helps reduce repetitive output.",
+                            ),
+                            self._field(
+                                backend_env,
+                                "MAX_TOKENS",
+                                "Max tokens",
+                                "Max tokens",
+                                "backend/.env",
+                                suggested=env_value(backend_env, "MAX_TOKENS", default="2048"),
+                                recommended_reason="Ограничивает длину генерации ответа.",
+                                recommended_reason_en="Caps the response generation length.",
+                            ),
+                        ],
+                    }
+                ],
+                [],
+            ),
+            self._variant(
                 "native_secrets",
-                "Secrets / Access",
+                "Секреты и доступ",
                 "Secrets / Access",
                 "Логины, пароли и auth secrets для локального admin/operator path.",
                 "Logins, passwords, and auth secrets for the local admin/operator path.",
                 [
                     {
                         "groupId": "native_secrets",
-                        "title": "Secrets / Access",
+                        "title": "Секреты и доступ",
                         "titleEn": "Secrets / Access",
                         "fields": [
                             self._field(
@@ -725,14 +1094,14 @@ class OperatorConfigService:
             ),
             self._variant(
                 "chainlit",
-                "Chainlit Profiles",
+                "Профили Chainlit",
                 "Chainlit Profiles",
                 "Профили Chainlit. Обычно редактируются вручную по конкретному workflow.",
                 "Chainlit profiles. These are usually edited manually for a specific workflow.",
                 [
                     {
                         "groupId": "chainlit_profiles",
-                        "title": "Chainlit Profiles",
+                        "title": "Профили Chainlit",
                         "titleEn": "Chainlit Profiles",
                         "fields": [
                             self._field(
@@ -762,14 +1131,14 @@ class OperatorConfigService:
             ),
             self._variant(
                 "parsing",
+                "Парсинг и сравнение",
                 "Parsing / Compare",
-                "Parsing / Compare",
-                "Параметры strict JSON и compare path. Здесь полезны safe/strict пресеты.",
-                "Strict JSON and compare-path settings. Safe and strict presets are useful here.",
+                "Параметры strict JSON и сравнения. Здесь полезны безопасный и строгий пресеты.",
+                "Strict JSON and compare settings. Safe and strict presets are useful here.",
                 [
                     {
                         "groupId": "parsing_compare",
-                        "title": "Parsing / Compare",
+                        "title": "Парсинг и сравнение",
                         "titleEn": "Parsing / Compare",
                         "fields": [
                             self._field(
@@ -791,8 +1160,7 @@ class OperatorConfigService:
                                 suggested=env_value(backend_env, "COMPARE_SINGLE_ITEM_STRICT_JSON", default="true"),
                                 recommended_reason="Strict JSON полезен для стабильного parser contract.",
                                 recommended_reason_en="Strict JSON helps keep the parser contract stable.",
-                                control="select",
-                                options=self._boolean_options(),
+                                control="toggle",
                             ),
                             self._field(
                                 backend_env,
@@ -805,6 +1173,18 @@ class OperatorConfigService:
                                 recommended_reason_en="A small retry count protects the parser path without too much extra latency.",
                                 control="select",
                                 options=self._select_options(["0", "1", "2", "3"]),
+                            ),
+                            self._field(
+                                backend_env_runtime or backend_env,
+                                "RAG_MODE_OVERRIDE",
+                                "RAG mode override",
+                                "RAG mode override",
+                                "backend/.env.runtime",
+                                suggested=env_value(backend_env_runtime or backend_env, "RAG_MODE_OVERRIDE", default="auto"),
+                                recommended_reason="Определяет, использовать ли auto, agentic или simple retrieval policy.",
+                                recommended_reason_en="Controls whether retrieval runs in auto, agentic, or simple mode.",
+                                control="select",
+                                options=self._select_options(["auto", "agentic", "simple"]),
                             ),
                         ],
                     }
@@ -845,105 +1225,134 @@ class OperatorConfigService:
 
         container_variants = [
             self._variant(
-                "local_safe_ports",
-                "Local Safe Ports",
-                "Local Safe Ports",
-                "Профиль для локального запуска рядом с текущим operator UI без конфликта published ports.",
-                "Profile for local execution next to the current operator UI without published-port conflicts.",
+                "published_ports",
+                "Порты публикации",
+                "Published Ports",
+                "Публикуемые порты container path. Используй пресеты для локального запуска рядом с UI или для целевого хоста.",
+                "Published ports for the container path. Use presets for local execution next to the UI or for the target host.",
                 [
                     {
-                        "groupId": "local_safe_ports",
-                        "title": "Local Safe Ports",
-                        "titleEn": "Local Safe Ports",
+                        "groupId": "published_ports",
+                        "title": "Порты публикации",
+                        "titleEn": "Published Ports",
                         "fields": [
-                            self._field(bundle_env, "AGENT_API_PORT", "Agent API port", "Agent API port", "deploy/offline_bundle/env.bundle", suggested=self.LOCAL_SAFE_PORTS["AGENT_API_PORT"], applied_default=self.TARGET_DEFAULT_PORTS["AGENT_API_PORT"], recommended_reason="Нужен отдельный порт, чтобы bundle не пытался занять тот же `8000`, что и текущий operator UI.", recommended_reason_en="Use a separate port so the bundle does not try to take the same `8000` used by the current operator UI."),
-                            self._field(bundle_env, "CHAINLIT_PORT", "Chainlit port", "Chainlit port", "deploy/offline_bundle/env.bundle", suggested=self.LOCAL_SAFE_PORTS["CHAINLIT_PORT"], applied_default=self.TARGET_DEFAULT_PORTS["CHAINLIT_PORT"], recommended_reason="Safe local порт для bundle Chainlit рядом с локальным dev UI.", recommended_reason_en="Safe local port for the bundle Chainlit UI next to the local dev UI."),
-                            self._field(bundle_env, "UMS_PORT", "UMS port", "UMS port", "deploy/offline_bundle/env.bundle", suggested=self.LOCAL_SAFE_PORTS["UMS_PORT"], applied_default=self.TARGET_DEFAULT_PORTS["UMS_PORT"], recommended_reason="Safe local порт для bundle UMS без конфликта со стандартным `8090`.", recommended_reason_en="Safe local port for the bundle UMS without conflicting with the standard `8090`."),
-                            self._field(bundle_env, "PROMETHEUS_PORT", "Prometheus port", "Prometheus port", "deploy/offline_bundle/env.bundle", suggested=self.LOCAL_SAFE_PORTS["PROMETHEUS_PORT"], applied_default=self.TARGET_DEFAULT_PORTS["PROMETHEUS_PORT"], recommended_reason="Safe local порт для мониторинга bundle рядом с локальными сервисами.", recommended_reason_en="Safe local port for bundle monitoring next to local services."),
-                            self._field(bundle_env, "GRAFANA_PORT", "Grafana port", "Grafana port", "deploy/offline_bundle/env.bundle", suggested=self.LOCAL_SAFE_PORTS["GRAFANA_PORT"], applied_default=self.TARGET_DEFAULT_PORTS["GRAFANA_PORT"], recommended_reason="Safe local порт для Grafana bundle рядом с локальным monitoring stack.", recommended_reason_en="Safe local port for bundle Grafana next to the local monitoring stack."),
+                            self._field(bundle_env, "AGENT_API_PORT", "Agent API port", "Agent API port", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "AGENT_API_PORT", default=self.LOCAL_SAFE_PORTS["AGENT_API_PORT"]), applied_default=self.TARGET_DEFAULT_PORTS["AGENT_API_PORT"], recommended_reason="Порт, который публикует container `agent-api`.", recommended_reason_en="Port published by the container `agent-api`."),
+                            self._field(bundle_env, "DOCUMENT_SERVER_PORT", "Document server port", "Document server port", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "DOCUMENT_SERVER_PORT", default="8001"), recommended_reason="Порт публикации контейнера document server.", recommended_reason_en="Published port for the document server container."),
+                            self._field(bundle_env, "LEGAL_SERVER_PORT", "Legal server port", "Legal server port", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "LEGAL_SERVER_PORT", default="8002"), recommended_reason="Порт публикации контейнера legal server.", recommended_reason_en="Published port for the legal server container."),
+                            self._field(bundle_env, "CHAINLIT_PORT", "Chainlit port", "Chainlit port", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "CHAINLIT_PORT", default=self.LOCAL_SAFE_PORTS["CHAINLIT_PORT"]), applied_default=self.TARGET_DEFAULT_PORTS["CHAINLIT_PORT"], recommended_reason="Порт, который публикует container UI Chainlit.", recommended_reason_en="Port published by the container Chainlit UI."),
+                            self._field(bundle_env, "UMS_PORT", "UMS port", "UMS port", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "UMS_PORT", default=self.LOCAL_SAFE_PORTS["UMS_PORT"]), applied_default=self.TARGET_DEFAULT_PORTS["UMS_PORT"], recommended_reason="Порт, который публикует container UMS.", recommended_reason_en="Port published by the container UMS."),
+                            self._field(bundle_env, "VLLM_PORT", "vLLM port", "vLLM port", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "VLLM_PORT", default="8101"), recommended_reason="Порт публикации отдельного vLLM container path.", recommended_reason_en="Published port for the dedicated vLLM container path."),
+                            self._field(bundle_env, "PROMETHEUS_PORT", "Prometheus port", "Prometheus port", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "PROMETHEUS_PORT", default=self.LOCAL_SAFE_PORTS["PROMETHEUS_PORT"]), applied_default=self.TARGET_DEFAULT_PORTS["PROMETHEUS_PORT"], recommended_reason="Порт, который публикует bundle Prometheus.", recommended_reason_en="Port published by bundle Prometheus."),
+                            self._field(bundle_env, "GRAFANA_PORT", "Grafana port", "Grafana port", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "GRAFANA_PORT", default=self.LOCAL_SAFE_PORTS["GRAFANA_PORT"]), applied_default=self.TARGET_DEFAULT_PORTS["GRAFANA_PORT"], recommended_reason="Порт, который публикует bundle Grafana.", recommended_reason_en="Port published by bundle Grafana."),
                         ],
                     }
                 ],
                 [
                     self._preset(
                         "bundle-local-safe-ports",
-                        "Local safe ports",
+                        "Локальные безопасные порты",
                         "Local Safe Ports",
-                        "Подставляет безопасные локальные порты для запуска рядом с текущим operator UI.",
+                        "Подставляет безопасные порты для запуска рядом с текущим operator UI.",
                         "Stages safe local ports for bundle execution next to the current operator UI.",
-                        "local_safe_ports",
+                        "published_ports",
                         deepcopy(self.LOCAL_SAFE_PORTS),
                         recommended=True,
-                        reason="Рекомендуется для локального теста bundle на той же машине, где уже работает operator UI.",
+                        reason="Используй, когда bundle стартует на той же машине, где уже работает operator UI.",
                         reason_en="Recommended when testing the bundle on the same machine where the operator UI already runs.",
                     ),
-                ],
-            ),
-            self._variant(
-                "target_default_ports",
-                "Target Default Ports",
-                "Target Default Ports",
-                "Канонический портовый профиль для target-host и offline release contract.",
-                "Canonical port profile for the target host and the offline release contract.",
-                [
-                    {
-                        "groupId": "target_default_ports",
-                        "title": "Target Default Ports",
-                        "titleEn": "Target Default Ports",
-                        "fields": [
-                            self._field(bundle_env, "AGENT_API_PORT", "Agent API port", "Agent API port", "deploy/offline_bundle/env.bundle", suggested=self.TARGET_DEFAULT_PORTS["AGENT_API_PORT"], recommended_reason="Канонический release порт `agent-api` для target-host.", recommended_reason_en="Canonical release port for `agent-api` on the target host."),
-                            self._field(bundle_env, "CHAINLIT_PORT", "Chainlit port", "Chainlit port", "deploy/offline_bundle/env.bundle", suggested=self.TARGET_DEFAULT_PORTS["CHAINLIT_PORT"], recommended_reason="Канонический release порт Chainlit для target-host.", recommended_reason_en="Canonical release port for Chainlit on the target host."),
-                            self._field(bundle_env, "UMS_PORT", "UMS port", "UMS port", "deploy/offline_bundle/env.bundle", suggested=self.TARGET_DEFAULT_PORTS["UMS_PORT"], recommended_reason="Канонический release порт UMS для target-host.", recommended_reason_en="Canonical release port for UMS on the target host."),
-                            self._field(bundle_env, "PROMETHEUS_PORT", "Prometheus port", "Prometheus port", "deploy/offline_bundle/env.bundle", suggested=self.TARGET_DEFAULT_PORTS["PROMETHEUS_PORT"], recommended_reason="Канонический release порт Prometheus для target-host.", recommended_reason_en="Canonical release port for Prometheus on the target host."),
-                            self._field(bundle_env, "GRAFANA_PORT", "Grafana port", "Grafana port", "deploy/offline_bundle/env.bundle", suggested=self.TARGET_DEFAULT_PORTS["GRAFANA_PORT"], recommended_reason="Канонический release порт Grafana для target-host.", recommended_reason_en="Canonical release port for Grafana on the target host."),
-                        ],
-                    }
-                ],
-                [
                     self._preset(
                         "bundle-target-default-ports",
-                        "Target default ports",
+                        "Целевые стандартные порты",
                         "Target Default Ports",
-                        "Возвращает bundle к каноническому release-профилю published ports.",
+                        "Возвращает bundle к каноническому release-профилю портов.",
                         "Restores the bundle to the canonical release profile for published ports.",
-                        "target_default_ports",
+                        "published_ports",
                         deepcopy(self.TARGET_DEFAULT_PORTS),
-                        reason="Используй перед упаковкой release bundle и для настоящего target-host.",
+                        reason="Используй перед упаковкой release bundle и на целевом хосте.",
                         reason_en="Use before packing a release bundle and for a real target host.",
                     ),
                 ],
             ),
             self._variant(
-                "monitoring",
-                "Monitoring",
-                "Monitoring",
-                "Настройки observability для Prometheus и Grafana внутри offline bundle.",
-                "Observability settings for Prometheus and Grafana inside the offline bundle.",
+                "model_source_mode",
+                "Режим источника моделей",
+                "Model Source Mode",
+                "Определяет, брать ли модели из layout bundle или монтировать их с внешнего хоста.",
+                "Controls whether models come from the bundle layout or from external host mounts.",
                 [
                     {
-                        "groupId": "monitoring_ports",
-                        "title": "Monitoring",
-                        "titleEn": "Monitoring",
+                        "groupId": "model_source_mode",
+                        "title": "Режим источника моделей",
+                        "titleEn": "Model Source Mode",
                         "fields": [
-                            self._field(bundle_env, "PROMETHEUS_PORT", "Prometheus port", "Prometheus port", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "PROMETHEUS_PORT", default=self.LOCAL_SAFE_PORTS["PROMETHEUS_PORT"]), recommended_reason="Выбирай порт в зависимости от local-safe или target profile.", recommended_reason_en="Pick the port based on whether you use the local-safe or target profile."),
-                            self._field(bundle_env, "GRAFANA_PORT", "Grafana port", "Grafana port", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "GRAFANA_PORT", default=self.LOCAL_SAFE_PORTS["GRAFANA_PORT"]), recommended_reason="Выбирай порт в зависимости от local-safe или target profile.", recommended_reason_en="Pick the port based on whether you use the local-safe or target profile."),
-                            self._field(bundle_env, "GF_SECURITY_ADMIN_USER", "Grafana admin user", "Grafana admin user", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "GF_SECURITY_ADMIN_USER", default="admin"), recommended_reason="Оставляй понятный admin user, но пароль меняй отдельно при target deploy.", recommended_reason_en="Keep a clear admin user, but change the password separately before target deploy."),
-                            self._field(bundle_env, "GF_SECURITY_ADMIN_PASSWORD", "Grafana admin password", "Grafana admin password", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "GF_SECURITY_ADMIN_PASSWORD", default="change-me-grafana"), recommended_reason="Для реального target-host меняй секрет вручную перед deploy.", recommended_reason_en="Change this secret manually before a real target-host deploy.", secret=True),
+                            self._field(
+                                bundle_env,
+                                "MODEL_SOURCE_MODE",
+                                "Model source mode",
+                                "Model source mode",
+                                "deploy/offline_bundle/env.bundle",
+                                suggested=env_value(bundle_env, "MODEL_SOURCE_MODE", default="bundle_layout"),
+                                recommended_reason="Выбирает между моделями внутри bundle и bind mounts с внешнего хоста.",
+                                recommended_reason_en="Switches between bundle-local models and bind mounts from the external host.",
+                                control="select",
+                                options=[
+                                    {"value": "bundle_layout", "label": "bundle_layout", "labelEn": "bundle_layout"},
+                                    {"value": "external_host_mounts", "label": "external_host_mounts", "labelEn": "external_host_mounts"},
+                                ],
+                            ),
                         ],
                     }
                 ],
-                [],
+                [
+                    self._preset(
+                        "bundle-layout-mode",
+                        "Bundle layout",
+                        "Bundle Layout",
+                        "Использует модели из `deploy/offline_bundle/models` и канонический release-layout.",
+                        "Uses models from `deploy/offline_bundle/models` and the canonical release layout.",
+                        "model_source_mode",
+                        {
+                            "MODEL_SOURCE_MODE": "bundle_layout",
+                            "MODEL_PATH_LLM": "/app/backend/models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf",
+                            "MODEL_PATH_VLM": "/app/backend/models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf",
+                            "MMPROJ_PATH": "/app/backend/models/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf",
+                            "MODEL_PATH_EMBEDDING_INTENT": "/app/backend/models/st/Qwen3-Embedding-0.6B",
+                            "MODEL_PATH_EMBEDDING_RETRIEVAL": "/app/backend/models/st/LaBSE",
+                        },
+                        recommended=True,
+                        reason="Канонический режим для release bundle и self-contained deploy.",
+                        reason_en="Canonical mode for the release bundle and self-contained deploys.",
+                    ),
+                    self._preset(
+                        "external-host-mounts-mode",
+                        "Внешние host mounts",
+                        "External Host Mounts",
+                        "Использует внешние host-пути и стабильные container targets для bind mounts.",
+                        "Uses external host paths and stable container targets for bind mounts.",
+                        "model_source_mode",
+                        {
+                            "MODEL_SOURCE_MODE": "external_host_mounts",
+                            "MODEL_PATH_LLM": "/opt/agent-nav/external/llm/model.gguf",
+                            "MODEL_PATH_VLM": "/opt/agent-nav/external/vlm/model.gguf",
+                            "MMPROJ_PATH": "/opt/agent-nav/external/vlm/mmproj.gguf",
+                            "MODEL_PATH_EMBEDDING_INTENT": "/opt/agent-nav/external/embedders/intent",
+                            "MODEL_PATH_EMBEDDING_RETRIEVAL": "/opt/agent-nav/external/embedders/retrieval",
+                        },
+                        reason="Используй, когда модели лежат вне `deploy/offline_bundle/models`.",
+                        reason_en="Use when models live outside `deploy/offline_bundle/models`.",
+                    ),
+                ],
             ),
             self._variant(
                 "runtime_backend",
-                "Runtime / Backend",
+                "Настройки backend и runtime",
                 "Runtime / Backend",
                 "Режим backend, runtime profile и общая device policy для offline bundle.",
                 "Backend mode, runtime profile, and global device policy for the offline bundle.",
                 [
                     {
                         "groupId": "bundle_runtime_backend",
-                        "title": "Runtime / Backend",
+                        "title": "Настройки backend и runtime",
                         "titleEn": "Runtime / Backend",
                         "fields": [
                             self._field(
@@ -989,14 +1398,14 @@ class OperatorConfigService:
             ),
             self._variant(
                 "bundle_gpu",
-                "GPU / Placement",
+                "GPU / Размещение",
                 "GPU / Placement",
                 "Размещение LLM, VLM и embedders по GPU, а также стратегия offload слоёв.",
                 "Placement for the LLM, VLM, and embedders across GPUs, plus the layer offload strategy.",
                 [
                     {
                         "groupId": "bundle_gpu_placement",
-                        "title": "GPU / Placement",
+                        "title": "GPU / Размещение",
                         "titleEn": "GPU / Placement",
                         "fields": [
                             self._field(
@@ -1116,14 +1525,14 @@ class OperatorConfigService:
             ),
             self._variant(
                 "secrets_access",
-                "Secrets / Access",
+                "Секреты и доступ",
                 "Secrets / Access",
                 "Логины, пароли и API keys для offline bundle сервисов.",
                 "Logins, passwords, and API keys for offline bundle services.",
                 [
                     {
                         "groupId": "bundle_secrets_access",
-                        "title": "Secrets / Access",
+                        "title": "Секреты и доступ",
                         "titleEn": "Secrets / Access",
                         "fields": [
                             self._field(
@@ -1197,19 +1606,37 @@ class OperatorConfigService:
             ),
             self._variant(
                 "artifact_mounts",
+                "Артефакты и пути",
                 "Artifact Mounts",
-                "Artifact Mounts",
-                "Пути к моделям, uploads и reports внутри offline bundle layout.",
-                "Paths for models, uploads, and reports inside the offline bundle layout.",
+                "Container-side пути runtime и host-side bind mounts для моделей, uploads и reports.",
+                "Container-side runtime paths and host-side bind mounts for models, uploads, and reports.",
                 [
                     {
-                        "groupId": "artifact_mounts",
-                        "title": "Artifact Mounts",
-                        "titleEn": "Artifact Mounts",
+                        "groupId": "container_runtime_paths",
+                        "title": "Container-side пути",
+                        "titleEn": "Container-side Paths",
                         "fields": [
-                            self._field(bundle_env, "BUNDLE_MODEL_ROOT", "Bundle model root", "Bundle model root", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "BUNDLE_MODEL_ROOT", default="/opt/agent-nav/models"), recommended_reason="Путь должен совпадать с runtime layout bundle.", recommended_reason_en="This path must stay aligned with the bundle runtime layout.", path_policy="bundle_internal_path", path_example="/opt/agent-nav/models"),
+                            self._field(bundle_env, "MODEL_PATH_LLM", "LLM model path", "LLM model path", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "MODEL_PATH_LLM", default="/app/backend/models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"), recommended_reason="Container-side путь к основному LLM artifact.", recommended_reason_en="Container-side path to the main LLM artifact.", path_policy="bundle_internal_path", path_example="/app/backend/models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"),
+                            self._field(bundle_env, "MODEL_PATH_VLM", "VLM model path", "VLM model path", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "MODEL_PATH_VLM", default="/app/backend/models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"), recommended_reason="Container-side путь к multimodal model, если VLM path включён.", recommended_reason_en="Container-side path to the multimodal model when the VLM path is enabled.", path_policy="bundle_internal_path", path_example="/app/backend/models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"),
+                            self._field(bundle_env, "MMPROJ_PATH", "mmproj path", "mmproj path", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "MMPROJ_PATH", default="/app/backend/models/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf"), recommended_reason="Container-side путь к mmproj для VLM contract.", recommended_reason_en="Container-side path to the mmproj artifact for the VLM contract.", path_policy="bundle_internal_path", path_example="/app/backend/models/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf"),
+                            self._field(bundle_env, "MODEL_PATH_EMBEDDING_INTENT", "Intent embedder path", "Intent embedder path", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "MODEL_PATH_EMBEDDING_INTENT", default="/app/backend/models/st/Qwen3-Embedding-0.6B"), recommended_reason="Container-side путь к директории intent embedder.", recommended_reason_en="Container-side path to the intent embedder directory.", path_policy="bundle_internal_path", path_example="/app/backend/models/st/Qwen3-Embedding-0.6B"),
+                            self._field(bundle_env, "MODEL_PATH_EMBEDDING_RETRIEVAL", "Retrieval embedder path", "Retrieval embedder path", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "MODEL_PATH_EMBEDDING_RETRIEVAL", default="/app/backend/models/st/LaBSE"), recommended_reason="Container-side путь к директории retrieval embedder.", recommended_reason_en="Container-side path to the retrieval embedder directory.", path_policy="bundle_internal_path", path_example="/app/backend/models/st/LaBSE"),
+                            self._field(bundle_env, "MODEL_REGISTRY_CONFIG_PATH", "Model registry config", "Model registry config", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "MODEL_REGISTRY_CONFIG_PATH", default="/app/backend/config/models.yaml"), recommended_reason="Container-side путь к конфигу реестра моделей для backend/runtime.", recommended_reason_en="Container-side path to the model registry config used by the backend/runtime.", path_policy="bundle_internal_path", path_example="/app/backend/config/models.yaml"),
+                            self._field(bundle_env, "BUNDLE_MODEL_ROOT", "Bundle model root", "Bundle model root", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "BUNDLE_MODEL_ROOT", default="/opt/agent-nav/models"), recommended_reason="Путь должен совпадать с runtime layout bundle.", recommended_reason_en="This path must stay aligned with the bundle runtime layout.", path_policy="bundle_internal_path", path_example="/opt/agent-nav/models", visible_when={"MODEL_SOURCE_MODE": "bundle_layout"}),
                             self._field(bundle_env, "BUNDLE_UPLOADS_ROOT", "Uploads root", "Uploads root", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "BUNDLE_UPLOADS_ROOT", default="/opt/agent-nav/uploads"), recommended_reason="Путь должен совпадать с runtime layout bundle.", recommended_reason_en="This path must stay aligned with the bundle runtime layout.", path_policy="bundle_internal_path", path_example="/opt/agent-nav/uploads"),
                             self._field(bundle_env, "BUNDLE_REPORTS_ROOT", "Reports root", "Reports root", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "BUNDLE_REPORTS_ROOT", default="/opt/agent-nav/reports"), recommended_reason="Путь должен совпадать с runtime layout bundle.", recommended_reason_en="This path must stay aligned with the bundle runtime layout.", path_policy="bundle_internal_path", path_example="/opt/agent-nav/reports"),
+                        ],
+                    },
+                    {
+                        "groupId": "external_host_mounts",
+                        "title": "Внешние host mounts",
+                        "titleEn": "External Host Mounts",
+                        "fields": [
+                            self._field(bundle_env, "HOST_MODEL_PATH_LLM", "Host LLM model", "Host LLM model", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "HOST_MODEL_PATH_LLM", default=""), recommended_reason="Host-side файл для bind mount основного LLM.", recommended_reason_en="Host-side file used as the bind-mount source for the main LLM.", path_policy="host_path_flexible", path_example="/mnt/models/qwen14b.gguf", visible_when={"MODEL_SOURCE_MODE": "external_host_mounts"}, picker_kind="file", picker_label="Выбрать файл", picker_label_en="Choose File"),
+                            self._field(bundle_env, "HOST_MODEL_PATH_VLM", "Host VLM model", "Host VLM model", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "HOST_MODEL_PATH_VLM", default=""), recommended_reason="Host-side файл для bind mount multimodal model.", recommended_reason_en="Host-side file used as the bind-mount source for the multimodal model.", path_policy="host_path_flexible", path_example="/mnt/models/qwenvl.gguf", visible_when={"MODEL_SOURCE_MODE": "external_host_mounts"}, picker_kind="file", picker_label="Выбрать файл", picker_label_en="Choose File"),
+                            self._field(bundle_env, "HOST_MMPROJ_PATH", "Host mmproj", "Host mmproj", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "HOST_MMPROJ_PATH", default=""), recommended_reason="Host-side файл для bind mount mmproj VLM path.", recommended_reason_en="Host-side file used as the bind-mount source for the VLM mmproj.", path_policy="host_path_flexible", path_example="/mnt/models/mmproj.gguf", visible_when={"MODEL_SOURCE_MODE": "external_host_mounts"}, picker_kind="file", picker_label="Выбрать файл", picker_label_en="Choose File"),
+                            self._field(bundle_env, "HOST_MODEL_PATH_EMBEDDING_INTENT", "Host intent embedder", "Host intent embedder", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "HOST_MODEL_PATH_EMBEDDING_INTENT", default=""), recommended_reason="Host-side директория для bind mount intent embedder.", recommended_reason_en="Host-side directory used as the bind-mount source for the intent embedder.", path_policy="host_path_flexible", path_example="/mnt/models/Qwen3-Embedding-0.6B", visible_when={"MODEL_SOURCE_MODE": "external_host_mounts"}, picker_kind="directory", picker_label="Выбрать папку", picker_label_en="Choose Folder"),
+                            self._field(bundle_env, "HOST_MODEL_PATH_EMBEDDING_RETRIEVAL", "Host retrieval embedder", "Host retrieval embedder", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "HOST_MODEL_PATH_EMBEDDING_RETRIEVAL", default=""), recommended_reason="Host-side директория для bind mount retrieval embedder.", recommended_reason_en="Host-side directory used as the bind-mount source for the retrieval embedder.", path_policy="host_path_flexible", path_example="/mnt/models/labse", visible_when={"MODEL_SOURCE_MODE": "external_host_mounts"}, picker_kind="directory", picker_label="Выбрать папку", picker_label_en="Choose Folder"),
                         ],
                     }
                 ],
@@ -1217,14 +1644,14 @@ class OperatorConfigService:
             ),
             self._variant(
                 "model_policy",
-                "Embedders / Models",
+                "Эмбеддеры и модели",
                 "Embedders / Models",
                 "Модельные идентификаторы, retrieval policy и intent-classifier contract внутри env.bundle.",
                 "Model identifiers, retrieval policy, and the intent-classifier contract inside env.bundle.",
                 [
                     {
                         "groupId": "bundle_model_policy",
-                        "title": "Embedders / Models",
+                        "title": "Эмбеддеры и модели",
                         "titleEn": "Embedders / Models",
                         "fields": [
                             self._field(
@@ -1301,6 +1728,36 @@ class OperatorConfigService:
                             ),
                             self._field(
                                 bundle_env,
+                                "INTENT_CLASSIFIER_LLM_CONFIDENCE_THRESHOLD",
+                                "Intent LLM confidence threshold",
+                                "Intent LLM confidence threshold",
+                                "deploy/offline_bundle/env.bundle",
+                                suggested=env_value(bundle_env, "INTENT_CLASSIFIER_LLM_CONFIDENCE_THRESHOLD", default="0.75"),
+                                recommended_reason="Порог уверенности LLM-classifier перед принятием маршрута intent.",
+                                recommended_reason_en="Confidence threshold used by the LLM-based intent classifier before it accepts a route.",
+                            ),
+                            self._field(
+                                bundle_env,
+                                "INTENT_CLASSIFIER_EMBEDDER_CONFIDENCE_THRESHOLD",
+                                "Intent embedder confidence threshold",
+                                "Intent embedder confidence threshold",
+                                "deploy/offline_bundle/env.bundle",
+                                suggested=env_value(bundle_env, "INTENT_CLASSIFIER_EMBEDDER_CONFIDENCE_THRESHOLD", default="0.60"),
+                                recommended_reason="Порог уверенности embedder-classifier для intent routing.",
+                                recommended_reason_en="Confidence threshold used by the embedder-based intent classifier for routing.",
+                            ),
+                            self._field(
+                                bundle_env,
+                                "INTENT_CLASSIFIER_EMBEDDER_MARGIN_THRESHOLD",
+                                "Intent embedder margin threshold",
+                                "Intent embedder margin threshold",
+                                "deploy/offline_bundle/env.bundle",
+                                suggested=env_value(bundle_env, "INTENT_CLASSIFIER_EMBEDDER_MARGIN_THRESHOLD", default="0.10"),
+                                recommended_reason="Минимальный margin между ближайшими intent-кандидатами для embedder path.",
+                                recommended_reason_en="Minimum margin between the closest intent candidates in the embedder path.",
+                            ),
+                            self._field(
+                                bundle_env,
                                 "RAG_MODE_OVERRIDE",
                                 "RAG mode override",
                                 "RAG mode override",
@@ -1317,15 +1774,41 @@ class OperatorConfigService:
                 [],
             ),
             self._variant(
+                "bundle_model_runtime",
+                "Параметры моделей",
+                "Model Runtime",
+                "Контекст, sampling и лимиты ответов для offline bundle runtime.",
+                "Context, sampling, and response limits for the offline bundle runtime.",
+                [
+                    {
+                        "groupId": "bundle_model_runtime",
+                        "title": "Параметры моделей",
+                        "titleEn": "Model Runtime",
+                        "fields": [
+                            self._field(bundle_env, "CONTEXT_SIZE_QWEN14B", "Qwen14B context size", "Qwen14B context size", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "CONTEXT_SIZE_QWEN14B", default="16384"), recommended_reason="Контекстное окно основного LLM внутри offline bundle.", recommended_reason_en="Context window for the main LLM inside the offline bundle."),
+                            self._field(bundle_env, "CONTEXT_SIZE_QWENVL", "QwenVL context size", "QwenVL context size", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "CONTEXT_SIZE_QWENVL", default="16384"), recommended_reason="Контекст multimodal модели, если VLM path включён.", recommended_reason_en="Context window for the multimodal model when the VLM path is enabled."),
+                            self._field(bundle_env, "CONTEXT_SIZE_LABSE", "LaBSE context size", "LaBSE context size", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "CONTEXT_SIZE_LABSE", default="512"), recommended_reason="Контекст retrieval embedder внутри bundle runtime.", recommended_reason_en="Context size for the retrieval embedder inside the bundle runtime."),
+                            self._field(bundle_env, "CONTEXT_SIZE_QWEN3_EMBEDDING_06B", "Qwen3 embedding context size", "Qwen3 embedding context size", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "CONTEXT_SIZE_QWEN3_EMBEDDING_06B", default="512"), recommended_reason="Контекст intent embedder внутри bundle runtime.", recommended_reason_en="Context size for the intent embedder inside the bundle runtime."),
+                            self._field(bundle_env, "TEMPERATURE", "Temperature", "Temperature", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "TEMPERATURE", default="0.5"), recommended_reason="Общий sampling-параметр для generation path внутри offline bundle.", recommended_reason_en="General sampling control for the generation path inside the offline bundle."),
+                            self._field(bundle_env, "TOP_P", "Top-p", "Top-p", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "TOP_P", default="0.9"), recommended_reason="Nucleus sampling для bundle runtime.", recommended_reason_en="Nucleus sampling setting for the bundle runtime."),
+                            self._field(bundle_env, "REPETITION_PENALTY", "Repetition penalty", "Repetition penalty", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "REPETITION_PENALTY", default="1.2"), recommended_reason="Сдерживает повторения при генерации ответа внутри bundle runtime.", recommended_reason_en="Helps reduce repetitive output inside the bundle runtime."),
+                            self._field(bundle_env, "MAX_TOKENS", "Max tokens", "Max tokens", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "MAX_TOKENS", default="2048"), recommended_reason="Лимит длины ответа внутри bundle runtime.", recommended_reason_en="Response-length cap inside the bundle runtime."),
+                            self._field(bundle_env, "VLLM_MAX_MODEL_LEN", "vLLM max model length", "vLLM max model length", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "VLLM_MAX_MODEL_LEN", default="16384"), recommended_reason="Лимит контекста для отдельного vLLM serving path.", recommended_reason_en="Context limit for the dedicated vLLM serving path."),
+                        ],
+                    }
+                ],
+                [],
+            ),
+            self._variant(
                 "chainlit_profiles",
-                "Chainlit Profiles",
+                "Профили Chainlit",
                 "Chainlit Profiles",
                 "Параметры Chainlit-профилей, влияющие на default temperature, top-p, max tokens и выбор модельных профилей.",
                 "Chainlit profile settings that control default temperature, top-p, max tokens, and model profile selection.",
                 [
                     {
                         "groupId": "bundle_chainlit_profiles",
-                        "title": "Chainlit Profiles",
+                        "title": "Профили Chainlit",
                         "titleEn": "Chainlit Profiles",
                         "fields": [
                             self._field(
@@ -1398,6 +1881,158 @@ class OperatorConfigService:
                                 recommended_reason="Меняй только если low-VRAM profile реально переключается на другой serving path.",
                                 recommended_reason_en="Change this only when the low-VRAM profile actually switches to a different serving path.",
                             ),
+                            self._field(
+                                bundle_env,
+                                "CHAINLIT_MODEL_PROFILE_LONG_CONTEXT_TEMPERATURE",
+                                "Long-context temperature",
+                                "Long-context temperature",
+                                "deploy/offline_bundle/env.bundle",
+                                suggested=env_value(bundle_env, "CHAINLIT_MODEL_PROFILE_LONG_CONTEXT_TEMPERATURE", default="0.3"),
+                                recommended_reason="Sampling для long-context профиля.",
+                                recommended_reason_en="Sampling control for the long-context profile.",
+                            ),
+                            self._field(
+                                bundle_env,
+                                "CHAINLIT_MODEL_PROFILE_LONG_CONTEXT_TOP_P",
+                                "Long-context top-p",
+                                "Long-context top-p",
+                                "deploy/offline_bundle/env.bundle",
+                                suggested=env_value(bundle_env, "CHAINLIT_MODEL_PROFILE_LONG_CONTEXT_TOP_P", default="0.9"),
+                                recommended_reason="Top-p для long-context профиля.",
+                                recommended_reason_en="Top-p for the long-context profile.",
+                            ),
+                            self._field(
+                                bundle_env,
+                                "CHAINLIT_MODEL_PROFILE_LONG_CONTEXT_MAX_TOKENS",
+                                "Long-context max tokens",
+                                "Long-context max tokens",
+                                "deploy/offline_bundle/env.bundle",
+                                suggested=env_value(bundle_env, "CHAINLIT_MODEL_PROFILE_LONG_CONTEXT_MAX_TOKENS", default="3072"),
+                                recommended_reason="Лимит длины ответа для long-context профиля.",
+                                recommended_reason_en="Response-length limit for the long-context profile.",
+                            ),
+                            self._field(
+                                bundle_env,
+                                "CHAINLIT_MODEL_PROFILE_LEGAL_COMPARE_TEMPERATURE",
+                                "Legal-compare temperature",
+                                "Legal-compare temperature",
+                                "deploy/offline_bundle/env.bundle",
+                                suggested=env_value(bundle_env, "CHAINLIT_MODEL_PROFILE_LEGAL_COMPARE_TEMPERATURE", default="0.2"),
+                                recommended_reason="Sampling для legal-compare профиля.",
+                                recommended_reason_en="Sampling control for the legal-compare profile.",
+                            ),
+                            self._field(
+                                bundle_env,
+                                "CHAINLIT_MODEL_PROFILE_LEGAL_COMPARE_TOP_P",
+                                "Legal-compare top-p",
+                                "Legal-compare top-p",
+                                "deploy/offline_bundle/env.bundle",
+                                suggested=env_value(bundle_env, "CHAINLIT_MODEL_PROFILE_LEGAL_COMPARE_TOP_P", default="0.8"),
+                                recommended_reason="Top-p для legal-compare профиля.",
+                                recommended_reason_en="Top-p for the legal-compare profile.",
+                            ),
+                            self._field(
+                                bundle_env,
+                                "CHAINLIT_MODEL_PROFILE_LEGAL_COMPARE_MAX_TOKENS",
+                                "Legal-compare max tokens",
+                                "Legal-compare max tokens",
+                                "deploy/offline_bundle/env.bundle",
+                                suggested=env_value(bundle_env, "CHAINLIT_MODEL_PROFILE_LEGAL_COMPARE_MAX_TOKENS", default="2048"),
+                                recommended_reason="Лимит длины ответа для legal-compare профиля.",
+                                recommended_reason_en="Response-length limit for the legal-compare profile.",
+                            ),
+                            self._field(
+                                bundle_env,
+                                "CHAINLIT_MODEL_PROFILE_LOW_VRAM_TEMPERATURE",
+                                "Low-VRAM temperature",
+                                "Low-VRAM temperature",
+                                "deploy/offline_bundle/env.bundle",
+                                suggested=env_value(bundle_env, "CHAINLIT_MODEL_PROFILE_LOW_VRAM_TEMPERATURE", default="0.2"),
+                                recommended_reason="Sampling для low-VRAM профиля.",
+                                recommended_reason_en="Sampling control for the low-VRAM profile.",
+                            ),
+                            self._field(
+                                bundle_env,
+                                "CHAINLIT_MODEL_PROFILE_LOW_VRAM_TOP_P",
+                                "Low-VRAM top-p",
+                                "Low-VRAM top-p",
+                                "deploy/offline_bundle/env.bundle",
+                                suggested=env_value(bundle_env, "CHAINLIT_MODEL_PROFILE_LOW_VRAM_TOP_P", default="0.8"),
+                                recommended_reason="Top-p для low-VRAM профиля.",
+                                recommended_reason_en="Top-p for the low-VRAM profile.",
+                            ),
+                            self._field(
+                                bundle_env,
+                                "CHAINLIT_MODEL_PROFILE_LOW_VRAM_MAX_TOKENS",
+                                "Low-VRAM max tokens",
+                                "Low-VRAM max tokens",
+                                "deploy/offline_bundle/env.bundle",
+                                suggested=env_value(bundle_env, "CHAINLIT_MODEL_PROFILE_LOW_VRAM_MAX_TOKENS", default="1024"),
+                                recommended_reason="Лимит длины ответа для low-VRAM профиля.",
+                                recommended_reason_en="Response-length limit for the low-VRAM profile.",
+                            ),
+                            self._field(
+                                bundle_env,
+                                "CHAINLIT_ENABLE_DATA_LAYER",
+                                "Enable data layer",
+                                "Enable data layer",
+                                "deploy/offline_bundle/env.bundle",
+                                suggested=env_value(bundle_env, "CHAINLIT_ENABLE_DATA_LAYER", default="true"),
+                                recommended_reason="Включает встроенный data layer Chainlit для истории и состояния UI.",
+                                recommended_reason_en="Enables the built-in Chainlit data layer for UI history and state.",
+                            ),
+                            self._field(
+                                bundle_env,
+                                "CHAINLIT_SQLITE_TIMEOUT_S",
+                                "Chainlit SQLite timeout",
+                                "Chainlit SQLite timeout",
+                                "deploy/offline_bundle/env.bundle",
+                                suggested=env_value(bundle_env, "CHAINLIT_SQLITE_TIMEOUT_S", default="30"),
+                                recommended_reason="SQLite timeout для локов и ожидания data layer внутри bundle.",
+                                recommended_reason_en="SQLite timeout used by the data layer inside the bundle.",
+                            ),
+                            self._field(
+                                bundle_env,
+                                "CHAINLIT_REPORT_PDF_DISPLAY",
+                                "Report PDF display",
+                                "Report PDF display",
+                                "deploy/offline_bundle/env.bundle",
+                                suggested=env_value(bundle_env, "CHAINLIT_REPORT_PDF_DISPLAY", default="inline"),
+                                recommended_reason="Режим показа PDF-отчётов в UI.",
+                                recommended_reason_en="Display mode for PDF reports in the UI.",
+                                control="select",
+                                options=self._select_options(["inline", "download"]),
+                            ),
+                        ],
+                    }
+                ],
+                [],
+            ),
+            self._variant(
+                "serving_runtime",
+                "Serving и среда",
+                "Serving / Runtime",
+                "Служебные URL, vLLM contract и concurrency-параметры offline bundle.",
+                "Service URLs, vLLM contract, and concurrency controls for the offline bundle.",
+                [
+                    {
+                        "groupId": "bundle_serving_runtime",
+                        "title": "Serving и среда",
+                        "titleEn": "Serving / Runtime",
+                        "fields": [
+                            self._field(bundle_env, "AGENT_API_HOST", "Agent API host", "Agent API host", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "AGENT_API_HOST", default="0.0.0.0"), recommended_reason="Хост привязки для container `agent-api`.", recommended_reason_en="Bind host for the container `agent-api`."),
+                            self._field(bundle_env, "UMS_HOST", "UMS host", "UMS host", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "UMS_HOST", default="0.0.0.0"), recommended_reason="Хост привязки для container UMS.", recommended_reason_en="Bind host for the container UMS."),
+                            self._field(bundle_env, "UMS_URL", "UMS URL", "UMS URL", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "UMS_URL", default="http://ums:8090"), recommended_reason="Внутренний URL, по которому backend обращается к UMS внутри compose-сети.", recommended_reason_en="Internal URL used by the backend to reach UMS inside the compose network."),
+                            self._field(bundle_env, "DOC_SERVER_URL", "Document server URL", "Document server URL", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "DOC_SERVER_URL", default="http://document-server:8001"), recommended_reason="Внутренний URL document server внутри compose-сети.", recommended_reason_en="Internal document-server URL inside the compose network."),
+                            self._field(bundle_env, "LEGAL_SERVER_URL", "Legal server URL", "Legal server URL", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "LEGAL_SERVER_URL", default="http://legal-server:8002"), recommended_reason="Внутренний URL legal server внутри compose-сети.", recommended_reason_en="Internal legal-server URL inside the compose network."),
+                            self._field(bundle_env, "VLLM_BASE_URL", "vLLM base URL", "vLLM base URL", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "VLLM_BASE_URL", default="http://vllm:8000"), recommended_reason="Базовый URL отдельного vLLM serving path.", recommended_reason_en="Base URL for the dedicated vLLM serving path."),
+                            self._field(bundle_env, "VLLM_MODEL_ID_QWEN_14B_LLM", "vLLM model id", "vLLM model id", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "VLLM_MODEL_ID_QWEN_14B_LLM", default="qwen-14b-llm"), recommended_reason="Модельный идентификатор, который публикует vLLM API.", recommended_reason_en="Model identifier exposed by the vLLM API."),
+                            self._field(bundle_env, "VLLM_MODEL_SOURCE_QWEN_14B_LLM", "vLLM model source", "vLLM model source", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "VLLM_MODEL_SOURCE_QWEN_14B_LLM", default="Qwen/Qwen2.5-14B-Instruct"), recommended_reason="Исходная модель или repo id для vLLM serving path.", recommended_reason_en="Source model or repo id for the vLLM serving path."),
+                            self._field(bundle_env, "UMS_LLM_MAX_CONCURRENCY", "LLM max concurrency", "LLM max concurrency", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "UMS_LLM_MAX_CONCURRENCY", default="1"), recommended_reason="Лимит одновременных heavy LLM запросов.", recommended_reason_en="Concurrency limit for heavy LLM requests."),
+                            self._field(bundle_env, "UMS_EMBED_MAX_CONCURRENCY", "Embedder max concurrency", "Embedder max concurrency", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "UMS_EMBED_MAX_CONCURRENCY", default="4"), recommended_reason="Лимит одновременных embedder запросов.", recommended_reason_en="Concurrency limit for embedder requests."),
+                            self._field(bundle_env, "UMS_CONCURRENCY_ACQUIRE_TIMEOUT_S", "Concurrency acquire timeout", "Concurrency acquire timeout", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "UMS_CONCURRENCY_ACQUIRE_TIMEOUT_S", default="5.0"), recommended_reason="Таймаут ожидания слота concurrency в UMS.", recommended_reason_en="Timeout while waiting for a concurrency slot in UMS."),
+                            self._field(bundle_env, "UMS_FAIL_FAST_ON_SATURATION", "Fail fast on saturation", "Fail fast on saturation", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "UMS_FAIL_FAST_ON_SATURATION", default="false"), recommended_reason="Определяет, должен ли UMS сразу отклонять запросы при saturation.", recommended_reason_en="Controls whether UMS should reject requests immediately when saturated."),
+                            self._field(bundle_env, "UMS_LLAMA_CACHE_PROMPT", "Cache prompt in llama path", "Cache prompt in llama path", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "UMS_LLAMA_CACHE_PROMPT", default="true"), recommended_reason="Включает prompt cache для llama-serving path.", recommended_reason_en="Enables prompt caching for the llama-serving path."),
                         ],
                     }
                 ],
@@ -1405,19 +2040,19 @@ class OperatorConfigService:
             ),
             self._variant(
                 "parsing",
-                "Parsing / Compare",
+                "Парсинг и сравнение",
                 "Parsing / Compare",
                 "Offline parser/compare contract внутри env.bundle.",
                 "Offline parser and compare contract inside env.bundle.",
                 [
                     {
                         "groupId": "bundle_parsing",
-                        "title": "Parsing / Compare",
+                        "title": "Парсинг и сравнение",
                         "titleEn": "Parsing / Compare",
                         "fields": [
-                            self._field(bundle_env, "OFFLINE_COMPARE_STRICT_JSON", "Offline strict JSON", "Offline strict JSON", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "OFFLINE_COMPARE_STRICT_JSON", default="true"), recommended_reason="Рекомендуется как канонический parser contract для offline bundle.", recommended_reason_en="Recommended as the canonical parser contract for the offline bundle.", control="select", options=self._boolean_options()),
-                            self._field(bundle_env, "BUNDLE_PREFLIGHT_REQUIRED", "Preflight required", "Preflight required", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "BUNDLE_PREFLIGHT_REQUIRED", default="true"), recommended_reason="Держи preflight обязательным для target deploy.", recommended_reason_en="Keep preflight required for target deploys.", control="select", options=self._boolean_options()),
-                            self._field(bundle_env, "BUNDLE_PARITY_SMOKE_REQUIRED", "Parity smoke required", "Parity smoke required", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "BUNDLE_PARITY_SMOKE_REQUIRED", default="true"), recommended_reason="Полезно для проверки parity после импорта bundle.", recommended_reason_en="Useful for validating parity after importing a bundle.", control="select", options=self._boolean_options()),
+                            self._field(bundle_env, "OFFLINE_COMPARE_STRICT_JSON", "Offline strict JSON", "Offline strict JSON", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "OFFLINE_COMPARE_STRICT_JSON", default="true"), recommended_reason="Рекомендуется как канонический parser contract для offline bundle.", recommended_reason_en="Recommended as the canonical parser contract for the offline bundle.", control="toggle"),
+                            self._field(bundle_env, "BUNDLE_PREFLIGHT_REQUIRED", "Preflight required", "Preflight required", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "BUNDLE_PREFLIGHT_REQUIRED", default="true"), recommended_reason="Держи preflight обязательным для target deploy.", recommended_reason_en="Keep preflight required for target deploys.", control="toggle"),
+                            self._field(bundle_env, "BUNDLE_PARITY_SMOKE_REQUIRED", "Parity smoke required", "Parity smoke required", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "BUNDLE_PARITY_SMOKE_REQUIRED", default="true"), recommended_reason="Полезно для проверки parity после импорта bundle.", recommended_reason_en="Useful for validating parity after importing a bundle.", control="toggle"),
                         ],
                     }
                 ],
@@ -1433,7 +2068,7 @@ class OperatorConfigService:
             },
             "container": {
                 "sourceFiles": runtime_paths["container"]["configSources"],
-                "defaultVariantId": "local_safe_ports",
+                "defaultVariantId": "published_ports",
                 "variants": container_variants,
             },
         }

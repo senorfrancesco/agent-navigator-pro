@@ -163,7 +163,7 @@ class OperatorRuntimeService:
                 "name": "Нативный запуск",
                 "nameEn": "Native Runtime",
                 "status": native_status,
-                "description": "Локальный developer-runtime с orchestration через launcher, прямым контролем путей моделей и видимостью сервисов.",
+                "description": "Локальная среда запуска с оркестрацией через launcher, прямым контролем путей моделей и видимостью сервисов.",
                 "descriptionEn": "Local developer runtime with launcher orchestration, direct model-path control, and visible service state.",
                 "launchSource": "scripts/launcher.sh --target native --profile adaptive",
                 "configSources": [
@@ -175,13 +175,13 @@ class OperatorRuntimeService:
                 "summary": [
                     {"label": "Профили запуска", "labelEn": "Launch Profiles", "value": "4 готовы", "valueEn": "4 ready", "tone": "lime"},
                     {"label": "Цепочка env", "labelEn": "env Chain", "value": "разрешена" if (self.backend_root / ".env").exists() else "отсутствует", "valueEn": "resolved" if (self.backend_root / ".env").exists() else "missing", "tone": "cyan" if (self.backend_root / ".env").exists() else "orange"},
-                    {"label": "Состояние runtime", "labelEn": "Runtime State", "value": "стабильно" if native_status == "available" else native_status, "valueEn": "stable" if native_status == "available" else native_status, "tone": "lime" if native_status == "available" else "orange"},
+                    {"label": "Состояние среды", "labelEn": "Runtime State", "value": "стабильно" if native_status == "available" else native_status, "valueEn": "stable" if native_status == "available" else native_status, "tone": "lime" if native_status == "available" else "orange"},
                 ],
                 "profiles": [
-                    {"title": "Только backend", "titleEn": "Backend only", "status": "available", "body": "Минимальный API + orchestration flow для workflow и endpoint checks.", "bodyEn": "Minimal API and orchestration flow for workflow and endpoint checks."},
-                    {"title": "Chainlit dev", "titleEn": "Chainlit dev", "status": "available", "body": "Путь operator UI с backend orchestration и локальным session state.", "bodyEn": "Operator UI path with backend orchestration and local session state."},
-                    {"title": "Нативный runtime", "titleEn": "Native runtime", "status": native_status, "body": "Полный native launcher flow с hardware-aware планом.", "bodyEn": "Full native launcher flow with a hardware-aware plan."},
-                    {"title": "Полный локальный стек", "titleEn": "Full local stack", "status": "partial", "body": "Запускается, но warmup и готовность сервисов могут отставать на один цикл проверки.", "bodyEn": "Can start, but warmup and service readiness may lag by one probe cycle."},
+                    {"title": "Только backend", "titleEn": "Backend only", "status": "available", "body": "Минимальный путь API и оркестрации для проверки сценариев и конечных точек.", "bodyEn": "Minimal API and orchestration flow for workflow and endpoint checks."},
+                    {"title": "Chainlit dev", "titleEn": "Chainlit dev", "status": "available", "body": "Путь панели оператора с backend-оркестрацией и локальным состоянием сессии.", "bodyEn": "Operator UI path with backend orchestration and local session state."},
+                    {"title": "Нативный runtime", "titleEn": "Native runtime", "status": native_status, "body": "Полный сценарий native-launcher с планом, учитывающим характеристики железа.", "bodyEn": "Full native launcher flow with a hardware-aware plan."},
+                    {"title": "Полный локальный стек", "titleEn": "Full local stack", "status": "partial", "body": "Запускается, но прогрев и готовность сервисов могут отставать на один цикл проверки.", "bodyEn": "Can start, but warmup and service readiness may lag by one probe cycle."},
                 ],
                 "whyUnavailable": {
                     "title": "Доступность нативного запуска",
@@ -201,30 +201,30 @@ class OperatorRuntimeService:
             },
             "container": {
                 "key": "container",
-                "name": "Offline Bundle / Контейнеры",
+                "name": "Офлайн-бандл / Контейнеры",
                 "nameEn": "Offline Bundle / Containers",
                 "status": bundle_status,
-                "description": "Путь через offline bundle с загрузкой образов, деплоем, проверками parity и artifact-based запуском на сервере.",
+                "description": "Путь через офлайн-бандл с загрузкой образов, деплоем, проверками согласованности и запуском артефактов на сервере.",
                 "descriptionEn": "Offline bundle path for image loading, deploy, parity checks, and artifact-based server startup.",
                 "launchSource": "deploy/offline_bundle/scripts/run_offline_bundle.sh",
                 "configSources": [
-                    {"path": "deploy/offline_bundle/env.bundle", "role": "контракт env для bundle", "roleEn": "env contract for the bundle", "freshness": file_freshness(self.deploy_root / "env.bundle")},
+                    {"path": "deploy/offline_bundle/env.bundle", "role": "контракт env для бандла", "roleEn": "env contract for the bundle", "freshness": file_freshness(self.deploy_root / "env.bundle")},
                     {"path": "deploy/offline_bundle/compose.offline.yaml", "role": "топология контейнеров", "roleEn": "container topology", "freshness": file_freshness(self.deploy_root / "compose.offline.yaml")},
-                    {"path": "deploy/offline_bundle/manifest.json", "role": "manifest артефактов", "roleEn": "artifact manifest", "freshness": file_freshness(self.deploy_root / "manifest.json")},
-                    {"path": "deploy/offline_bundle/state/exported-env", "role": "экспортированное env-состояние runtime", "roleEn": "exported runtime env state", "freshness": file_freshness(self.deploy_root / "state" / "exported-env")},
+                    {"path": "deploy/offline_bundle/manifest.json", "role": "манифест артефактов", "roleEn": "artifact manifest", "freshness": file_freshness(self.deploy_root / "manifest.json")},
+                    {"path": "deploy/offline_bundle/state/exported-env", "role": "экспортированное env-состояние среды", "roleEn": "exported runtime env state", "freshness": file_freshness(self.deploy_root / "state" / "exported-env")},
                 ],
                 "summary": [
-                    {"label": "Файлы bundle", "labelEn": "Bundle Files", "value": "есть" if self.deploy_root.exists() else "отсутствуют", "valueEn": "present" if self.deploy_root.exists() else "missing", "tone": "lime" if self.deploy_root.exists() else "orange"},
-                    {"label": "Docker binary", "labelEn": "Docker binary", "value": "доступен" if docker_binary else "отсутствует", "valueEn": "available" if docker_binary else "missing", "tone": "cyan" if docker_binary else "orange"},
-                    {"label": "Доступ к socket", "labelEn": "Socket access", "value": "есть" if docker_socket_ready else "заблокирован", "valueEn": "present" if docker_socket_ready else "blocked", "tone": "lime" if docker_socket_ready else "orange"},
+                    {"label": "Файлы бандла", "labelEn": "Bundle Files", "value": "есть" if self.deploy_root.exists() else "отсутствуют", "valueEn": "present" if self.deploy_root.exists() else "missing", "tone": "lime" if self.deploy_root.exists() else "orange"},
+                    {"label": "Бинарник Docker", "labelEn": "Docker CLI", "value": "доступен" if docker_binary else "отсутствует", "valueEn": "available" if docker_binary else "missing", "tone": "cyan" if docker_binary else "orange"},
+                    {"label": "Доступ к сокету", "labelEn": "Socket Access", "value": "есть" if docker_socket_ready else "заблокирован", "valueEn": "present" if docker_socket_ready else "blocked", "tone": "lime" if docker_socket_ready else "orange"},
                 ],
                 "profiles": [
-                    {"title": "Загрузка образов bundle", "titleEn": "Bundle image loading", "status": "available" if docker_binary and docker_socket_ready else "unavailable", "body": "Архивы образов можно загружать в Docker только когда доступны engine и socket.", "bodyEn": "Bundle image archives can be loaded into Docker only when the engine and socket are available."},
-                    {"title": "Offline bundle runtime", "titleEn": "Offline bundle runtime", "status": bundle_status, "body": "Основной пользовательский путь идёт через run_offline_bundle.sh и deploy.sh, а не через dev compose launcher checkout-репозитория.", "bodyEn": "The main user path goes through run_offline_bundle.sh and deploy.sh, not through the dev compose launcher for the checkout repository."},
-                    {"title": "Импорт и parity-проверка", "titleEn": "Import and parity validation", "status": "partial", "body": "Manifest, env.bundle и deploy surface читаются даже когда сам runtime ещё не поднят.", "bodyEn": "Manifest, env.bundle, and the deploy surface remain readable even before the runtime is up."},
+                    {"title": "Загрузка архивов образов", "titleEn": "Bundle image loading", "status": "available" if docker_binary and docker_socket_ready else "unavailable", "body": "Архивы образов можно загружать в Docker только при доступных движке и сокете.", "bodyEn": "Bundle image archives can be loaded into Docker only when the engine and socket are available."},
+                    {"title": "Запуск офлайн-бандла", "titleEn": "Offline bundle runtime", "status": bundle_status, "body": "Основной пользовательский путь идёт через run_offline_bundle.sh и deploy.sh, а не через dev compose launcher checkout-репозитория.", "bodyEn": "The main user path goes through run_offline_bundle.sh and deploy.sh, not through the dev compose launcher for the checkout repository."},
+                    {"title": "Импорт и проверка согласованности", "titleEn": "Import and parity validation", "status": "partial", "body": "Манифест, env.bundle и поверхность деплоя читаются даже когда сама среда ещё не поднята.", "bodyEn": "Manifest, env.bundle, and the deploy surface remain readable even before the runtime is up."},
                 ],
                 "whyUnavailable": {
-                    "title": "Состояние offline bundle / контейнерного запуска",
+                    "title": "Состояние офлайн-бандла и контейнерного запуска",
                     "titleEn": "Offline bundle and container runtime state",
                     "checks": [
                         ["deploy/offline_bundle/", "present" if self.deploy_root.exists() else "missing"],
@@ -235,12 +235,12 @@ class OperatorRuntimeService:
                         ["Docker socket", "present" if docker_socket_ready else "missing"],
                     ],
                     "blockers": [] if (docker_binary and docker_socket_ready) else [
-                        "Bundle-файлы есть, но Docker на текущем host доступен не полностью.",
+                        "Файлы офлайн-бандла есть, но Docker на текущем хосте доступен не полностью.",
                     ],
                     "blockersEn": [] if (docker_binary and docker_socket_ready) else [
                         "Bundle files are present, but Docker is not fully available on this host.",
                     ],
-                    "remediation": "Контейнерный путь запуска ведёт в deploy/offline_bundle/scripts: сначала можно загрузить образы bundle, затем выполнить deploy или run offline bundle без dev-сборки checkout-репозитория.",
+                    "remediation": "Контейнерный путь запуска ведёт в deploy/offline_bundle/scripts: сначала можно загрузить архивы образов, затем выполнить деплой или запуск офлайн-бандла без dev-сборки checkout-репозитория.",
                     "remediationEn": "The container runtime path points to deploy/offline_bundle/scripts: first load bundle images, then deploy or run the offline bundle without a dev build from the checkout repository.",
                 },
             },
@@ -251,19 +251,28 @@ class OperatorRuntimeService:
         mem_gb = self._detect_memory_gb()
         cpu_label = f"{platform.processor() or platform.machine()} / {mem_gb} GB RAM".strip()
         gpu_inventory = self._detect_gpu_inventory()
-        gpu_visibility = self._detect_gpu()
-        gpu_inventory_text = "No NVIDIA GPU detected"
+        gpu_visibility_ru = "GPU NVIDIA не обнаружены"
+        gpu_visibility_en = "No NVIDIA GPU detected"
+        gpu_inventory_text = "GPU NVIDIA не обнаружены"
+        gpu_inventory_text_en = "No NVIDIA GPU detected"
         if gpu_inventory:
+            if len(gpu_inventory) == 1:
+                gpu_visibility_ru = f"{gpu_inventory[0]['name']}, {gpu_inventory[0]['memory_mib']} MiB"
+                gpu_visibility_en = gpu_visibility_ru
+            else:
+                gpu_visibility_ru = f"Обнаружено {len(gpu_inventory)} GPU NVIDIA"
+                gpu_visibility_en = f"{len(gpu_inventory)}x NVIDIA GPU detected"
             gpu_inventory_text = "; ".join(
                 f"GPU{gpu['index']}: {gpu['name']} ({gpu['memory_mib']} MiB)"
                 for gpu in gpu_inventory
             )
+            gpu_inventory_text_en = gpu_inventory_text
         return [
             {"label": "Detected host OS", "labelEn": "Detected Host OS", "value": platform.platform(), "valueEn": platform.platform(), "note": "Host facts are gathered server-side for the operator UI.", "noteEn": "Host facts are gathered server-side for the operator UI."},
-            {"label": "GPU visibility", "labelEn": "GPU Visibility", "value": gpu_visibility, "valueEn": gpu_visibility, "note": "Used to explain runtime capabilities and suggested defaults.", "noteEn": "Used to explain runtime capabilities and suggested defaults."},
-            {"label": "GPU inventory", "labelEn": "GPU Inventory", "value": gpu_inventory_text, "valueEn": gpu_inventory_text, "note": "All detected NVIDIA devices are listed for multi-GPU aware planning.", "noteEn": "All detected NVIDIA devices are listed for multi-GPU aware planning."},
-            {"label": "CPU / memory", "labelEn": "CPU / Memory", "value": cpu_label, "valueEn": cpu_label, "note": "Used for runtime and bundle sizing context.", "noteEn": "Used for runtime and bundle sizing context."},
-            {"label": "Suggested runtime profile", "labelEn": "Suggested Runtime Profile", "value": "adaptive", "valueEn": "adaptive", "note": "Matches the canonical launcher flow for generated applied plans.", "noteEn": "Matches the canonical launcher flow for generated applied plans."},
-            {"label": "Suggested context budget", "labelEn": "Suggested Context Budget", "value": env_value(envs["backend_env_runtime"], "UMS_MANUAL_EFFECTIVE_CONTEXT_TOKENS", default="16384"), "valueEn": env_value(envs["backend_env_runtime"], "UMS_MANUAL_EFFECTIVE_CONTEXT_TOKENS", default="16384"), "note": "Mirrors the current applied or suggested operator value.", "noteEn": "Mirrors the current applied or suggested operator value."},
+            {"label": "GPU visibility", "labelEn": "GPU Visibility", "value": gpu_visibility_ru, "valueEn": gpu_visibility_en, "note": "Used to explain runtime capabilities and suggested defaults.", "noteEn": "Used to explain runtime capabilities and suggested defaults."},
+            {"label": "GPU inventory", "labelEn": "GPU Inventory", "value": gpu_inventory_text, "valueEn": gpu_inventory_text_en, "note": "Все обнаруженные NVIDIA GPU перечислены для планирования с несколькими GPU.", "noteEn": "All detected NVIDIA devices are listed for multi-GPU aware planning."},
+            {"label": "CPU / memory", "labelEn": "CPU / Memory", "value": cpu_label, "valueEn": cpu_label, "note": "Нужно для оценки размеров среды и бандла.", "noteEn": "Used for runtime and bundle sizing context."},
+            {"label": "Предлагаемый профиль среды", "labelEn": "Suggested Runtime Profile", "value": "adaptive", "valueEn": "adaptive", "note": "Соответствует каноническому сценарию запуска для применённого плана.", "noteEn": "Matches the canonical launcher flow for generated applied plans."},
+            {"label": "Предлагаемый бюджет контекста", "labelEn": "Suggested Context Budget", "value": env_value(envs["backend_env_runtime"], "UMS_MANUAL_EFFECTIVE_CONTEXT_TOKENS", default="16384"), "valueEn": env_value(envs["backend_env_runtime"], "UMS_MANUAL_EFFECTIVE_CONTEXT_TOKENS", default="16384"), "note": "Отражает текущее применённое значение оператора.", "noteEn": "Mirrors the current applied or suggested operator value."},
             {"label": "Bundle archive target", "labelEn": "Bundle Archive Target", "value": self._detect_bundle_archive(), "valueEn": self._detect_bundle_archive(), "note": "Single portable tar.gz is the preferred build artifact.", "noteEn": "Single portable tar.gz is the preferred build artifact."},
         ]

@@ -30,7 +30,6 @@ REQUIRED_DIRS = [
     "state/chainlit-data",
     "state/uploads",
     "state/exported-env",
-    "models",
 ]
 
 REQUIRED_MODEL_FILE_ENV_KEYS = [
@@ -50,6 +49,22 @@ REQUIRED_MODEL_DIR_ENV_KEYS = [
 OPTIONAL_MODEL_DIR_ENV_KEYS = [
     "MODEL_PATH_E5_LEGAL",
     "MODEL_PATH_RUBERT",
+]
+
+MODEL_SOURCE_MODES = {"bundle_layout", "external_host_mounts"}
+
+REQUIRED_EXTERNAL_FILE_ENV_KEYS = [
+    "HOST_MODEL_PATH_LLM",
+]
+
+OPTIONAL_EXTERNAL_FILE_ENV_KEYS = [
+    "HOST_MODEL_PATH_VLM",
+    "HOST_MMPROJ_PATH",
+]
+
+REQUIRED_EXTERNAL_DIR_ENV_KEYS = [
+    "HOST_MODEL_PATH_EMBEDDING_INTENT",
+    "HOST_MODEL_PATH_EMBEDDING_RETRIEVAL",
 ]
 
 
@@ -83,7 +98,7 @@ def validate_required_paths(errors: list[str], bundle_root: Path, env_path: Path
         if not path.exists():
             errors.append(f"missing-required-file:{rel_path}")
     for rel_path in REQUIRED_DIRS:
-        path = models_root if rel_path == "models" else bundle_root / rel_path
+        path = bundle_root / rel_path
         if not path.exists():
             errors.append(f"missing-required-dir:{rel_path}")
 
@@ -120,6 +135,33 @@ def validate_host_packages(errors: list[str], bundle_root: Path) -> None:
                 errors.append(f"missing-host-package-path:host_packages/{distro}/{rel_name}")
 
 
+def validate_container_target(errors: list[str], key: str, value: str, *, expect_file: bool) -> None:
+    raw = value.strip()
+    if not raw:
+        errors.append(f"missing-env:{key}")
+        return
+    if not raw.startswith("/"):
+        errors.append(f"invalid-container-path:{key}:{raw}")
+        return
+    if expect_file and raw.endswith("/"):
+        errors.append(f"invalid-container-file-path:{key}:{raw}")
+
+
+def validate_host_source(errors: list[str], key: str, value: str, *, expect_file: bool) -> None:
+    raw = value.strip()
+    if not raw:
+        errors.append(f"missing-env:{key}")
+        return
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        errors.append(f"invalid-host-path-not-absolute:{key}:{raw}")
+        return
+    if expect_file and not candidate.is_file():
+        errors.append(f"missing-host-model-file:{key}:{candidate}")
+    if not expect_file and not candidate.is_dir():
+        errors.append(f"missing-host-model-dir:{key}:{candidate}")
+
+
 def validate_env_and_models(errors: list[str], bundle_root: Path, env_path: Path, models_root: Path) -> None:
     if not env_path.exists():
         errors.append("missing-required-file:env.bundle")
@@ -127,60 +169,95 @@ def validate_env_and_models(errors: list[str], bundle_root: Path, env_path: Path
 
     payload = parse_env(env_path)
 
-    for key in REQUIRED_MODEL_FILE_ENV_KEYS:
-        value = payload.get(key, "").strip()
-        if not value:
-            errors.append(f"missing-env:{key}")
-            continue
-        try:
-            bundle_path = to_bundle_model_path(value, models_root)
-        except ValueError as exc:
-            errors.append(str(exc))
-            continue
-        if not bundle_path.is_file():
-            errors.append(f"missing-model-file:{key}:{bundle_path.relative_to(bundle_root)}")
+    model_source_mode = payload.get("MODEL_SOURCE_MODE", "bundle_layout").strip() or "bundle_layout"
+    if model_source_mode not in MODEL_SOURCE_MODES:
+        errors.append(f"invalid-model-source-mode:{model_source_mode}")
+        return
 
     vlm_path = payload.get("MODEL_PATH_VLM", "").strip()
     mmproj_path = payload.get("MMPROJ_PATH", "").strip()
     if bool(vlm_path) != bool(mmproj_path):
         errors.append("incomplete-vlm-config:MODEL_PATH_VLM-and-MMPROJ_PATH-must-both-be-set-or-empty")
 
+    if model_source_mode == "bundle_layout":
+        if not models_root.exists():
+            errors.append("missing-required-dir:models")
+        for key in REQUIRED_MODEL_FILE_ENV_KEYS:
+            value = payload.get(key, "").strip()
+            if not value:
+                errors.append(f"missing-env:{key}")
+                continue
+            try:
+                bundle_path = to_bundle_model_path(value, models_root)
+            except ValueError as exc:
+                errors.append(str(exc))
+                continue
+            if not bundle_path.is_file():
+                errors.append(f"missing-model-file:{key}:{bundle_path.relative_to(bundle_root)}")
+
+        for key in OPTIONAL_MODEL_FILE_ENV_KEYS:
+            value = payload.get(key, "").strip()
+            if not value:
+                continue
+            try:
+                bundle_path = to_bundle_model_path(value, models_root)
+            except ValueError as exc:
+                errors.append(str(exc))
+                continue
+            if not bundle_path.is_file():
+                errors.append(f"missing-model-file:{key}:{bundle_path.relative_to(bundle_root)}")
+
+        for key in REQUIRED_MODEL_DIR_ENV_KEYS:
+            value = payload.get(key, "").strip()
+            if not value:
+                errors.append(f"missing-env:{key}")
+                continue
+            try:
+                bundle_path = to_bundle_model_path(value, models_root)
+            except ValueError as exc:
+                errors.append(str(exc))
+                continue
+            if not bundle_path.is_dir():
+                errors.append(f"missing-model-dir:{key}:{bundle_path.relative_to(bundle_root)}")
+
+        for key in OPTIONAL_MODEL_DIR_ENV_KEYS:
+            value = payload.get(key, "").strip()
+            if not value:
+                continue
+            try:
+                bundle_path = to_bundle_model_path(value, models_root)
+            except ValueError as exc:
+                errors.append(str(exc))
+                continue
+            if not bundle_path.is_dir():
+                errors.append(f"missing-model-dir:{key}:{bundle_path.relative_to(bundle_root)}")
+        return
+
+    for key in REQUIRED_MODEL_FILE_ENV_KEYS:
+        validate_container_target(errors, key, payload.get(key, ""), expect_file=True)
     for key in OPTIONAL_MODEL_FILE_ENV_KEYS:
         value = payload.get(key, "").strip()
-        if not value:
-            continue
-        try:
-            bundle_path = to_bundle_model_path(value, models_root)
-        except ValueError as exc:
-            errors.append(str(exc))
-            continue
-        if not bundle_path.is_file():
-            errors.append(f"missing-model-file:{key}:{bundle_path.relative_to(bundle_root)}")
-
+        if value:
+            validate_container_target(errors, key, value, expect_file=True)
     for key in REQUIRED_MODEL_DIR_ENV_KEYS:
-        value = payload.get(key, "").strip()
-        if not value:
-            errors.append(f"missing-env:{key}")
-            continue
-        try:
-            bundle_path = to_bundle_model_path(value, models_root)
-        except ValueError as exc:
-            errors.append(str(exc))
-            continue
-        if not bundle_path.is_dir():
-            errors.append(f"missing-model-dir:{key}:{bundle_path.relative_to(bundle_root)}")
-
+        validate_container_target(errors, key, payload.get(key, ""), expect_file=False)
     for key in OPTIONAL_MODEL_DIR_ENV_KEYS:
         value = payload.get(key, "").strip()
-        if not value:
-            continue
-        try:
-            bundle_path = to_bundle_model_path(value, models_root)
-        except ValueError as exc:
-            errors.append(str(exc))
-            continue
-        if not bundle_path.is_dir():
-            errors.append(f"missing-model-dir:{key}:{bundle_path.relative_to(bundle_root)}")
+        if value:
+            validate_container_target(errors, key, value, expect_file=False)
+
+    for key in REQUIRED_EXTERNAL_FILE_ENV_KEYS:
+        validate_host_source(errors, key, payload.get(key, ""), expect_file=True)
+    host_vlm = payload.get("HOST_MODEL_PATH_VLM", "").strip()
+    host_mmproj = payload.get("HOST_MMPROJ_PATH", "").strip()
+    if bool(host_vlm) != bool(host_mmproj):
+        errors.append("incomplete-external-vlm-config:HOST_MODEL_PATH_VLM-and-HOST_MMPROJ_PATH-must-both-be-set-or-empty")
+    for key in OPTIONAL_EXTERNAL_FILE_ENV_KEYS:
+        value = payload.get(key, "").strip()
+        if value:
+            validate_host_source(errors, key, value, expect_file=True)
+    for key in REQUIRED_EXTERNAL_DIR_ENV_KEYS:
+        validate_host_source(errors, key, payload.get(key, ""), expect_file=False)
 
 
 def main() -> int:

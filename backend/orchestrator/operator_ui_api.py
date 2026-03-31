@@ -29,6 +29,12 @@ BACKEND_ROOT = REPO_ROOT / "backend"
 DEPLOY_ROOT = REPO_ROOT / "deploy" / "offline_bundle"
 SCRIPTS_ROOT = REPO_ROOT / "scripts"
 OFFLINE_SCRIPTS_ROOT = DEPLOY_ROOT / "scripts"
+PATH_BROWSER_ROOTS = [
+    REPO_ROOT,
+    Path("/home/seral"),
+    Path("/mnt"),
+    Path("/media"),
+]
 
 
 class OperatorActionRequest(BaseModel):
@@ -42,6 +48,150 @@ class OperatorConfigApplyRequest(BaseModel):
 
 class OperatorConfigPresetPreviewRequest(BaseModel):
     preset_id: str
+
+
+def _resolve_allowed_path(raw_path: str) -> Path:
+    candidate = Path(raw_path).expanduser().resolve()
+    for root in PATH_BROWSER_ROOTS:
+        try:
+            candidate.relative_to(root.resolve())
+            return candidate
+        except ValueError:
+            continue
+    raise HTTPException(status_code=403, detail=f"path-not-allowed:{candidate}")
+
+
+def _path_kind_matches(candidate: Path, kind: str) -> bool:
+    if kind == "file":
+        return candidate.is_file()
+    if kind == "directory":
+        return candidate.is_dir()
+    raise HTTPException(status_code=400, detail=f"invalid-path-kind:{kind}")
+
+
+def _describe_path_validation(candidate: Path, kind: str, field_key: str | None) -> Dict[str, Any]:
+    if not candidate.exists():
+        return {
+            "status": "error",
+            "valid": False,
+            "message": f"Path does not exist on the host yet: {candidate}",
+            "checks": [],
+        }
+
+    if not _path_kind_matches(candidate, kind):
+        expected = "file" if kind == "file" else "directory"
+        actual = "directory" if candidate.is_dir() else "file"
+        return {
+            "status": "error",
+            "valid": False,
+            "message": f"Expected a {expected}, but got a {actual}: {candidate}",
+            "checks": [],
+        }
+
+    checks: List[str] = []
+    status = "ok"
+    message = f"Path looks valid for this field: {candidate}"
+
+    if field_key in {"HOST_MODEL_PATH_LLM", "HOST_MODEL_PATH_VLM", "HOST_MMPROJ_PATH"}:
+        if candidate.suffix.lower() != ".gguf":
+            return {
+                "status": "error",
+                "valid": False,
+                "message": f"Expected a `.gguf` model file for {field_key}: {candidate}",
+                "checks": checks,
+            }
+        checks.append("GGUF extension detected")
+        if candidate.stat().st_size <= 0:
+            return {
+                "status": "error",
+                "valid": False,
+                "message": f"The selected `.gguf` file is empty: {candidate}",
+                "checks": checks,
+            }
+        if field_key == "HOST_MMPROJ_PATH" and "mmproj" not in candidate.name.lower():
+            status = "warning"
+            message = f"The file exists, but its name does not look like an mmproj artifact: {candidate.name}"
+        else:
+            message = f"Host model file looks valid: {candidate.name}"
+
+    if field_key in {"HOST_MODEL_PATH_EMBEDDING_INTENT", "HOST_MODEL_PATH_EMBEDDING_RETRIEVAL"}:
+        markers = [
+            "config.json",
+            "modules.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "sentence_bert_config.json",
+        ]
+        found_markers = [marker for marker in markers if (candidate / marker).exists()]
+        if found_markers:
+            checks.append(f"Found model markers: {', '.join(found_markers)}")
+            message = f"Model directory looks plausible: {candidate.name}"
+        else:
+            status = "warning"
+            message = f"Directory exists, but common model marker files were not found yet: {candidate.name}"
+
+    return {
+        "status": status,
+        "valid": status != "error",
+        "message": message,
+        "checks": checks,
+    }
+
+
+def _build_path_browser_payload(path: str | None, kind: str) -> Dict[str, Any]:
+    if not path:
+        return {
+            "kind": kind,
+            "cwd": "",
+            "cwdDisplay": "",
+            "parentPath": None,
+            "entries": [
+                {
+                    "name": root.name or str(root),
+                    "path": str(root),
+                    "type": "directory",
+                    "selectable": kind == "directory",
+                }
+                for root in PATH_BROWSER_ROOTS
+                if root.exists()
+            ],
+        }
+
+    current = _resolve_allowed_path(path)
+    if not current.exists():
+        raise HTTPException(status_code=404, detail=f"path-not-found:{current}")
+    if current.is_file():
+        current = current.parent
+
+    entries = []
+    for child in sorted(current.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())):
+        entries.append(
+            {
+                "name": child.name,
+                "path": str(child.resolve()),
+                "type": "directory" if child.is_dir() else "file",
+                "selectable": child.is_dir() if kind == "directory" else child.is_file(),
+            }
+        )
+
+    parent_path = None
+    for root in PATH_BROWSER_ROOTS:
+        root_resolved = root.resolve()
+        try:
+            current.relative_to(root_resolved)
+        except ValueError:
+            continue
+        if current != root_resolved:
+            parent_path = str(current.parent.resolve())
+        break
+
+    return {
+        "kind": kind,
+        "cwd": str(current),
+        "cwdDisplay": str(current),
+        "parentPath": parent_path,
+        "entries": entries,
+    }
 
 
 def _build_delivery_contract() -> Dict[str, str]:
@@ -101,9 +251,9 @@ def build_operator_state() -> Dict[str, Any]:
     if not docker_binary:
         warnings.append(
             {
-                "title": "Контейнерный запуск заблокирован: Docker binary не найден",
+            "title": "Контейнерный запуск заблокирован: Docker не найден",
                 "titleEn": "Container runtime blocked: Docker binary was not found",
-                "body": "Файлы offline bundle на месте, но compose-driven действия останутся заблокированными, пока Docker не появится на host.",
+                "body": "Файлы офлайн-бандла на месте, но действия через compose останутся заблокированными, пока Docker не появится на хосте.",
                 "bodyEn": "Offline bundle files are present, but compose-driven actions stay blocked until Docker is available on the host.",
             }
         )
@@ -112,30 +262,30 @@ def build_operator_state() -> Dict[str, Any]:
             {
                 "title": "Контейнерный запуск заблокирован: нет доступа к Docker socket",
                 "titleEn": "Container runtime blocked: no access to the Docker socket",
-                "body": "Файлы offline bundle на месте, но compose-driven действия останутся заблокированными, пока не появится доступ к Docker socket.",
+                "body": "Файлы офлайн-бандла на месте, но действия через compose останутся заблокированными, пока не появится доступ к сокету Docker.",
                 "bodyEn": "Offline bundle files are present, but compose-driven actions stay blocked until the Docker socket becomes reachable.",
             }
         )
 
     service_rows = [
         {
-            "name": "Operator Control Plane",
+            "name": "Контур управления оператором",
             "nameEn": "Operator Control Plane",
             "status": "running",
-            "note": "Agent API обслуживает `/operator/state`, action catalog и static operator UI shell.",
+            "note": "API оператора обслуживает `/operator/state`, каталог действий и статическую оболочку панели оператора.",
             "noteEn": "The Agent API serves `/operator/state`, the action catalog, and the static operator UI shell.",
             "path": "native",
             "stage": "Готово",
             "stageEn": "Ready",
             "endpoint": "/operator/state + /operator-ui",
-            "freshness": "backend route probe",
+            "freshness": "проверка backend-маршрута",
             "freshnessEn": "backend route probe",
         },
         {
-            "name": "Runtime Preflight",
+            "name": "Предпроверка запуска",
             "nameEn": "Runtime Preflight",
             "status": "running" if (SCRIPTS_ROOT / "runtime_preflight.py").exists() else "blocked",
-            "note": "Канонический вход для preflight и planning нативного запуска.",
+            "note": "Канонический вход для предпроверки и планирования нативного запуска.",
             "noteEn": "Canonical entrypoint for native runtime preflight and planning.",
             "path": "native",
             "stage": "Готово" if (SCRIPTS_ROOT / "runtime_preflight.py").exists() else "Заблокировано",
@@ -145,10 +295,10 @@ def build_operator_state() -> Dict[str, Any]:
             "freshnessEn": "filesystem probe",
         },
         {
-            "name": "Launcher",
+            "name": "Сценарий запуска",
             "nameEn": "Launcher",
             "status": "running" if (SCRIPTS_ROOT / "launcher.sh").exists() else "blocked",
-            "note": "Канонический launcher для нативного и контейнерного путей запуска.",
+            "note": "Канонический сценарий запуска для нативного и контейнерного путей.",
             "noteEn": "Canonical launcher for native and container runtime paths.",
             "path": "native",
             "stage": "Готово" if (SCRIPTS_ROOT / "launcher.sh").exists() else "Заблокировано",
@@ -158,10 +308,10 @@ def build_operator_state() -> Dict[str, Any]:
             "freshnessEn": "filesystem probe",
         },
         {
-            "name": "Bundle Manifest",
+            "name": "Манифест офлайн-бандла",
             "nameEn": "Bundle Manifest",
             "status": "running" if (DEPLOY_ROOT / "manifest.json").exists() else "blocked",
-            "note": "Manifest артефактов для deploy/offline_bundle.",
+            "note": "Манифест артефактов для deploy/offline_bundle.",
             "noteEn": "Artifact manifest for deploy/offline_bundle.",
             "path": "container",
             "stage": "Читается" if (DEPLOY_ROOT / "manifest.json").exists() else "Отсутствует",
@@ -171,10 +321,23 @@ def build_operator_state() -> Dict[str, Any]:
             "freshnessEn": "filesystem probe",
         },
         {
+            "name": "Бинарник Docker",
+            "nameEn": "Docker Binary",
+            "status": "running" if docker_binary else "blocked",
+            "note": "Бинарник Docker нужен для загрузки архивов образов, `docker compose config` и реального запуска контейнеров.",
+            "noteEn": "The Docker binary is required for bundle image loading, `docker compose config`, and real container deploy/run flows.",
+            "path": "container",
+            "stage": "Готово" if docker_binary else "Заблокировано",
+            "stageEn": "Ready" if docker_binary else "Blocked",
+            "endpoint": docker_binary or "docker",
+            "freshness": "проверка бинарника на хосте",
+            "freshnessEn": "host binary probe",
+        },
+        {
             "name": "Docker Socket",
             "nameEn": "Docker Socket",
             "status": "running" if docker_socket.exists() else "blocked",
-            "note": "Запуск контейнеров и загрузка images зависят от доступа к Docker socket на host.",
+            "note": "Запуск контейнеров и загрузка образов зависят от доступа к сокету Docker на хосте.",
             "noteEn": "Container startup and image loading depend on Docker socket access on the host.",
             "path": "container",
             "stage": "Готово" if docker_socket.exists() else "Заблокировано",
@@ -188,6 +351,39 @@ def build_operator_state() -> Dict[str, Any]:
     config_state = config_service.get_config_state(runtime_paths)
 
     diagnostics: List[Dict[str, str]] = []
+    if not docker_binary:
+        diagnostics.append(
+            {
+                "path": "container",
+                "title": "Контейнерный путь заблокирован: Docker отсутствует",
+                "titleEn": "Container runtime blocked: Docker binary is missing",
+                "body": "Контейнерный запуск не сможет перейти от чтения офлайн-бандла к сборке и деплою, пока Docker не установлен на хосте.",
+                "bodyEn": "The container launch cannot move from bundle inspection to build/deploy until Docker is installed on the host.",
+                "tone": "orange",
+            }
+        )
+    if not docker_socket.exists():
+        diagnostics.append(
+            {
+                "path": "container",
+                "title": "Контейнерный путь заблокирован: сокет Docker недоступен",
+                "titleEn": "Container runtime blocked: Docker socket is unavailable",
+                "body": "Поверхность офлайн-бандла можно читать, но `docker compose` и загрузка образов не завершатся без доступа к `/var/run/docker.sock`.",
+                "bodyEn": "The bundle surface remains readable, but `docker compose` and image loading cannot complete without access to `/var/run/docker.sock`.",
+                "tone": "orange",
+            }
+        )
+    if env_value(bundle_env, "AGENT_API_PORT", default="8000") == "8000":
+        diagnostics.append(
+            {
+                "path": "container",
+                "title": "Нужен безопасный профиль портов перед локальным deploy",
+                "titleEn": "A safe port profile is needed before local deploy",
+                "body": "Текущий `AGENT_API_PORT=8000` конфликтует с этой панелью на том же хосте. Для локального запуска сначала подставь локальные безопасные порты.",
+                "bodyEn": "The current `AGENT_API_PORT=8000` conflicts with the operator UI on this host. Stage safe local ports before local smoke or deploy.",
+                "tone": "cyan",
+            }
+        )
 
     log_lines = [
         {"path": "native", "service": "operator", "text": "[operator][repository-derived] обнаружены env-источники: backend/.env, backend/.env.native, backend/.env.runtime"},
@@ -204,15 +400,15 @@ def build_operator_state() -> Dict[str, Any]:
 
     blockers = []
     if not docker_binary:
-        blockers.append({"title": "Docker binary отсутствует", "titleEn": "Docker binary is missing", "body": "Container build/deploy flow останется частично заблокированным, пока Docker не будет установлен.", "bodyEn": "The container build/deploy flow stays partially blocked until Docker is installed."})
+        blockers.append({"title": "Docker отсутствует", "titleEn": "Docker binary is missing", "body": "Сценарий сборки и деплоя контейнеров останется частично заблокированным, пока Docker не будет установлен.", "bodyEn": "The container build/deploy flow stays partially blocked until Docker is installed."})
     if not docker_socket.exists():
-        blockers.append({"title": "Docker socket недоступен", "titleEn": "Docker socket is unavailable", "body": "Container deploy actions не смогут завершиться без доступа к socket на host.", "bodyEn": "Container deploy actions cannot finish without Docker socket access on the host."})
+        blockers.append({"title": "Сокет Docker недоступен", "titleEn": "Docker socket is unavailable", "body": "Действия деплоя контейнеров не смогут завершиться без доступа к сокету Docker на хосте.", "bodyEn": "Container deploy actions cannot finish without Docker socket access on the host."})
     if env_value(bundle_env, "AGENT_API_PORT", default="8000") == "8000":
         blockers.append(
             {
                 "title": "Контейнерный деплой делит порт с текущим operator UI",
                 "titleEn": "Container deploy shares a port with the current operator UI",
-                "body": "Если запускать bundle из этого же локального backend на `8000`, контейнерный `agent-api` попытается занять тот же порт. Для безопасного запуска нужен другой порт или отдельное окружение.",
+                "body": "Если запускать офлайн-бандл из этого же локального backend на `8000`, контейнерный `agent-api` попытается занять тот же порт. Для безопасного запуска нужен другой порт или отдельное окружение.",
                 "bodyEn": "If the bundle starts from this same local backend on `8000`, its container `agent-api` will try to take the same port. Use a different port profile or a separate environment.",
             }
         )
@@ -251,26 +447,114 @@ def _build_runtime_health(state: Dict[str, Any], path_key: str) -> Dict[str, Any
     if path_key not in runtime_paths:
         raise KeyError(path_key)
 
+    path = runtime_paths[path_key]
     rows = [item for item in state["serviceRows"] if item["path"] == path_key]
     running = sum(1 for item in rows if item["status"] == "running")
     blocked = sum(1 for item in rows if item["status"] == "blocked")
     degraded = sum(1 for item in rows if item["status"] == "degraded")
     active_warnings = sum(1 for item in state["warnings"] if path_key == "container" or "runtime" in item["title"].lower())
+    diagnostics = [item for item in state.get("diagnostics", []) if item.get("path") == path_key]
+    warnings = state.get("warnings", [])
+    blockers = state.get("blockers", [])
 
-    if blocked:
-        status = "blocked"
-    elif degraded:
-        status = "degraded"
-    elif running:
-        status = "healthy"
+    status = "unknown"
+    summary = "Runtime health is not available yet."
+    summary_en = "Runtime health is not available yet."
+    reason = ""
+    reason_en = ""
+    next_action = "Проверь путь запуска и журнал последних действий."
+    next_action_en = "Check the runtime path and the recent activity log."
+
+    if path_key == "container":
+        docker_binary_missing = any("Docker binary" in item["titleEn"] for item in warnings) or any("Docker binary" in item["titleEn"] for item in blockers)
+        docker_socket_missing = any("Docker socket" in item["titleEn"] for item in warnings) or any("Docker socket" in item["titleEn"] for item in blockers)
+        port_conflict = any("shares a port" in item.get("titleEn", "") for item in blockers)
+
+        if docker_binary_missing:
+            status = "blocked"
+            reason = "Docker отсутствует."
+            reason_en = "The Docker binary is missing."
+            summary = "Bundle читается, но сборка и деплой контейнеров заблокированы до установки Docker."
+            summary_en = "The bundle surface is readable, but container build and deploy stay blocked until Docker is installed."
+            next_action = "Установи Docker на хост и затем снова проверь контейнерный путь запуска."
+            next_action_en = "Install Docker on the host and then check the container launch again."
+        elif docker_socket_missing:
+            status = "blocked"
+            reason = "Сокет Docker недоступен."
+            reason_en = "The Docker socket is unavailable."
+            summary = "Bundle готов, но `docker compose` не сможет завершиться без доступа к сокету."
+            summary_en = "The bundle surface is ready, but `docker compose` cannot complete without socket access."
+            next_action = "Дай доступ к сокету Docker или запускай bundle в окружении, где он доступен."
+            next_action_en = "Provide Docker socket access or run the bundle in an environment where the socket is available."
+        elif port_conflict:
+            status = "blocked"
+            reason = "Порт `agent-api` конфликтует с текущим operator UI."
+            reason_en = "The `agent-api` port conflicts with the current operator UI."
+            summary = "Контейнерный путь не должен стартовать поверх локального backend на том же порту."
+            summary_en = "The container runtime should not start on top of the local backend on the same port."
+            next_action = "Во вкладке Конфиг подставь безопасные локальные порты перед локальным деплоем или запуском."
+            next_action_en = "Stage safe local ports in Config before a local deploy or run."
+        elif degraded or any(item.get("tone") == "orange" for item in diagnostics):
+            status = "degraded"
+            reason = "Есть сигналы среды выполнения и диагностики, требующие внимания."
+            reason_en = "Runtime and diagnostics signals require attention."
+            summary = "Bundle читается и проверки хоста доступны, но часть контейнерных проверок остаётся в сниженном состоянии."
+            summary_en = "The bundle is readable and host probes are available, but some container checks remain degraded."
+            next_action = "Открой Сервисы и Диагностику, затем смотри журнал запуска и панель деплоя."
+            next_action_en = "Open Services and Diagnostics, then inspect the launch log and deploy surface."
+        else:
+            status = "not_started"
+            reason = "Bundle и проверки хоста готовы, но контейнерный путь ещё не запускался."
+            reason_en = "The bundle and host probes are ready, but the container runtime has not been started yet."
+            summary = "Offline bundle готов к проверке оператором, но активная контейнерная среда ещё не поднята."
+            summary_en = "The offline bundle is ready for operator review, but the active container runtime is not up yet."
+            next_action = "Запусти Офлайн-бандл / Контейнеры из вкладки Запуск или перейди в Сборка / Деплой для подготовки окружения."
+            next_action_en = "Start Offline Bundle / Containers from Launch or open Build / Deploy to prepare the environment."
     else:
-        status = "unknown"
+        if path.get("status") == "unavailable":
+            status = "blocked"
+            reason = "Нативный путь запуска недоступен."
+            reason_en = "The native runtime path is unavailable."
+            summary = "Не хватает обязательных файлов нативного пути запуска."
+            summary_en = "Required files for the native runtime path are missing."
+            next_action = "Проверь `scripts/launcher.sh`, `scripts/runtime_preflight.py` и цепочку backend env-файлов."
+            next_action_en = "Check `scripts/launcher.sh`, `scripts/runtime_preflight.py`, and the backend env chain."
+        elif degraded:
+            status = "degraded"
+            reason = "Нативный путь запуска виден, но часть проверок находится в сниженном состоянии."
+            reason_en = "The native runtime path is visible, but some probes are degraded."
+            summary = "Нативная среда доступна, но часть операторских проверок требует внимания."
+            summary_en = "The native runtime is available, but some operator checks require attention."
+            next_action = "Проверь Сервисы и журнал запуска перед повторным запуском."
+            next_action_en = "Check Services and the launch log before retrying."
+        elif running:
+            status = "running"
+            reason = "Канонические проверки нативного пути доступны."
+            reason_en = "Canonical native probes are available."
+            summary = "Нативный путь выглядит рабочим по опубликованным операторским проверкам."
+            summary_en = "The native runtime path looks healthy according to the published operator checks."
+            next_action = "Проверь сервисы и логи, если менялся профиль запуска или режим устройства."
+            next_action_en = "Check services and logs if the runtime profile or device mode changed."
+        else:
+            status = "not_started"
+            reason = "Backend ещё не прислал операторские проверки для нативного пути."
+            reason_en = "The backend has not published native runtime checks yet."
+            summary = "Нативный путь виден, но полноценный сигнал о состоянии среды ещё не опубликован."
+            summary_en = "The native runtime path is visible, but a full runtime signal is not published yet."
+            next_action = "Запусти нативный путь и затем проверь журнал запуска."
+            next_action_en = "Start the native path and then inspect the launch log."
 
     return {
         "pathKey": path_key,
-        "pathLabel": runtime_paths[path_key]["name"],
-        "pathLabelEn": runtime_paths[path_key].get("nameEn", runtime_paths[path_key]["name"]),
+        "pathLabel": path["name"],
+        "pathLabelEn": path.get("nameEn", path["name"]),
         "status": status,
+        "summary": summary,
+        "summaryEn": summary_en,
+        "reason": reason,
+        "reasonEn": reason_en,
+        "nextAction": next_action,
+        "nextActionEn": next_action_en,
         "runningChecks": running,
         "blockedChecks": blocked,
         "degradedChecks": degraded,
@@ -377,6 +661,27 @@ def operator_config_apply(path_key: str, request: OperatorConfigApplyRequest) ->
         return config_service.apply_config(path_key, request.updates)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"unknown-path:{path_key}") from exc
+
+
+@router.get("/path-browser")
+def operator_path_browser(path: str | None = None, kind: str = "file") -> Dict[str, Any]:
+    return _build_path_browser_payload(path=path, kind=kind)
+
+
+@router.get("/path-browser/validate")
+def operator_path_browser_validate(path: str, kind: str = "file", field_key: str | None = None) -> Dict[str, Any]:
+    candidate = _resolve_allowed_path(path)
+    validation = _describe_path_validation(candidate, kind, field_key)
+    return {
+        "path": str(candidate),
+        "exists": candidate.exists(),
+        "kind": kind,
+        "fieldKey": field_key,
+        "valid": validation["valid"],
+        "status": validation["status"],
+        "message": validation["message"],
+        "checks": validation["checks"],
+    }
 
 
 @router.get("/services/{path_key}")

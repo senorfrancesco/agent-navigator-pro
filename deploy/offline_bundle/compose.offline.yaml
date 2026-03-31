@@ -25,6 +25,11 @@ services:
       - ./state/backend-data:/app/backend/.data
       - ./state/uploads:/app/backend/uploads
       - ./models:/app/backend/models
+      - ${HOST_MODEL_PATH_LLM:-./state/host-install/.gitkeep}:/opt/agent-nav/external/llm/model.gguf:ro
+      - ${HOST_MODEL_PATH_VLM:-./state/host-install/.gitkeep}:/opt/agent-nav/external/vlm/model.gguf:ro
+      - ${HOST_MMPROJ_PATH:-./state/host-install/.gitkeep}:/opt/agent-nav/external/vlm/mmproj.gguf:ro
+      - ${HOST_MODEL_PATH_EMBEDDING_INTENT:-./state/host-install}:/opt/agent-nav/external/embedders/intent:ro
+      - ${HOST_MODEL_PATH_EMBEDDING_RETRIEVAL:-./state/host-install}:/opt/agent-nav/external/embedders/retrieval:ro
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()\""]
       interval: 15s
@@ -47,6 +52,11 @@ services:
       - ./state/backend-data:/app/backend/.data
       - ./state/uploads:/app/backend/uploads
       - ./models:/app/backend/models
+      - ${HOST_MODEL_PATH_LLM:-./state/host-install/.gitkeep}:/opt/agent-nav/external/llm/model.gguf:ro
+      - ${HOST_MODEL_PATH_VLM:-./state/host-install/.gitkeep}:/opt/agent-nav/external/vlm/model.gguf:ro
+      - ${HOST_MMPROJ_PATH:-./state/host-install/.gitkeep}:/opt/agent-nav/external/vlm/mmproj.gguf:ro
+      - ${HOST_MODEL_PATH_EMBEDDING_INTENT:-./state/host-install}:/opt/agent-nav/external/embedders/intent:ro
+      - ${HOST_MODEL_PATH_EMBEDDING_RETRIEVAL:-./state/host-install}:/opt/agent-nav/external/embedders/retrieval:ro
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=2).read()\""]
       interval: 15s
@@ -69,6 +79,11 @@ services:
       - ./state/backend-data:/app/backend/.data
       - ./state/uploads:/app/backend/uploads
       - ./models:/app/backend/models
+      - ${HOST_MODEL_PATH_LLM:-./state/host-install/.gitkeep}:/opt/agent-nav/external/llm/model.gguf:ro
+      - ${HOST_MODEL_PATH_VLM:-./state/host-install/.gitkeep}:/opt/agent-nav/external/vlm/model.gguf:ro
+      - ${HOST_MMPROJ_PATH:-./state/host-install/.gitkeep}:/opt/agent-nav/external/vlm/mmproj.gguf:ro
+      - ${HOST_MODEL_PATH_EMBEDDING_INTENT:-./state/host-install}:/opt/agent-nav/external/embedders/intent:ro
+      - ${HOST_MODEL_PATH_EMBEDDING_RETRIEVAL:-./state/host-install}:/opt/agent-nav/external/embedders/retrieval:ro
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=2).read()\""]
       interval: 15s
@@ -89,6 +104,11 @@ services:
       - ./state/backend-data:/app/backend/.data
       - ./state/uploads:/app/backend/uploads
       - ./models:/app/backend/models
+      - ${HOST_MODEL_PATH_LLM:-./state/host-install/.gitkeep}:/opt/agent-nav/external/llm/model.gguf:ro
+      - ${HOST_MODEL_PATH_VLM:-./state/host-install/.gitkeep}:/opt/agent-nav/external/vlm/model.gguf:ro
+      - ${HOST_MMPROJ_PATH:-./state/host-install/.gitkeep}:/opt/agent-nav/external/vlm/mmproj.gguf:ro
+      - ${HOST_MODEL_PATH_EMBEDDING_INTENT:-./state/host-install}:/opt/agent-nav/external/embedders/intent:ro
+      - ${HOST_MODEL_PATH_EMBEDDING_RETRIEVAL:-./state/host-install}:/opt/agent-nav/external/embedders/retrieval:ro
     gpus: all
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=2).read()\""]

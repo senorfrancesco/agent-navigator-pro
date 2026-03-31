@@ -402,7 +402,7 @@ bash deploy/offline_bundle/scripts/build_wheelhouse.sh --skip-download
 
 `build_host_apt_bundle.sh`
 - `--distro <name>`: выбрать `ubuntu-22.04` или `ubuntu-24.04`.
-- `--driver-package <name>`: выбрать `nvidia-driver-550-server` или `nvidia-driver-550`.
+- `--driver-package <name>`: выбрать `nvidia-driver-590-server` или `nvidia-driver-590`.
 - `--output-root <path>`: переопределить каталог `host_packages/<distro>`.
 - `--extra-package <name>`: добавить дополнительный пакет, например kernel headers.
 - `--check-only`: только проверить prereq/candidate path без скачивания.
@@ -462,7 +462,7 @@ bash deploy/offline_bundle/scripts/build_host_apt_bundle.sh --distro ubuntu-22.0
 Важно:
 - `build_host_apt_bundle.sh` собирает локальный apt bundle для пакетной установки;
 - ручной NVIDIA driver `590.48.01` при необходимости скачивается оператором отдельно под конкретную версию Ubuntu;
-- если вы используете пакетный вариант драйвера через локальный apt bundle, остаётся `nvidia-driver-550-server` по умолчанию или `nvidia-driver-550` как override.
+- если вы используете пакетный вариант драйвера через локальный apt bundle, остаётся `nvidia-driver-590-server` по умолчанию или `nvidia-driver-590` как override.
 
 Когда нужны `--extra-package`:
 - если вы планируете ставить драйвер **через локальный apt bundle**, на target-host могут понадобиться kernel-specific пакеты;
@@ -480,7 +480,7 @@ uname -r
 uname -m
 dpkg --print-architecture
 dpkg -l | grep -E 'linux-(image|headers|modules)|nvidia|dkms' || true
-apt-cache policy nvidia-driver-550 nvidia-driver-550-server || true
+apt-cache policy nvidia-driver-590 nvidia-driver-590-server || true
 apt-cache search "^linux-modules-nvidia" || true
 apt-cache search "^linux-headers-$(uname -r)$" || true
 nvidia-smi || true
@@ -517,7 +517,7 @@ bash deploy/offline_bundle/scripts/build_host_apt_bundle.sh --distro ubuntu-24.0
 - `containerd.io`
 - `docker-buildx-plugin`
 - `docker-compose-plugin`
-- `nvidia-driver-550-server`
+- `nvidia-driver-590-server`
 - `nvidia-container-toolkit`
 - `python3`
 - `curl`
@@ -527,7 +527,7 @@ bash deploy/offline_bundle/scripts/build_host_apt_bundle.sh --distro ubuntu-24.0
 Если нужен desktop-вариант драйвера:
 
 ```bash
-bash deploy/offline_bundle/scripts/build_host_apt_bundle.sh --driver-package nvidia-driver-550
+bash deploy/offline_bundle/scripts/build_host_apt_bundle.sh --driver-package nvidia-driver-590
 ```
 
 Полезные режимы:
@@ -539,7 +539,7 @@ bash deploy/offline_bundle/scripts/build_host_apt_bundle.sh --dry-run
 
 Флаги `build_host_apt_bundle.sh`:
 - `--distro <name>`: выбрать целевую пакетную матрицу. Допустимые значения: `ubuntu-22.04`, `ubuntu-24.04`. По умолчанию используется `ubuntu-24.04`.
-- `--driver-package <name>`: выбрать пакетный драйверный baseline для apt-path. Допустимые значения: `nvidia-driver-550-server` и `nvidia-driver-550`.
+- `--driver-package <name>`: выбрать пакетный драйверный baseline для apt-path. Допустимые значения: `nvidia-driver-590-server` и `nvidia-driver-590`.
 - `--output-root <path>`: переопределить каталог, в который будет собран host apt bundle вместо стандартного `host_packages/<distro>/`.
 - `--extra-package <name>`: явно добавить пакет в bundle. Флаг можно повторять несколько раз. Нужен в первую очередь для kernel-specific пакетов при пакетной установке драйвера.
 - `--check-only`: не скачивать `.deb`, а только проверить prerequisites, доступность repo и разрешение exact package candidates.
@@ -550,7 +550,7 @@ bash deploy/offline_bundle/scripts/build_host_apt_bundle.sh --dry-run
 ```bash
 bash deploy/offline_bundle/scripts/build_host_apt_bundle.sh \
   --distro ubuntu-22.04 \
-  --driver-package nvidia-driver-550
+  --driver-package nvidia-driver-590
 
 bash deploy/offline_bundle/scripts/build_host_apt_bundle.sh \
   --distro ubuntu-24.04 \

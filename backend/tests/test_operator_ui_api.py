@@ -1,3 +1,4 @@
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -7,6 +8,8 @@ from orchestrator.operator_ui_api import (
     OperatorConfigApplyRequest,
     OperatorConfigPresetPreviewRequest,
     build_operator_state,
+    operator_path_browser,
+    operator_path_browser_validate,
     operator_config_apply,
     operator_config_preset_preview,
     operator_config_variants,
@@ -87,6 +90,19 @@ def test_operator_runtime_health_returns_summary_for_path():
     assert payload["pathKey"] == "native"
     assert "status" in payload
     assert "checkCount" in payload
+    assert "summary" in payload
+    assert "reason" in payload
+    assert "nextAction" in payload
+
+
+def test_operator_runtime_health_marks_container_as_blocked_with_actionable_summary():
+    payload = operator_runtime_health("container")
+
+    assert payload["pathKey"] == "container"
+    assert payload["status"] == "blocked"
+    assert payload["reason"]
+    assert payload["summary"]
+    assert payload["nextAction"]
 
 
 @pytest.mark.asyncio
@@ -110,6 +126,37 @@ async def test_operator_action_run_returns_job_snapshot(monkeypatch):
 
     assert payload["job_id"] == "job-123"
     assert payload["status"] == "queued"
+
+
+def test_operator_path_browser_lists_allowed_roots():
+    payload = operator_path_browser()
+
+    assert payload["kind"] == "file"
+    assert payload["cwd"] == ""
+    assert any(entry["type"] == "directory" for entry in payload["entries"])
+
+
+def test_operator_path_browser_validate_accepts_repo_path():
+    payload = operator_path_browser_validate(path=str(Path.cwd()), kind="directory")
+
+    assert payload["exists"] is True
+    assert payload["valid"] is True
+
+
+def test_operator_path_browser_validate_reports_model_file_semantics(tmp_path, monkeypatch):
+    candidate = tmp_path / "model.gguf"
+    candidate.write_text("weights", encoding="utf-8")
+    monkeypatch.setattr("orchestrator.operator_ui_api.PATH_BROWSER_ROOTS", [tmp_path])
+
+    payload = operator_path_browser_validate(
+        path=str(candidate),
+        kind="file",
+        field_key="HOST_MODEL_PATH_LLM",
+    )
+
+    assert payload["valid"] is True
+    assert payload["status"] == "ok"
+    assert "GGUF extension detected" in payload["checks"]
 
 
 @pytest.mark.asyncio

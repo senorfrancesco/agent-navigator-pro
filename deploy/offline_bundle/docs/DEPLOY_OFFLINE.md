@@ -48,7 +48,7 @@ sudo bash scripts/install_host_apt_bundle.sh
 - `containerd.io`
 - `docker-buildx-plugin`
 - `docker-compose-plugin`
-- `nvidia-driver-550` или `nvidia-driver-550-server` при пакетной установке из локального apt-bundle
+- `nvidia-driver-590` или `nvidia-driver-590-server` при пакетной установке из локального apt-bundle
 - либо ручной NVIDIA Data Center Driver `590.48.01` под конкретную версию Ubuntu
 - `nvidia-container-toolkit=1.19.0-1`
 - `nvidia-container-toolkit-base=1.19.0-1`
@@ -66,7 +66,7 @@ sudo bash scripts/install_host_apt_bundle.sh
 - для текущего `v1.0` целевой сервер ориентирован на NVIDIA RTX A4000;
 - для ручной установки драйвера жёстко фиксируем baseline как **NVIDIA Data Center Driver `590.48.01`**;
 - `590.48.01` подходит для `CUDA 12.8` и RTX A4000;
-- для пакетной оффлайн-установки из bundle допускается distro-пакет `nvidia-driver-550` / `nvidia-driver-550-server`;
+- для пакетной оффлайн-установки из bundle допускается distro-пакет `nvidia-driver-590` / `nvidia-driver-590-server`;
 - для текущего `v1.0` жёстко фиксируем container-runtime baseline как **`nvidia-container-toolkit 1.19.0-1`** и связанные пакеты той же версии;
 - нижнюю границу совместимости CUDA 12.8 стоит считать не целью, а только минимумом.
 
@@ -104,7 +104,7 @@ docker info | grep -i nvidia
 
 Как выбрать между ручным и пакетным driver path:
 - если хотите самый предсказуемый путь под `CUDA 12.8`, используйте ручной `Data Center Driver 590.48.01`;
-- если хотите полностью оффлайн-пакетную установку из bundle, используйте локальный apt bundle с `nvidia-driver-550-server` / `nvidia-driver-550`;
+- если хотите полностью оффлайн-пакетную установку из bundle, используйте локальный apt bundle с `nvidia-driver-590-server` / `nvidia-driver-590`;
 - для пакетного пути на некоторых серверах могут понадобиться kernel-specific пакеты, и тогда build-side bundle надо пересобрать с `--extra-package`;
 - для ручного `590.48.01` этот шаг обычно не нужен.
 

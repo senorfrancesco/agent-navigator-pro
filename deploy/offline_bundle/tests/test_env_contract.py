@@ -63,6 +63,12 @@ def test_env_bundle_example_contains_runtime_parity_knobs() -> None:
         "RAG_MODE_OVERRIDE",
         "UMS_LLM_MAX_CONCURRENCY",
         "REPORT_PDF_FONT_PATH",
+        "MODEL_SOURCE_MODE",
+        "HOST_MODEL_PATH_LLM",
+        "HOST_MODEL_PATH_VLM",
+        "HOST_MMPROJ_PATH",
+        "HOST_MODEL_PATH_EMBEDDING_INTENT",
+        "HOST_MODEL_PATH_EMBEDDING_RETRIEVAL",
     }
 
     assert expected.issubset(keys)
@@ -72,6 +78,7 @@ def test_env_bundle_example_defaults_to_llama_server_backend() -> None:
     values = _parse_env_values(BUNDLE_ROOT / "env.bundle.example")
 
     assert values["BACKEND_MODE"] == "llama-server"
+    assert values["MODEL_SOURCE_MODE"] == "bundle_layout"
 
 
 def test_env_bundle_example_passes_preflight_contract_validation() -> None:

@@ -14,7 +14,7 @@ let runtimePaths = {
     summary: [
       { label: "Профили запуска", value: "4 готовы", tone: "lime" },
       { label: "Цепочка env", value: "разрешена", tone: "cyan" },
-      { label: "Состояние runtime", value: "стабильно", tone: "lime" },
+      { label: "Состояние среды", value: "стабильно", tone: "lime" },
     ],
     profiles: [
       { title: "Только backend", status: "available", body: "Минимальный путь API и orchestration для проверок workflow и endpoint'ов." },
@@ -41,26 +41,26 @@ let runtimePaths = {
     key: "container",
     name: "Offline Bundle / контейнерный запуск",
     status: "partial",
-    description: "Путь через offline bundle с загрузкой образов, деплоем, проверками parity и artifact-based запуском на сервере.",
+    description: "Путь через офлайн-бандл с загрузкой образов, деплоем, проверками согласованности и запуском артефактов на сервере.",
     launchSource: "deploy/offline_bundle/scripts/run_offline_bundle.sh",
     configSources: [
-      { path: "deploy/offline_bundle/env.bundle", role: "контракт env для bundle", freshness: "present" },
+      { path: "deploy/offline_bundle/env.bundle", role: "контракт env для бандла", freshness: "present" },
       { path: "deploy/offline_bundle/compose.offline.yaml", role: "топология контейнеров", freshness: "present" },
-      { path: "deploy/offline_bundle/manifest.json", role: "manifest артефактов", freshness: "present" },
-      { path: "deploy/offline_bundle/runtime_report.json", role: "последний импортированный runtime report", freshness: "stale" },
+      { path: "deploy/offline_bundle/manifest.json", role: "манифест артефактов", freshness: "present" },
+      { path: "deploy/offline_bundle/runtime_report.json", role: "последний импортированный отчёт о среде", freshness: "stale" },
     ],
     summary: [
       { label: "Профили запуска", value: "1 заблокирован / 2 доступны для проверки", tone: "orange" },
-      { label: "Файлы bundle", value: "есть", tone: "lime" },
+      { label: "Файлы бандла", value: "есть", tone: "lime" },
       { label: "Состояние Docker engine", value: "заблокировано", tone: "orange" },
     ],
     profiles: [
-      { title: "Загрузка образов bundle", status: "unavailable", body: "Архивы образов можно загрузить в Docker только когда доступны engine и socket." },
-      { title: "Offline bundle runtime", status: "partial", body: "Основной пользовательский путь идёт через run_offline_bundle.sh и deploy.sh, а не через dev compose launcher checkout-репозитория." },
-      { title: "Импорт и parity-проверка", status: "partial", body: "Manifest и env bundle доступны для чтения; проверки parity и deploy surface можно изучать ещё до старта runtime." },
+      { title: "Загрузка архивов образов", status: "unavailable", body: "Архивы образов можно загрузить в Docker только когда доступны движок и сокет." },
+      { title: "Запуск офлайн-бандла", status: "partial", body: "Основной пользовательский путь идёт через run_offline_bundle.sh и deploy.sh, а не через dev compose launcher checkout-репозитория." },
+      { title: "Импорт и проверка согласованности", status: "partial", body: "Манифест и env.bundle доступны для чтения; поверхность деплоя можно изучать ещё до старта среды." },
     ],
     whyUnavailable: {
-      title: "Состояние offline bundle / контейнерного запуска",
+      title: "Состояние офлайн-бандла и контейнерного запуска",
       checks: [
         ["deploy/offline_bundle/", "present"],
         ["compose.offline.yaml", "present"],
@@ -74,7 +74,7 @@ let runtimePaths = {
         "Bundle-файлы есть, но активный Docker engine не обнаружен.",
         "Профили, которым нужен compose, останутся отключёнными, пока не пройдут проверки сокета и Docker engine.",
       ],
-      remediation: "Этот путь запуска ведёт в deploy/offline_bundle/scripts: сначала можно загрузить образы bundle, затем выполнить deploy или run offline bundle без dev-сборки checkout-репозитория.",
+      remediation: "Этот путь запуска ведёт в deploy/offline_bundle/scripts: сначала можно загрузить архивы образов, затем выполнить деплой или запуск офлайн-бандла без dev-сборки checkout-репозитория.",
     },
   },
 };
@@ -83,12 +83,14 @@ let hardwareMetrics = [
   { label: "Определённая ОС", value: "Ожидаем состояние оператора", note: "Факты о железе приходят из backend." },
   { label: "Видимость GPU", value: "Неизвестно", note: "Host probe ещё не завершился." },
   { label: "CPU / память", value: "Неизвестно", note: "Host probe ещё не завершился." },
-  { label: "Предлагаемый runtime profile", value: "Неизвестно", note: "Рекомендованные значения появятся после загрузки backend state." },
+  { label: "Предлагаемый профиль среды", value: "Неизвестно", note: "Предлагаемые значения появятся после загрузки состояния backend." },
   { label: "Предлагаемый контекст", value: "Неизвестно", note: "Рекомендованные значения появятся после загрузки backend state." },
   { label: "Целевой архив", value: "Неизвестно", note: "Имя архива приходит из backend." },
 ];
 
 let warnings = [];
+const stagedPathValidations = new Map();
+const pathValidationTimers = new Map();
 
 let serviceRows = [];
 
@@ -223,89 +225,89 @@ let grafanaLinks = {
 
 let deploySurface = {
   build: {
-    label: "Сборка bundle",
-    summaryTitle: "Состояние сборки bundle",
+    label: "Сборка офлайн-бандла",
+    summaryTitle: "Состояние сборки офлайн-бандла",
     stagesTitle: "Стадии сборки",
     actionsTitle: "Действия сборки",
     artifactsTitle: "Выходные артефакты и упаковка архива",
     logsTitle: "Лог сборки и экспорта",
     summary: [
-      { label: "Корень bundle", value: "deploy/offline_bundle", note: "Канонический workspace для подключённой сборки.", tone: "cyan" },
+      { label: "Корень бандла", value: "deploy/offline_bundle", note: "Канонический рабочий каталог сборки.", tone: "cyan" },
       { label: "Целевой архив", value: "agent-nav-offline-bundle_v1.0.tar.gz", note: "Единый переносимый артефакт для передачи.", tone: "lime" },
-      { label: "Матрица host apt", value: "ubuntu-24.04 готов", note: "Собрано через локальный apt bundle flow.", tone: "lime" },
-      { label: "Состояние manifest", value: "проверен", note: "Выход готов к deploy и проходит bundle validation.", tone: "lime" },
+      { label: "Матрица системных пакетов", value: "ubuntu-24.04 готов", note: "Собрано через локальный сценарий APT-бандла.", tone: "lime" },
+      { label: "Состояние манифеста", value: "проверен", note: "Выход готов к деплою и проходит проверку бандла.", tone: "lime" },
     ],
     sources: [
       { path: "deploy/offline_bundle/scripts/build_bundle.sh", role: "верхнеуровневый оркестратор сборки и экспорта", freshness: "present" },
-      { path: "deploy/offline_bundle/scripts/build_host_apt_bundle.sh", role: "сборка host APT bundle", freshness: "present" },
-      { path: "deploy/offline_bundle/scripts/export_images.sh", role: "сборка и экспорт Docker images", freshness: "present" },
-      { path: "deploy/offline_bundle/scripts/generate_manifest.py", role: "генерация manifest", freshness: "present" },
-      { path: "deploy/offline_bundle/scripts/validate_bundle.py", role: "проверка готовности к deploy", freshness: "present" },
+      { path: "deploy/offline_bundle/scripts/build_host_apt_bundle.sh", role: "сборка APT-бандла системных пакетов", freshness: "present" },
+      { path: "deploy/offline_bundle/scripts/export_images.sh", role: "сборка и экспорт Docker-образов", freshness: "present" },
+      { path: "deploy/offline_bundle/scripts/generate_manifest.py", role: "генерация манифеста", freshness: "present" },
+      { path: "deploy/offline_bundle/scripts/validate_bundle.py", role: "проверка готовности к деплою", freshness: "present" },
     ],
     stages: [
       { title: "Wheelhouse", status: "running", body: "Подготовить offline Python wheelhouse перед экспортом images.", script: "build_wheelhouse.sh" },
       { title: "Образы", status: "running", body: "Собрать backend/UMS/Chainlit images и экспортировать их в tar-архивы.", script: "export_images.sh" },
-      { title: "Модели", status: "running", body: "Экспортировать layout моделей для env.bundle и manifest.", script: "export_models.sh" },
-      { title: "Состояние", status: "running", body: "Экспортировать runtime env и persisted state в bundle/state.", script: "export_state.sh" },
-      { title: "Host packages", status: "running", body: "Собрать apt bundle с точными версиями для целевого Ubuntu.", script: "build_host_apt_bundle.sh" },
+      { title: "Модели", status: "running", body: "Экспортировать layout моделей для env.bundle и манифеста.", script: "export_models.sh" },
+      { title: "Состояние", status: "running", body: "Экспортировать env среды и сохранённое состояние в bundle/state.", script: "export_state.sh" },
+      { title: "Системные пакеты", status: "running", body: "Собрать APT-бандл с точными версиями для целевой Ubuntu.", script: "build_host_apt_bundle.sh" },
       { title: "Упаковка архива", status: "partial", body: "Упаковать весь deploy/offline_bundle в единый tar.gz артефакт.", script: "tar czf ..." },
     ],
     actions: [
-      { title: "Собрать bundle", body: "Запустить каноническую orchestration сборки и экспорта.", action: "Собрать bundle" },
-      { title: "Собрать host APT bundle", body: "Подготовить пакеты Ubuntu и versions lock для offline install.", action: "Собрать host APT bundle" },
-      { title: "Экспортировать images", body: "Собрать offline images и сохранить их как image-архивы.", action: "Экспортировать images" },
-      { title: "Сгенерировать manifest", body: "Сгенерировать manifest и проверить полноту готовности к deploy.", action: "Сгенерировать manifest" },
+      { title: "Собрать офлайн-бандл", body: "Запустить каноническую оркестрацию сборки и экспорта.", action: "Собрать офлайн-бандл" },
+      { title: "Собрать APT-бандл", body: "Подготовить системные пакеты Ubuntu и lock-файл версий для офлайн-установки.", action: "Собрать APT-бандл" },
+      { title: "Экспортировать образы", body: "Собрать офлайн-образы и сохранить их как архивы образов.", action: "Экспортировать образы" },
+      { title: "Сгенерировать манифест", body: "Сгенерировать манифест и проверить полноту готовности к деплою.", action: "Сгенерировать манифест" },
       { title: "Упаковать tar.gz", body: "Создать единый переносимый архив из deploy/offline_bundle.", action: "Упаковать tar.gz" },
       { title: "Посмотреть логи сборки", body: "Открыть stage-oriented output сборки и экспорта.", action: "Посмотреть логи сборки" },
     ],
     artifacts: [
-      { title: "Архив bundle", body: "agent-nav-offline-bundle_v1.0.tar.gz · 18.6 GB · готов к передаче", badge: "ready" },
+      { title: "Архив бандла", body: "agent-nav-offline-bundle_v1.0.tar.gz · 18.6 GB · готов к передаче", badge: "ready" },
       { title: "Архивы образов", body: "backend-app, ums, chainlit, vllm сохранены в deploy/offline_bundle/images", badge: "ready" },
-      { title: "Пакет host packages", body: "ubuntu-24.04 pool + Packages.gz + versions.lock.json", badge: "ready" },
-      { title: "Manifest", body: "manifest.json содержит checksums для images, state, models, wheelhouse, host_packages", badge: "ready" },
+      { title: "Пакет системных пакетов", body: "ubuntu-24.04 pool + Packages.gz + versions.lock.json", badge: "ready" },
+      { title: "Манифест", body: "manifest.json содержит контрольные суммы для images, state, models, wheelhouse и host_packages", badge: "ready" },
     ],
   },
   import: {
     label: "Импорт / деплой",
     summaryTitle: "Состояние импорта / деплоя",
-    stagesTitle: "Стадии на целевом host",
+    stagesTitle: "Стадии на целевом хосте",
     actionsTitle: "Действия импорта и деплоя",
-    artifactsTitle: "Приём архива и распакованное состояние bundle",
+    artifactsTitle: "Приём архива и распакованное состояние бандла",
     logsTitle: "Лог импорта / деплоя",
     summary: [
       { label: "Приём архива", value: "выбран", note: "Один tar.gz принимается как канонический переносимый артефакт.", tone: "lime" },
-      { label: "Корень распаковки", value: "/opt/agent-nav/offline_bundle", note: "Bundle распакован в целевой runtime root.", tone: "cyan" },
-      { label: "Состояние deploy", value: "частично", note: "Bundle проходит проверку, но host runtime ещё ждёт install пакетов и загрузку images.", tone: "orange" },
-      { label: "Канонический entrypoint", value: "deploy.sh", note: "run_offline_bundle.sh остаётся верхнеуровневой обёрткой для удобного запуска.", tone: "cyan" },
+      { label: "Корень распаковки", value: "/opt/agent-nav/offline_bundle", note: "Бандл распакован в целевой корень среды.", tone: "cyan" },
+      { label: "Состояние деплоя", value: "частично", note: "Бандл проходит проверку, но среда на хосте ещё ждёт установку пакетов и загрузку образов.", tone: "orange" },
+      { label: "Каноническая точка входа", value: "deploy.sh", note: "run_offline_bundle.sh остаётся верхнеуровневой обёрткой для удобного запуска.", tone: "cyan" },
     ],
     sources: [
-      { path: "deploy/offline_bundle/scripts/install_host_apt_bundle.sh", role: "offline install и проверка host packages", freshness: "present" },
-      { path: "deploy/offline_bundle/scripts/deploy.sh", role: "каноническая deploy orchestration", freshness: "present" },
-      { path: "deploy/offline_bundle/scripts/load_images.sh", role: "импорт Docker images", freshness: "present" },
-      { path: "deploy/offline_bundle/scripts/restore_state.sh", role: "восстановление state bundle", freshness: "present" },
+      { path: "deploy/offline_bundle/scripts/install_host_apt_bundle.sh", role: "офлайн-установка и проверка системных пакетов", freshness: "present" },
+      { path: "deploy/offline_bundle/scripts/deploy.sh", role: "канонический сценарий деплоя", freshness: "present" },
+      { path: "deploy/offline_bundle/scripts/load_images.sh", role: "импорт Docker-образов", freshness: "present" },
+      { path: "deploy/offline_bundle/scripts/restore_state.sh", role: "восстановление состояния бандла", freshness: "present" },
       { path: "deploy/offline_bundle/scripts/run_offline_bundle.sh", role: "обёртка верхнего уровня для удобного запуска", freshness: "present" },
     ],
     stages: [
       { title: "Приём архива", status: "running", body: "Принять tar.gz артефакт и зарегистрировать метаданные импорта.", script: "UI archive selector" },
-      { title: "Распаковка", status: "running", body: "Распаковать bundle в целевой offline bundle root.", script: "tar xzf ..." },
-      { title: "Проверка bundle", status: "running", body: "Проверить env, models, manifest, images и host packages.", script: "validate_bundle.py --mode deploy" },
-      { title: "Установка host apt bundle", status: "partial", body: "Установить или проверить offline host packages для обнаруженного distro.", script: "install_host_apt_bundle.sh" },
-      { title: "Загрузка images", status: "partial", body: "Загрузить docker images из bundle images/*.tar архивов.", script: "load_images.sh" },
-      { title: "Деплой и проверка", status: "partial", body: "Восстановить state, запустить deploy.sh и затем проверить runtime.", script: "deploy.sh + verify_runtime.sh" },
+      { title: "Распаковка", status: "running", body: "Распаковать бандл в целевой корень офлайн-бандла.", script: "tar xzf ..." },
+      { title: "Проверка бандла", status: "running", body: "Проверить env, models, манифест, образы и системные пакеты.", script: "validate_bundle.py --mode deploy" },
+      { title: "Установка APT-бандла", status: "partial", body: "Установить или проверить офлайн-системные пакеты для обнаруженного дистрибутива.", script: "install_host_apt_bundle.sh" },
+      { title: "Загрузка образов", status: "partial", body: "Загрузить Docker-образы из архивов бандла.", script: "load_images.sh" },
+      { title: "Деплой и проверка", status: "partial", body: "Восстановить состояние, запустить deploy.sh и затем проверить среду выполнения.", script: "deploy.sh + verify_runtime.sh" },
     ],
     actions: [
-      { title: "Выбрать архив", body: "Выбрать один offline bundle tar.gz артефакт.", action: "Выбрать архив" },
-      { title: "Распаковать bundle", body: "Распаковать архив и подготовить целевой bundle root.", action: "Распаковать bundle" },
-      { title: "Проверить host packages", body: "Запустить проверку host packages перед установкой.", action: "Проверить host packages" },
-      { title: "Установить host APT bundle", body: "Установить offline host packages точной версии и runtime configuration.", action: "Установить host APT bundle" },
-      { title: "Деплоить runtime", body: "Запустить канонический deploy flow: image load, restore state, compose up и verification.", action: "Деплоить runtime" },
-      { title: "Запустить offline bundle", body: "Использовать верхнеуровневый launcher после прохождения prerequisite deploy.", action: "Запустить offline bundle" },
+      { title: "Выбрать архив", body: "Выбрать один tar.gz архив офлайн-бандла.", action: "Выбрать архив" },
+      { title: "Распаковать бандл", body: "Распаковать архив и подготовить целевой корень бандла.", action: "Распаковать бандл" },
+      { title: "Проверить системные пакеты", body: "Запустить проверку системных пакетов перед установкой.", action: "Проверить системные пакеты" },
+      { title: "Установить APT-бандл", body: "Установить офлайн-системные пакеты точной версии и конфигурацию среды.", action: "Установить APT-бандл" },
+      { title: "Деплоить среду", body: "Запустить канонический сценарий деплоя: загрузка образов, восстановление состояния, compose up и проверка.", action: "Деплоить среду" },
+      { title: "Запустить офлайн-бандл", body: "Использовать верхнеуровневый launcher после прохождения обязательного деплоя.", action: "Запустить офлайн-бандл" },
     ],
     artifacts: [
-      { title: "Приём архива", body: "agent-nav-offline-bundle_v1.0.tar.gz получен с build-машины", badge: "ready" },
-      { title: "Распакованный bundle", body: "compose.offline.yaml, env.bundle, manifest.json, images/, models/, state/ доступны", badge: "ready" },
-      { title: "Установка host package", body: "versions.lock.json совпадает с target distro, install ещё ждёт runtime configure", badge: "partial" },
-      { title: "Runtime deploy", body: "Ожидается image load и выполнение deploy.sh на целевом host", badge: "partial" },
+      { title: "Приём архива", body: "agent-nav-offline-bundle_v1.0.tar.gz получен с машины сборки", badge: "ready" },
+      { title: "Распакованный бандл", body: "compose.offline.yaml, env.bundle, manifest.json, images/, models/ и state/ доступны", badge: "ready" },
+      { title: "Установка системных пакетов", body: "versions.lock.json совпадает с целевым дистрибутивом, установка ещё ждёт настройки среды", badge: "partial" },
+      { title: "Деплой среды", body: "Ожидается загрузка образов и выполнение deploy.sh на целевом хосте", badge: "partial" },
     ],
   },
 };
@@ -350,7 +352,15 @@ let revealedSecretFields = new Set();
 let hiddenSecretFields = new Set();
 let selectedConfigVariantByPath = {
   native: "runtime",
-  container: "local_safe_ports",
+  container: "published_ports",
+};
+let pathBrowserState = {
+  pathKey: null,
+  fieldKey: null,
+  kind: "file",
+  cwd: "",
+  entries: [],
+  currentValue: "",
 };
 let actionCatalog = [];
 let actionCatalogById = {};
@@ -423,6 +433,7 @@ function summarizeFailureDetail(detail) {
 function operatorShellHealth() {
   const controlPlaneRow = serviceRows.find((row) =>
     row.endpoint === "/operator/state + /operator-ui"
+    || row.name === "Контур управления оператором"
     || row.name === "Operator Control Plane"
     || row.nameEn === "Operator Control Plane");
   if (!controlPlaneOnline) {
@@ -535,7 +546,7 @@ function pathTitle(path) {
   if (!path) return currentLanguage === "en" ? "Runtime Path" : "Путь запуска";
   if (currentLanguage === "en" && path.nameEn) return path.nameEn;
   if (path.key === "native") return currentLanguage === "en" ? "Native Runtime" : "Нативный запуск";
-  if (path.key === "container") return currentLanguage === "en" ? "Offline Bundle / Containers" : "Offline Bundle / Контейнеры";
+  if (path.key === "container") return currentLanguage === "en" ? "Offline Bundle / Containers" : "Офлайн-бандл / Контейнеры";
   return path.name;
 }
 
@@ -557,6 +568,7 @@ function displayLabel(label) {
     "CPU / память": "CPU / Memory",
     "Suggested runtime profile": "Suggested Runtime Profile",
     "Предлагаемый профиль runtime": "Suggested Runtime Profile",
+    "Предлагаемый профиль среды": "Suggested Runtime Profile",
     "Suggested context budget": "Suggested Context Budget",
     "Предлагаемый бюджет контекста": "Suggested Context Budget",
     "Bundle archive target": "Bundle Archive Target",
@@ -565,12 +577,27 @@ function displayLabel(label) {
     "Launcher": "Launcher",
     "Bundle Manifest": "Bundle Manifest",
     "Manifest bundle": "Bundle Manifest",
+    "Манифест офлайн-бандла": "Bundle Manifest",
     "Docker Socket": "Docker Socket",
     "Docker socket": "Docker Socket",
+    "Бинарник Docker": "Docker CLI",
     "Local Safe Ports": "Local Safe Ports",
     "Target Default Ports": "Target Default Ports",
     "Adaptive recommended": "Adaptive Recommended",
+    "Адаптивный набор": "Adaptive Recommended",
     "CPU fallback": "CPU Fallback",
+    "CPU-режим": "CPU Fallback",
+    "Реестр моделей и пути": "Model Registry & Paths",
+    "GPU / Размещение": "GPU / Placement",
+    "LLM / Контекст": "LLM / Context",
+    "Параметры моделей": "Model Runtime",
+    "Секреты и доступ": "Secrets / Access",
+    "Профили Chainlit": "Chainlit Profiles",
+    "Безопасные локальные порты": "Local Safe Ports",
+    "Целевые стандартные порты": "Target Default Ports",
+    "Настройки backend и runtime": "Runtime / Backend",
+    "Артефакты и пути": "Artifact Mounts",
+    "Эмбеддеры и модели": "Embedders / Models",
     "Single GPU": "Single GPU",
     "Multi GPU": "Multi GPU",
     "Parser safe mode": "Parser Safe Mode",
@@ -601,18 +628,20 @@ function displayLabel(label) {
     "Offline strict JSON": "Offline Strict JSON",
     "Preflight required": "Preflight Required",
     "Parity smoke required": "Parity Smoke Required",
+    "События деградации": "Fallback Events",
   } : {
     "Detected host OS": "Определённая ОС",
     "GPU visibility": "Видимость GPU",
     "GPU inventory": "Инвентарь GPU",
     "CPU / memory": "CPU / память",
-    "Suggested runtime profile": "Предлагаемый профиль runtime",
+    "Suggested runtime profile": "Предлагаемый профиль среды",
     "Suggested context budget": "Предлагаемый бюджет контекста",
     "Bundle archive target": "Целевой архив",
     "Runtime Preflight": "Предпроверка runtime",
     "Launcher": "Launcher",
-    "Bundle Manifest": "Manifest bundle",
+    "Bundle Manifest": "Манифест офлайн-бандла",
     "Docker Socket": "Docker socket",
+    "Docker CLI": "Бинарник Docker",
     "Runtime profile": "Профиль runtime",
     "Device mode": "Режим устройства",
     "Backend mode": "Режим backend",
@@ -639,42 +668,56 @@ function displayLabel(label) {
     "Single-item strict JSON": "Strict JSON для single item",
     "Single-item retry count": "Повторы для single item",
     "Runtime / Profile": "Режим запуска",
-    "Model Registry & Paths": "Модели и пути",
-    "GPU / Placement": "GPU / размещение",
+    "Model Registry & Paths": "Реестр моделей и пути",
+    "GPU / Placement": "GPU / Размещение",
+    "LLM / Context": "LLM / Контекст",
+    "Model Runtime": "Параметры моделей",
+    "Secrets / Access": "Секреты и доступ",
     "Ports & URLs": "Порты и URL",
     "Chainlit Profiles": "Профили Chainlit",
-    "Parsing / Compare": "Парсинг / compare",
+    "Parsing / Compare": "Парсинг и сравнение",
     "Local Safe Ports": "Безопасные локальные порты",
-    "Target Default Ports": "Целевые порты",
+    "Target Default Ports": "Целевые стандартные порты",
+    "Runtime / Backend": "Настройки backend и runtime",
     "Monitoring": "Мониторинг",
     "Artifact Mounts": "Артефакты и пути",
+    "Embedders / Models": "Эмбеддеры и модели",
     "Agent API port": "Порт Agent API",
     "Prometheus port": "Порт Prometheus",
     "Grafana port": "Порт Grafana",
     "Grafana admin user": "Пользователь Grafana",
     "Grafana admin password": "Пароль Grafana",
+    "Fallback-событий": "События деградации",
     "Offline strict JSON": "Offline strict JSON",
     "Preflight required": "Обязательный preflight",
     "Parity smoke required": "Обязательный parity smoke",
-    "Adaptive recommended": "Адаптивный режим",
-    "CPU fallback": "CPU fallback",
+    "Adaptive recommended": "Адаптивный набор",
+    "CPU fallback": "CPU-режим",
     "Single GPU": "Одна GPU",
     "Multi GPU": "Несколько GPU",
     "Parser safe mode": "Безопасный парсинг",
     "Parser strict mode": "Строгий парсинг",
     "Launch Profiles": "Профили запуска",
     "env Chain": "Цепочка env",
-    "Runtime State": "Состояние runtime",
-    "Bundle Files": "Файлы bundle",
+    "Runtime State": "Состояние среды",
+    "Bundle Files": "Файлы бандла",
     "Docker Engine State": "Состояние Docker engine",
-    "Build Bundle": "Сборка bundle",
+    "Build Bundle": "Сборка офлайн-бандла",
     "Import / Deploy": "Импорт / деплой",
     "Build Actions": "Действия сборки",
     "Import and Deploy Actions": "Действия импорта и деплоя",
     "Build Stages": "Стадии сборки",
-    "Target Host Stages": "Стадии на целевом host",
+    "Target Host Stages": "Стадии на целевом хосте",
     "Build and Export Log": "Лог сборки и экспорта",
     "Import and Deploy Log": "Лог импорта / деплоя",
+    "Build": "Сборка",
+    "Wheelhouse": "Wheelhouse",
+    "Images": "Образы",
+    "Host": "Хост",
+    "Manifest": "Манифест",
+    "Pack": "Упаковка",
+    "Operator": "Operator",
+    "Launcher": "Launcher",
   };
   return labels[label] || label;
 }
@@ -685,9 +728,9 @@ function displayText(text) {
     "переопределения для нативного пути запуска": "overrides for the native runtime path",
     "сгенерированный применённый план runtime": "generated applied runtime plan",
     "постоянные overrides размещения": "persistent placement overrides",
-    "контракт env для bundle": "env contract for the bundle",
+    "контракт env для бандла": "env contract for the bundle",
     "топология контейнеров": "container topology",
-    "manifest артефактов": "artifact manifest",
+    "манифест артефактов": "artifact manifest",
     "экспортированное env-состояние runtime": "exported runtime env state",
     "разрешена": "resolved",
     "стабильно": "stable",
@@ -698,10 +741,11 @@ function displayText(text) {
     "Только backend": "Backend only",
     "Нативный runtime": "Native runtime",
     "Полный локальный стек": "Full local stack",
-    "Загрузка образов bundle": "Bundle image loading",
-    "Импорт и parity-проверка": "Import and parity validation",
+    "Загрузка архивов образов": "Bundle image loading",
+    "Запуск офлайн-бандла": "Offline bundle runtime",
+    "Импорт и проверка согласованности": "Import and parity validation",
     "Минимальный API + orchestration flow для workflow и endpoint checks.": "Minimal API and orchestration flow for workflow and endpoint checks.",
-    "Путь operator UI с backend orchestration и локальным session state.": "Operator UI path with backend orchestration and local session state.",
+    "Путь панели оператора с backend-оркестрацией и локальным состоянием сессии.": "Operator UI path with backend orchestration and local session state.",
     "Полный native launcher flow с hardware-aware планом.": "Full native launcher flow with a hardware-aware plan.",
     "Запускается, но warmup и готовность сервисов могут отставать на один цикл проверки.": "Can start, but warmup and service readiness may lag by one probe cycle.",
     "Канонический вход для preflight и planning нативного запуска.": "Canonical entrypoint for native runtime preflight and planning.",
@@ -713,7 +757,7 @@ function displayText(text) {
     "Заблокировано": "Blocked",
     "Читается": "Readable",
     "Отсутствует": "Missing",
-    "Состояние bundle видно сразу, а запуск контейнеров зависит от Docker engine и доступа к socket.": "Bundle state is visible immediately, while container startup still depends on Docker engine and socket access.",
+    "Состояние бандла видно сразу, а запуск контейнеров зависит от Docker Engine и доступа к сокету.": "Bundle state is visible immediately, while container startup still depends on Docker engine and socket access.",
     "Проверки native и host probes берутся из репозитория.": "Native checks and host probes are derived from repository state.",
     "Нет предупреждений": "No warnings",
     "Backend не сообщил о дополнительных блокерах runtime сверх текущего состояния доступности.": "Backend has not reported additional runtime blockers beyond the current availability state.",
@@ -722,8 +766,8 @@ function displayText(text) {
     "Факты о железе собираются на стороне backend.": "Host facts are gathered server-side.",
     "Используется для объяснения возможностей runtime и предлагаемых значений.": "Used to explain runtime capabilities and suggested defaults.",
     "Все обнаруженные NVIDIA GPU перечислены для multi-GPU planning.": "All detected NVIDIA GPUs are listed for multi-GPU aware planning.",
-    "Нужно для оценки размеров runtime и bundle.": "Used for runtime and bundle sizing context.",
-    "Соответствует каноническому flow запуска для применённого плана.": "Matches the canonical launcher flow for the applied plan.",
+    "Нужно для оценки размеров среды и бандла.": "Used for runtime and bundle sizing context.",
+    "Соответствует каноническому сценарию запуска для применённого плана.": "Matches the canonical launcher flow for the applied plan.",
     "Отражает текущее применённое или рекомендованное значение оператора.": "Mirrors the current applied or suggested operator value.",
     "Единый переносимый tar.gz остаётся предпочтительным артефактом.": "A single portable tar.gz remains the preferred artifact.",
     "Ссылки на Grafana и Prometheus появятся после загрузки backend-сводки наблюдаемости.": "Grafana and Prometheus links appear after backend observability state loads.",
@@ -738,26 +782,26 @@ function displayText(text) {
     "Сначала проверяй сводку и этапы, затем уже отдельные действия и лог.": "Check summary and stages first, then move to actions and logs.",
     "Кнопки режима привязаны к allowlisted operator-командам и Python job model.": "Mode actions map to allowlisted operator commands and the Python job model.",
     "Открывай Grafana или Prometheus прямо из режима сборки и деплоя.": "Open Grafana or Prometheus directly from build and deploy mode.",
-    "Локальный developer-runtime с запуском через launcher, управлением путями моделей и видимостью сервисов.": "Local developer runtime launched through the canonical launcher with model-path control and service visibility.",
-    "Локальный developer-runtime с orchestration через launcher, прямым контролем путей моделей и видимостью сервисов.": "Local developer runtime with launcher orchestration, direct model-path control, and visible service state.",
-    "Путь запуска через bundle и compose для offline rollout, проверки parity и artifact-based deployment.": "Runtime path through bundle and compose for offline rollout, parity checks, and artifact-based deployment.",
-    "Путь через offline bundle с загрузкой образов, деплоем, проверками parity и artifact-based запуском на сервере.": "Offline bundle path for image loading, deploy, parity checks, and artifact-based server startup.",
+    "Локальный runtime разработчика с запуском через launcher, управлением путями моделей и видимостью сервисов.": "Local developer runtime launched through the canonical launcher with model-path control and service visibility.",
+    "Локальная среда запуска с оркестрацией через launcher, прямым контролем путей моделей и видимостью сервисов.": "Local developer runtime with launcher orchestration, direct model-path control, and visible service state.",
+    "Путь запуска через бандл и compose для офлайн-развёртывания, проверки согласованности и запуска артефактов.": "Runtime path through bundle and compose for offline rollout, parity checks, and artifact-based deployment.",
+    "Путь через офлайн-бандл с загрузкой образов, деплоем, проверками согласованности и запуском артефактов на сервере.": "Offline bundle path for image loading, deploy, parity checks, and artifact-based server startup.",
     "Нативный путь запуска доступен. Открой «Конфиг», чтобы посмотреть приоритет источников, или перейди в «Запуск» и выбери профиль.": "Native runtime is available. Open Config to inspect source precedence or go to Launch and choose a profile.",
-    "Профиль для локального запуска рядом с текущим operator UI без конфликта published ports.": "Profile for local bundle execution next to the current operator UI without published-port conflicts.",
-    "Подставляет безопасные локальные порты для запуска рядом с текущим operator UI.": "Stages safe local ports for running the bundle next to the current operator UI.",
-    "Рекомендуется для локального теста bundle на той же машине, где уже работает operator UI.": "Recommended when testing the bundle on the same machine where the operator UI already runs.",
-    "Контейнерный деплой делит порт с текущим operator UI": "Container deploy shares a port with the current operator UI",
-    "Если запускать bundle из этого же локального backend на `8000`, контейнерный `agent-api` попытается занять тот же порт. Для безопасного запуска нужен другой порт или отдельное окружение.": "If the bundle starts from this same local backend on `8000`, its container `agent-api` will try to take the same port. Use a different port profile or a separate environment.",
-    "Профиль запуска, backend mode и общий режим устройства.": "Launch profile, backend mode, and overall device mode.",
-    "Пути к моделям и registry-конфигу. Здесь обычно правки ручные, но рекомендации видны рядом.": "Model paths and registry config. These fields are usually edited manually, with recommendations shown next to each field.",
+    "Профиль для локального запуска рядом с текущей панелью оператора без конфликта опубликованных портов.": "Profile for local bundle execution next to the current operator UI without published-port conflicts.",
+    "Подставляет локальные безопасные порты для запуска рядом с текущей панелью оператора.": "Stages safe local ports for running the bundle next to the current operator UI.",
+    "Рекомендуется для локального теста офлайн-бандла на той же машине, где уже работает панель оператора.": "Recommended when testing the bundle on the same machine where the operator UI already runs.",
+    "Контейнерный деплой делит порт с текущей панелью оператора": "Container deploy shares a port with the current operator UI",
+    "Если запускать офлайн-бандл из этого же локального backend на `8000`, контейнерный `agent-api` попытается занять тот же порт. Для безопасного запуска нужен другой порт или отдельное окружение.": "If the bundle starts from this same local backend on `8000`, its container `agent-api` will try to take the same port. Use a different port profile or a separate environment.",
+    "Профиль запуска, режим backend и общий режим устройства.": "Launch profile, backend mode, and overall device mode.",
+    "Пути к моделям и конфигу реестра. Здесь изменения обычно вносятся вручную.": "Model paths and registry config. These fields are usually edited manually, with recommendations shown next to each field.",
     "Размещение моделей и ограничения по GPU. Здесь часть параметров меняется пресетами, часть вручную.": "Model placement and GPU limits. Some values come from presets, others remain manual.",
-    "Порты локального native path и service URLs.": "Ports for the local native path and service URLs.",
-    "Профили Chainlit. Обычно редактируются вручную по конкретному workflow.": "Chainlit profiles. These are usually edited manually for a specific workflow.",
-    "Параметры strict JSON и compare path. Здесь полезны safe/strict пресеты.": "Strict JSON and compare-path settings. Safe and strict presets are useful here.",
+    "Порты локального нативного пути и URL сервисов.": "Ports for the local native path and service URLs.",
+    "Профили Chainlit. Обычно редактируются вручную под конкретный сценарий.": "Chainlit profiles. These are usually edited manually for a specific workflow.",
+    "Параметры strict JSON и сравнения. Здесь полезны безопасный и строгий пресеты.": "Strict JSON and compare settings. Safe and strict presets are useful here.",
     "Канонический портовый профиль для target-host и offline release contract.": "Canonical port profile for the target host and offline release contract.",
-    "Настройки observability для Prometheus и Grafana внутри offline bundle.": "Observability settings for Prometheus and Grafana inside the offline bundle.",
-    "Пути к моделям, uploads и reports внутри offline bundle layout.": "Paths for models, uploads, and reports inside the offline bundle layout.",
-    "Offline parser/compare contract внутри env.bundle.": "Offline parser and compare contract inside env.bundle.",
+    "Настройки наблюдаемости для Prometheus и Grafana внутри offline bundle.": "Observability settings for Prometheus and Grafana inside the offline bundle.",
+    "Пути к моделям, загрузкам и отчётам внутри layout offline bundle.": "Paths for models, uploads, and reports inside the offline bundle layout.",
+    "Offline-контракт парсинга и сравнения внутри env.bundle.": "Offline parser and compare contract inside env.bundle.",
     "Обычно должен указывать на repo-local models.yaml.": "Usually points to the repository-local models.yaml.",
     "Укажи основной LLM artifact для runtime path.": "Set the main LLM artifact for this runtime path.",
     "Заполняется только если multimodal path реально используется.": "Fill this only when the multimodal path is actually used.",
@@ -773,12 +817,12 @@ function displayText(text) {
     "This value is interpreted inside the offline bundle/container layout.": "This value is interpreted inside the offline bundle/container layout.",
     "Value is empty and must be set explicitly.": "Value is empty and must be set explicitly.",
   } : {
-    "Host facts are gathered server-side for the operator UI.": "Факты о железе собираются на стороне backend.",
-    "Used to explain runtime capabilities and suggested defaults.": "Используется для объяснения возможностей runtime и предлагаемых значений.",
-    "All detected NVIDIA devices are listed for multi-GPU aware planning.": "Все обнаруженные NVIDIA GPU перечислены для multi-GPU planning.",
+    "Host facts are gathered server-side for the operator UI.": "Факты о железе собираются на стороне сервера.",
+    "Used to explain runtime capabilities and suggested defaults.": "Используется для объяснения возможностей среды выполнения и предлагаемых значений.",
+    "All detected NVIDIA devices are listed for multi-GPU aware planning.": "Все обнаруженные NVIDIA GPU перечислены для планирования multi-GPU.",
     "Used for runtime and bundle sizing context.": "Нужно для оценки размеров runtime и bundle.",
-    "Matches the canonical launcher flow for generated applied plans.": "Соответствует каноническому flow запуска для применённого плана.",
-    "Mirrors the current applied or suggested operator value.": "Отражает текущее применённое или рекомендованное значение оператора.",
+    "Matches the canonical launcher flow for generated applied plans.": "Соответствует каноническому сценарию запуска для применённого плана.",
+    "Mirrors the current applied or suggested operator value.": "Отражает текущее применённое значение оператора.",
     "Single portable tar.gz is the preferred build artifact.": "Единый переносимый tar.gz остаётся предпочтительным артефактом.",
     "Canonical native/runtime planning entrypoint exposed through operator summary.": "Канонический вход планирования native runtime, видимый в сводке оператора.",
     "Canonical user-facing launcher for native and container paths.": "Канонический launcher для нативного и контейнерного пути.",
@@ -790,7 +834,7 @@ function displayText(text) {
     "persistent placement overrides": "постоянные overrides размещения",
     "env contract for the bundle": "контракт env для bundle",
     "container topology": "топология контейнеров",
-    "artifact manifest": "manifest артефактов",
+    "artifact manifest": "манифест артефактов",
     "exported runtime env state": "экспортированное env-состояние runtime",
     "resolved": "разрешена",
     "stable": "стабильно",
@@ -801,54 +845,55 @@ function displayText(text) {
     "Backend only": "Только backend",
     "Native runtime": "Нативный runtime",
     "Full local stack": "Полный локальный стек",
-    "Bundle image loading": "Загрузка образов bundle",
-    "Import and parity validation": "Импорт и parity-проверка",
+    "Bundle image loading": "Загрузка архивов образов",
+    "Offline bundle runtime": "Запуск офлайн-бандла",
+    "Import and parity validation": "Импорт и проверка согласованности",
     "Minimal API and orchestration flow for workflow and endpoint checks.": "Минимальный API + orchestration flow для workflow и endpoint checks.",
-    "Operator UI path with backend orchestration and local session state.": "Путь operator UI с backend orchestration и локальным session state.",
+    "Operator UI path with backend orchestration and local session state.": "Путь панели оператора с backend-оркестрацией и локальным состоянием сессии.",
     "Full native launcher flow with a hardware-aware plan.": "Полный native launcher flow с hardware-aware планом.",
     "Can start, but warmup and service readiness may lag by one probe cycle.": "Запускается, но warmup и готовность сервисов могут отставать на один цикл проверки.",
     "Canonical entrypoint for native runtime preflight and planning.": "Канонический вход для preflight и planning нативного запуска.",
     "Canonical launcher for native and container runtime paths.": "Канонический launcher для нативного и контейнерного путей запуска.",
-    "Artifact manifest for deploy/offline_bundle.": "Manifest артефактов для deploy/offline_bundle.",
+    "Artifact manifest for deploy/offline_bundle.": "Манифест артефактов для deploy/offline_bundle.",
     "filesystem probe": "проверка файловой системы",
     "Readable": "Читается",
     "Missing": "Отсутствует",
-    "Bundle state is visible immediately, while container startup still depends on Docker engine and socket access.": "Состояние bundle видно сразу, а запуск контейнеров зависит от Docker engine и доступа к socket.",
+    "Bundle state is visible immediately, while container startup still depends on Docker engine and socket access.": "Состояние бандла видно сразу, а запуск контейнеров зависит от Docker Engine и доступа к сокету.",
     "Native checks and host probes are derived from repository state.": "Проверки native и host probes берутся из репозитория.",
     "No warnings": "Нет предупреждений",
     "Backend has not reported additional runtime blockers beyond the current availability state.": "Backend не сообщил о дополнительных блокерах runtime сверх текущего состояния доступности.",
     "No operator activity yet": "Пока нет активности оператора",
-    "Actions, config applies, and completed jobs will appear here.": "Здесь появятся действия, применение конфига и завершённые jobs.",
-    "Local developer runtime launched through the canonical launcher with model-path control and service visibility.": "Локальный developer-runtime с запуском через launcher, управлением путями моделей и видимостью сервисов.",
-    "Local developer runtime with launcher orchestration, direct model-path control, and visible service state.": "Локальный developer-runtime с orchestration через launcher, прямым контролем путей моделей и видимостью сервисов.",
-    "Runtime path through bundle and compose for offline rollout, parity checks, and artifact-based deployment.": "Путь запуска через bundle и compose для offline rollout, проверки parity и artifact-based deployment.",
+    "Actions, config applies, and completed jobs will appear here.": "Здесь появятся действия, применение конфига и завершённые задачи.",
+    "Local developer runtime launched through the canonical launcher with model-path control and service visibility.": "Локальный runtime разработчика с запуском через launcher, управлением путями моделей и видимостью сервисов.",
+    "Local developer runtime with launcher orchestration, direct model-path control, and visible service state.": "Локальный runtime разработчика с оркестрацией через launcher, прямым контролем путей моделей и видимостью сервисов.",
+    "Runtime path through bundle and compose for offline rollout, parity checks, and artifact-based deployment.": "Путь запуска через бандл и compose для офлайн-развёртывания, проверки согласованности и запуска артефактов.",
     "Native runtime is available. Open Config to inspect source precedence or go to Launch and choose a profile.": "Нативный путь запуска доступен. Открой «Конфиг», чтобы посмотреть приоритет источников, или перейди в «Запуск» и выбери профиль.",
-    "Profile for local bundle execution next to the current operator UI without published-port conflicts.": "Профиль для локального запуска рядом с текущим operator UI без конфликта published ports.",
-    "Stages safe local ports for running the bundle next to the current operator UI.": "Подставляет безопасные локальные порты для запуска рядом с текущим operator UI.",
-    "Recommended when testing the bundle on the same machine where the operator UI already runs.": "Рекомендуется для локального теста bundle на той же машине, где уже работает operator UI.",
-    "Container deploy shares a port with the current operator UI": "Контейнерный деплой делит порт с текущим operator UI",
-    "If the bundle starts from this same local backend on `8000`, its container `agent-api` will try to take the same port. Use a different port profile or a separate environment.": "Если запускать bundle из этого же локального backend на `8000`, контейнерный `agent-api` попытается занять тот же порт. Для безопасного запуска нужен другой порт или отдельное окружение.",
-    "Профиль запуска, backend mode и общий режим устройства.": "Профиль запуска, backend mode и общий режим устройства.",
-    "Пути к моделям и registry-конфигу. Здесь обычно правки ручные, но рекомендации видны рядом.": "Пути к моделям и registry-конфигу. Здесь обычно правки ручные, но рекомендации видны рядом.",
-    "Размещение моделей и ограничения по GPU. Здесь часть параметров меняется пресетами, часть вручную.": "Размещение моделей и ограничения по GPU. Здесь часть параметров меняется пресетами, часть вручную.",
-    "Порты локального native path и service URLs.": "Порты локального native path и service URLs.",
-    "Профили Chainlit. Обычно редактируются вручную по конкретному workflow.": "Профили Chainlit. Обычно редактируются вручную по конкретному workflow.",
-    "Параметры strict JSON и compare path. Здесь полезны safe/strict пресеты.": "Параметры strict JSON и compare path. Здесь полезны safe/strict пресеты.",
-    "Профиль для локального запуска рядом с текущим operator UI без конфликта published ports.": "Профиль для локального запуска рядом с текущим operator UI без конфликта published ports.",
-    "Канонический портовый профиль для target-host и offline release contract.": "Канонический портовый профиль для target-host и offline release contract.",
-    "Настройки observability для Prometheus и Grafana внутри offline bundle.": "Настройки observability для Prometheus и Grafana внутри offline bundle.",
-    "Пути к моделям, uploads и reports внутри offline bundle layout.": "Пути к моделям, uploads и reports внутри offline bundle layout.",
-    "Offline parser/compare contract внутри env.bundle.": "Offline parser/compare contract внутри env.bundle.",
-    "Offline bundle path for image loading, deploy, parity checks, and artifact-based server startup.": "Путь через offline bundle с загрузкой образов, деплоем, проверками parity и artifact-based запуском на сервере.",
-    "Launch profile, backend mode, and overall device mode.": "Профиль запуска, backend mode и общий режим устройства.",
-    "Model paths and registry config. These fields are usually edited manually, with recommendations shown next to each field.": "Пути к моделям и registry-конфигу. Здесь обычно правки ручные, но рекомендации видны рядом.",
+    "Profile for local bundle execution next to the current operator UI without published-port conflicts.": "Профиль для локального запуска рядом с текущей панелью оператора без конфликта опубликованных портов.",
+    "Stages safe local ports for running the bundle next to the current operator UI.": "Подставляет локальные безопасные порты для запуска рядом с текущей панелью оператора.",
+    "Recommended when testing the bundle on the same machine where the operator UI already runs.": "Рекомендуется для локального теста офлайн-бандла на той же машине, где уже работает панель оператора.",
+    "Container deploy shares a port with the current operator UI": "Контейнерный деплой делит порт с текущей панелью оператора",
+    "If the bundle starts from this same local backend on `8000`, its container `agent-api` will try to take the same port. Use a different port profile or a separate environment.": "Если запускать офлайн-бандл из этого же локального backend на `8000`, контейнерный `agent-api` попытается занять тот же порт. Для безопасного запуска нужен другой порт или отдельное окружение.",
+    "Профиль запуска, режим backend и общий режим устройства.": "Профиль запуска, режим backend и общий режим устройства.",
+    "Пути к моделям и registry-конфигу. Здесь обычно правки ручные, но рекомендации видны рядом.": "Пути к моделям и конфигу реестра. Здесь изменения обычно вносятся вручную.",
+    "Размещение моделей и ограничения по GPU. Здесь часть параметров меняется пресетами, часть вручную.": "Размещение моделей и ограничения по GPU. Часть параметров меняется пресетами, часть вручную.",
+    "Порты локального native path и service URLs.": "Порты локального нативного пути и URL сервисов.",
+    "Профили Chainlit. Обычно редактируются вручную по конкретному workflow.": "Профили Chainlit. Обычно редактируются вручную под конкретный сценарий.",
+    "Параметры strict JSON и compare path. Здесь полезны safe/strict пресеты.": "Параметры strict JSON и сравнения. Здесь полезны безопасный и строгий пресеты.",
+    "Профиль для локального запуска рядом с текущим operator UI без конфликта published ports.": "Профиль для локального запуска рядом с текущим operator UI без конфликта опубликованных портов.",
+    "Канонический портовый профиль для target-host и offline release contract.": "Канонический портовый профиль для целевого хоста и offline release-контракта.",
+    "Настройки observability для Prometheus и Grafana внутри offline bundle.": "Настройки наблюдаемости для Prometheus и Grafana внутри offline bundle.",
+    "Пути к моделям, uploads и reports внутри offline bundle layout.": "Пути к моделям, загрузкам и отчётам внутри layout offline bundle.",
+    "Offline parser/compare contract внутри env.bundle.": "Offline-контракт парсинга и сравнения внутри env.bundle.",
+    "Offline bundle path for image loading, deploy, parity checks, and artifact-based server startup.": "Путь через офлайн-бандл с загрузкой образов, деплоем, проверками согласованности и запуском артефактов на сервере.",
+    "Launch profile, backend mode, and overall device mode.": "Профиль запуска, режим backend и общий режим устройства.",
+    "Model paths and registry config. These fields are usually edited manually, with recommendations shown next to each field.": "Пути к моделям и конфигу реестра. Здесь изменения обычно вносятся вручную.",
     "Model placement and GPU limits. Some values come from presets, others remain manual.": "Размещение моделей и ограничения по GPU. Здесь часть параметров меняется пресетами, часть вручную.",
-    "Ports for the local native path and service URLs.": "Порты локального native path и service URLs.",
-    "Chainlit profiles. These are usually edited manually for a specific workflow.": "Профили Chainlit. Обычно редактируются вручную по конкретному workflow.",
-    "Strict JSON and compare-path settings. Safe and strict presets are useful here.": "Параметры strict JSON и compare path. Здесь полезны safe/strict пресеты.",
-    "Canonical port profile for the target host and offline release contract.": "Канонический портовый профиль для target-host и offline release contract.",
-    "Observability settings for Prometheus and Grafana inside the offline bundle.": "Настройки observability для Prometheus и Grafana внутри offline bundle.",
-    "Paths for models, uploads, and reports inside the offline bundle layout.": "Пути к моделям, uploads и reports внутри offline bundle layout.",
+    "Ports for the local native path and service URLs.": "Порты локального нативного пути и URL сервисов.",
+    "Chainlit profiles. These are usually edited manually for a specific workflow.": "Профили Chainlit. Обычно редактируются вручную под конкретный сценарий.",
+    "Strict JSON and compare settings. Safe and strict presets are useful here.": "Параметры strict JSON и сравнения. Здесь полезны безопасный и строгий пресеты.",
+    "Canonical port profile for the target host and offline release contract.": "Канонический портовый профиль для целевого хоста и offline release-контракта.",
+    "Observability settings for Prometheus and Grafana inside the offline bundle.": "Настройки наблюдаемости для Prometheus и Grafana внутри offline bundle.",
+    "Paths for models, uploads, and reports inside the offline bundle layout.": "Пути к моделям, загрузкам и отчётам внутри layout offline bundle.",
     "Usually points to the repository-local models.yaml.": "Обычно должен указывать на repo-local models.yaml.",
     "Set the main LLM artifact for this runtime path.": "Укажи основной LLM artifact для runtime path.",
     "Fill this only when the multimodal path is actually used.": "Заполняется только если multimodal path реально используется.",
@@ -856,11 +901,21 @@ function displayText(text) {
     "Should point to the retrieval embedder used by the current runtime path.": "Должен указывать на retrieval embedder текущего runtime path.",
     "This path must stay aligned with the bundle runtime layout.": "Путь должен совпадать с runtime layout bundle.",
     "The main user path goes through run_offline_bundle.sh and deploy.sh, not through the dev compose launcher for the checkout repository.": "Основной пользовательский путь идёт через run_offline_bundle.sh и deploy.sh, а не через dev compose launcher checkout-репозитория.",
-    "Bundle image archives can be loaded into Docker only when the engine and socket are available.": "Архивы образов можно загружать в Docker только когда доступны engine и socket.",
-    "Manifest, env.bundle, and the deploy surface remain readable even before the runtime is up.": "Manifest, env.bundle и deploy surface читаются даже когда сам runtime ещё не поднят.",
+    "Bundle image archives can be loaded into Docker only when the engine and socket are available.": "Архивы образов можно загружать в Docker только когда доступны engine и сокет.",
+    "Manifest, env.bundle, and the deploy surface remain readable even before the runtime is up.": "Manifest, env.bundle и поверхность деплоя читаются даже когда сам runtime ещё не поднят.",
     "The container runtime path points to deploy/offline_bundle/scripts: first load bundle images, then deploy or run the offline bundle without a dev build from the checkout repository.": "Контейнерный путь запуска ведёт в deploy/offline_bundle/scripts: сначала можно загрузить образы bundle, затем выполнить deploy или run offline bundle без dev-сборки checkout-репозитория.",
     "This value is interpreted inside the offline bundle/container layout.": "Это значение интерпретируется внутри layout offline bundle / контейнера.",
     "Value is empty and must be set explicitly.": "Значение пустое и должно быть задано явно.",
+    "Число запросов orchestration, видимых через `agent_api` metrics.": "Число запросов оркестрации, видимых через метрики `agent_api`.",
+    "Счётчик degraded/fallback событий по runtime и workflow.": "Счётчик событий деградации и fallback по среде выполнения и сценариям.",
+    "Факты о железе собираются на стороне backend.": "Факты о железе собираются на стороне сервера.",
+    "Используется для объяснения возможностей runtime и предлагаемых значений.": "Используется для объяснения возможностей runtime и предлагаемых значений.",
+    "Все обнаруженные NVIDIA GPU перечислены для multi-GPU planning.": "Все обнаруженные NVIDIA GPU перечислены для планирования multi-GPU.",
+    "Проверки native и host probes берутся из репозитория.": "Проверки нативного пути и хоста берутся из состояния репозитория.",
+    "Состояние бандла видно сразу, а запуск контейнеров зависит от Docker Engine и доступа к сокету.": "Состояние бандла видно сразу, а запуск контейнеров зависит от Docker Engine и доступа к сокету.",
+    "Здесь появятся действия, применение конфига и завершённые jobs.": "Здесь появятся действия, применение конфига и завершённые задачи.",
+    "Локальный developer-runtime с orchestration через launcher, прямым контролем путей моделей и видимостью сервисов.": "Локальная среда запуска с оркестрацией через launcher, прямым контролем путей моделей и видимостью сервисов.",
+    "Путь через офлайн-бандл с загрузкой образов, деплоем, проверками согласованности и запуском артефактов на сервере.": "Путь через офлайн-бандл с загрузкой образов, деплоем, проверками согласованности и запуском артефактов на сервере.",
   };
   return texts[text] || text;
 }
@@ -873,6 +928,45 @@ function displayValidationMessage(message) {
   }
   if (message.startsWith("Resolved host path does not exist yet:")) {
     return `Разрешённый host path пока не существует: ${message.slice("Resolved host path does not exist yet:".length).trim()}`;
+  }
+  if (message.startsWith("Resolved host path exists but is not a .gguf file:")) {
+    return `Путь существует, но это не .gguf файл: ${message.slice("Resolved host path exists but is not a .gguf file:".length).trim()}`;
+  }
+  if (message.startsWith("Resolved host directory exists but common model markers were not found yet:")) {
+    return `Папка существует, но типовые файлы модели пока не найдены: ${message.slice("Resolved host directory exists but common model markers were not found yet:".length).trim()}`;
+  }
+  if (message.startsWith("Bundle-relative model path resolves locally:")) {
+    return `Bundle-путь локально разрешается: ${message.slice("Bundle-relative model path resolves locally:".length).trim()}`;
+  }
+  if (message.startsWith("Bundle-relative model path is not present in deploy/offline_bundle/models yet:")) {
+    return `Bundle-путь пока не найден в deploy/offline_bundle/models: ${message.slice("Bundle-relative model path is not present in deploy/offline_bundle/models yet:".length).trim()}`;
+  }
+  if (message === "This container target is expected to be filled by an external host mount before startup.") {
+    return "Этот путь внутри контейнера должен быть заполнен внешним host mount до запуска.";
+  }
+  if (message.startsWith("Path does not exist on the host yet:")) {
+    return `Путь пока не существует на хосте: ${message.slice("Path does not exist on the host yet:".length).trim()}`;
+  }
+  if (message.startsWith("Expected a `.gguf` model file for")) {
+    return `Ожидается .gguf-файл модели: ${message.split(":").slice(1).join(":").trim()}`;
+  }
+  if (message.startsWith("The selected `.gguf` file is empty:")) {
+    return `Выбранный .gguf файл пуст: ${message.slice("The selected `.gguf` file is empty:".length).trim()}`;
+  }
+  if (message.startsWith("The file exists, but its name does not look like an mmproj artifact:")) {
+    return `Файл существует, но его имя не похоже на mmproj-артефакт: ${message.slice("The file exists, but its name does not look like an mmproj artifact:".length).trim()}`;
+  }
+  if (message.startsWith("Host model file looks valid:")) {
+    return `Файл модели выглядит корректно: ${message.slice("Host model file looks valid:".length).trim()}`;
+  }
+  if (message.startsWith("Model directory looks plausible:")) {
+    return `Папка модели выглядит правдоподобно: ${message.slice("Model directory looks plausible:".length).trim()}`;
+  }
+  if (message.startsWith("Directory exists, but common model marker files were not found yet:")) {
+    return `Папка существует, но типовые файлы модели пока не найдены: ${message.slice("Directory exists, but common model marker files were not found yet:".length).trim()}`;
+  }
+  if (message === "VLM and mmproj must be filled together.") {
+    return "VLM и mmproj должны быть заполнены парой.";
   }
   return displayText(message);
 }
@@ -1040,10 +1134,12 @@ function localizeStaticShell() {
     ["#section-launch .eyebrow", "Launch"],
     ["#section-launch h2", "Runtime cards with explicit source and availability"],
     ["#section-launch .support-copy", "The main workflow starts with a visible runtime path, not hidden assumptions."],
-    ["#section-launch .panel:nth-of-type(1) .eyebrow", "Run Profiles"],
-    ["#section-launch .panel:nth-of-type(1) h3", "Runtime status, active job, and health of the selected path"],
-    ["#section-launch .panel:nth-of-type(2) .eyebrow", "Launch Log"],
-    ["#section-launch .panel:nth-of-type(2) h3", "Current or latest execution log"],
+    ["#launch-profiles-eyebrow", "Run Profiles"],
+    ["#launch-profiles-title", "Subordinate presets for the selected runtime path"],
+    ["#launch-log-eyebrow", "Launch Log"],
+    ["#launch-log-title", "Current or latest execution log"],
+    ["#launch-fail-eyebrow", "Launch Status"],
+    ["#launch-fail-title", "Current state summary"],
     ["#launch-next-eyebrow", "Next Step"],
     ["#launch-next-title", "What to do after launch"],
     ["#section-config .eyebrow", "Config"],
@@ -1100,6 +1196,9 @@ function localizeStaticShell() {
     ["#ui-settings-modal-eyebrow", "Interface settings"],
     ["#ui-settings-modal-title", "UI Settings"],
     ["#ui-settings-modal-close", "Close"],
+    ["#path-browser-eyebrow", "Choose Path"],
+    ["#path-browser-title", "Model Path"],
+    ["#path-browser-close", "Close"],
   ] : [
     [".topbar-copy .eyebrow", "Панель управления оператором"],
     [".topbar-copy h1", "Панель запуска и управления системой"],
@@ -1129,8 +1228,12 @@ function localizeStaticShell() {
     ["#section-launch .eyebrow", "Запуск"],
     ["#section-launch h2", "Карточки запуска с явным источником и доступностью"],
     ["#section-launch .support-copy", "Основной сценарий начинается с выбора доступного пути запуска, а не со скрытых допущений."],
-    ["#section-launch .panel:nth-of-type(1) .eyebrow", "Лог запуска"],
-    ["#section-launch .panel:nth-of-type(1) h3", "Ход текущей или последней задачи"],
+    ["#launch-profiles-eyebrow", "Профили запуска"],
+    ["#launch-profiles-title", "Подчинённые пресеты выбранного пути запуска"],
+    ["#launch-log-eyebrow", "Лог запуска"],
+    ["#launch-log-title", "Ход текущей или последней задачи"],
+    ["#launch-fail-eyebrow", "Статус запуска"],
+    ["#launch-fail-title", "Сводка текущего состояния"],
     ["#launch-next-eyebrow", "Следующий шаг"],
     ["#launch-next-title", "Что делать после запуска"],
     ["#section-config .eyebrow", "Конфиг"],
@@ -1140,7 +1243,7 @@ function localizeStaticShell() {
     ["#section-services h2", "Состояние, готовность, логи и диагностика парсинга"],
     ["#section-services .support-copy", "Логи и метрики входят в операторский цикл принятия решения."],
     ["#section-deploy .eyebrow", "Сборка / Деплой"],
-    ["#section-deploy h2", "Сборка переносимого bundle и обратный импорт в рабочую систему"],
+    ["#section-deploy h2", "Сборка переносимого офлайн-бандла и обратный импорт в рабочую систему"],
     ["#section-deploy .support-copy", "Панель покрывает сборку, экспорт, упаковку, распаковку, проверку, установку, деплой и верификацию."],
     ["#section-maintenance .eyebrow", "Действия"],
     ["#section-maintenance h2", "Только разрешённые maintenance-сценарии"],
@@ -1148,18 +1251,16 @@ function localizeStaticShell() {
     ["#overview-hardware-title", "Обнаруженные возможности и базовые env-настройки"],
     ["#overview-hardware-pill", "Только справка"],
     ["#overview-warnings-eyebrow", "Предупреждения"],
-    ["#overview-warnings-title", "Блокеры парсинга и runtime"],
+    ["#overview-warnings-title", "Блокеры парсинга и среды выполнения"],
     ["#overview-warnings-pill", "Требует внимания"],
     ["#overview-health-eyebrow", "Здоровье сервисов"],
     ["#overview-health-title", "Готовность активного пути"],
     ["#overview-activity-eyebrow", "Последние действия"],
-    ["#overview-activity-title", "Недавние runtime и config события"],
-    ["#section-launch .panel .eyebrow", "Профили"],
-    ["#section-launch .panel h3", "Профили запуска для выбранного пути"],
+    ["#overview-activity-title", "Недавние события запуска и конфига"],
     ["#section-config .panel:nth-of-type(1) .eyebrow", "Источники конфига"],
     ["#section-config .panel:nth-of-type(1) h3", "Происхождение выбранного пути запуска"],
     ["#section-config .panel:nth-of-type(2) .eyebrow", "Варианты"],
-    ["#section-config .panel:nth-of-type(2) h3", "Варианты и рекомендуемые пресеты"],
+    ["#section-config .panel:nth-of-type(2) h3", "Варианты и готовые наборы значений"],
     ["#section-config .panel:nth-of-type(3) .eyebrow", "Редактируемые поля"],
     ["#section-config .panel:nth-of-type(3) h3", "Сгруппированные настройки запуска и парсинга"],
     ["#apply-config-button", "Применить изменения"],
@@ -1169,11 +1270,11 @@ function localizeStaticShell() {
     ["#services-diagnostics-eyebrow", "Диагностика парсера"],
     ["#services-diagnostics-title", "Проверки для выбранного пути"],
     ["#services-observability-eyebrow", "Метрики и Grafana"],
-    ["#services-observability-title", "Evidence для health, latency и наблюдаемости runtime"],
+    ["#services-observability-title", "Данные для оценки состояния, задержек и наблюдаемости"],
     ["#services-logs-eyebrow", "Логи"],
     ["#services-logs-title", "Сводный поток событий и логов"],
     ["#deploy-summary-eyebrow", "Сводка режима"],
-    ["#deploy-sources-title", "Канонические scripts и корни артефактов"],
+    ["#deploy-sources-title", "Канонические сценарии и корни артефактов"],
     ["#deploy-sources-eyebrow", "Источники"],
     ["#deploy-observability-eyebrow", "Наблюдаемость"],
     ["#deploy-observability-title", "Сводка метрик и переходы в Grafana"],
@@ -1184,7 +1285,7 @@ function localizeStaticShell() {
     ["#maintenance-actions-eyebrow", "Действия"],
     ["#maintenance-actions-title", "Контролируемые команды оператора"],
     ["#maintenance-blockers-eyebrow", "Текущие блокеры"],
-    ["#maintenance-blockers-title", "Что мешает полной runtime-паритетности"],
+    ["#maintenance-blockers-title", "Что мешает полной паритетности запуска"],
     ["#section-services .panel:nth-of-type(1) .eyebrow", "Сервисы"],
     ["#section-services .panel:nth-of-type(1) h3", "Статус выбранного пути запуска"],
     ["#section-services .panel:nth-of-type(2) .eyebrow", "Диагностика парсинга"],
@@ -1198,11 +1299,14 @@ function localizeStaticShell() {
     ["#section-maintenance .panel:nth-of-type(2) .eyebrow", "Текущие блокеры"],
     ["#section-maintenance .panel:nth-of-type(2) h3", "Что мешает полной паритетности"],
     ["#reason-modal-eyebrow", "Почему недоступно?"],
-    ["#reason-modal-title", "Детали runtime"],
+    ["#reason-modal-title", "Детали среды выполнения"],
     ["#reason-modal-close", "Закрыть"],
     ["#ui-settings-modal-eyebrow", "Настройки интерфейса"],
     ["#ui-settings-modal-title", "Настройки UI"],
     ["#ui-settings-modal-close", "Закрыть"],
+    ["#path-browser-eyebrow", "Выбор пути"],
+    ["#path-browser-title", "Путь модели"],
+    ["#path-browser-close", "Закрыть"],
   ];
 
   textMap.forEach(([selector, text]) => {
@@ -1287,6 +1391,7 @@ function rerenderAll() {
   renderServiceOverview();
   renderActivity();
   renderLaunchStrip();
+  renderLaunchFailureSummary();
   renderProfiles();
   renderLaunchLogs();
   renderConfig();
@@ -1335,7 +1440,8 @@ function renderSidebarState() {
 
 function runtimeHealthTone(status) {
   if (["running", "healthy"].includes(status)) return "lime";
-  if (["building", "deploying", "degraded", "unknown", "not_started"].includes(status)) return "cyan";
+  if (["building", "deploying", "not_started"].includes(status)) return "cyan";
+  if (["degraded", "unknown"].includes(status)) return "orange";
   return "orange";
 }
 
@@ -1353,7 +1459,7 @@ function runtimeHealthLabel(status) {
         not_started: "Not started",
       }
     : {
-        healthy: "Runtime healthy",
+        healthy: "Система работает",
         running: "Система работает",
         building: "Идёт сборка",
         deploying: "Идёт деплой",
@@ -1376,32 +1482,50 @@ function deriveLaunchRuntimeState(pathKey) {
     return {
       status: pathKey === "container" ? "building" : "deploying",
       detail: runtimeJob.detail,
+      reason: runtimeJob.detail,
+      nextAction: currentLanguage === "en" ? "Wait for the current operator job to finish." : "Дождись завершения текущей operator-задачи.",
     };
   }
   if (lastJobSummary?.pathKey === pathKey && lastJobSummary.outcome === "failed") {
     return {
       status: "failed",
       detail: lastJobSummary.detail,
+      reason: lastJobSummary.detail,
+      failedStage: lastJobSummary.stage || "",
+      nextAction: pathKey === "container"
+        ? (currentLanguage === "en" ? "Inspect the launch log, then verify Docker, ports, and bundle diagnostics." : "Сначала смотри журнал запуска, затем проверь Docker, порты и диагностику офлайн-бандла.")
+        : (currentLanguage === "en" ? "Inspect the launch log and service checks before retrying." : "Сначала смотри журнал запуска и проверки сервисов перед повтором."),
     };
   }
   if (runtimeHealth?.status && runtimeHealth.status !== "unknown") {
     return {
       status: runtimeHealth.status,
-      detail: currentLanguage === "en"
-        ? `${runtimeHealth.runningChecks || 0}/${runtimeHealth.checkCount || 0} checks healthy`
-        : `${runtimeHealth.runningChecks || 0}/${runtimeHealth.checkCount || 0} проверок healthy`,
+      detail: displayText(localizedField(runtimeHealth, "summary") || ""),
+      reason: displayText(localizedField(runtimeHealth, "reason") || ""),
+      nextAction: displayText(localizedField(runtimeHealth, "nextAction") || ""),
+      checkSummary: currentLanguage === "en"
+        ? `${runtimeHealth.runningChecks || 0}/${runtimeHealth.checkCount || 0} checks ready`
+        : `${runtimeHealth.runningChecks || 0}/${runtimeHealth.checkCount || 0} проверок готовы`,
     };
   }
   if (latestLog) {
     return {
       status: "not_started",
       detail: latestLog,
+      reason: latestLog,
+      nextAction: currentLanguage === "en" ? "Inspect the latest log line, then start the selected path." : "Сначала посмотри последнюю строку лога, затем запусти выбранный путь.",
     };
   }
   return {
     status: "unknown",
     detail: currentLanguage === "en" ? "No runtime signal yet" : "Пока нет сигнала от runtime",
+    reason: currentLanguage === "en" ? "No published operator signal yet." : "Пока нет опубликованного operator-сигнала.",
+    nextAction: currentLanguage === "en" ? "Refresh the operator state or start a runtime action." : "Перечитай состояние оператора или запусти runtime-действие.",
   };
+}
+
+function shouldShowLaunchFailSummary(state) {
+  return ["building", "deploying", "failed", "blocked", "degraded"].includes(state.status);
 }
 
 function renderSystemStatus() {
@@ -1542,15 +1666,24 @@ async function triggerLaunchForPath(pathKey) {
 function getActionIdForDeployLabel(label) {
   const overrides = {
     "Собрать bundle": "deploy.bundle.build",
+    "Собрать офлайн-бандл": "deploy.bundle.build",
     "Собрать host APT bundle": "deploy.host_packages.build",
+    "Собрать APT-бандл": "deploy.host_packages.build",
     "Экспортировать images": "deploy.images.export",
+    "Экспортировать образы": "deploy.images.export",
     "Сгенерировать manifest": "deploy.bundle.manifest",
+    "Сгенерировать манифест": "deploy.bundle.manifest",
     "Pack tar.gz": "deploy.bundle.pack",
     "Упаковать tar.gz": "deploy.bundle.pack",
+    "Распаковать бандл": null,
     "Проверить host packages": "deploy.host.check",
+    "Проверить системные пакеты": "deploy.host.check",
     "Установить host APT bundle": "deploy.host.install",
+    "Установить APT-бандл": "deploy.host.install",
     "Деплоить runtime": "deploy.runtime.deploy",
+    "Деплоить среду": "deploy.runtime.deploy",
     "Запустить offline bundle": "deploy.runtime.run",
+    "Запустить офлайн-бандл": "deploy.runtime.run",
     "Проверить runtime": "deploy.runtime.verify",
   };
   return overrides[label] || actionCatalogByTitle[label]?.action_id || null;
@@ -1565,10 +1698,10 @@ function formatConfigSources(sources) {
 function renderPathCard(path, includeProfiles = true) {
   const showSafePortsButton = path.key === "container" && hasBundlePortConflict();
   const primaryLabel = path.key === "container"
-    ? (currentLanguage === "en" ? "Run Bundle" : "Запустить bundle")
+    ? (currentLanguage === "en" ? "Run Bundle" : "Запустить офлайн-бандл")
     : (currentLanguage === "en" ? "Launch" : "Запустить");
   const blockedLabel = path.key === "container"
-    ? (currentLanguage === "en" ? "Bundle Run Blocked" : "Запуск bundle заблокирован")
+    ? (currentLanguage === "en" ? "Bundle Run Blocked" : "Запуск офлайн-бандла заблокирован")
     : (currentLanguage === "en" ? "Launch Blocked" : "Запуск заблокирован");
   const card = document.createElement("article");
   card.className = `runtime-card ${path.status === "unavailable" ? "unavailable" : ""}`;
@@ -1612,7 +1745,7 @@ function renderPathCard(path, includeProfiles = true) {
       </button>
       ${showSafePortsButton ? `
         <button class="ghost-button safe-ports-button" data-path="${path.key}">
-          ${currentLanguage === "en" ? "Stage safe local ports" : "Подставить safe local ports"}
+          ${currentLanguage === "en" ? "Stage safe local ports" : "Подставить локальные безопасные порты"}
         </button>
       ` : ""}
       <button class="ghost-button why-button" data-path="${path.key}">
@@ -1727,13 +1860,13 @@ function renderServicesStrip() {
     </div>
     <div class="workspace-card">
       <div class="source-label">${currentLanguage === "en" ? "Service Checks" : "Проверки сервисов"}</div>
-      <strong>${currentLanguage === "en" ? `${running} of ${rows.length || 0} healthy` : `${running} из ${rows.length || 0} готовы`}</strong>
+      <strong>${currentLanguage === "en" ? `${running} of ${rows.length || 0} ready` : `${running} из ${rows.length || 0} готовы`}</strong>
       <p>${blocked ? (currentLanguage === "en" ? `Blocked: ${blocked}.` : `Заблокировано: ${blocked}.`) : displayText("Явных блокировок в опубликованных проверках нет.")}</p>
     </div>
     <div class="workspace-card">
       <div class="source-label">${currentLanguage === "en" ? "Diagnostics" : "Диагностика"}</div>
       <strong>${currentLanguage === "en" ? `${pathDiagnostics.length || 0} signals` : `${pathDiagnostics.length || 0} сигналов`}</strong>
-      <p>${pathDiagnostics.length ? (currentLanguage === "en" ? "Check diagnostics first, then metrics and logs below." : "Сначала смотри диагностику, затем метрики и лог ниже.") : (currentLanguage === "en" ? "Backend has not sent additional parser/runtime signals yet." : "Backend пока не прислал дополнительных parser/runtime сигналов.")}</p>
+      <p>${pathDiagnostics.length ? (currentLanguage === "en" ? "Check diagnostics first, then metrics and logs below." : "Сначала смотри диагностику, затем метрики и журнал ниже.") : (currentLanguage === "en" ? "Backend has not sent additional parser/runtime signals yet." : "Backend пока не прислал дополнительных сигналов парсинга или среды выполнения.")}</p>
     </div>
     <div class="workspace-card">
       <div class="source-label">${currentLanguage === "en" ? "Observability" : "Наблюдаемость"}</div>
@@ -1792,7 +1925,7 @@ function renderWarnings() {
     container.innerHTML = `
       <div class="metric-card">
         <div class="source-label">${currentLanguage === "en" ? "No Warnings" : "Нет предупреждений"}</div>
-        <p>${displayText("Backend не сообщил о дополнительных блокерах runtime сверх текущего состояния доступности.")}</p>
+        <p>${displayText("Backend не сообщил о дополнительных блокерах среды выполнения сверх текущего состояния доступности.")}</p>
       </div>
     `;
     return;
@@ -1817,8 +1950,8 @@ function renderServiceOverview() {
         <div class="service-row">
           <div>
             <div class="source-label">${pathTitle(path)}</div>
-            <h4>${currentLanguage === "en" ? `${running}/${rows.length} healthy, ${degraded} degraded, ${blocked} blocked` : `${running}/${rows.length} готовы, ${degraded} снижены, ${blocked} заблокированы`}</h4>
-            <p>${rows.length ? displayText(path.key === "native" ? "Проверки native и host probes берутся из репозитория." : "Состояние bundle видно сразу, а запуск контейнеров зависит от Docker engine и доступа к socket.") : (currentLanguage === "en" ? "No published service probes for this runtime path yet." : "Для этого пути запуска ещё нет опубликованных service probes.")}</p>
+            <h4>${currentLanguage === "en" ? `${running}/${rows.length} ready, ${degraded} degraded, ${blocked} blocked` : `${running}/${rows.length} готовы, ${degraded} снижены, ${blocked} заблокированы`}</h4>
+            <p>${rows.length ? displayText(path.key === "native" ? "Проверки нативного пути и хоста берутся из состояния репозитория." : "Состояние бандла видно сразу, а запуск контейнеров зависит от Docker Engine и доступа к сокету.") : (currentLanguage === "en" ? "No published service probes for this runtime path yet." : "Для этого пути запуска ещё нет опубликованных проверок сервисов.")}</p>
           </div>
           <span class="status-pill ${chipClass(path.status)}">${cap(path.status)}</span>
         </div>
@@ -1885,7 +2018,7 @@ function renderLaunchStrip() {
       : (currentLanguage === "en" ? "Launch actions will appear here." : "Здесь появится ход текущего запуска."));
   const nextAction = selectedLaunchPath === "container"
     ? (hasBundlePortConflict()
-      ? (currentLanguage === "en" ? "Stage safe local ports before deploy" : "Сначала подставь safe local ports")
+      ? (currentLanguage === "en" ? "Stage safe local ports before deploy" : "Сначала подставь локальные безопасные порты")
       : (currentLanguage === "en" ? "Open build/deploy after launch" : "После запуска перейди в Сборка / Деплой"))
     : (currentLanguage === "en" ? "Verify services and logs after start" : "После запуска проверь сервисы и логи");
 
@@ -1896,9 +2029,9 @@ function renderLaunchStrip() {
       <p>${displayText(localizedField(path, "description"))}</p>
     </div>
     <div class="workspace-card">
-      <div class="source-label">${currentLanguage === "en" ? "Runtime state" : "Состояние runtime"}</div>
+      <div class="source-label">${currentLanguage === "en" ? "Runtime state" : "Состояние среды"}</div>
       <strong>${runtimeHealthLabel(state.status)}</strong>
-      <p>${runtimeStateDetail}</p>
+      <p>${runtimeStateDetail || (state.checkSummary || "")}</p>
     </div>
     <div class="workspace-card">
       <div class="source-label">${currentLanguage === "en" ? "Active job" : "Активная задача"}</div>
@@ -1907,8 +2040,38 @@ function renderLaunchStrip() {
     </div>
     <div class="workspace-card">
       <div class="source-label">${currentLanguage === "en" ? "Next step" : "Следующий шаг"}</div>
-      <strong>${currentLanguage === "en" ? "Inspect after launch" : "Проверка после запуска"}</strong>
-      <p>${nextAction}</p>
+      <strong>${currentLanguage === "en" ? "Operator action" : "Действие оператора"}</strong>
+      <p>${state.nextAction || nextAction}</p>
+    </div>
+  `;
+}
+
+function renderLaunchFailureSummary() {
+  const panel = document.querySelector("#launch-fail-summary");
+  const pill = document.querySelector("#launch-fail-pill");
+  const list = document.querySelector("#launch-fail-list");
+  const state = deriveLaunchRuntimeState(selectedLaunchPath);
+
+  panel.hidden = !shouldShowLaunchFailSummary(state);
+  if (panel.hidden) {
+    list.innerHTML = "";
+    return;
+  }
+
+  pill.className = `status-pill ${runtimeHealthTone(state.status)}`;
+  pill.textContent = runtimeHealthLabel(state.status);
+  list.innerHTML = `
+    <div class="metric-card">
+      <div class="source-label">${currentLanguage === "en" ? "Summary" : "Сводка"}</div>
+      <strong>${state.detail || (currentLanguage === "en" ? "Runtime status requires attention." : "Состояние среды требует внимания.")}</strong>
+      <p>${state.reason || (currentLanguage === "en" ? "Inspect the operator log and diagnostics." : "Проверь журнал оператора и диагностику.")}</p>
+    </div>
+    <div class="metric-card">
+      <div class="source-label">${currentLanguage === "en" ? "Next operator step" : "Следующий шаг оператора"}</div>
+      <strong>${state.nextAction || (currentLanguage === "en" ? "Inspect the launch log first." : "Сначала посмотри журнал запуска.")}</strong>
+      <p>${state.failedStage
+        ? (currentLanguage === "en" ? `Last failing stage: ${state.failedStage}` : `Последний проблемный этап: ${state.failedStage}`)
+        : (state.checkSummary || (currentLanguage === "en" ? "Use Services and Deploy to isolate the issue." : "Используй Сервисы и Сборка / Деплой для локализации проблемы."))}</p>
     </div>
   `;
 }
@@ -1932,14 +2095,14 @@ function renderLaunchLogs() {
   const nextSteps = document.querySelector("#launch-next-steps");
   const items = selectedLaunchPath === "container"
     ? [
-        currentLanguage === "en" ? "Check Build / Deploy and the container health cards." : "Проверь Сборка / Деплой и health-карточки контейнерного пути.",
+        runtimeState.nextAction || (currentLanguage === "en" ? "Check Build / Deploy and the container health cards." : "Проверь Сборка / Деплой и карточки состояния контейнерного пути."),
         hasBundlePortConflict()
-          ? (currentLanguage === "en" ? "Apply safe local ports before retrying deploy." : "Перед повторным деплоем подставь safe local ports.")
-          : (currentLanguage === "en" ? "If the build fails, inspect registry/network access in the launch log." : "Если сборка падает, смотри доступ к registry/network в launch-логе."),
+          ? (currentLanguage === "en" ? "Apply safe local ports before retrying deploy." : "Перед повторным деплоем подставь локальные безопасные порты.")
+          : (currentLanguage === "en" ? "If build or deploy stalls, inspect Docker, ports, and diagnostics." : "Если сборка или деплой застопорились, проверь Docker, порты и диагностику."),
       ]
     : [
-        currentLanguage === "en" ? "Open Services to verify endpoints and logs." : "Открой Сервисы и проверь endpoints и логи.",
-        currentLanguage === "en" ? "Open Config if runtime profile or device mode needs adjustment." : "Открой Конфиг, если нужно поправить runtime profile или device mode.",
+        currentLanguage === "en" ? "Open Services to verify endpoints and logs." : "Открой Сервисы и проверь конечные точки и логи.",
+        currentLanguage === "en" ? "Open Config if runtime profile or device mode needs adjustment." : "Открой Конфиг, если нужно поправить профиль запуска или режим устройства.",
       ];
   nextSteps.innerHTML = items.map((item) => `
     <div class="metric-card">
@@ -1988,6 +2151,144 @@ function getConfigVariant(pathKey, variantId) {
 function getFieldValue(pathKey, field) {
   const staged = stagedFieldValues.get(`${pathKey}:${field.key}`);
   return staged ?? field.applied;
+}
+
+function shouldShowField(pathKey, field) {
+  if (!field?.visibleWhen) return true;
+  return Object.entries(field.visibleWhen).every(([depKey, expected]) => {
+    const dependency = findField(pathKey, depKey);
+    if (!dependency) return false;
+    return String(getFieldValue(pathKey, dependency)) === String(expected);
+  });
+}
+
+function configFieldTone(field) {
+  if (field.pathPolicy === "host_path_flexible") return "host-source";
+  if (field.pathPolicy === "bundle_internal_path") return "container-target";
+  return "default";
+}
+
+function validationStatusTone(validation) {
+  const status = String(validation?.status || "").toLowerCase();
+  if (["ok", "warning", "error", "info"].includes(status)) {
+    return status;
+  }
+  return "";
+}
+
+function fieldValidationStatus(pathKey, field) {
+  return validationStatusTone(getFieldValidation(pathKey, field));
+}
+
+function configFieldClasses(pathKey, field) {
+  const classes = [`config-field-${configFieldTone(field)}`];
+  const validationStatus = fieldValidationStatus(pathKey, field);
+  if (validationStatus) {
+    classes.push(`config-field-validation-${validationStatus}`);
+  }
+  return classes.join(" ");
+}
+
+function configFieldRoleLabel(field) {
+  if (field.pathPolicy === "host_path_flexible") {
+    return currentLanguage === "en" ? "Host source" : "Источник хоста";
+  }
+  if (field.pathPolicy === "bundle_internal_path") {
+    return currentLanguage === "en" ? "Container target" : "Цель в контейнере";
+  }
+  return "";
+}
+
+function pathValidationMapKey(pathKey, fieldKey) {
+  return `${pathKey}:${fieldKey}`;
+}
+
+function getModelPairValidation(pathKey, field) {
+  if (pathKey !== "container") return null;
+  const modelSourceMode = String(getFieldValue(pathKey, findField(pathKey, "MODEL_SOURCE_MODE")) || "");
+  if (!modelSourceMode) return null;
+  const pairKeys = [
+    ["MODEL_PATH_VLM", "MMPROJ_PATH"],
+    ["HOST_MODEL_PATH_VLM", "HOST_MMPROJ_PATH"],
+  ];
+  for (const [leftKey, rightKey] of pairKeys) {
+    if (field.key !== leftKey && field.key !== rightKey) continue;
+    if (leftKey.startsWith("HOST_") && modelSourceMode !== "external_host_mounts") return null;
+    const leftField = findField(pathKey, leftKey);
+    const rightField = findField(pathKey, rightKey);
+    const leftValue = String(getFieldValue(pathKey, leftField) || "").trim();
+    const rightValue = String(getFieldValue(pathKey, rightField) || "").trim();
+    if ((leftValue && !rightValue) || (!leftValue && rightValue)) {
+      return {
+        status: "warning",
+        message: currentLanguage === "en"
+          ? "VLM and mmproj must be filled together."
+          : "VLM и mmproj должны быть заполнены парой.",
+      };
+    }
+  }
+  return null;
+}
+
+function getFieldValidation(pathKey, field) {
+  const stagedValidation = stagedPathValidations.get(pathValidationMapKey(pathKey, field.key));
+  const pairValidation = getModelPairValidation(pathKey, field);
+  if (stagedValidation && stagedValidation.value === String(getFieldValue(pathKey, field) || "").trim()) {
+    return stagedValidation.validation || pairValidation || field.validation || null;
+  }
+  return pairValidation || field.validation || null;
+}
+
+async function validatePathField(pathKey, field, value) {
+  const rawValue = String(value || "").trim();
+  const mapKey = pathValidationMapKey(pathKey, field.key);
+  if (!rawValue || field.pathPolicy !== "host_path_flexible") {
+    stagedPathValidations.delete(mapKey);
+    renderConfig();
+    return;
+  }
+  try {
+    const params = new URLSearchParams({
+      path: rawValue,
+      kind: field.pickerKind || "file",
+      field_key: field.key,
+    });
+    const response = await fetch(`/operator/path-browser/validate?${params.toString()}`);
+    if (!response.ok) {
+      throw new Error(await response.text());
+    }
+    const payload = await response.json();
+    stagedPathValidations.set(mapKey, {
+      value: rawValue,
+      validation: {
+        status: payload.status || (payload.valid ? "ok" : "error"),
+        message: payload.message || "",
+        checks: payload.checks || [],
+      },
+    });
+  } catch (error) {
+    stagedPathValidations.set(mapKey, {
+      value: rawValue,
+      validation: {
+        status: "error",
+        message: String(error?.message || error || ""),
+      },
+    });
+  }
+  renderConfig();
+}
+
+function queuePathValidation(pathKey, field, value) {
+  const mapKey = pathValidationMapKey(pathKey, field.key);
+  const existing = pathValidationTimers.get(mapKey);
+  if (existing) {
+    window.clearTimeout(existing);
+  }
+  const timer = window.setTimeout(() => {
+    pathValidationTimers.delete(mapKey);
+    validatePathField(pathKey, field, value);
+  }, 220);
+  pathValidationTimers.set(mapKey, timer);
 }
 
 function maskSecretValue(value) {
@@ -2133,6 +2434,16 @@ function showToast(title, body, tone = "success") {
 function renderFieldControl(pathKey, field) {
   const value = getFieldValue(pathKey, field);
   const isVisible = isSecretFieldVisible(pathKey, field);
+  if (field.control === "toggle") {
+    const checked = String(value).toLowerCase() === "true";
+    return `
+      <label class="config-toggle">
+        <input type="checkbox" ${checked ? "checked" : ""} ${field.editable === false ? "disabled" : ""} />
+        <span class="config-toggle-track"><span class="config-toggle-thumb"></span></span>
+        <span class="config-toggle-label">${checked ? "true" : "false"}</span>
+      </label>
+    `;
+  }
   if (field.control === "select" && Array.isArray(field.options) && field.options.length) {
     return `
       <select ${field.editable === false ? "disabled" : ""}>
@@ -2142,7 +2453,27 @@ function renderFieldControl(pathKey, field) {
       </select>
     `;
   }
-  const input = `<input type="${field.secret && !isVisible ? "password" : "text"}" value="${value}" ${field.editable === false ? "disabled" : ""} />`;
+  const inputType = field.secret && !isVisible
+    ? "password"
+    : (field.control === "number" ? "number" : field.control === "url" ? "url" : "text");
+  const inputStep = field.control === "number" ? " step=\"any\"" : "";
+  const input = `<input type="${inputType}" value="${value}"${inputStep} ${field.editable === false ? "disabled" : ""} />`;
+  if (field.pickerKind && field.editable !== false && !field.secret) {
+    return `
+      <div class="config-input-row config-input-row-picker">
+        ${input}
+        <button
+          type="button"
+          class="config-picker-button"
+          data-open-picker="${field.key}"
+          title="${displayLabel(localizedField(field, "pickerLabel"))}"
+          aria-label="${displayLabel(localizedField(field, "pickerLabel"))}"
+        >
+          ${displayLabel(localizedField(field, "pickerLabel"))}
+        </button>
+      </div>
+    `;
+  }
   if (field.secret && field.editable !== false) {
     return `
       <div class="config-input-row">
@@ -2269,6 +2600,7 @@ function renderConfig() {
   });
   document.querySelector("#config-variant-title").textContent = displayLabel(localizedField(selectedVariant || {}, "title") || "Config Variants");
   document.querySelector("#config-variant-description").textContent = displayText(localizedField(selectedVariant || {}, "description") || (currentLanguage === "en" ? "Variant not selected" : "Вариант не выбран"));
+  document.querySelector("#config-variant-helper").innerHTML = renderConfigVariantHelper(selectedConfigPath, selectedVariant);
 
   const presetList = document.querySelector("#config-preset-list");
   const presets = selectedVariant?.presets || [];
@@ -2278,7 +2610,7 @@ function renderConfig() {
       <strong>${displayLabel(localizedField(preset, "title"))}</strong>
       <p>${displayText(localizedField(preset, "description"))}</p>
       <div class="button-row" style="margin-top: 12px;">
-        <button class="ghost-button config-preset-button" data-preset-id="${preset.presetId}">${currentLanguage === "en" ? "Stage preset values" : "Подставить в staged"}</button>
+        <button class="ghost-button config-preset-button" data-preset-id="${preset.presetId}">${currentLanguage === "en" ? "Stage values" : "Подставить значения"}</button>
       </div>
     </div>
   `).join("") : `
@@ -2289,7 +2621,10 @@ function renderConfig() {
   `;
 
   const groups = document.querySelector("#config-groups");
-  groups.innerHTML = (selectedVariant?.groups || []).map((group) => `
+  const visibleGroups = (selectedVariant?.groups || [])
+    .map((group) => ({ ...group, fields: (group.fields || []).filter((field) => shouldShowField(selectedConfigPath, field)) }))
+    .filter((group) => group.fields.length);
+  groups.innerHTML = visibleGroups.map((group) => `
     <section class="config-group">
       <div class="config-group-copy">
         <div class="eyebrow">${pathTitle(path)}</div>
@@ -2300,9 +2635,12 @@ function renderConfig() {
       </div>
       <div class="config-field-grid">
         ${group.fields.map((field) => `
-          <label class="config-field" data-key="${field.key}">
+          <label class="config-field ${configFieldClasses(selectedConfigPath, field)}" data-key="${field.key}">
             <div class="config-label-row">
-              <span class="config-key">${displayLabel(localizedField(field, "label"))}</span>
+              <div class="config-label-stack">
+                <span class="config-key">${displayLabel(localizedField(field, "label"))}</span>
+                ${configFieldRoleLabel(field) ? `<span class="config-role-badge">${configFieldRoleLabel(field)}</span>` : ""}
+              </div>
               ${uiSettings.showLiteralEnvKeys ? `<span class="config-key-hint">${field.key}</span>` : ""}
             </div>
             <p class="config-help">${displayText(localizedField(field, "description") || "")}</p>
@@ -2312,7 +2650,17 @@ function renderConfig() {
               ${uiSettings.showSourceFiles ? `<span>${currentLanguage === "en" ? "Source" : "Источник"}: <span class="mono-line">${field.source}</span></span>` : ""}
               ${field.pathPolicy ? `<span>${currentLanguage === "en" ? "Path policy" : "Политика пути"}: ${translatePathPolicy(field.pathPolicy)}</span>` : ""}
               ${field.pathExample ? `<span>${currentLanguage === "en" ? "Example" : "Пример"}: <span class="mono-line">${field.pathExample}</span></span>` : ""}
-              ${field.validation ? `<span>${currentLanguage === "en" ? "Validation" : "Проверка"}: ${displayValidationMessage(field.validation.message || "")}</span>` : ""}
+              ${getFieldValidation(selectedConfigPath, field) ? `
+                <span class="config-validation-note config-validation-note-${fieldValidationStatus(selectedConfigPath, field)}">
+                  <span class="config-validation-badge">${currentLanguage === "en" ? (getFieldValidation(selectedConfigPath, field).status || "info") : (
+                    getFieldValidation(selectedConfigPath, field).status === "ok" ? "ok" :
+                    getFieldValidation(selectedConfigPath, field).status === "warning" ? "предупреждение" :
+                    getFieldValidation(selectedConfigPath, field).status === "error" ? "ошибка" :
+                    "к сведению"
+                  )}</span>
+                  <span>${displayValidationMessage(getFieldValidation(selectedConfigPath, field).message || "")}</span>
+                </span>
+              ` : ""}
             </div>
           </label>
         `).join("")}
@@ -2321,9 +2669,21 @@ function renderConfig() {
   `).join("");
 
   groups.querySelectorAll("input, select").forEach((control) => {
-    control.addEventListener(control.tagName === "SELECT" ? "change" : "input", () => {
+    const eventName = control.tagName === "SELECT" || control.type === "checkbox"
+      ? "change"
+      : "input";
+    control.addEventListener(eventName, () => {
       const fieldNode = control.closest(".config-field");
-      setStagedFieldValue(selectedConfigPath, fieldNode.dataset.key, control.value);
+      const field = findField(selectedConfigPath, fieldNode.dataset.key);
+      const nextValue = control.type === "checkbox" ? (control.checked ? "true" : "false") : control.value;
+      if (control.type === "checkbox") {
+        const toggleLabel = fieldNode.querySelector(".config-toggle-label");
+        if (toggleLabel) toggleLabel.textContent = nextValue;
+      }
+      setStagedFieldValue(selectedConfigPath, fieldNode.dataset.key, nextValue);
+      if (field?.pathPolicy || field?.pickerKind) {
+        queuePathValidation(selectedConfigPath, field, nextValue);
+      }
       updateDirtyState();
     });
   });
@@ -2362,6 +2722,14 @@ function renderConfig() {
       if (!field) return;
       toggleSecretFieldVisibility(selectedConfigPath, field.key);
       renderConfig();
+    });
+  });
+
+  groups.querySelectorAll("[data-open-picker]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const field = findField(selectedConfigPath, button.dataset.openPicker);
+      if (!field) return;
+      await openPathBrowser(selectedConfigPath, field);
     });
   });
 
@@ -2406,6 +2774,191 @@ function renderConfig() {
       control.classList.add("dirty");
     }
   });
+}
+
+async function fetchPathBrowser(path, kind) {
+  const params = new URLSearchParams({ kind });
+  if (path) params.set("path", path);
+  const response = await fetch(`/operator/path-browser?${params.toString()}`);
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+  return response.json();
+}
+
+function renderPathBrowserModal() {
+  const modal = document.querySelector("#path-browser-modal");
+  const title = document.querySelector("#path-browser-title");
+  const cwd = document.querySelector("#path-browser-current-path");
+  const list = document.querySelector("#path-browser-entry-list");
+  const selectCurrent = document.querySelector("#path-browser-select-current");
+  const field = pathBrowserState.fieldKey ? findField(pathBrowserState.pathKey, pathBrowserState.fieldKey) : null;
+
+  title.textContent = field
+    ? displayLabel(localizedField(field, "label"))
+    : (currentLanguage === "en" ? "Choose path" : "Выбор пути");
+  cwd.textContent = pathBrowserState.cwd || (currentLanguage === "en" ? "Allowed roots" : "Разрешённые корни");
+  selectCurrent.textContent = currentLanguage === "en" ? "Use this folder" : "Выбрать эту папку";
+  selectCurrent.hidden = pathBrowserState.kind !== "directory" || !pathBrowserState.cwd;
+
+  list.innerHTML = `
+    ${pathBrowserState.parentPath ? `
+      <button type="button" class="path-browser-entry path-browser-entry-parent" data-path-browser-parent="${escapeHtml(pathBrowserState.parentPath)}">
+        <span class="path-browser-entry-glyph path-browser-entry-glyph-parent">..</span>
+        <span>${currentLanguage === "en" ? "Parent folder" : "Родительская папка"}</span>
+      </button>
+    ` : ""}
+    ${pathBrowserState.entries.map((entry) => `
+      <div class="path-browser-entry ${entry.type === "directory" ? "path-browser-entry-dir" : ""}">
+        <button type="button" class="path-browser-open-button" data-path-browser-open="${escapeHtml(entry.path)}">
+          <span class="path-browser-entry-glyph ${entry.type === "directory" ? "path-browser-entry-glyph-dir" : "path-browser-entry-glyph-file"}">${entry.type === "directory" ? "D" : "F"}</span>
+          <span>${escapeHtml(entry.name)}</span>
+        </button>
+        ${entry.selectable ? `
+          <button
+            type="button"
+            class="ghost-button path-browser-select-button"
+            data-path-browser-select="${escapeHtml(entry.path)}"
+          >
+            ${currentLanguage === "en" ? "Use" : "Выбрать"}
+          </button>
+        ` : ""}
+      </div>
+    `).join("")}
+  `;
+
+  list.querySelectorAll("[data-path-browser-open]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      pathBrowserState = {
+        ...pathBrowserState,
+        ...(await fetchPathBrowser(button.dataset.pathBrowserOpen, pathBrowserState.kind)),
+      };
+      renderPathBrowserModal();
+    });
+  });
+
+  list.querySelectorAll("[data-path-browser-parent]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      pathBrowserState = {
+        ...pathBrowserState,
+        ...(await fetchPathBrowser(button.dataset.pathBrowserParent, pathBrowserState.kind)),
+      };
+      renderPathBrowserModal();
+    });
+  });
+
+  list.querySelectorAll("[data-path-browser-select]").forEach((button) => {
+    button.addEventListener("click", () => {
+      applyPathBrowserSelection(button.dataset.pathBrowserSelect);
+    });
+  });
+
+  selectCurrent.onclick = () => applyPathBrowserSelection(pathBrowserState.cwd);
+  if (!modal.open) modal.showModal();
+}
+
+function applyPathBrowserSelection(pathValue) {
+  const field = findField(pathBrowserState.pathKey, pathBrowserState.fieldKey);
+  if (!field) return;
+  setStagedFieldValue(pathBrowserState.pathKey, field.key, pathValue);
+  queuePathValidation(pathBrowserState.pathKey, field, pathValue);
+  showToast(
+    currentLanguage === "en" ? "Path selected" : "Путь выбран",
+    displayLabel(localizedField(field, "label")),
+  );
+  document.querySelector("#path-browser-modal").close();
+  renderConfig();
+}
+
+function renderConfigVariantHelper(pathKey, variant) {
+  if (!variant || pathKey !== "container") return "";
+  const modelSourceMode = String(getFieldValue(pathKey, findField(pathKey, "MODEL_SOURCE_MODE")) || "bundle_layout");
+  if (variant.variantId === "model_source_mode") {
+    return `
+      <article class="config-variant-helper-card">
+        <div class="config-helper-head">
+          <p class="eyebrow">${currentLanguage === "en" ? "How It Works" : "Как это работает"}</p>
+          <strong>${currentLanguage === "en" ? "Choose where models come from before startup" : "Сначала выбери, откуда контейнеры возьмут модели"}</strong>
+        </div>
+        <div class="config-flow-diagram">
+          <div class="config-flow-node ${modelSourceMode === "bundle_layout" ? "active" : ""}">
+            <span class="config-flow-kicker">${currentLanguage === "en" ? "Bundle mode" : "Bundle-режим"}</span>
+            <strong>deploy/offline_bundle/models</strong>
+          </div>
+          <span class="config-flow-arrow">→</span>
+          <div class="config-flow-node">
+            <span class="config-flow-kicker">${currentLanguage === "en" ? "Mounted to" : "Монтируется в"}</span>
+            <strong>/app/backend/models</strong>
+          </div>
+          <span class="config-flow-arrow">→</span>
+          <div class="config-flow-node ${modelSourceMode === "external_host_mounts" ? "active" : ""}">
+            <span class="config-flow-kicker">${currentLanguage === "en" ? "External mode" : "Внешний режим"}</span>
+            <strong>/opt/agent-nav/external/...</strong>
+          </div>
+        </div>
+        <p class="config-helper-note">${currentLanguage === "en"
+          ? "Bundle layout keeps everything self-contained. External host mounts let you reuse models from another disk without copying them into the bundle."
+          : "Bundle layout хранит всё внутри офлайн-бандла. External host mounts позволяют использовать модели с другого диска без копирования их в bundle."}</p>
+      </article>
+    `;
+  }
+  if (variant.variantId === "artifact_mounts") {
+    const isExternal = modelSourceMode === "external_host_mounts";
+    return `
+      <article class="config-variant-helper-card">
+        <div class="config-helper-head">
+          <p class="eyebrow">${currentLanguage === "en" ? "Path Contract" : "Схема путей"}</p>
+          <strong>${currentLanguage === "en" ? "Host source and container target are different things" : "Источник на хосте и путь в контейнере — это разные вещи"}</strong>
+        </div>
+        <div class="config-flow-diagram">
+          <div class="config-flow-node ${isExternal ? "active" : ""}">
+            <span class="config-flow-kicker">${currentLanguage === "en" ? "Host source" : "Источник хоста"}</span>
+            <strong>${isExternal ? "/mnt/models/..." : "deploy/offline_bundle/models/..."}</strong>
+          </div>
+          <span class="config-flow-arrow">→</span>
+          <div class="config-flow-node">
+            <span class="config-flow-kicker">${currentLanguage === "en" ? "Mount step" : "Этап монтирования"}</span>
+            <strong>${isExternal ? "read-only bind mount" : "./models → /app/backend/models"}</strong>
+          </div>
+          <span class="config-flow-arrow">→</span>
+          <div class="config-flow-node">
+            <span class="config-flow-kicker">${currentLanguage === "en" ? "Runtime path" : "Путь для runtime"}</span>
+            <strong>${isExternal ? "/opt/agent-nav/external/..." : "/app/backend/models/..."}</strong>
+          </div>
+        </div>
+        <p class="config-helper-note">${currentLanguage === "en"
+          ? "For VLM always provide both the model file and the mmproj file. For embedders point to the whole model directory, not a single file inside it."
+          : "Для VLM всегда задавай и файл модели, и файл mmproj. Для embedder-путей указывай целую папку модели, а не отдельный файл внутри неё."}</p>
+      </article>
+    `;
+  }
+  return "";
+}
+
+async function openPathBrowser(pathKey, field) {
+  const currentValue = String(getFieldValue(pathKey, field) || "").trim();
+  pathBrowserState = {
+    pathKey,
+    fieldKey: field.key,
+    kind: field.pickerKind || "file",
+    cwd: "",
+    entries: [],
+    currentValue,
+    parentPath: null,
+  };
+  try {
+    pathBrowserState = {
+      ...pathBrowserState,
+      ...(await fetchPathBrowser(currentValue || "", pathBrowserState.kind)),
+    };
+    renderPathBrowserModal();
+  } catch (error) {
+    showToast(
+      currentLanguage === "en" ? "Could not open path browser" : "Не удалось открыть выбор пути",
+      String(error?.message || error || ""),
+      "error",
+    );
+  }
 }
 
 async function previewConfigPreset(pathKey, presetId) {
@@ -2535,9 +3088,11 @@ function renderServices() {
   `;
 
   const pathDiagnostics = diagnostics.filter((item) => item.path === selectedServicesPath);
-  document.querySelector("#diagnostics-status-pill").textContent = pathDiagnostics.length
+  const diagnosticsPill = document.querySelector("#diagnostics-status-pill");
+  diagnosticsPill.className = `status-pill ${pathDiagnostics.some((item) => item.tone === "orange") ? "orange" : (pathDiagnostics.length ? "cyan" : "neutral")}`;
+  diagnosticsPill.textContent = pathDiagnostics.length
     ? (currentLanguage === "en" ? `Diagnostics: ${pathDiagnostics.length}` : `Диагностика: ${pathDiagnostics.length}`)
-    : (currentLanguage === "en" ? "No runtime diagnostics" : "Нет runtime-диагностики");
+    : (currentLanguage === "en" ? "No runtime diagnostics" : "Нет диагностики среды");
   document.querySelector("#diagnostics-list").innerHTML = pathDiagnostics.length ? pathDiagnostics.map((item) => `
       <div class="diagnostic-card">
         <div class="diagnostic-row">
@@ -2572,7 +3127,7 @@ function refreshLogFilterOptions() {
   const previous = select.value;
   select.innerHTML = `
     <option value="all">${currentLanguage === "en" ? `All logs for ${pathTitle(runtimePaths[selectedServicesPath])}` : `Все логи ${pathTitle(runtimePaths[selectedServicesPath])}`}</option>
-    ${services.map((service) => `<option value="${service}">${cap(service)}</option>`).join("")}
+    ${services.map((service) => `<option value="${service}">${displayText(cap(service))}</option>`).join("")}
   `;
   if (services.includes(previous)) {
     select.value = previous;
@@ -2633,7 +3188,7 @@ function renderDeploy() {
       <h4>${displayLabel(localizedField(item, "title"))}</h4>
       <p>${displayText(localizedField(item, "body"))}</p>
       <div class="button-row" style="margin-top: 14px;">
-        <button class="primary-button deploy-action-button" data-action="${item.action}" ${!getActionIdForDeployLabel(item.action) ? "disabled" : ""}>${displayLabel(localizedField(item, "action"))}</button>
+        <button class="primary-button deploy-action-button" data-action="${item.action}" ${!getActionIdForDeployLabel(item.action) ? "disabled" : ""}>${displayLabel(localizedField(item, "title"))}</button>
       </div>
     </div>
   `).join("");
@@ -2683,7 +3238,7 @@ function refreshDeployLogFilterOptions() {
   const previous = select.value;
   select.innerHTML = `
     <option value="all">${currentLanguage === "en" ? `All logs ${localizedField(deploySurface[selectedDeployMode], "label")}` : `Все логи ${deploySurface[selectedDeployMode].label}`}</option>
-    ${stages.map((stage) => `<option value="${stage}">${cap(stage)}</option>`).join("")}
+    ${stages.map((stage) => `<option value="${stage}">${displayText(cap(stage))}</option>`).join("")}
   `;
   if (stages.includes(previous)) {
     select.value = previous;
@@ -2911,7 +3466,7 @@ function initServicesFlow() {
 
 function initDeployFlow() {
   const modes = {
-    build: { key: "build", name: currentLanguage === "en" ? "Build Bundle" : "Сборка bundle" },
+    build: { key: "build", name: currentLanguage === "en" ? "Build Bundle" : "Сборка офлайн-бандла" },
     import: { key: "import", name: currentLanguage === "en" ? "Import / Deploy" : "Импорт / деплой" },
   };
   const onModeChange = (modeKey) => {
@@ -3343,6 +3898,9 @@ async function init() {
 
   document.querySelector("#reason-modal-close").addEventListener("click", () => {
     document.querySelector("#reason-modal").close();
+  });
+  document.querySelector("#path-browser-close").addEventListener("click", () => {
+    document.querySelector("#path-browser-modal").close();
   });
 }
 
