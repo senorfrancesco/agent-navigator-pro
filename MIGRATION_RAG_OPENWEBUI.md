@@ -1,5 +1,9 @@
 # ТЗ на плавный переход с Chainlit на Open WebUI с полноценной RAG-архитектурой
 
+См. также:
+- [MIGRATION_OVERIEW_WITH_LEAKS.md](./MIGRATION_OVERIEW_WITH_LEAKS.md)
+- [MIGRATION_TOOLS.md](./MIGRATION_TOOLS.md)
+
 ## 1. Цель проекта
 
 - [ ] **Перевести текущую систему с Chainlit на Open WebUI без потери существующей бизнес-логики.**

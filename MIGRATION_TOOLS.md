@@ -1,5 +1,9 @@
 # Техническое задание: плавный переход с Chainlit на Open WebUI без обязательного оркестратора
 
+См. также:
+- [MIGRATION_OVERIEW_WITH_LEAKS.md](./MIGRATION_OVERIEW_WITH_LEAKS.md)
+- [MIGRATION_RAG_OPENWEBUI.md](./MIGRATION_RAG_OPENWEBUI.md)
+
 ## 1. Цель
 
 Перевести текущую систему с `Chainlit` на `Open WebUI` так, чтобы:
