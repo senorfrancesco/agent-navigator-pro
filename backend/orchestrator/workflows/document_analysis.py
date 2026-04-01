@@ -19,6 +19,7 @@ import os
 import re
 import time
 import httpx
+from functools import lru_cache
 from typing import TypedDict, List, Dict, Any, Annotated, Optional
 import operator
 from langgraph.graph import StateGraph, END
@@ -123,7 +124,7 @@ class DocumentAnalysisState(TypedDict):
 
 # === Classification ===
 
-_DOC_TYPE_KEYWORDS = {
+_DEFAULT_DOC_TYPE_KEYWORDS = {
     "tz": ["техническое задание", "предмет закупки", "требования к поставляемому",
            "тз на", "объект закупки", "техзадание"],
     "smeta": ["сметная документация", "сметный расчет", "сметный расчёт",
@@ -133,6 +134,54 @@ _DOC_TYPE_KEYWORDS = {
     "legal": ["договор", "контракт", "соглашение", "предмет договора",
               "стороны договора"],
 }
+_DOC_TYPE_KEYWORDS = _DEFAULT_DOC_TYPE_KEYWORDS
+_PARSERS_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "parsers_config.yaml")
+
+
+@lru_cache(maxsize=1)
+def _load_document_type_keywords() -> Dict[str, List[str]]:
+    """Load configurable doc-type keywords from parsers_config.yaml with safe fallback."""
+    if not os.path.exists(_PARSERS_CONFIG_PATH):
+        logger.warning(
+            "Document analysis config not found at %s; fallback keywords will be used.",
+            _PARSERS_CONFIG_PATH,
+        )
+        return _DEFAULT_DOC_TYPE_KEYWORDS
+
+    try:
+        import yaml
+
+        with open(_PARSERS_CONFIG_PATH, "r", encoding="utf-8") as handle:
+            config = yaml.safe_load(handle) or {}
+    except Exception as exc:
+        logger.warning(
+            "Failed to load document_type_keywords from %s (%s); fallback keywords will be used.",
+            _PARSERS_CONFIG_PATH,
+            exc,
+        )
+        return _DEFAULT_DOC_TYPE_KEYWORDS
+
+    doc_type_keywords = config.get("document_type_keywords")
+    if not isinstance(doc_type_keywords, dict) or not doc_type_keywords:
+        logger.warning(
+            "document_type_keywords is empty/invalid in %s; fallback keywords will be used.",
+            _PARSERS_CONFIG_PATH,
+        )
+        return _DEFAULT_DOC_TYPE_KEYWORDS
+
+    normalized = {
+        str(doc_type): [str(keyword).lower() for keyword in keywords if isinstance(keyword, str)]
+        for doc_type, keywords in doc_type_keywords.items()
+        if isinstance(keywords, list)
+    }
+    if not normalized:
+        logger.warning(
+            "document_type_keywords has no valid entries in %s; fallback keywords will be used.",
+            _PARSERS_CONFIG_PATH,
+        )
+        return _DEFAULT_DOC_TYPE_KEYWORDS
+
+    return normalized
 
 
 def _extract_llm_content(response: Dict[str, Any]) -> str:
@@ -159,8 +208,9 @@ def _extract_llm_content(response: Dict[str, Any]) -> str:
 def classify_doc_type(text: str) -> str:
     """Keyword scoring для определения типа документа (без LLM)."""
     text_lower = text[:5000].lower()
+    doc_type_keywords = _load_document_type_keywords()
     scores = {}
-    for doc_type, keywords in _DOC_TYPE_KEYWORDS.items():
+    for doc_type, keywords in doc_type_keywords.items():
         score = sum(1 for kw in keywords if kw in text_lower)
         if score > 0:
             scores[doc_type] = score

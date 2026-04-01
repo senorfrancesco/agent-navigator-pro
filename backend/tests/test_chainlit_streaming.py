@@ -60,6 +60,39 @@ class FakeUserSession:
         self._data[key] = value
 
 
+class _SessionStore:
+    def __init__(self):
+        self._data = {}
+
+    def get(self, key, default=None):
+        return self._data.get(key, default)
+
+    def set(self, key, value):
+        self._data[key] = value
+
+
+class _ResumeFakeStep:
+    def __init__(self, name=None, type=None):
+        self.name = name
+        self.type = type
+        self.output = None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _ResumeFakeMessage:
+    def __init__(self, content=""):
+        self.content = content
+        self.elements = []
+
+    async def send(self):
+        return None
+
+
 @pytest.fixture
 def chainlit_stream_module():
     mock_cl = MagicMock()
@@ -330,6 +363,82 @@ def test_compare_appendix_threshold_moves_long_appendix_to_step(chainlit_stream_
     }
 
     assert module._should_render_compare_appendix_in_step(split_result) is True
+
+
+class TestResumeStreamingIntegration:
+    @pytest.fixture(autouse=True)
+    def _setup_chainlit_mock(self):
+        mock_cl = MagicMock()
+        mock_cl.user_session = _SessionStore()
+        mock_cl.Message = _ResumeFakeMessage
+        mock_cl.Step = _ResumeFakeStep
+        mock_cl.User = MagicMock()
+        mock_cl.Action = MagicMock()
+        mock_cl.AskActionMessage = MagicMock()
+        mock_cl.on_chat_start = lambda f: f
+        mock_cl.on_chat_resume = lambda f: f
+        mock_cl.on_message = lambda f: f
+        mock_cl.on_stop = lambda f: f
+        mock_cl.password_auth_callback = lambda f: f
+        mock_cl.data_layer = lambda f: f
+
+        sys.modules["chainlit"] = mock_cl
+        sys.modules["chainlit.data"] = MagicMock()
+        sys.modules["chainlit.data.sql_alchemy"] = MagicMock()
+
+        if "orchestrator.chainlit_app" in sys.modules:
+            importlib.reload(sys.modules["orchestrator.chainlit_app"])
+        else:
+            import orchestrator.chainlit_app
+
+        self._module = sys.modules["orchestrator.chainlit_app"]
+        yield
+
+        for mod_name in ["chainlit", "chainlit.data", "chainlit.data.sql_alchemy"]:
+            sys.modules.pop(mod_name, None)
+        sys.modules.pop("orchestrator.chainlit_app", None)
+
+    @pytest.mark.asyncio
+    async def test_resume_follow_up_uses_backend_execution_request(self):
+        message = SimpleNamespace(content="Как дела?", elements=[], command=None)
+        store = SimpleNamespace(load_run=AsyncMock(return_value=None))
+        execution_response = {
+            "assistant_message": "ok",
+            "route": "general_chat",
+            "executor": "general_chat",
+            "confidence": 0.0,
+            "margin": 0.0,
+            "reason": "test",
+            "action_required": None,
+        }
+
+        with patch.object(self._module, "get_orchestration_state_store", return_value=store), patch.object(
+            self._module, "_send_control_plane_settings", new=AsyncMock()
+        ), patch.object(self._module, "_sync_thread_presentation", new=AsyncMock()), patch.object(
+            self._module, "_persist_current_backend_state", new=AsyncMock()
+        ), patch.object(
+            self._module, "_render_execution_response", new=AsyncMock()
+        ), patch.object(
+            self._module,
+            "_backend_execute_orchestration",
+            new=AsyncMock(return_value=execution_response),
+        ) as mock_exec:
+            await self._module.on_chat_resume(
+                {
+                    "steps": [
+                        {"type": "user_message", "output": "Привет"},
+                        {"type": "assistant_message", "output": "Здравствуйте"},
+                    ]
+                }
+            )
+            await self._module.on_message(message)
+
+        history = self._module.cl.user_session.get("history")
+        request = mock_exec.await_args_list[-1].args[0]
+        assert history[0] == {"role": "user", "content": "Привет"}
+        assert history[1] == {"role": "assistant", "content": "Здравствуйте"}
+        assert history[-1] == {"role": "user", "content": "Как дела?"}
+        assert request["session_docs"] == {}
 
 
 def test_compare_progress_stages_cover_long_running_compare(chainlit_stream_module):

@@ -2278,6 +2278,15 @@
 | D. Resume/session | #12, #16, #17, #18, #19, #20, #22 | defer | После B3.31a |
 | E. Summary memory | #13, #14, #15 | defer | После resume contract |
 
+Update (2026-04-01):
+- Из старого PR inventory для текущего `dev` целесообразно переносить только:
+  - `#16 add-tests-for-chat-resume-context`
+  - `#10 add-document-type-keywords-section`
+- Кластер summary-memory (`#13/#14/#15`) оставлен в `defer` сознательно:
+  - это усиливает `Chainlit`-specific session/prompt layer;
+  - не бьётся с текущим migration-фокусом из `MIGRATION_TOOLS.md` / `MIGRATION_RAG_OPENWEBUI.md`;
+  - возвращаться к нему имеет смысл только как к backend-owned UI-agnostic summary contract, а не как к прямому порту старых PR.
+
 ---
 
 ## E2E валидация (2026-03-04)

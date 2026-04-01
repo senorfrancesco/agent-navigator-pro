@@ -74,8 +74,8 @@ backend/.env.runtime
 # Local agent/operator workspace files
 .claude/
 .gemini/
-AGENTS.md
-CLAUDE.md
+#AGENTS.md
+#CLAUDE.md
 GEMINI.md
 TASKS_NIGHT.md
 
