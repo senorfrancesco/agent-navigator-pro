@@ -57,12 +57,8 @@ pip install -r backend/requirements.txt
 ### Активация
 
 ```bash
+source ~/.bashrc
 conda activate base
-```
-
-Или через скрипт (создаётся `setup_ubuntu.sh`):
-```bash
-source activate_env.sh
 ```
 
 ### Деактивация
@@ -158,7 +154,7 @@ conda update -n base -c defaults conda
 
 ```bash
 # Если CUDA доступна — пересобрать с GPU-поддержкой
-CMAKE_ARGS="-DLLAMA_CUBLAS=on" pip install llama-cpp-python[server] --force-reinstall --no-cache-dir
+CMAKE_ARGS="-DGGML_CUDA=ON" pip install llama-cpp-python[server] --force-reinstall --no-cache-dir
 ```
 
 ---

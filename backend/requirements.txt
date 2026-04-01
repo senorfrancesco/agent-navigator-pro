@@ -24,6 +24,8 @@ llama-cpp-python[server]>=0.2.0
 # System monitoring
 psutil>=5.9.0
 nvidia-ml-py>=12.535.133
+PyYAML>=6.0.2
+scipy>=1.16.3
 
 # Document processing
 pdfplumber>=0.10.0

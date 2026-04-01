@@ -1,0 +1,16 @@
+ARG BACKEND_BASE_IMAGE=agent-nav-backend-app-offline:v1.0
+FROM ${BACKEND_BASE_IMAGE}
+
+WORKDIR /app/backend
+
+COPY deploy/offline_bundle/requirements.chainlit.lock.txt /tmp/requirements.chainlit.lock.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip install --timeout=120 --retries=3 -r /tmp/requirements.chainlit.lock.txt
+
+RUN mkdir -p /app/backend/.data /app/backend/uploads
+
+EXPOSE 3000
+
+WORKDIR /app/backend/orchestrator
+
+CMD ["chainlit", "run", "chainlit_app.py", "--host", "0.0.0.0", "--port", "3000"]

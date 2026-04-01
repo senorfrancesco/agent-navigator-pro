@@ -158,6 +158,22 @@ def _build_runtime_metadata(ums_status: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _extract_telemetry_details(payload: Dict[str, Any]) -> Dict[str, Any]:
+    telemetry = payload.get("telemetry") if isinstance(payload, dict) else None
+    if not isinstance(telemetry, dict):
+        return {}
+    return {
+        "telemetry_elapsed_ms": telemetry.get("elapsed_ms"),
+        "telemetry_llm_ms": telemetry.get("llm_ms"),
+        "telemetry_embedding_ms": telemetry.get("embedding_ms"),
+        "telemetry_service_ms": telemetry.get("service_ms"),
+        "telemetry_report_ms": telemetry.get("report_ms"),
+        "telemetry_quality_summary": telemetry.get("quality_summary"),
+        "telemetry_stage_count": len(telemetry.get("stage_timings") or []),
+        "telemetry_tool_count": len(telemetry.get("tool_timings") or []),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Сценарии
 # ---------------------------------------------------------------------------
@@ -465,6 +481,7 @@ def scenario_doc_question(client: httpx.Client) -> BenchmarkResult:
                 "orchestration_sec": round(step2_time, 2),
                 "route": data.get("route", "unknown"),
                 "response_preview": answer[:150],
+                **_extract_telemetry_details(data),
             },
         )
     except httpx.ReadTimeout:
@@ -551,6 +568,7 @@ def scenario_compare(client: httpx.Client) -> BenchmarkResult:
                 "workflow_sec": round(step2_time, 2),
                 "route": data.get("route", "unknown"),
                 "response_preview": answer[:150],
+                **_extract_telemetry_details(data),
             },
         )
     except httpx.ReadTimeout:
@@ -637,6 +655,7 @@ def scenario_equipment(client: httpx.Client) -> BenchmarkResult:
                 "workflow_sec": round(step2_time, 2),
                 "route": data.get("route", "unknown"),
                 "response_preview": answer[:150],
+                **_extract_telemetry_details(data),
             },
         )
     except httpx.ReadTimeout:

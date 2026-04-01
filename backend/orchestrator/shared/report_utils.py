@@ -227,13 +227,20 @@ def _read_report_text(filepath: str) -> str:
 def get_uploads_dir() -> str:
     """Возвращает путь к директории загрузок, общую для контейнера и хоста."""
     # По умолчанию для Docker
-    default_dir = "/app/uploads"
+    default_dir = "/app/backend/uploads"
     if not os.path.exists(default_dir) and not os.getenv("UPLOADS_DIR"):
         # Фолбэк для запуска на хосте вне Docker
-        default_dir = os.path.join(
+        candidate = os.path.join(
             os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
-            'backend', 'open_webui_uploads'
+            'backend', 'uploads'
         )
+        if os.path.exists(candidate):
+            default_dir = candidate
+        else:
+            default_dir = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+                'backend', 'open_webui_uploads'
+            )
     return os.getenv("UPLOADS_DIR", default_dir)
 
 def save_report_with_dedup(

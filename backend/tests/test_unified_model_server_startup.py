@@ -6,7 +6,7 @@ import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
@@ -1808,6 +1808,28 @@ async def test_non_stream_local_llama_infer_enables_cache_prompt_by_default():
             "headers": {},
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_non_stream_infer_uses_env_configured_timeout(monkeypatch):
+    monkeypatch.setenv("UMS_INFER_TIMEOUT_S", "777")
+    fake_client = _FakePostAsyncClient(_FakeJSONResponse({"id": "cmpl-1"}))
+    client_factory = MagicMock(return_value=fake_client)
+
+    with patch.object(ums_server, "_start_server", return_value="qwen-14b-llm"), patch(
+        "services.model_manager.unified_model_server.httpx.AsyncClient",
+        client_factory,
+    ):
+        response = await ums_server.infer(
+            ums_server.InferRequest(
+                model_id="qwen-14b-llm",
+                payload={"prompt": "hello"},
+                stream=False,
+            )
+        )
+
+    assert response["status"] == "success"
+    assert client_factory.call_args.kwargs["timeout"] == 777.0
 
 
 @pytest.mark.asyncio

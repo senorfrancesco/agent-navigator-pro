@@ -654,6 +654,10 @@ def _resolve_backend_mode() -> str:
     return "llama-cpp-python"
 
 
+def _resolve_infer_timeout_s() -> float:
+    return float(os.getenv("UMS_INFER_TIMEOUT_S", "300.0"))
+
+
 def _should_use_vllm_backend(config: Dict[str, Any]) -> bool:
     return _resolve_backend_mode() == "vllm" and str(config.get("type")) == "gguf"
 
@@ -1830,7 +1834,7 @@ async def _proxy_sse_stream(
             if not slot_pre_acquired:
                 await _reserve_runtime_slot(sem, "stream")
                 owns_slot = True
-            async with httpx.AsyncClient(timeout=300.0, headers=headers) as stream_client:
+            async with httpx.AsyncClient(timeout=_resolve_infer_timeout_s(), headers=headers) as stream_client:
                 async with stream_client.stream("POST", url, json=payload) as resp:
                     resp.raise_for_status()
                     async for line in resp.aiter_lines():
@@ -2092,7 +2096,7 @@ async def infer(request: InferRequest):
                 url = _build_infer_url(started_config, is_chat=is_chat)
                 headers = _build_upstream_headers(started_config)
                 payload = _build_infer_payload(started_model_id, started_config, request.payload)
-                async with httpx.AsyncClient(timeout=300.0, headers=headers) as client:
+                async with httpx.AsyncClient(timeout=_resolve_infer_timeout_s(), headers=headers) as client:
                     resp = await client.post(url, json=payload)
                     resp.raise_for_status()
                     return {

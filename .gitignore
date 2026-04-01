@@ -78,7 +78,11 @@ AGENTS.md
 CLAUDE.md
 GEMINI.md
 TASKS_NIGHT.md
-docs/plans/
 
 # Local ad-hoc Node/Playwright bootstrap
 package-lock.json
+
+# Local visual/debug artifacts
+output/
+tmp/
+agent-navigator-offline-bundle*.tar.gz

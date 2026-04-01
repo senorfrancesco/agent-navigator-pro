@@ -2,6 +2,8 @@
 
 Этот документ фиксирует каноническую карту runtime-скриптов проекта и разделяет user-facing entrypoints, compatibility aliases, legacy path и internal helpers.
 
+Канонический справочник флагов и env-переменных находится в [docs/flags-reference.md](../flags-reference.md). Здесь остаётся карта entrypoints, script roles и launcher/runtime semantics.
+
 ## Canonical Paths
 
 - Основной entrypoint для разработки: `./scripts/launcher.sh --target native --profile adaptive`
@@ -598,11 +600,13 @@ python scripts/benchmark_compare.py a.json b.json --json-output results/compare.
 Эти скрипты пока не являются рабочими install steps и должны документироваться как scaffold-only:
 - `scripts/install/install_dependencies.sh`
 - `scripts/install/install_cuda.sh`
-- `scripts/install/build_llamacpp.sh`
 - `scripts/install/verify_system.sh`
 - `scripts/utils/system_check.sh`
 
 У всех сейчас поддерживается только `--help`; реального install contract за ними пока нет.
+
+Исключение:
+- `scripts/install/build_llamacpp.sh` уже рабочий build-step. Он готовит локальный source tree `llama.cpp`, собирает `llama-server` и используется из `scripts/setup_ubuntu.sh`.
 
 ## Installer Status
 
@@ -610,9 +614,11 @@ python scripts/benchmark_compare.py a.json b.json --json-output results/compare.
 
 - `scripts/install/install.sh` уже работает как installer coordinator;
 - `scripts/install/install_ubuntu.sh`, `install_ubuntu_server.sh`, `install_wsl.sh`, `install_windows.ps1` существуют как platform wrappers;
-- `scripts/install/*.sh` step scripts и `scripts/utils/system_check.sh` пока scaffold-only;
+- `scripts/install/build_llamacpp.sh` уже рабочий build-step для локального `llama-server`;
+- остальные `scripts/install/*.sh` step scripts и `scripts/utils/system_check.sh` пока scaffold-only;
 - `scripts/models/install_models.sh` уже рабочий coordinator для model provisioning;
 - heavy Linux install path всё ещё проходит через `scripts/setup_ubuntu.sh`, а `launcher.sh --install` ведёт в `scripts/install/install.sh -> platform wrapper`.
+- `scripts/setup_ubuntu.sh` больше не создаёт `activate_env.sh`; вместо этого он предлагает managed-block в `~/.bashrc` для `conda`, `CUDA` и путей локальной сборки `llama.cpp`.
 
 Поддерживаемые platform-specific paths сейчас такие:
 

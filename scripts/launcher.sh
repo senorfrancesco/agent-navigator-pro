@@ -33,7 +33,8 @@ print_help() {
   cat <<EOF
 launcher.sh
 
-Canonical entrypoint for Agent Navigator runtime and guided install.
+Compatibility wrapper for manual/native shell usage around the Python-first operator control plane.
+Operator UI and `/operator/*` endpoints remain the canonical product API; this script is kept for CLI, install and recovery workflows.
 
 Использование:
   ./scripts/launcher.sh --target native --profile adaptive

@@ -12,6 +12,21 @@ DEFAULT_CHAINLIT_AUTH_SECRET="agent-navigator-secret-key-change-me"
 MODE="check"
 TARGET="native"
 PLATFORM="auto"
+PYTHON_CMD=""
+
+resolve_python_cmd() {
+  if command -v python >/dev/null 2>&1; then
+    PYTHON_CMD="python"
+    return 0
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    PYTHON_CMD="python3"
+    return 0
+  fi
+
+  return 1
+}
 
 print_help() {
   cat <<EOF
@@ -95,7 +110,7 @@ source_backend_env() {
 }
 
 generate_chainlit_auth_secret() {
-  python -c 'import secrets; print(secrets.token_urlsafe(48))'
+  "$PYTHON_CMD" -c 'import secrets; print(secrets.token_urlsafe(48))'
 }
 
 upsert_env_var() {
@@ -122,10 +137,36 @@ upsert_env_var() {
   mv "$tmp_file" "$BACKEND_ENV_FILE"
 }
 
+read_env_var_from_file() {
+  local key="$1"
+
+  if [ ! -f "$BACKEND_ENV_FILE" ]; then
+    return 1
+  fi
+
+  awk -F= -v key="$key" '
+    $1 == key {
+      value = substr($0, index($0, "=") + 1)
+      gsub(/^"/, "", value)
+      gsub(/"$/, "", value)
+      print value
+      found = 1
+      exit
+    }
+    END {
+      if (!found) {
+        exit 1
+      }
+    }
+  ' "$BACKEND_ENV_FILE"
+}
+
 ensure_chainlit_auth_secret() {
   local env_created="$1"
-  local current="${CHAINLIT_AUTH_SECRET:-}"
+  local current=""
   local event=""
+
+  current="$(read_env_var_from_file "CHAINLIT_AUTH_SECRET" || true)"
 
   if [ -z "$current" ]; then
     event="secret-generated"
@@ -154,6 +195,12 @@ if [ ! -f "$BACKEND_ENV_FILE" ]; then
   env_created=1
 fi
 
+if ! resolve_python_cmd; then
+  echo "missing:python" >&2
+  echo "Bootstrap check failed. Install Python 3 or make python/python3 available on PATH." >&2
+  exit 1
+fi
+
 source_backend_env
 ensure_chainlit_auth_secret "$env_created"
 source_backend_env
@@ -177,7 +224,10 @@ check_cmd() {
 
 if [ "${AGENT_NAVIGATOR_SKIP_COMMAND_CHECKS:-0}" != "1" ]; then
   check_cmd "tmux" "tmux"
-  check_cmd "python" "python"
+  if ! command -v python >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
+    echo "missing:python"
+    missing=1
+  fi
 
   if [ "$TARGET" = "container" ]; then
     check_cmd "docker" "docker"

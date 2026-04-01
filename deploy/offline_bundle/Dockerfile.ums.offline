@@ -1,0 +1,84 @@
+FROM python:3.11-slim-bookworm AS python-runtime
+
+FROM nvidia/cuda:12.8.1-devel-ubuntu24.04 AS llama-builder
+
+WORKDIR /opt
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY deploy/offline_bundle/vendor/llama.cpp /opt/llama.cpp
+
+RUN test -f /opt/llama.cpp/CMakeLists.txt || (echo "не найден локальный source tree llama.cpp по пути deploy/offline_bundle/vendor/llama.cpp" >&2 && exit 1)
+
+# Временно собираем fatbin для sm_75 и sm_86, чтобы bundle можно было
+# локально прогнать на этой build-машине с RTX 2070. После локального GPU-smoke
+# теста можно вернуть только "86", если нужна более узкая и лёгкая сборка под A4000.
+RUN cmake -S /opt/llama.cpp -B /opt/llama.cpp/build \
+    -DGGML_CUDA=ON \
+    -DCMAKE_CUDA_ARCHITECTURES="75;86" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DLLAMA_BUILD_EXAMPLES=OFF \
+    -DLLAMA_BUILD_TESTS=OFF \
+    -DCMAKE_EXE_LINKER_FLAGS="-L/usr/local/cuda/lib64/stubs -lcuda" && \
+    cmake --build /opt/llama.cpp/build --config Release --target llama-server -j"$(nproc)"
+
+
+FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04
+
+WORKDIR /app/backend
+
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONPATH=/app/backend
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH=/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+#ENV PIP_NO_CACHE_DIR=1
+
+ARG TORCH_VERSION=2.8.0
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    git \
+    libgdk-pixbuf-2.0-0 \
+    libglib2.0-0 \
+    libgomp1 \
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    shared-mime-info \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=python-runtime /usr/local /usr/local
+
+RUN python3.11 -m venv /opt/venv && \
+    /opt/venv/bin/python -m pip --version
+
+COPY deploy/offline_bundle/requirements.ums.lock.txt /tmp/requirements.ums.lock.txt
+COPY deploy/offline_bundle/wheelhouse /opt/wheelhouse
+RUN find /opt/wheelhouse -maxdepth 1 \( -name '*.whl' -o -name '*.tar.gz' -o -name '*.zip' \) | grep -q . || \
+    (echo "wheelhouse пуст: сначала выполните deploy/offline_bundle/scripts/build_wheelhouse.sh" >&2 && exit 1)
+RUN --mount=type=cache,id=pip,target=/root/.cache/pip \
+    python -m pip install \
+    --break-system-packages \
+    --no-index \
+    --find-links /opt/wheelhouse \
+    torch==${TORCH_VERSION} \
+    -r /tmp/requirements.ums.lock.txt
+
+COPY --from=llama-builder /opt/llama.cpp/build/bin/llama-server /usr/local/bin/llama-server
+COPY --from=llama-builder /opt/llama.cpp/build/bin/*.so* /usr/local/lib/
+RUN ldconfig
+
+COPY backend /app/backend
+
+RUN mkdir -p /app/backend/.data /app/backend/uploads /app/backend/models
+
+EXPOSE 8090
+
+CMD ["python3", "services/model_manager/unified_model_server.py"]

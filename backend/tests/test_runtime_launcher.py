@@ -62,7 +62,8 @@ def test_launcher_help_documents_install_and_platform_flags():
     result = _run_script("launcher.sh", "--help", env=os.environ.copy())
 
     assert result.returncode == 0
-    assert "Canonical entrypoint" in result.stdout
+    assert "Compatibility wrapper" in result.stdout
+    assert "Python-first operator control plane" in result.stdout
     assert "--install --platform ubuntu" in result.stdout
     assert "--hardware-override-file <path>" in result.stdout
 

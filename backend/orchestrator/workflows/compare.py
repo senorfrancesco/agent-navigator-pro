@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import asyncio
+import time
 import httpx
 from typing import TypedDict, List, Dict, Any, Annotated, Optional
 import operator
@@ -19,6 +20,7 @@ from services.model_manager.ums_client import ums_client
 from services.observability import inc_metric_counter
 from orchestrator.utils import parse_json_garbage
 from orchestrator.shared.http_client import get_shared_client
+from orchestrator.telemetry_runtime import record_current_duration
 
 # Настройки URL серверов (через переменные окружения)
 MCP_DOCUMENT_SERVER_URL = os.getenv("MCP_DOCUMENT_SERVER_URL", "http://localhost:8001")
@@ -36,12 +38,20 @@ _LEGAL_COMPARE_SELECTION = resolve_model_selection("llm.legal_compare")
 
 
 async def _infer_compare_llm(prompt: str, payload: Dict[str, Any]) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+    started = time.monotonic()
     response = await ums_client.async_infer(
         "llm.legal_compare",
         {
             **payload,
             "prompt": prompt,
         },
+    )
+    record_current_duration(
+        name="ums_compare_infer",
+        elapsed_seconds=time.monotonic() - started,
+        kind="tool",
+        category="llm",
+        meta={"role_key": "llm.legal_compare"},
     )
     model_execution = response.get("model_execution") if isinstance(response, dict) else None
     if not isinstance(model_execution, dict):
@@ -68,6 +78,8 @@ class CompareState(TypedDict):
     text_2: str
     document_role_1: str
     document_role_2: str
+    base_document_title_1: str
+    base_document_title_2: str
     pair_relation_type: str
     compare_mode_selected: str
     semantic_fallback_triggered: bool
@@ -78,9 +90,25 @@ class CompareState(TypedDict):
     final_report: str
     errors: List[str]
     model_execution: Annotated[List[Dict[str, Any]], operator.add]
+    runtime_context: Dict[str, Any]
     session_id: str  # Привязка workflow к сессии (для дедупликации)
 
 # === Nodes ===
+
+def _get_runtime_context(state: CompareState) -> Dict[str, Any]:
+    raw = state.get("runtime_context") or {}
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _format_elapsed_seconds(elapsed_seconds: float) -> str:
+    clamped = max(0.0, float(elapsed_seconds))
+    if clamped < 60:
+        return f"{clamped:.1f} сек."
+    minutes, seconds = divmod(int(round(clamped)), 60)
+    if minutes < 60:
+        return f"{minutes} мин. {seconds} сек."
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} ч. {minutes} мин. {seconds} сек."
 
 def truncate_text(text: str, max_chars: int = COMPARE_TRUNCATE_CHARS) -> str:
     if len(text) <= max_chars:
@@ -129,12 +157,45 @@ def _detect_document_role(name: str, text: str) -> str:
     return "other"
 
 
+def _extract_base_document_title(text: str) -> str:
+    head = text[:6000]
+    patterns = [
+        r"Внести\s+в\s+Закон\s+Республики\s+Беларусь[^«]{0,200}«([^»]{5,200})»",
+        r"Об\s+изменении\s+Закона\s+Республики\s+Беларусь\s+«([^»]{5,200})»",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, head, flags=re.IGNORECASE | re.DOTALL)
+        if match:
+            return re.sub(r"\s+", " ", match.group(1)).strip()
+    return ""
+
+
+def _normalize_legal_title(title: str) -> str:
+    return re.sub(r"\W+", " ", title.lower()).strip()
+
+
+def _is_amendment_document(text: str) -> bool:
+    head = text[:6000].lower()
+    return "об изменении" in head and "внести в закон" in head
+
+
 def _determine_compare_mode(
     role_1: str,
     role_2: str,
     name_1: str,
     name_2: str,
+    text_1: str = "",
+    text_2: str = "",
 ) -> tuple[str, str]:
+    base_title_1 = _normalize_legal_title(_extract_base_document_title(text_1))
+    base_title_2 = _normalize_legal_title(_extract_base_document_title(text_2))
+    if (
+        base_title_1
+        and base_title_1 == base_title_2
+        and _is_amendment_document(text_1)
+        and _is_amendment_document(text_2)
+    ):
+        return "same_base_law_amendments", "semantic_compare"
     if role_1 == "policy" and role_2 == "contract":
         return "policy_vs_contract", "heterogeneous_alignment"
     if role_1 == "contract" and role_2 == "policy":
@@ -148,9 +209,169 @@ def _determine_compare_mode(
     return "unknown", "semantic_compare"
 
 
+def _resolve_match_threshold(state: CompareState) -> float:
+    if state.get("pair_relation_type") == "same_base_law_amendments":
+        return 0.64
+    if state.get("compare_mode_selected") == "semantic_compare":
+        return 0.68
+    return 0.72
+
+
+def _resolve_analysis_batch_size(state: CompareState) -> int:
+    if state.get("pair_relation_type") == "same_base_law_amendments":
+        return 1
+    if state.get("compare_mode_selected") == "semantic_compare":
+        return 2
+    return BATCH_SIZE
+
+
 def _append_structural_result(results: List[Dict[str, Any]], match: Dict[str, Any]) -> None:
     content = match.get("new_text", "") if match.get("type") == "ADDED" else match.get("old_text", "")
     results.append({"type": match["type"], "diff": "Структурное изменение", "content": content})
+
+
+def _build_compare_batch_items_text(batch: List[Dict[str, Any]]) -> str:
+    parts: List[str] = []
+    for idx, item in enumerate(batch, start=1):
+        diff_type = item.get("type", "MODIFIED")
+        if diff_type == "ADDED":
+            parts.append(
+                f"\n[{idx}] TYPE=ADDED\n"
+                f"ДОБАВЛЕНО: {truncate_text(item.get('new_text', ''), 800)}\n"
+            )
+        elif diff_type == "DELETED":
+            parts.append(
+                f"\n[{idx}] TYPE=DELETED\n"
+                f"УДАЛЕНО: {truncate_text(item.get('old_text', ''), 800)}\n"
+            )
+        else:
+            parts.append(
+                f"\n[{idx}] TYPE=MODIFIED\n"
+                f"СТАРЫЙ: {truncate_text(item.get('old_text', ''), 800)}\n"
+                f"НОВЫЙ: {truncate_text(item.get('new_text', ''), 800)}\n"
+            )
+    return "".join(parts)
+
+
+def _prioritize_semantic_candidates(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _priority(item: Dict[str, Any]) -> tuple[int, float, int]:
+        diff_type = item.get("type", "MODIFIED")
+        old_text = str(item.get("old_text") or "")
+        new_text = str(item.get("new_text") or "")
+        text = f"{old_text} {new_text}".lower()
+        critical_kw = ("обязан", "запрещ", "огранич", "доступ", "аккредитац", "агрегатор", "экстрем")
+        keyword_hits = sum(1 for keyword in critical_kw if keyword in text)
+        score = float(item.get("similarity_score", item.get("score", 0.0)) or 0.0)
+        weight = 0 if diff_type == "MODIFIED" else 1
+        return (weight, score, -keyword_hits)
+
+    return sorted(candidates, key=_priority)
+
+
+def _extract_compare_response_content(response: Dict[str, Any]) -> str:
+    content = response.get("content", "")
+    if not content and "choices" in response:
+        content = response["choices"][0].get("text", "")
+    elif not content and "result" in response and "choices" in response.get("result", {}):
+        content = response["result"]["choices"][0].get("text", "")
+    return content
+
+
+def _normalize_compare_batch_payload(
+    batch: List[Dict[str, Any]],
+    parsed: Any,
+) -> List[Dict[str, Any]]:
+    if not isinstance(parsed, list):
+        parsed = [parsed] if isinstance(parsed, dict) else []
+
+    normalized: List[Dict[str, Any]] = []
+    for idx, match in enumerate(batch):
+        item_data = parsed[idx] if idx < len(parsed) and isinstance(parsed[idx], dict) else {}
+        diff_type = match.get("type", "MODIFIED")
+        if item_data and (item_data.get("is_critical") or len(item_data.get("diff", " ")) > 5):
+            payload = {
+                "type": diff_type,
+                "is_critical": item_data.get("is_critical"),
+                "diff": item_data.get("diff"),
+                "impact": item_data.get("impact"),
+                "old_text": match.get("old_text", ""),
+                "new_text": match.get("new_text", ""),
+            }
+            if diff_type in {"ADDED", "DELETED"}:
+                payload["content"] = match.get("new_text", "") if diff_type == "ADDED" else match.get("old_text", "")
+            normalized.append(payload)
+        elif diff_type in {"ADDED", "DELETED"}:
+            payload = []
+            _append_structural_result(payload, match)
+            normalized.extend(payload)
+        else:
+            normalized.append({
+                "type": "MODIFIED",
+                "is_critical": False,
+                "diff": "Ошибка анализа",
+                "impact": "Требуется ручной анализ",
+                "old_text": match.get("old_text", ""),
+                "new_text": match.get("new_text", ""),
+            })
+    return normalized
+
+
+async def _analyze_compare_batch(
+    *,
+    batch: List[Dict[str, Any]],
+    model_execution_events: List[Dict[str, Any]],
+    allow_item_retry: bool = True,
+) -> List[Dict[str, Any]]:
+    items_text = _build_compare_batch_items_text(batch)
+    prompt = f"""<|im_start|>system
+Ты эксперт-юрист. Проанализируй {len(batch)} изменений в документе.
+Для каждого изменения объясни юридический смысл, даже если это просто добавленный или удалённый фрагмент.
+Верни JSON массив из ровно {len(batch)} объектов с полями:
+is_critical, diff, impact.<|im_end|>
+<|im_start|>user
+Для каждого из {len(batch)} изменений определи юридическую суть.
+{items_text}
+Ответ — JSON массив из ровно {len(batch)} объектов:
+[{{"is_critical": true/false, "diff": "суть изменения", "impact": "последствия"}}]<|im_end|>
+<|im_start|>assistant
+"""
+    payload = {
+        "prompt": prompt,
+        "max_tokens": COMPARE_ANALYSIS_MAX_TOKENS,
+        "temperature": COMPARE_ANALYSIS_TEMPERATURE,
+        "echo": False,
+    }
+    response, model_execution = await _infer_compare_llm(prompt, payload)
+    if model_execution:
+        model_execution_events.append(model_execution)
+
+    content = _extract_compare_response_content(response)
+    parsed = parse_json_garbage(content)
+    parsed_list = parsed if isinstance(parsed, list) else ([parsed] if isinstance(parsed, dict) else [])
+
+    if len(parsed_list) < len(batch):
+        logger.warning(
+            "Compare analyze fallback: structured output count mismatch batch=%s parsed=%s",
+            len(batch),
+            len(parsed_list),
+        )
+        inc_metric_counter(
+            "agent_nav_fallback_events_total",
+            labels={"component": "compare_workflow", "fallback": "analyze_parse_partial", "source": "workflow"},
+        )
+        if allow_item_retry and len(batch) > 1:
+            retried_results: List[Dict[str, Any]] = []
+            for item in batch:
+                retried_results.extend(
+                    await _analyze_compare_batch(
+                        batch=[item],
+                        model_execution_events=model_execution_events,
+                        allow_item_retry=False,
+                    )
+                )
+            return retried_results
+
+    return _normalize_compare_batch_payload(batch, parsed_list)
 
 
 def _build_heterogeneous_compare_prompt(
@@ -174,10 +395,14 @@ def _build_heterogeneous_compare_prompt(
     relation_type = state.get("pair_relation_type", "unknown")
     role_1 = state.get("document_role_1", "other")
     role_2 = state.get("document_role_2", "other")
+    base_title_1 = state.get("base_document_title_1", "")
+    base_title_2 = state.get("base_document_title_2", "")
     diffs_block = "\n".join(structural_lines) if structural_lines else "Явных структурных различий не выделено."
 
     return f"""<|im_start|>system
-Ты эксперт по юридическому анализу документов. Твоя задача — не делать line-by-line redline, а объяснить юридическое соотношение документов разных ролей.
+Ты эксперт по юридическому анализу документов. Твоя задача — не делать line-by-line redline, а объяснить юридическое соотношение документов по смыслу.
+Если документы вносят изменения в один и тот же базовый акт, выдели совпадающие темы, новые блоки регулирования и нормы, которые могли быть перенесены или переформулированы.
+Если документы относятся к разным объектам регулирования и прямого сопоставления нет, скажи это прямо.
 Верни JSON объект с полями:
 {{
   "relation_summary": "краткий вывод",
@@ -192,6 +417,8 @@ def _build_heterogeneous_compare_prompt(
 Тип пары: {relation_type}
 Документ 1: {state.get('name_1')} (role={role_1})
 Документ 2: {state.get('name_2')} (role={role_2})
+Базовый акт 1: {base_title_1 or "не определён"}
+Базовый акт 2: {base_title_2 or "не определён"}
 
 Краткое содержание документа 1:
 {truncate_text(state.get('text_1', ''), 1800)}
@@ -266,14 +493,30 @@ async def load_documents_node(state: CompareState):
     client = await get_shared_client()
     try:
         # Загружаем первый документ
+        started = time.monotonic()
         resp1 = await client.post(f"{MCP_DOCUMENT_SERVER_URL}/load_document", json={"path": state['input_1']})
         resp1.raise_for_status()
         text1 = resp1.json().get("text", "")
+        record_current_duration(
+            name="document_server.load_document",
+            elapsed_seconds=time.monotonic() - started,
+            kind="tool",
+            category="service",
+            meta={"document": state.get("name_1") or os.path.basename(state["input_1"])},
+        )
         
         # Загружаем второй документ
+        started = time.monotonic()
         resp2 = await client.post(f"{MCP_DOCUMENT_SERVER_URL}/load_document", json={"path": state['input_2']})
         resp2.raise_for_status()
         text2 = resp2.json().get("text", "")
+        record_current_duration(
+            name="document_server.load_document",
+            elapsed_seconds=time.monotonic() - started,
+            kind="tool",
+            category="service",
+            meta={"document": state.get("name_2") or os.path.basename(state["input_2"])},
+        )
         
         # Разбиваем на чанки
         def dc_smart_chunk(text: str) -> List[str]:
@@ -295,11 +538,15 @@ async def load_documents_node(state: CompareState):
         chunks_new = dc_smart_chunk(text2)
         role_1 = _detect_document_role(state.get("name_1") or os.path.basename(state["input_1"]), text1)
         role_2 = _detect_document_role(state.get("name_2") or os.path.basename(state["input_2"]), text2)
+        base_title_1 = _extract_base_document_title(text1)
+        base_title_2 = _extract_base_document_title(text2)
         pair_relation_type, compare_mode_selected = _determine_compare_mode(
             role_1,
             role_2,
             state.get("name_1") or os.path.basename(state["input_1"]),
             state.get("name_2") or os.path.basename(state["input_2"]),
+            text1,
+            text2,
         )
         print(f"[Workflow] Chunks: old={len(chunks_old)}, new={len(chunks_new)}")
         return {
@@ -307,6 +554,8 @@ async def load_documents_node(state: CompareState):
             "text_2": text2,
             "document_role_1": role_1,
             "document_role_2": role_2,
+            "base_document_title_1": base_title_1,
+            "base_document_title_2": base_title_2,
             "pair_relation_type": pair_relation_type,
             "compare_mode_selected": compare_mode_selected,
             "semantic_fallback_triggered": False,
@@ -330,13 +579,22 @@ async def match_chunks_node(state: CompareState):
 
     client = await get_shared_client()
     try:
+        threshold = _resolve_match_threshold(state)
         # Вызываем новый батчевый эндпоинт
+        started = time.monotonic()
         resp = await client.post(f"{MCP_LEGAL_SERVER_URL}/match_batches", json={
             "list_old": state['chunks_old'],
             "list_new": state['chunks_new'],
-            "threshold": 0.72
+            "threshold": threshold,
         })
         resp.raise_for_status()
+        record_current_duration(
+            name="legal_server.match_batches",
+            elapsed_seconds=time.monotonic() - started,
+            kind="tool",
+            category="service",
+            meta={"old_chunks": len(state["chunks_old"]), "new_chunks": len(state["chunks_new"])},
+        )
         data = resp.json()
 
         if data.get("status") == "error":
@@ -391,6 +649,11 @@ async def analyze_differences_node(state: CompareState):
     role_2 = state.get("document_role_2", "other")
     should_run_semantic_fallback = (
         compare_mode_selected == "heterogeneous_alignment"
+        or state.get("pair_relation_type") == "same_base_law_amendments"
+        or (
+            compare_mode_selected == "semantic_compare"
+            and len(structural) >= max(1, len(to_analyze))
+        )
         or (role_1 != role_2 and len(structural) > 0 and len(to_analyze) == 0)
     )
 
@@ -412,71 +675,25 @@ async def analyze_differences_node(state: CompareState):
                 labels={"component": "compare_workflow", "fallback": "semantic_compare_error", "source": "workflow"},
             )
 
-    for m in structural:
-        _append_structural_result(results, m)
+    semantic_candidates = _prioritize_semantic_candidates(to_analyze + structural)
 
     # Batch LLM анализ: по BATCH_SIZE различий в одном промпте
-    total_batches = (len(to_analyze) + BATCH_SIZE - 1) // BATCH_SIZE if to_analyze else 0
-    for batch_idx, batch_start in enumerate(range(0, len(to_analyze), BATCH_SIZE)):
-        batch = to_analyze[batch_start:batch_start + BATCH_SIZE]
+    analysis_batch_size = _resolve_analysis_batch_size(state)
+    print(
+        f"[Workflow] Pair relation={state.get('pair_relation_type', 'unknown')}, "
+        f"threshold={_resolve_match_threshold(state):.2f}, analysis_batch_size={analysis_batch_size}"
+    )
+    total_batches = (len(semantic_candidates) + analysis_batch_size - 1) // analysis_batch_size if semantic_candidates else 0
+    for batch_idx, batch_start in enumerate(range(0, len(semantic_candidates), analysis_batch_size)):
+        batch = semantic_candidates[batch_start:batch_start + analysis_batch_size]
         print(f"[Workflow] LLM batch {batch_idx+1}/{total_batches} ({len(batch)} diffs)")
-
-        items_text = ""
-        for idx, m in enumerate(batch):
-            items_text += f"\n[{idx+1}] СТАРЫЙ: {truncate_text(m.get('old_text',''), 800)}\n    НОВЫЙ: {truncate_text(m.get('new_text',''), 800)}\n"
-
-        prompt = f"""<|im_start|>system
-Ты эксперт-юрист. Проанализируй {len(batch)} изменений в документе.<|im_end|>
-<|im_start|>user
-Для каждого из {len(batch)} изменений определи юридическую суть.
-{items_text}
-Ответ — JSON массив из ровно {len(batch)} объектов:
-[{{"is_critical": true/false, "diff": "суть изменения", "impact": "последствия"}}]<|im_end|>
-<|im_start|>assistant
-"""
         try:
-            payload = {
-                "prompt": prompt,
-                "max_tokens": COMPARE_ANALYSIS_MAX_TOKENS,
-                "temperature": COMPARE_ANALYSIS_TEMPERATURE,
-                "echo": False,
-            }
-            response, model_execution = await _infer_compare_llm(prompt, payload)
-
-            content = response.get("content", "")
-            if not content and "choices" in response:
-                content = response["choices"][0].get("text", "")
-            elif not content and "result" in response and "choices" in response.get("result", {}):
-                content = response["result"]["choices"][0].get("text", "")
-
-            parsed = parse_json_garbage(content)
-            if not isinstance(parsed, list):
-                parsed = [parsed] if isinstance(parsed, dict) else []
-            if len(parsed) < len(batch):
-                logger.warning(
-                    "Compare analyze fallback: structured output count mismatch batch=%s parsed=%s",
-                    len(batch),
-                    len(parsed),
+            results.extend(
+                await _analyze_compare_batch(
+                    batch=batch,
+                    model_execution_events=model_execution_events,
                 )
-                inc_metric_counter(
-                    "agent_nav_fallback_events_total",
-                    labels={"component": "compare_workflow", "fallback": "analyze_parse_partial", "source": "workflow"},
-                )
-
-            for idx, m in enumerate(batch):
-                item_data = parsed[idx] if idx < len(parsed) else {}
-                if item_data and (item_data.get("is_critical") or len(item_data.get("diff", " ")) > 5):
-                    results.append({
-                        "type": "MODIFIED",
-                        "is_critical": item_data.get("is_critical"),
-                        "diff": item_data.get("diff"),
-                        "impact": item_data.get("impact"),
-                        "old_text": m.get('old_text', ''),
-                        "new_text": m.get('new_text', '')
-                    })
-
-            if model_execution:
-                model_execution_events.append(model_execution)
+            )
 
         except Exception as e:
             print(f"[Workflow] Error in batch {batch_idx+1}: {e}")
@@ -486,14 +703,18 @@ async def analyze_differences_node(state: CompareState):
                 labels={"component": "compare_workflow", "fallback": "analyze_batch_error", "source": "workflow"},
             )
             for m in batch:
-                results.append({
-                    "type": "MODIFIED",
-                    "is_critical": False,
-                    "diff": "Ошибка анализа",
-                    "impact": "Требуется ручной анализ",
-                    "old_text": m.get('old_text', ''),
-                    "new_text": m.get('new_text', '')
-                })
+                diff_type = m.get("type", "MODIFIED")
+                if diff_type in {"ADDED", "DELETED"}:
+                    _append_structural_result(results, m)
+                else:
+                    results.append({
+                        "type": "MODIFIED",
+                        "is_critical": False,
+                        "diff": "Ошибка анализа",
+                        "impact": "Требуется ручной анализ",
+                        "old_text": m.get('old_text', ''),
+                        "new_text": m.get('new_text', '')
+                    })
 
     return {
         "analysis_results": results,
@@ -503,14 +724,22 @@ async def analyze_differences_node(state: CompareState):
 
 async def generate_report_node(state: CompareState):
     """Формирует финальный Markdown отчет и сохраняет его."""
-    import time
     import glob as glob_mod
 
     name_1 = state.get('name_1') or os.path.basename(state['input_1'])
     name_2 = state.get('name_2') or os.path.basename(state['input_2'])
+    runtime_context = _get_runtime_context(state)
 
     report = "# Отчет о сравнении документов\n\n"
     report += f"**Дата:** {time.strftime('%Y-%m-%d %H:%M')}\n"
+    started_at_monotonic = runtime_context.get("started_at_monotonic")
+    if started_at_monotonic is not None:
+        try:
+            elapsed_seconds = time.monotonic() - float(started_at_monotonic)
+        except (TypeError, ValueError):
+            elapsed_seconds = None
+        if elapsed_seconds is not None:
+            report += f"**Время выполнения:** {_format_elapsed_seconds(elapsed_seconds)}\n"
     report += f"**Файлы:**\n- Старая версия: {name_1}\n- Новая версия: {name_2}\n\n"
     report += f"**Найдено изменений:** {len(state['analysis_results'])}\n\n"
     legal_summaries = [r for r in state["analysis_results"] if r.get("type") == "LEGAL_SUMMARY"]
@@ -561,9 +790,17 @@ async def generate_report_node(state: CompareState):
             report += f"> **Стало:** {r.get('new_text', '')[:200]}...\n\n"
         elif diff_type == 'ADDED':
             report += "### ✅ ДОБАВЛЕНО\n"
+            if r.get('diff'):
+                report += f"**Суть:** {r.get('diff')}\n"
+            if r.get('impact'):
+                report += f"**Влияние:** {r.get('impact')}\n"
             report += f"> {r.get('content', '')[:200]}...\n\n"
         elif diff_type == 'DELETED':
             report += "### ❌ УДАЛЕНО\n"
+            if r.get('diff'):
+                report += f"**Суть:** {r.get('diff')}\n"
+            if r.get('impact'):
+                report += f"**Влияние:** {r.get('impact')}\n"
             report += f"> {r.get('content', '')[:200]}...\n\n"
 
     # Сохранение в файл (с проверкой дубликатов через общую утилиту)

@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from orchestrator.execution_runtime import (
     ExecutionDependencies,
     _DOCUMENTS_SUMMARY_CACHE,
+    _extract_quality_signals_from_result,
     _execute_document_analysis,
     _execute_documents_summary,
     _run_graph,
@@ -36,6 +37,10 @@ def setup_function():
 def teardown_function():
     reset_observability_metrics()
     _DOCUMENTS_SUMMARY_CACHE.clear()
+
+
+def _strip_timing_footer(text: str) -> str:
+    return str(text).split("\n\n---\nTiming / Quality", 1)[0]
 
 
 @pytest.fixture(autouse=True)
@@ -148,8 +153,36 @@ def test_execute_orchestration_runs_chat_handler_via_backend_dependencies():
     )
 
     assert response["executor"] == "chat"
-    assert response["assistant_message"] == "Привет!"
+    assert _strip_timing_footer(response["assistant_message"]) == "Привет!"
     deps.infer_assistant_text.assert_awaited_once()
+
+
+def test_execute_orchestration_includes_telemetry_and_footer_for_chat_response():
+    deps = _build_minimal_deps()
+
+    response = asyncio.run(
+        execute_orchestration(
+            {
+                "message": "Привет",
+                "session_id": "session-telemetry-chat",
+                "runtime_mode": "chat_only",
+                "history": [],
+            },
+            deps=deps,
+        )
+    )
+
+    telemetry = response.get("telemetry") or {}
+
+    assert telemetry["executor"] == "chat"
+    assert telemetry["elapsed_ms"] >= 0
+    assert telemetry["started_at"]
+    assert telemetry["completed_at"]
+    assert telemetry["stage_timings"]
+    assert telemetry["quality_summary"]
+    assert "Timing / Quality" in response["assistant_message"]
+    assert "Полный ответ" in response["assistant_message"]
+    assert "Качество" in response["assistant_message"]
 
 
 def test_execute_orchestration_attaches_model_execution_metadata_from_dependencies():
@@ -178,9 +211,35 @@ def test_execute_orchestration_attaches_model_execution_metadata_from_dependenci
         )
     )
 
-    assert response["assistant_message"] == "Привет!"
+    assert _strip_timing_footer(response["assistant_message"]) == "Привет!"
     assert response["model_execution"]["fallback_used"] is False
     assert response["model_execution"]["events"][0]["used_model_id"] == "qwen-14b-llm"
+
+
+def test_extract_quality_signals_accepts_model_execution_list():
+    signals = _extract_quality_signals_from_result(
+        executor="document_analysis",
+        result={
+            "assistant_message": "Готово.",
+            "quality_signals": {"structured_output_ok": True, "parsed_items": 3},
+            "model_execution": [
+                {
+                    "role_key": "llm.document_analysis",
+                    "primary_model_id": "qwen-14b-llm",
+                    "fallback_model_id": "qwen-7b",
+                    "used_model_id": "qwen-7b",
+                    "fallback_used": True,
+                    "attempt_count": 2,
+                    "status": "fallback_completed",
+                }
+            ],
+        },
+        response={},
+    )
+
+    assert signals["fallback_used"] is True
+    assert signals["parsed_items"] == 3
+    assert signals["report_generated"] is False
 
 
 def test_execute_orchestration_general_chat_regenerates_on_language_contamination():
@@ -205,7 +264,7 @@ def test_execute_orchestration_general_chat_regenerates_on_language_contaminatio
         )
     )
 
-    assert response["assistant_message"] == "Система работает."
+    assert _strip_timing_footer(response["assistant_message"]) == "Система работает."
     assert deps.infer_assistant_text.await_count == 2
 
 
@@ -226,7 +285,7 @@ def test_execute_orchestration_general_chat_skips_language_guard_for_translation
         )
     )
 
-    assert response["assistant_message"] == "System works."
+    assert _strip_timing_footer(response["assistant_message"]) == "System works."
     deps.infer_assistant_text.assert_awaited_once()
 
 
@@ -252,7 +311,7 @@ def test_execute_orchestration_general_chat_regenerates_on_english_answer_to_rus
         )
     )
 
-    assert response["assistant_message"] == "Система работает."
+    assert _strip_timing_footer(response["assistant_message"]) == "Система работает."
     assert deps.infer_assistant_text.await_count == 2
 
 
@@ -306,7 +365,7 @@ def test_execute_orchestration_resolves_classifier_result_in_backend_when_missin
     assert captured["query"] == "Привет"
     assert captured["assistant_mode"] == "general_chat"
     assert captured["classifier_result"]["intent"] == "general_chat"
-    assert response["assistant_message"] == "Привет!"
+    assert _strip_timing_footer(response["assistant_message"]) == "Привет!"
 
 
 def test_execute_orchestration_adds_top_level_control_plane_fields():
@@ -537,7 +596,7 @@ def test_execute_orchestration_doc_question_direct_single_source_evidence_avoids
     )
 
     assert response["route"] == "document_question"
-    assert response["assistant_message"] == "5 [1]"
+    assert _strip_timing_footer(response["assistant_message"]) == "5 [1]"
     assert "данных недостаточно" not in response["assistant_message"].lower()
 
 
@@ -614,7 +673,7 @@ def test_execute_orchestration_doc_question_single_source_regens_when_initial_ci
         )
     )
 
-    assert response["assistant_message"] == "5 [1]"
+    assert _strip_timing_footer(response["assistant_message"]) == "5 [1]"
     assert deps.infer_assistant_text.await_count == 3
 
 
@@ -691,7 +750,7 @@ def test_execute_orchestration_doc_question_single_source_builds_deterministic_g
         )
     )
 
-    assert response["assistant_message"] == "5 [1]"
+    assert _strip_timing_footer(response["assistant_message"]) == "5 [1]"
 
 
 def test_execute_orchestration_doc_question_floor_query_does_not_take_first_unrelated_number(monkeypatch):
@@ -767,7 +826,7 @@ def test_execute_orchestration_doc_question_floor_query_does_not_take_first_unre
         )
     )
 
-    assert response["assistant_message"] == "10 [1]"
+    assert _strip_timing_footer(response["assistant_message"]) == "10 [1]"
 
 
 def test_run_graph_merges_errors_from_multiple_nodes():
@@ -891,7 +950,7 @@ def test_execute_orchestration_doc_question_handles_rag_result_without_metadata_
         )
     )
 
-    assert response["assistant_message"] == "Ответ [1]"
+    assert _strip_timing_footer(response["assistant_message"]) == "Ответ [1]"
     assert response["sources"] == [
         {"document_id": "doc-1", "display_name": "contract.pdf", "source_id": 1}
     ]
@@ -1073,7 +1132,7 @@ def test_execute_orchestration_routes_kb_doc_question_through_unified_backend_co
 
     assert response["route"] == "document_question"
     assert response["executor"] == "document_question"
-    assert response["assistant_message"] == "Ответ по базе [1]"
+    assert _strip_timing_footer(response["assistant_message"]) == "Ответ по базе [1]"
     assert response["sources"][0]["source_origin"] == "knowledge_base"
     assert response["sources"][0]["collection_id"] == "legal"
 

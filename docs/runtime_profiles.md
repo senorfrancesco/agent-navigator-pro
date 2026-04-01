@@ -2,6 +2,8 @@
 
 `Agent Navigator Pro` использует backend-owned runtime profiles для подстройки под железо и budget-контракт `UMS`.
 
+Этот документ описывает semantics runtime profiles. Канонический ответ на вопрос “куда писать какой флаг” вынесен в [docs/flags-reference.md](./flags-reference.md).
+
 ## Backend modes
 
 Отдельно от runtime profiles `UMS` поддерживает backend mode switch через `BACKEND_MODE`:
@@ -59,6 +61,12 @@ Legacy aliases остаются допустимыми для compatibility roll
 - `MODEL_PATH_LABSE` -> `MODEL_PATH_EMBEDDING_RETRIEVAL`
 
 Runtime profiles не меняют этот contract. Они управляют budget, placement и routing policy поверх уже заданных model paths.
+
+Практическое правило:
+
+- `backend/.env` / `backend/.env.native` — paths и service/runtime env;
+- `backend/.env.hardware.override` — persistent placement overrides;
+- `backend/.env.runtime` — generated applied plan.
 
 ## Профили
 

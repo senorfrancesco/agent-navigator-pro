@@ -16,6 +16,10 @@ from orchestrator.knowledge_base_ingestion import ingest_text_source_sync
 from orchestrator.knowledge_base_store import get_knowledge_base_store
 
 
+def _strip_timing_footer(text: str) -> str:
+    return str(text).split("\n\n---\nTiming / Quality", 1)[0]
+
+
 def _stub_embed_fn(texts):
     import numpy as np
 
@@ -209,6 +213,8 @@ async def test_execute_orchestration_api_returns_top_level_control_plane_fields(
     assert response["rag_scope"] == "knowledge_base_rag"
     assert response["knowledge_collection_id"] == "legal"
     assert response["source_scope_summary"] == "knowledge_base+session_overlay"
+    assert response["telemetry"]["elapsed_ms"] >= 0
+    assert response["telemetry"]["quality_summary"]
 
 
 @pytest.mark.asyncio
@@ -405,7 +411,7 @@ async def test_execute_orchestration_api_reads_knowledge_base_via_unified_core(m
     response = await execute_orchestration_api(request)
 
     assert response["route"] == "document_question"
-    assert response["assistant_message"] == "Штраф составляет 3 процента [1]"
+    assert _strip_timing_footer(response["assistant_message"]) == "Штраф составляет 3 процента [1]"
     assert response["sources"][0]["source_origin"] == "knowledge_base"
     assert response["sources"][0]["collection_id"] == "legal"
 

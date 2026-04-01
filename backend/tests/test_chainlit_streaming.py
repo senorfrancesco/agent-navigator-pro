@@ -21,6 +21,7 @@ class FakeMessage:
         self.content = ""
         self.tokens = []
         self.sent = False
+        self.elements = []
 
     async def stream_token(self, token: str):
         self.tokens.append(token)
@@ -30,11 +31,39 @@ class FakeMessage:
         self.sent = True
 
 
+class FakeStep:
+    def __init__(self, **kwargs):
+        self.name = kwargs.get("name")
+        self.type = kwargs.get("type")
+        self.show_input = kwargs.get("show_input")
+        self.default_open = kwargs.get("default_open")
+        self.autoCollapse = kwargs.get("autoCollapse")
+        self.output = ""
+        self.sent = False
+        self.updated = False
+
+    async def send(self):
+        self.sent = True
+
+    async def update(self):
+        self.updated = True
+
+
+class FakeUserSession:
+    def __init__(self):
+        self._data = {}
+
+    def get(self, key, default=None):
+        return self._data.get(key, default)
+
+    def set(self, key, value):
+        self._data[key] = value
+
+
 @pytest.fixture
 def chainlit_stream_module():
     mock_cl = MagicMock()
-    mock_session = MagicMock()
-    mock_session.get.return_value = None
+    mock_session = FakeUserSession()
     mock_cl.user_session = mock_session
     mock_cl.Message = MagicMock()
     mock_cl.Step = MagicMock()
@@ -168,6 +197,302 @@ async def test_infer_assistant_text_strips_leaked_system_lines(chainlit_stream_m
     assert "Используй краткий ответ" not in result
     assert "Не повторяйся" not in result
     assert result == "Привет! Как могу помочь тебе сегодня?"
+
+
+@pytest.mark.asyncio
+async def test_compare_appendix_is_not_kept_inline_in_main_message(chainlit_stream_module):
+    module, _stream_response = chainlit_stream_module
+    history = []
+    sent_messages = []
+    sent_steps = []
+
+    compare_report = """## Юридический вывод
+Краткий юридический вывод.
+
+## Ключевые смысловые различия
+- Изменение 1
+
+## Приложение: различия по пунктам
+1. Строка различия 1
+2. Строка различия 2
+3. Строка различия 3
+4. Строка различия 4
+5. Строка различия 5
+6. Строка различия 6
+"""
+
+    def message_factory(*args, **kwargs):
+        msg = FakeMessage()
+        msg.content = kwargs.get("content", "")
+        msg.elements = kwargs.get("elements", [])
+        sent_messages.append(msg)
+        return msg
+
+    def step_factory(*args, **kwargs):
+        step = FakeStep(**kwargs)
+        sent_steps.append(step)
+        return step
+
+    with patch.object(module.cl, "Message", side_effect=message_factory), patch.object(
+        module.cl, "Step", side_effect=step_factory
+    ), patch.object(
+        module, "_sync_run_metadata_from_response"
+    ), patch.object(module, "_apply_session_state_patch"), patch.object(
+        module, "_finalize_progress_box", new=AsyncMock()
+    ), patch.object(
+        module, "_persist_current_backend_state", new=AsyncMock()
+    ):
+        await module._render_execution_response(
+            {"assistant_message": compare_report},
+            history,
+        )
+
+    assert len(sent_messages) == 1
+    assert "## Юридический вывод" in sent_messages[0].content
+    assert "## Приложение: различия по пунктам" not in sent_messages[0].content
+    assert len(sent_steps) == 1
+
+
+def test_compare_appendix_split_returns_original_when_section_missing(chainlit_stream_module):
+    module, _stream_response = chainlit_stream_module
+    report = """## Юридический вывод
+Краткий юридический вывод.
+"""
+
+    split_result = module._split_compare_report_appendix(report)
+
+    assert split_result["main_body"] == report
+    assert split_result["appendix_body"] is None
+    assert split_result["appendix_lines"] == 0
+
+
+def test_compare_appendix_split_extracts_canonical_appendix_section(chainlit_stream_module):
+    module, _stream_response = chainlit_stream_module
+    report = """## Юридический вывод
+Краткий юридический вывод.
+
+## Ключевые смысловые различия
+- Изменение 1
+
+## Приложение: различия по пунктам
+1. Строка различия 1
+2. Строка различия 2
+"""
+
+    split_result = module._split_compare_report_appendix(report)
+
+    assert "## Приложение: различия по пунктам" not in split_result["main_body"]
+    assert split_result["appendix_body"].startswith("## Приложение: различия по пунктам")
+    assert split_result["appendix_lines"] == 2
+
+
+def test_compare_appendix_split_ignores_partial_noncanonical_header(chainlit_stream_module):
+    module, _stream_response = chainlit_stream_module
+    report = """## Юридический вывод
+Краткий юридический вывод.
+
+## Приложение
+1. Строка различия 1
+"""
+
+    split_result = module._split_compare_report_appendix(report)
+
+    assert split_result["main_body"] == report
+    assert split_result["appendix_body"] is None
+    assert split_result["appendix_lines"] == 0
+
+
+def test_compare_appendix_threshold_keeps_short_appendix_inline(chainlit_stream_module):
+    module, _stream_response = chainlit_stream_module
+    split_result = {
+        "main_body": "## Юридический вывод\nКратко.",
+        "appendix_body": "## Приложение: различия по пунктам\n1. Короткая строка",
+        "appendix_lines": 1,
+    }
+
+    assert module._should_render_compare_appendix_in_step(split_result) is False
+
+
+def test_compare_appendix_threshold_moves_long_appendix_to_step(chainlit_stream_module):
+    module, _stream_response = chainlit_stream_module
+    split_result = {
+        "main_body": "## Юридический вывод\nКратко.",
+        "appendix_body": (
+            "## Приложение: различия по пунктам\n"
+            "1. Строка различия 1\n"
+            "2. Строка различия 2\n"
+            "3. Строка различия 3\n"
+            "4. Строка различия 4\n"
+            "5. Строка различия 5\n"
+            "6. Строка различия 6"
+        ),
+        "appendix_lines": 6,
+    }
+
+    assert module._should_render_compare_appendix_in_step(split_result) is True
+
+
+def test_compare_progress_stages_cover_long_running_compare(chainlit_stream_module):
+    module, _stream_response = chainlit_stream_module
+
+    stages = module._build_execution_progress_stages(
+        {
+            "message": "Сравни документы",
+            "forced_route": "compare_documents",
+            "session_docs": {"a": {}, "b": {}},
+        }
+    )
+
+    assert stages is not None
+    assert stages[0]["title"] == "Сравнение документов"
+    assert "Загружаю документы" in stages[0]["content"]
+    assert any("Сопоставляю смысловые фрагменты" in stage["content"] for stage in stages)
+    assert any("Формирую юридический вывод" in stage["content"] for stage in stages)
+
+
+@pytest.mark.asyncio
+async def test_await_backend_execution_shows_compare_progress_states(chainlit_stream_module):
+    module, _stream_response = chainlit_stream_module
+    progress_updates = []
+
+    async def fake_execute(_request, deps=None):
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        return {"assistant_message": "готово"}
+
+    async def fake_update_progress_box(*, key: str, title: str, content: str):
+        progress_updates.append({"key": key, "title": title, "content": content})
+
+    with patch.object(module, "_backend_execute_orchestration", new=AsyncMock(side_effect=fake_execute)), patch.object(
+        module, "_build_execution_dependencies", return_value={}
+    ), patch.object(
+        module, "_update_progress_box", new=AsyncMock(side_effect=fake_update_progress_box)
+    ), patch.object(
+        module, "_clear_progress_box", new=AsyncMock()
+    ), patch.object(
+        module, "_persist_current_backend_state", new=AsyncMock()
+    ), patch.object(
+        module, "EXECUTION_PROGRESS_POLL_S", 0
+    ), patch.object(
+        module.cl, "Message", side_effect=lambda *args, **kwargs: FakeMessage()
+    ):
+        response = await module._await_backend_execution(
+            {
+                "message": "Сравни два закона",
+                "forced_route": "compare_documents",
+                "session_docs": {"doc-1": {}, "doc-2": {}},
+                "trace_id": "trace-1",
+            }
+        )
+
+    assert response == {"assistant_message": "готово"}
+    assert progress_updates
+    assert progress_updates[0]["key"] == "execution_progress"
+    assert progress_updates[0]["title"] == "Сравнение документов"
+    assert any("Сопоставляю смысловые фрагменты" in item["content"] for item in progress_updates)
+
+
+@pytest.mark.asyncio
+async def test_compare_long_appendix_renders_in_collapsed_step(chainlit_stream_module):
+    module, _stream_response = chainlit_stream_module
+    history = []
+    sent_messages = []
+    sent_steps = []
+
+    compare_report = """## Юридический вывод
+Краткий юридический вывод.
+
+## Ключевые смысловые различия
+- Изменение 1
+
+## Приложение: различия по пунктам
+1. Строка различия 1
+2. Строка различия 2
+3. Строка различия 3
+4. Строка различия 4
+5. Строка различия 5
+6. Строка различия 6
+"""
+
+    def message_factory(*args, **kwargs):
+        msg = FakeMessage()
+        msg.content = kwargs.get("content", "")
+        msg.elements = kwargs.get("elements", [])
+        sent_messages.append(msg)
+        return msg
+
+    def step_factory(*args, **kwargs):
+        step = FakeStep(**kwargs)
+        sent_steps.append(step)
+        return step
+
+    with patch.object(module.cl, "Message", side_effect=message_factory), patch.object(
+        module.cl, "Step", side_effect=step_factory
+    ), patch.object(
+        module, "_sync_run_metadata_from_response"
+    ), patch.object(module, "_apply_session_state_patch"), patch.object(
+        module, "_finalize_progress_box", new=AsyncMock()
+    ), patch.object(
+        module, "_persist_current_backend_state", new=AsyncMock()
+    ):
+        await module._render_execution_response(
+            {"assistant_message": compare_report},
+            history,
+        )
+
+    assert len(sent_messages) == 1
+    assert "## Юридический вывод" in sent_messages[0].content
+    assert "## Приложение: различия по пунктам" not in sent_messages[0].content
+    assert len(sent_steps) == 1
+    assert sent_steps[0].name == "Приложение: различия по пунктам (6)"
+    assert sent_steps[0].autoCollapse is True
+    assert sent_steps[0].sent is True
+    assert "## Приложение: различия по пунктам" in sent_steps[0].output
+
+
+@pytest.mark.asyncio
+async def test_compare_short_appendix_stays_inline_without_step(chainlit_stream_module):
+    module, _stream_response = chainlit_stream_module
+    history = []
+    sent_messages = []
+    sent_steps = []
+
+    compare_report = """## Юридический вывод
+Краткий юридический вывод.
+
+## Приложение: различия по пунктам
+1. Строка различия 1
+"""
+
+    def message_factory(*args, **kwargs):
+        msg = FakeMessage()
+        msg.content = kwargs.get("content", "")
+        msg.elements = kwargs.get("elements", [])
+        sent_messages.append(msg)
+        return msg
+
+    def step_factory(*args, **kwargs):
+        step = FakeStep(**kwargs)
+        sent_steps.append(step)
+        return step
+
+    with patch.object(module.cl, "Message", side_effect=message_factory), patch.object(
+        module.cl, "Step", side_effect=step_factory
+    ), patch.object(
+        module, "_sync_run_metadata_from_response"
+    ), patch.object(module, "_apply_session_state_patch"), patch.object(
+        module, "_finalize_progress_box", new=AsyncMock()
+    ), patch.object(
+        module, "_persist_current_backend_state", new=AsyncMock()
+    ):
+        await module._render_execution_response(
+            {"assistant_message": compare_report},
+            history,
+        )
+
+    assert len(sent_messages) == 1
+    assert "## Приложение: различия по пунктам" in sent_messages[0].content
+    assert sent_steps == []
 
 
 class TestAsyncInferStream:

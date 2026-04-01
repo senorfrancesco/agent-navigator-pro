@@ -14,6 +14,21 @@ ASSET_SET="${AGENT_NAVIGATOR_MODEL_ASSET_SET:-core}"
 MODELS_ROOT="${AGENT_NAVIGATOR_MODELS_ROOT:-}"
 HF_CACHE="${HF_HOME:-${AGENT_NAVIGATOR_HF_CACHE:-}}"
 DRY_RUN=0
+PYTHON_CMD=""
+
+resolve_python_cmd() {
+  if command -v python >/dev/null 2>&1; then
+    PYTHON_CMD="python"
+    return 0
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    PYTHON_CMD="python3"
+    return 0
+  fi
+
+  return 1
+}
 
 print_help() {
   cat <<EOF
@@ -100,6 +115,11 @@ if [ -f "$NATIVE_ENV_FILE" ]; then
   set +a
 fi
 
+if ! resolve_python_cmd; then
+  echo "Не найден python/python3 для scripts/models/download_models.py" >&2
+  exit 1
+fi
+
 PY_ARGS=(
   "$PYTHON_HELPER"
   "--mode" "$MODE"
@@ -118,4 +138,4 @@ if [ "$DRY_RUN" = "1" ] || [ "${AGENT_NAVIGATOR_TEST_MODE:-0}" = "1" ]; then
   PY_ARGS+=("--dry-run")
 fi
 
-exec python "${PY_ARGS[@]}"
+exec "$PYTHON_CMD" "${PY_ARGS[@]}"

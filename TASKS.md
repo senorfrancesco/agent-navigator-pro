@@ -2,6 +2,170 @@
 
 > **Единственный operational backlog.** Планы в `docs/plans/` — исторические артефакты, не operational source.
 
+## Release/v1.0 Transition (2026-03-22)
+
+- [ ] R1.0.1 — Переопределить каноническую основную ветку проекта на `release/v1.0`
+- [ ] R1.0.2 — Ввести `deploy/offline_bundle/` как канонический offline/server deployment slice
+- [ ] R1.0.3 — Собрать новый `docker-first` runtime bundle с export/import/deploy pipeline
+- [ ] R1.0.4 — Включить operator-controlled multi-agent runtime в offline bundle `v1.0`
+- [ ] R1.0.5 — Убрать зависимость нового release path от legacy hybrid compose/runtime
+- [ ] R1.0.6 — Scope guard: в рамках задачи изменять код только внутри `deploy/offline_bundle/`; любые правки вне этой папки делать только после явного предупреждения пользователя
+- [ ] R1.0.7 — Пересобрать `host_packages` для Ubuntu `24.04.4 LTS` / kernel `6.17.0-19-generic` с `--extra-package linux-headers-6.17.0-19-generic`
+- [x] R1.0.8 — Сделать offline deploy/build/runtime surface частью единого operator UI, который заменяет shell UX для `deploy/offline_bundle`
+  План: `docs/plans/2026-03-26-offline-operator-ui-plan.md`
+  Progress: в Stitch создан отдельный экран `Deploy / Build Control` (`9104511724d04a739cd23d2c5969116c`), а в `prototype/operator-ui` добавлена отдельная вкладка `Deploy / Build` с режимами `Build Bundle` и `Import / Deploy`, привязанными к каноническим scripts из `deploy/offline_bundle/scripts`.
+  Progress: host package audit больше не требует exact package version для NVIDIA driver stack, если на сервере уже есть рабочий драйвер и `nvidia-smi` проходит. `check_host_packages.py` и `install_host_apt_bundle.sh` автоматически переходят в manual-driver semantics и убирают ложные блокеры вроде `missing:xserver-xorg-video-nvidia-570-server=...`.
+  Решение: не расширять `scripts/launcher.sh` до полного offline bundle lifecycle; вместо этого вести UI через отдельный Python operator runner/action registry, который оркестрирует allowlisted native/container runtime actions и `deploy/offline_bundle/scripts`.
+  Done: offline/container workflow больше не живёт как отдельное приложение; он встроен в единый `prototype/operator-ui` и покрывает `Build Bundle`, `Import / Deploy`, runtime actions, job tracking и observability через общий Python control plane.
+- [ ] R1.0.9 — Довести единый operator UI для native development/runtime path и offline/container path до production-ready состояния
+  План: `docs/plans/2026-03-26-native-dev-operator-ui-plan.md`
+  Runtime-control UI logic: `docs/plans/2026-03-29-runtime-control-operator-ui-logic.md`
+  Frontend/observability refactor: `docs/plans/2026-03-29-operator-ui-frontend-refactor-and-observability-plan.md`
+  Решение: не делать два разных UI-приложения; native path и offline/container path считаются равноправными внутри одного operator shell. UI показывает availability обоих path, не скрывает unavailable state, а объясняет его через `Why unavailable?` drawer и редактирует реальные env/config sources выбранного path через explicit apply flow.
+  Deliverability: текущий `prototype/operator-ui` — web-first static prototype; позже его можно поднять как отдельное web-приложение или упаковать в desktop-shell (`Electron`/`Tauri`) без смены UX-контракта.
+  Progress: начат реальный web-first slice — `agent_api` теперь монтирует `/operator-ui/` и `/operator-assets/`, а `prototype/operator-ui` умеет гидратироваться из backend endpoint `GET /operator/state`.
+  Progress: `Config` переведён на path-aware variants и preset preview flow; для `native` и `container` появились отдельные variant tabs, staged-presets без auto-write и `Local safe ports` / `Target default ports` для `env.bundle`.
+  Workaround: container deploy/run из текущего backend-served operator UI теперь блокируется, если `env.bundle` пытается поднять `agent-api` на том же порту, что и текущий UI (`8000` по умолчанию). Это intentional self-conflict guard, пока не появится detached deploy mode или отдельный портовый профиль для offline bundle.
+  Follow-up: добавить настоящие live runtime probes для offline/container stack и полноценный backend-level bilingual payload, чтобы RU/EN toggle не зависел только от frontend shell translation.
+  Follow-up: текущая settings-plane для языка/видимости env keys/source/recommendations живёт во frontend shell; если нужен server-side preference sync, это надо вынести в `/operator/preferences`.
+- [x] R1.0.9a — Сделать Python control plane каноническим backend-контуром для operator UI
+  План: `docs/plans/2026-03-29-python-operator-control-plane-migration.md`
+  Цель: UI должен разговаривать только с Python API и Python job/action model; shell не должен оставаться продуктовым API для экрана запуска, конфига, deploy/build и maintenance.
+  Done: umbrella-migration закрыта поверх `R1.0.9b`–`R1.0.9f`; action execution идёт через async Python routes/jobs, multi-GPU hardware truth собирается server-side, shell UI больше не держит жёстко прошитые hardware/runtime claims, а offline deploy/run shell entrypoints остаются compatibility wrappers поверх Python-first control plane.
+  Verification: `pytest backend/tests/test_operator_ui_actions.py backend/tests/test_operator_ui_api.py backend/tests/test_operator_runtime_service.py -q` -> `8 passed`; `node --check prototype/operator-ui/app.js`; `python -m py_compile backend/orchestrator/operator_ui_actions.py backend/orchestrator/operator_ui_api.py backend/orchestrator/operator_runtime_service.py`.
+- [x] R1.0.9b — Вынести runtime path discovery, hardware-aware defaults и config source resolution в отдельные Python services
+  Контур: `backend/orchestrator/operator_runtime_service.py`, `backend/orchestrator/operator_config_service.py`
+  Acceptance: availability `native` / `offline_bundle` рассчитывается Python-слоем, suggested values и effective config собираются там же, а UI получает уже структурированный contract.
+  Done: `operator_ui_api.py` больше не держит path/config discovery как локальную ad-hoc логику; `OperatorRuntimeService` и `OperatorConfigService` стали source of truth для runtime paths, hardware metrics, env source resolution и grouped config state.
+  Verification: `pytest backend/tests/test_operator_runtime_service.py backend/tests/test_operator_config_service.py backend/tests/test_operator_ui_api.py -q` -> `5 passed`.
+- [x] R1.0.9c — Вынести `deploy/offline_bundle` build/import/deploy lifecycle в Python deploy service
+  Контур: `backend/orchestrator/operator_deploy_service.py`
+  Acceptance: bundle build, archive pack/unpack, validate, host install, image load, restore, deploy и verify моделируются Python-слоем со stage/status contract, а scripts остаются только allowlisted low-level adapters.
+  Done: `OperatorDeployService` стал source of truth для `Deploy / Build` surface, build/import stage catalog, artifact summary и stage-scoped deploy logs; `operator_ui_api.py` больше не собирает deploy lifecycle inline.
+  Verification: `pytest backend/tests/test_operator_deploy_service.py backend/tests/test_operator_runtime_service.py backend/tests/test_operator_config_service.py backend/tests/test_operator_ui_api.py -q` -> `7 passed`.
+- [x] R1.0.9d — Вынести jobs, stage model и structured logs из action registry в отдельный Python module
+  Контур: `backend/orchestrator/operator_jobs.py`
+  Acceptance: long-running actions имеют единый job schema (`job_id`, `status`, `current_stage`, `stages`, `logs`, `exit_code`, timestamps), пригодный для UI polling/streaming.
+  Done: `OperatorJobStore` и structured schema (`OperatorJob`, `OperatorJobStage`, `OperatorJobLogEntry`) вынесены в `operator_jobs.py`; `operator_ui_actions.py` теперь использует их как execution glue вместо локального `JOB_STORE` и ad-hoc `logs: List[str]`.
+  Verification: `pytest backend/tests/test_operator_jobs.py backend/tests/test_operator_ui_api.py backend/tests/test_operator_deploy_service.py backend/tests/test_operator_runtime_service.py backend/tests/test_operator_config_service.py -q` -> `9 passed`.
+- [x] R1.0.9e — Перевести frontend operator UI на Python-only API adapters
+  Контур: `prototype/operator-ui`, future real app shell
+  Acceptance: кнопки `Launch`, `Apply`, `Build Bundle`, `Import / Deploy`, `Verify`, `Maintenance` ходят только в Python endpoints `/operator/*`; mock-only action paths и shell-first assumptions удалены.
+  Done: `prototype/operator-ui/app.js` теперь гидратирует `actions/catalog`, запускает runnable actions через `POST /operator/actions/run`, поллит `GET /operator/jobs/{job_id}`, применяет env changes через `POST /operator/config/{path_key}/apply`, а maintenance refresh flows идут через `/operator/state`, `/operator/runtime/paths` и `/operator/deploy/{mode}`.
+  Verification: `node --check prototype/operator-ui/app.js` and `pytest backend/tests/test_operator_jobs.py backend/tests/test_operator_ui_api.py backend/tests/test_operator_deploy_service.py backend/tests/test_operator_runtime_service.py backend/tests/test_operator_config_service.py -q` -> `11 passed`.
+- [x] R1.0.9f — Деградировать shell-скрипты до compatibility/recovery layer и thin wrappers
+  Контур: `scripts/launcher.sh`, `deploy/offline_bundle/scripts/*.sh`
+  Acceptance: shell не считается каноническим UI API; по возможности скрипты вызывают Python entrypoints или узкие host-команды и сохраняются как ручной CLI/recovery path.
+  Done: добавлен `backend/orchestrator/operator_shell_compat.py`; `deploy/offline_bundle/scripts/deploy.sh` и `run_offline_bundle.sh` теперь делегируют в Python compatibility bridge, а `scripts/launcher.sh` явно переопределён как manual compatibility wrapper вокруг Python-first operator control plane.
+  Verification: `pytest backend/tests/test_operator_shell_compat.py backend/tests/test_runtime_launcher.py::test_launcher_help_documents_install_and_platform_flags -q` -> `6 passed`; `python -m py_compile backend/orchestrator/operator_shell_compat.py` -> passed.
+- [x] R1.0.9g — Пересобрать frontend IA/operator shell под более интуитивный runtime workspace
+  План: `docs/plans/2026-03-29-operator-ui-frontend-refactor-and-observability-plan.md`
+  Scope: убрать дублирование `Overview`/`Launch`, ослабить card-mosaic, перейти к layout-first operator composition, добавить inspector/drawer patterns и превратить `Services` в health+metrics+logs workspace.
+  Done: `Overview` переведён на компактные summary cards вместо дублирования launch-cards; `Services` и `Deploy` собраны как более жёсткие workspace-секции с отдельными summary strips, metrics/links surfaces и логами; для shell добавлены стабильные UI hooks под Playwright smoke.
+  Done: системные индикаторы и `UI Settings` вынесены из topbar в нижний sidebar control-cluster как единый вертикальный action-list; topbar разгружен до одного primary launch CTA, а у кнопки настроек появилась встроенная минималистичная gear-иконка.
+  Done: topbar CTA переработан в `split-button`: primary action запускает текущий выбранный runtime path, а chevron-menu позволяет немедленно запустить `Native Runtime` или `Offline Bundle / Containers` без жёсткой привязки к нативному сценарию. Sidebar получил отдельную nav-card и более явную operator-rail иерархию.
+- [x] R1.0.9h — Русифицировать operator UI и ввести единый словарь operational терминов
+  План: `docs/plans/2026-03-29-operator-ui-frontend-refactor-and-observability-plan.md`
+  Scope: перевести навигацию, CTA, статусы, ошибки и utility copy на русский; сохранить английский только для env keys, script names, URLs и API paths; выровнять backend/frontend wording.
+  Done: shell, dynamic copy и backend-derived runtime/deploy wording приведены к одному русскому словарю; добавлен source-of-truth файл `docs/plans/2026-03-29-operator-ui-i18n-map.md`. Английские literal'ы сохранены только для env keys, script names, paths, URLs и метрик.
+- [x] R1.0.9i — Подключить Prometheus summary metrics к operator API и UI
+  План: `docs/plans/2026-03-29-operator-ui-frontend-refactor-and-observability-plan.md`
+  Scope: добавить Python adapter layer для runtime/service/deploy metrics, новые `/operator/metrics/*` endpoints и встроенные metrics surfaces для `Overview`, `Services` и `Deploy / Build`.
+  Done: добавлен `backend/orchestrator/operator_observability_service.py`; `/operator/state` включает `metricsSummary`, работают endpoints `/operator/metrics/{summary,runtime,services,deploy}`, а в `prototype/operator-ui` отрисованы metrics panels для `Overview`, `Services` и `Deploy`. Есть unit tests на summary/empty metrics contract.
+- [x] R1.0.9j — Интегрировать Grafana deep links и observability navigation в operator UI
+  План: `docs/plans/2026-03-29-operator-ui-frontend-refactor-and-observability-plan.md`
+  Scope: добавить service/dashboard mapping, кнопки `Открыть в Grafana` / `Explore`, связать operator diagnostics с Prometheus/Grafana evidence вместо изолированных UI summaries.
+  Done: Python observability layer возвращает surface-aware `grafanaLinks`, включая dashboard/panel links, `Grafana Explore` и `Prometheus targets`; в `prototype/operator-ui` CTA стали явными (`Открыть в Grafana` / `Открыть в Prometheus`), а `Services`/`Deploy` получили встроенную observability navigation. Playwright smoke покрывает наличие этих workspace-блоков.
+- [x] R1.0.9k — Довести launch-monitoring и runtime health до честного operator feedback
+  План: `docs/plans/2026-03-29-operator-ui-polish-and-typed-config-plan.md`
+  Scope: добавить `Launch status strip`, launch-scoped log panel, runtime health model `not_started/building/deploying/running/degraded/failed/blocked` и понятный fail-summary для container build/deploy.
+  Context: живой прогон показал container launch failure на Docker build step (`docker.io/library/python:3.11-slim` не резолвится из-за DNS/network), а UI пока не объясняет это достаточно явно прямо во вкладке `Launch`.
+  Progress: в `prototype/operator-ui` начат перенос `Launch` из статической launch-cards surface в execution workspace: добавлены launch strip, launch log panel и отдельный runtime health fetch из `/operator/runtime/health/{path}`; следующим шагом нужно довести classification container build/deploy failures и привязать их к service probes.
+  Progress: user-facing container path больше не описывается как `scripts/launcher.sh --target container`; primary source/copy переведены на offline bundle (`deploy/offline_bundle/scripts/run_offline_bundle.sh`), а legacy `runtime.container.launch` явно помечен как dev-only checkout launcher.
+  Progress: `operator_ui_api.py` теперь возвращает richer runtime health contract (`status`, `summary`, `reason`, `nextAction`) для `native` и `container`, а `Launch` уже показывает этот слой в strip, log-panel и fail-summary вместо одного ad-hoc health label. Для container path отдельно различаются `blocked/degraded/not_started`, включая Docker missing/socket missing и локальный port-conflict.
+  Done: live smoke на `2026-03-31` подтвердил, что `Launch` использует единый runtime health contract для strip, fail-summary, CTA и next-step hints; контейнерный путь честно показывает blockers по Docker/socket/ports, а user-facing path source окончательно привязан к offline bundle entrypoint, а не к dev-container launcher.
+- [x] R1.0.9l — Перевести Config на typed controls там, где варианты конечны
+  План: `docs/plans/2026-03-29-operator-ui-polish-and-typed-config-plan.md`
+  Scope: добавить schema-driven `select/toggle/text/password`, заменить свободный text input для runtime/profile/parser булевых и ограниченных значений, сохранить manual fields только для путей, URL, model/tool params и других free-form значений.
+  Progress: `OperatorConfigService` уже размечает первые typed fields как `select` (`UMS_RUNTIME_PROFILE`, `DEVICE_MODE`, strict JSON / retry / preflight / parity fields), а frontend `Config` умеет рендерить `select` вместо свободного text input и сохранять staged/apply flow.
+  Done: `Config` теперь использует не только `select`, но и `toggle/number/url` controls. Булевы parser/preflight/serving flags (`COMPARE_SINGLE_ITEM_STRICT_JSON`, `OFFLINE_COMPARE_STRICT_JSON`, `BUNDLE_PREFLIGHT_REQUIRED`, `BUNDLE_PARITY_SMOKE_REQUIRED`, `CHAINLIT_ENABLE_DATA_LAYER`, `UMS_FAIL_FAST_ON_SATURATION`, `UMS_LLAMA_CACHE_PROMPT`) больше не рендерятся как свободный ввод; конечные enum-поля (`BACKEND_MODE`, `*_DEVICE_MODE`, `GPU_LAYERS_MODE`, `MODEL_SOURCE_MODE`, `RAG_MODE_OVERRIDE`, `INTENT_CLASSIFIER_MODE`, `CHAINLIT_REPORT_PDF_DISPLAY`) идут через typed controls, а URL/number-поля получили соответствующие input-типы.
+- [x] R1.0.9m — Перенести language/UI preferences в единый settings drawer и дочистить RU/EN contract
+  План: `docs/plans/2026-03-29-operator-ui-polish-and-typed-config-plan.md`
+  Scope: убрать language selector из topbar, держать язык и UI preferences только в `Настройки интерфейса`, довести bilingual shell без смешанного copy, кроме literal env keys, paths, script names и raw logs.
+  Progress: отдельный `UI Settings` dialog уже есть; следующим шагом он становится единственной точкой смены языка и UI preferences, а selector в topbar удаляется.
+  Progress: `Config` и path cards получили дополнительную англофикацию backend-derived строк после hydration; отдельно введён явный path contract для host/bundle path-полей, чтобы EN-профиль объяснял, где допустимы абсолютные внешние пути, а где layout должен оставаться bundle-internal. Следующим срезом bilingual-поля (`nameEn`, `roleEn`, `titleEn`, `bodyEn`, `labelEn`, `valueEn`) вынесены в `operator_runtime_service.py`, `operator_ui_api.py` и `operator_deploy_service.py`, а `app.js` переключён на них как на source of truth для EN-рендера.
+  Progress: `operator_config_service.py` теперь тоже отдаёт bilingual contract для `Config` (`titleEn`, `descriptionEn`, `labelEn`, `recommendedReasonEn`, `reasonEn`), а `app.js` перестроен на `localizedField(...)` для variants/presets/field meta и activity сообщений. Дополнительно `Apply changes`, deploy-mode switcher и maintenance empty state больше не остаются русскими в EN-режиме.
+  Progress: живой browser smoke на `2026-03-30` подтвердил ещё один cleanup-срез: RU-витрина больше не показывает `Operator Control Plane`, `backend route probe`, `GPU / Placement`, `LLM / Context`, `Model Runtime`, `Secrets / Access`, `CPU fallback` и `Подставить в staged` в основных `Overview/Config` surfaces; для этого bilingual payload и frontend label maps были дожаты до согласованных RU/EN пар.
+  Progress: добавлен audit-скрипт `scripts/audit_operator_ui_i18n.py` и тест `backend/tests/test_operator_ui_i18n_audit.py`, которые проверяют семантические UI-поля (`title/body/label/name/role/action/note/...`) на наличие `...En` пары внутри итогового `/operator/state`. Audit уже используется для добивки `hardwareMetrics`, `serviceRows`, `pathLabel` и typed-control options.
+  Progress: живой smoke на `2026-03-31` добил ещё один backend-derived слой: `Launch`, `Services` и `Deploy` больше не показывают старые гибриды вроде `Operator Control Plane`, `backend route probe`, `degraded/fallback events`, `heavy-model`, `runtime blockers`, `summary and stages`, `canonical scripts` и похожие headings/notes в русской витрине. Остались точечные хвосты уровня `offline bundle`, `runtime`, `host packages`, которые уже локализуются как отдельный финальный pass, а не как системный разнобой.
+  Progress: live pass на `2026-03-31` дожал `Launch/Services/Build / Deploy`: action-button'ы деплоя больше не светят canonical labels (`Собрать bundle`, `Экспортировать images`, `Сгенерировать manifest`), контейнерный путь запуска и его CTA переведены на `офлайн-бандл`, а `Overview`/`Services` получили ещё один cleanup backend-derived notes (`GPU inventory`, `fallback`, `runtime state`, `bundle files`, `нет диагностики среды`).
+  Done: отдельный settings drawer стал единственной operator-точкой для language/UI preferences, а bilingual contract теперь системный: `...En`-поля в backend payload, frontend `localizedField(...)`, audit-скрипт и live smoke покрывают `Overview`, `Launch`, `Config`, `Services`, `Build / Deploy`, `Actions`. В пользовательской витрине остались только допустимые literal terms: env keys, пути, script names, raw logs, `Agent API`, `Grafana`, `Prometheus`.
+- [x] R1.0.9n — Убрать horizontal overflow и дожать responsive layout для Services/Deploy
+  План: `docs/plans/2026-03-29-operator-ui-polish-and-typed-config-plan.md`
+  Scope: убрать full-page horizontal scroll во вкладке `Services`, ограничить длинные endpoint/source строки, стабилизировать container-path layout и проверить узкие ширины.
+  Progress: ослаблены `mono-line`, `source-value`, `service-meta-pill` и `log-console` для wrap/word-break; на узких ширинах `service-row` и `path-card-header` теперь складываются в колонку. Нужен живой browser smoke именно на container-path `Services`.
+  Progress: локализована конкретная причина full-width overflow: terminal `pre.log-console` растягивал grid-элемент. Добавлены `white-space: pre-wrap`, `width/max-width/min-width` ограничения для log-console и `min-width: 0` для карточек/workspace-элементов, чтобы длинные log-lines не раздвигали весь shell.
+  Follow-up: во вкладке `Сборка / Деплой` user experience лучше читается, когда `Логи` идут full-width сразу после primary workflow (`Сводка` + `Этапы`), а не ждут завершения длинной правой secondary-колонки. Нужен отдельный layout pass, который сократит side-rail и поднимет лог-терминал выше в потоке.
+  Progress: `Services` и нижний `Deploy` grid прошли ещё один responsive/layout pass. `service-grid` теперь собирается в две колонки на desktop и раньше схлопывается на узких ширинах; `Deploy` secondary-grid переведён на `auto-fit`, а `Actions` внутри deploy-panel больше не растут одной длинной вертикальной колонной. Живой smoke на `2026-03-31` подтвердил, что вкладки больше не уезжают вниз и читаются как `primary workflow -> full-width logs -> secondary panels`.
+  Progress: повторный live smoke на `2026-03-31` подтвердил, что `Launch`, `Services` и `Build / Deploy` после перезагрузки `uvicorn` не имеют layout-регрессий: `Deploy` сохраняет wide-log между primary и secondary зонами, а `Services` не проваливается в длинную узкую башню even after copy cleanup.
+  Done: live UI на `http://127.0.0.1:18001/operator-ui/` больше не показывает horizontal overflow или схлопывание панелей вниз. `Services` и `Build / Deploy` стабильно читаются как отдельные workspaces, а wide-log остаётся опорной full-width панелью между primary и secondary content zones.
+- [x] R1.0.9o — Расширить Native Runtime Config до полного typed runtime/GPU surface
+  План: `docs/plans/2026-03-29-operator-ui-runtime-knobs-and-help-plan.md`
+  Scope: собрать единый UI-contract поверх `backend/.env`, `backend/.env.runtime` и `backend/.env.hardware.override`, чтобы `Config` умел редактировать `BACKEND_MODE`, `*_DEVICE_MODE`, `GPU_LAYERS_MODE`, `N_GPU_LAYERS_OVERRIDE`, context budgets и per-model runtime knobs без ручного поиска по файлам.
+  Progress: native `Config` уже расширен typed-вариантами `GPU / Placement`, `LLM / Context` и `Model Runtime`; добавлены `LLM/VLM/INTENT/RETRIEVAL *_DEVICE_MODE`, `GPU_LAYERS_MODE`, `N_GPU_LAYERS_OVERRIDE`, context-budget knobs и per-model runtime fields (`CONTEXT_SIZE_*`, `N_GPU_LAYERS_QWEN14B`) с unit coverage.
+  Progress: для `Native Runtime` добавлен отдельный variant `Secrets / Access`, который выводит и позволяет редактировать `CHAINLIT_ADMIN_USER`, `CHAINLIT_ADMIN_PASSWORD`, `CHAINLIT_AUTH_SECRET`, `GF_SECURITY_ADMIN_USER`, `GF_SECURITY_ADMIN_PASSWORD` прямо из `backend/.env`, чтобы локальный admin/operator path не оставался вне operator UI.
+  Done: `Native Runtime` теперь покрывает practically-used operator knobs из `backend/.env`, `backend/.env.runtime` и `backend/.env.hardware.override`: runtime/backend profile, device placement, GPU-layer strategy, context budget, generation controls (`TEMPERATURE`, `TOP_P`, `REPETITION_PENALTY`, `MAX_TOKENS`), `MMPROJ_PATH`, native ports/URLs (`AGENT_API_PORT`, `UMS_PORT`, `UMS_URL`, `DOC_SERVER_URL`, `LEGAL_SERVER_URL`) и admin secrets. Осознанно вне UI оставлены только non-operator/internal ключи (`ACTIVE_MODEL_ID`, `AGENT_API_HOST`, `CHAINLIT_DB_URL`, `MODEL_PATH_E5_LEGAL`, `MODEL_PATH_RUBERT`, `UMS_HOST`, `UMS_SELECTED_GPU_LAYERS`).
+- [x] R1.0.9p — Расширить Offline Bundle Config для secrets, profiles, GPU placement и Chainlit knobs
+  План: `docs/plans/2026-03-29-operator-ui-runtime-knobs-and-help-plan.md`
+  Scope: добавить typed/editor support для `deploy/offline_bundle/env.bundle`, включая `CHAINLIT_*`/`GF_*` secrets, `BACKEND_MODE`, `UMS_RUNTIME_PROFILE`, `UMS_LLM_GPU_INDICES`, `GPU_LAYERS_MODE`, `N_GPU_LAYERS_*`, `VLLM_*` и profile-specific Chainlit parameters.
+  Progress: `env.bundle` surface уже расширен variant tabs `Runtime / Backend`, `GPU / Placement`, `Secrets / Access`, `Embedders / Models` и `Chainlit Profiles`; туда выведены `BACKEND_MODE`, `UMS_RUNTIME_PROFILE`, `DEVICE_MODE`, `LLM/VLM/EMBEDDER *_DEVICE_MODE`, `UMS_LLM_GPU_INDICES`, `GPU_LAYERS_MODE`, `N_GPU_LAYERS_*`, `VLLM_*`, `CHAINLIT_*`, `GF_*`, `INTENT_CLASSIFIER_*` и retrieval/model profile knobs с regression test на typed controls.
+  Progress: container `Config` переведён на двухрежимный model-source contract. Вместо двух дублирующихся port tabs теперь один variant `Порты публикации / Published Ports` с двумя presets (`Локальные безопасные порты` и `Целевые стандартные порты`). Отдельно добавлен variant `Режим источника моделей / Model Source Mode` c `bundle_layout` и `external_host_mounts`, а в `Артефакты и пути / Artifact Mounts` появились host-side bind-source поля `HOST_MODEL_PATH_LLM`, `HOST_MODEL_PATH_VLM`, `HOST_MMPROJ_PATH`, `HOST_MODEL_PATH_EMBEDDING_INTENT`, `HOST_MODEL_PATH_EMBEDDING_RETRIEVAL` плюс container-side runtime paths `MODEL_PATH_*`/`MMPROJ_PATH`. Для host-source полей добавлены metadata `pickerKind=file|directory` и `visibleWhen=MODEL_SOURCE_MODE=external_host_mounts`.
+  Progress: живой UI pass на `2026-03-30` подтвердил, что `Published Ports` и `Artifact Mounts` уже работают как operator surface, а не как env-dump. Для path fields добавлены визуальные роли `Источник хоста / Host source` и `Цель в контейнере / Container target`, чтобы source/target mapping читался без расшифровки meta-строк.
+  Done: `Offline Bundle / Containers` теперь покрывает practically-used container contract: published ports включая `DOCUMENT_SERVER_PORT` / `LEGAL_SERVER_PORT` / `VLLM_PORT`, `MODEL_SOURCE_MODE`, secrets/access, runtime/backend, GPU placement, artifact mounts с `MODEL_REGISTRY_CONFIG_PATH`, model runtime (`CONTEXT_SIZE_*`, sampling, `VLLM_MAX_MODEL_LEN`), classifier thresholds, расширенные Chainlit profile knobs и отдельный variant `Serving / Runtime` для service URLs, vLLM contract и concurrency-параметров. Осознанно вне UI оставлены release/internal metadata и state-пути (`BUNDLE_VERSION`, `RELEASE_BRANCH`, `*_IMAGE`, `*_DB_URL`, `UPLOADS_DIR`, `HOST_UPLOADS_DIR`, `REPORT_PDF_FONT_PATH`, `ACTIVE_MODEL_ID`).
+- [x] R1.0.9q — Добавить help-текст по каждому runtime/container параметру и полный bilingual contract
+  План: `docs/plans/2026-03-29-operator-ui-runtime-knobs-and-help-plan.md`
+  Scope: у каждого поля в `Config` должны быть `description` / `descriptionEn` и `recommendedReason` / `recommendedReasonEn`; UI обязан переключать labels и help-тексты между `RU/EN`, не переводя literal env keys, paths и raw values. Для secrets нужен отдельный `secret` flag и masked rendering по умолчанию.
+  Progress: backend `field` contract уже расширен до `description` / `descriptionEn` и `secret`; UI `Config` теперь показывает help-текст под каждым полем и маскирует `CHAINLIT_*`, `GF_*`, `VLLM_API_KEY` в meta-блоке и input-контроле. Дополнительно в `UI Settings` добавлен локальный reveal-toggle `Show secret values`, который по умолчанию выключен и не влияет на backend state. Следующий шаг внутри этого пункта — visual polish для плотности `Config`.
+  Progress: `Config` визуально пересобран в более читаемый workspace: group sections теперь двуколоночные (`orientation слева / поля справа`), meta-информация собрана в компактную grid-легенду, а variant/path switchers получили более явный container treatment. Это снижает ощущение технического env-dump перед дальнейшим расширением knobs.
+  Progress: `description` больше не наследует `recommendedReason` как fallback. `OperatorConfigService` теперь генерирует нейтральные operational descriptions по типу параметра (`PORT`, `URL`, `PATH`, `SECRET`, `DEVICE_MODE`, `PROFILE`, runtime tuning и т.д.), поэтому help-текст в `Config` объясняет назначение параметра, а не советует, что “рекомендуется”. Живой smoke подтвердил, что поля в `Runtime / Profile` уже показывают формат `что делает параметр / применено / источник` без advisory-tone.
+  Progress: для secret-полей добавлена встроенная мини-кнопка генерации прямо внутри input-row. Генерация идёт локально через `crypto.getRandomValues`, значение попадает в staged state и не записывается в env без явного `Применить изменения`.
+  Progress: рядом с генератором добавлена мини-кнопка копирования, чтобы текущее staged/current secret-значение можно было быстро забрать из UI без отдельного ручного выделения.
+  Progress: для host-side mount fields добавлен backend read-only path browser (`/operator/path-browser` и `/operator/path-browser/validate`) с allowlisted roots (`repo root`, `/home/seral`, `/mnt`, `/media`). Во фронте появился modal path picker с `Выбрать файл` / `Выбрать папку`, который заполняет staged value без немедленной записи в env.
+  Progress: path-browser modal прошёл первый visual polish pass: toolbar стал более стабильным, file/directory rows получили более чистую иерархию и явные glyph-badges вместо шумных emoji, а path-mount fields в `Config` теперь визуально различают host source и container target на уровне карточки.
+  Progress: для container model-path contract добавлен компактный helper-block со схемой `источник хоста/bundle -> mount -> container target -> runtime`, чтобы различие между host source и container path читалось без длинных объяснений под каждой настройкой.
+  Progress: inline validation для host model paths усилена: path browser и staged path input теперь проверяют не только существование, но и тип артефакта (`.gguf` для LLM/VLM/mmproj, директория для embedder paths), а также показывают pair-warning для `VLM + mmproj`.
+  Done: `Config` получил финальный help/validation polish: у operator-visible полей есть нейтральные `description/descriptionEn`, validation states сведены к `ok / warning / error / info`, карточки полей и inline-note визуально различают эти статусы, а live smoke на `2026-03-31` подтвердил рендер `toggle/number/url`, path helper-block, локальный secret UX (`show/hide`, `copy`, `generate`, toast`) и pair-validation для `VLM + mmproj`.
+
+## План исправления compare/offline bundle багов (2026-03-26 19:18 EDT)
+
+- [ ] R1.0.10 — `compare_workflow`: убрать расхождение между `needs LLM: 5` и фактической LLM-очередью `75`
+  Контекст: в `backend/orchestrator/workflows/compare.py` сейчас в `semantic_candidates` попадает `to_analyze + structural`, из-за чего structural diff'ы ошибочно уходят в `_analyze_compare_batch()`, хотя лог `needs LLM` считает только `to_analyze`.
+  План: либо исключить `structural` из LLM-очереди и обрабатывать их только через `_append_structural_result()`, либо как минимум привести telemetry/logging к честной формулировке `semantic queue / llm_modified / structural`.
+  Verification: таргетный pytest для compare workflow + ручная проверка docker-логов offline bundle, что после фикса количество `LLM batch` соответствует реальному числу LLM-кандидатов.
+
+- [ ] R1.0.11 — `compare_workflow`: стабилизировать strict JSON parsing для single-item LLM batch и убрать `structured output count mismatch batch=1 parsed=0`
+  Контекст: `_analyze_compare_batch()` требует JSON-массив ровно из `len(batch)` объектов; в offline bundle при `analysis_batch_size=1` модель периодически возвращает ответ, который не парсится как массив/объект, и workflow падает в fallback без дополнительного retry.
+  План: для `len(batch) == 1` перейти на prompt c одним JSON-объектом вместо массива, принимать оба формата (`dict` и `[dict]`) на parse-path, добавить минимальный single-item retry с более жёсткой инструкцией `только JSON без markdown/пояснений`.
+  Verification: таргетный pytest для `_analyze_compare_batch()` / compare parser path с кейсами `dict`, `[dict]`, markdown-fenced JSON и garbage-prefix/suffix; затем smoke-run в offline bundle с контролем отсутствия новых `parsed=0` по docker-логам `chainlit`.
+
+- [ ] R1.0.12 — `compare_workflow`: уменьшить runtime деградацию offline bundle при compare-run
+  Контекст: по docker-логам `deploy/offline_bundle` один `POST /infer` в `UMS` занимает примерно `19-71s`, а из-за текущей очереди compare уже дошёл до `LLM batch 14/75` без финального отчёта.
+  План: после исправления очереди и parse-path повторно проверить фактический объём LLM-вызовов, убедиться, что structural diff'ы не гоняются через LLM, и оценить необходимость дополнительного ограничения `COMPARE_ANALYSIS_MAX_TOKENS` / prompt-size для offline режима.
+  Verification: повторный docker log inspection `chainlit` + `ums`, сравнение количества `POST /infer`, latency и времени до `Saved new report`.
+
+## Instrumentation / Reporting (2026-03-31)
+
+- [ ] R1.0.13 — Сквозная телеметрия времени и качества для ответа, workflow и инструментов
+  Контекст: для отчёта нужна измеримая текущая скорость обработки и понятный суррогат качества ответа без редизайна уже работающего чата. Изменение должно затрагивать только telemetry-contract, сбор таймингов и компактный footer после ответа.
+  План: добавить единый telemetry payload (`started_at`, `completed_at`, `elapsed_ms`, `queue_ms`, `service_ms`, `tool_ms`, `llm_ms`, `embedding_ms`, `report_ms`, `stage_timings`, `tool_timings`, `quality_signals`, `quality_summary`), собирать его в `execution_runtime.py`, workflow helper-функциях и сервисных вызовах (`UMS`, `document_server`, `legal_server`, RAG/embeddings), а затем выводить компактный блок `Timing / Quality` после основного ответа.
+  Progress: добавлен context-local collector `backend/orchestrator/telemetry_runtime.py`, который собирает stage/tool spans, quality-signals и in-memory aggregate summary `latest/by_executor` для operator path.
+  Progress: `execute_orchestration()` теперь финализирует `response["telemetry"]`, добавляет компактный footer `Timing / Quality` к `assistant_message` и не меняет остальную продуктовую логику кроме вывода времени/качества после ответа.
+  Progress: `compare`, `equipment`, `document_analysis`, `doc_question`, `documents_summary` и `general_chat` уже публикуют practical quality-signals (`used_llm`, `used_rag`, `sources_count`, `citations_count`, `structured_output_ok`, `parsed_items`, `coverage_signals`, `report_generated`, `fallback_used`) и stage/tool timings.
+  Progress: workflow/service instrumentation добавлена для `UMS` inference, `document_server` (`load_document`, `load_pages`, `extract_tables`, `smart_chunk`), `legal_server.match_batches`, RAG retrieve и embeddings path.
+  Progress: `operator_metrics_summary()` теперь включает `timingSummary`, а `scripts/benchmark.py` подхватывает telemetry details из `execute_orchestration` response для `doc_question`, `compare` и `equipment`.
+  Surrogate metrics: `quality_signals.coverage_signals`, `parsed_items`, `structured_output_ok`, `fallback_used` и `quality_summary` сейчас считаются временными runtime-surrogate сигналами для отчёта.
+  Canonical metrics: `elapsed_ms`, `llm_ms`, `embedding_ms`, `service_ms`, `report_ms`, `stage_timings`, `tool_timings`, `sources_count`, `citations_count`, `report_generated` считаются каноническими telemetry-полями текущего instrumentation slice.
+
 ## Текущее состояние (2026-03-12)
 
 **Ветка:** `codex/orchestration-control-plane-snapshot` (2 коммита от `v3.0`)
@@ -1547,6 +1711,12 @@
   Verification:
   - `pytest backend/tests/test_compare_workflow.py -q`
   - `python -m py_compile backend/orchestrator/workflows/compare.py backend/tests/test_compare_workflow.py`
+  Status 2026-03-19:
+  - В `Chainlit` добавлен presentation-layer UX contour для длинного compare appendix.
+  - Если секция `Приложение: различия по пунктам` превышает threshold по числу строк, основной `assistant_message` теперь оставляет summary-first report без appendix spam.
+  - Полный appendix переносится в отдельный схлопнутый `Chainlit Step` `Приложение: различия по пунктам (N)` с `autoCollapse=True`.
+  - Короткие appendix cases остаются inline, чтобы не ухудшать UX на маленьких compare-ответах.
+  - Workflow `compare.py` не менялся по report contract; split сделан только на уровне `chainlit_app.py`.
 
 - [ ] **B3.51a — Harden pair typing до production-grade compare regime selection**
   Контекст:
@@ -1712,6 +1882,91 @@
   - dedicated compare eval script / pytest suite;
   - live rerun на `2024-Polozhenie-o-distancionnoy-rabote-ecp.pdf` + `employment contract sample for remote work.pdf`;
   - manual review checkpoint на generated markdown report.
+
+- [ ] **B3.51g — Сделать summary-first compare с prioritized deep diff и bounded latency**
+  Контекст:
+  - live rerun на паре законов о СМИ показал, что adaptive batching снял часть parse-failures, но перевёл compare в `74` одиночных LLM-вызова и latency порядка `8+` минут;
+  - при этом итоговый отчёт всё ещё перекошен в `ADDED/DELETED`, а `Юридический вывод` остаётся слишком общим;
+  - для production compare нужен quality-first output, но без full deep analysis каждого orphan chunk.
+  Что сделать:
+  - оставить `summary pass` отдельным обязательным шагом для любого non-redline compare;
+  - усилить summary prompt так, чтобы он всегда возвращал:
+    - `Ключевые темы`;
+    - `Что исчезло / чем заменено`;
+    - `Что нового добавилось`;
+    - `Последствия / риски`;
+  - перейти на `top-N prioritized deep diff`:
+    - анализировать LLM-ом только наиболее значимые различия, ориентир `12-20`;
+    - prioritization строить по `MODIFIED first`, semantic overlap, topic importance, legal impact markers;
+  - остальные различия оставлять в `Приложении` без полного LLM-анализа;
+  - в metadata/report явно фиксировать:
+    - сколько различий было всего;
+    - сколько ушло в deep diff;
+    - сколько осталось appendix-only.
+  Execution budget:
+  - `fast_compare` target: summary + top findings укладываются в `<= 90s` на документах порядка `30-50` chunks на сторону;
+  - `deep_compare` target: `<= 6 min`, при этом bounded depth и отсутствие unbounded item-by-item expansion;
+  - report должен честно отражать, если deep analysis ограничен budget-ом, а хвост вынесен в appendix.
+  Acceptance:
+  - compare перестаёт анализировать десятки low-value orphan items одинаково глубоко;
+  - summary становится обязательной и содержательной частью любого semantic compare;
+  - runtime остаётся bounded и предсказуемым, без `70+` последовательных LLM-вызовов на один кейс;
+  - отчёт по проблемной паре PDF явно объясняет общие смысловые сдвиги между пакетами поправок, а не только перечисляет `ADDED/DELETED`.
+  Verification:
+  - unit tests на prioritization/top-N selection и budget enforcement;
+  - integration test на pair `H12100110_1621890000.pdf` vs `H12300274_1688590800.pdf`;
+  - manual review generated report на наличие всех summary sections и bounded appendix.
+
+- [ ] **B3.51h — Ввести fast/deep compare mode с user choice и отдельными execution graph paths**
+  Контекст:
+  - compare теперь реально требует разного профиля исполнения: иногда нужен быстрый обзор, иногда глубокий legal diff;
+  - текущий UI скрывает эту развилку, поэтому пользователь не контролирует tradeoff `speed vs depth`;
+  - user request: дать два выбора через кнопки и вести workflow по разным путям.
+  Что сделать:
+  - в Chainlit/UI добавить явный выбор перед compare run:
+    - `Быстрое сравнение`
+    - `Глубокое сравнение`
+  - для `Быстрое сравнение` запускать graph path:
+    - mandatory summary pass;
+    - top findings only;
+    - appendix без полного deep diff хвоста;
+  - для `Глубокое сравнение` запускать отдельный graph path:
+    - summary pass;
+    - расширенный prioritized deep diff;
+    - richer evidence package;
+  - передавать выбранный mode через orchestration contract и сохранять его в metadata/report;
+  - зафиксировать safe default:
+    - если user явно не выбрал mode, стартовать с `Быстрое сравнение`.
+  Acceptance:
+  - пользователь может управлять глубиной анализа до запуска compare;
+  - fast/deep path отличаются не только текстом статуса, но и реальным execution graph / budget / output depth;
+  - saved report и telemetry явно показывают выбранный mode.
+  Verification:
+  - unit tests на mode selection/request payload;
+  - integration tests на fast vs deep graph routing;
+  - manual UI smoke с button-based selection в Chainlit.
+
+- [ ] **B3.51i — Убрать дублирующиеся compare progress messages в Chainlit**
+  Контекст:
+  - после внедрения progress-step пользователь видит повторяющиеся нижние сообщения вида:
+    - `Avatar for Сравнение документов ... Анализирую различия по смыслу`
+    - `Avatar for Сравнение документов ... Формирую юридический вывод...`
+  - такой UX выглядит как дублирование финального отчёта и засоряет ленту.
+  Что сделать:
+  - пересобрать compare progress rendering так, чтобы использовался один устойчивый обновляемый status container, а не серия визуально дублирующихся сообщений;
+  - проверить lifecycle:
+    - создание;
+    - update;
+    - finalize/remove;
+  - убедиться, что progress-state не остаётся “хвостом” после отправки финального compare report;
+  - если `Chainlit Step.update()` не даёт чистого UX, ввести другой presentation primitive для transient execution status.
+  Acceptance:
+  - во время compare пользователь видит один понятный progress block;
+  - после финального ответа внизу не остаётся лишних дублирующихся status entries;
+  - appendix step и progress state визуально не смешиваются.
+  Verification:
+  - unit/integration tests на single-progress-container lifecycle;
+  - manual Chainlit smoke на long-running compare.
 
 - [ ] **T6.2 P0 — Compose full-stack smoke tests**
   Контекст: runtime/scripts и `docker-compose.yaml` часто меняются, но нет единого black-box gate, который подтверждает что весь stack действительно поднялся и отвечает не только на уровне unit mocks.
@@ -2178,6 +2433,88 @@ DOCUMENT_ANALYSIS_SUMMARIZE_MAX_TOKENS=512
   - runtime metadata честно отражают фактическое распределение компонентов по GPU;
   - manual overrides для GPU sets работают предсказуемо и не ломают auto-policy;
   - есть тесты, которые подтверждают поведение для `4 GPU` и регрессии не завязаны на реальное железо конкретной машины.
+
+### Future Task — B3.52: Явный tool/graph contract вместо UI-профилей как основного способа выбора сценария
+
+- [ ] **B3.52 — Ввести backend-first contract `requested_tool` / `routing_mode` для action-first чата**
+  Контекст:
+  - текущий `Chainlit`-контур перегружен `assistant_mode` / `runtime_mode` / `rag_scope` / `tool_scope` / `model_profile` и выглядит как operator panel, а не как обычный пользовательский чат;
+  - в коде уже есть переходный механизм `forced_route`, но он живёт как service override, а не как публичный основной контракт выбора действия;
+  - пользовательский сценарий должен начинаться с обычного чата, поверх которого доступны явные действия-инструменты, а не с набора слабопонятных профилей.
+  Что нужно сделать:
+  - определить публичный orchestration contract:
+    - `requested_tool` или `requested_graph`;
+    - `routing_mode=explicit|assisted|auto`;
+    - явное правило приоритета между `requested_tool`, planner/classifier hint и fallback routing;
+  - не опираться на classifier как на единственный центр выбора graph;
+  - перевести `forced_route` в нормализованный и документированный backend-owned contract;
+  - подготовить registry/каталог доступных действий:
+    - `compare_documents`
+    - `document_analysis`
+    - `document_question`
+    - `equipment_analysis`
+    - `documents_summary`
+  - отделить product-facing labels от внутренних executor/route names.
+  Acceptance:
+  - backend умеет выполнить явный пользовательский выбор инструмента без classifier;
+  - classifier остаётся optional hint / planner helper, а не hard dependency;
+  - один и тот же contract пригоден для `Chainlit`, `Open WebUI` и будущего custom frontend.
+
+### Future Task — B3.53: Упростить Chainlit до action-first UX и убрать ощущение недостоверного control panel
+
+- [ ] **B3.53 — Радикально упростить основной `Chainlit` UI для обычного чата с инструментами**
+  Контекст:
+  - текущий `Chainlit` использует starter cards плюс многовкладочный `ChatSettings`, что визуально перегружает стартовый экран;
+  - часть настроек полезна оператору, но не должна быть основной surface для конечного пользователя;
+  - нужен UX уровня “обычный чат + понятные действия”, а не “консоль с профилями”.
+  Что нужно сделать:
+  - сократить главный UI до action-first surface:
+    - несколько крупных product actions;
+    - минимальный набор видимых настроек;
+    - advanced/settings path отдельно и не в центре опыта;
+  - перевести starter cards с preset-centric логики на явные продуктовые действия;
+  - использовать `requested_tool` contract из `B3.52`, а не только `preset:*`;
+  - сохранить `Chainlit` как полезный debug/dev shell:
+    - progress steps;
+    - route choice fallback;
+    - trace/debug visibility.
+  Не делать:
+  - не строить хрупкий Claude-like hover-prefill на DOM hacks как основной UX path;
+  - не плодить новые вкладки/селекты вместо сокращения surface.
+  Acceptance:
+  - стартовый экран `Chainlit` объясним без знания внутренних runtime policy;
+  - пользователь видит 4-5 понятных действий вместо набора слабоочевидных профилей;
+  - advanced knobs сохранены, но не мешают основному сценарию.
+
+### Future Task — B3.54: Оценить Open WebUI как пользовательский shell поверх backend orchestration, не как второй мозг системы
+
+- [ ] **B3.54 — Подготовить controlled migration/evaluation contour для `Open WebUI` как thin shell**
+  Контекст:
+  - `agent_api.py` уже даёт `/v1/chat/completions`, что делает `Open WebUI` технически совместимым frontend-кандидатом;
+  - при этом нельзя допустить появления второго orchestration engine внутри UI или конфликта между native Open WebUI RAG и backend-owned routing;
+  - основной интерес — обычный чатовый интерфейс с понятным выбором действий, а не замена логики всей LLM-системы.
+  Что нужно сделать:
+  - зафиксировать роль `Open WebUI`:
+    - UI shell;
+    - auth/history/admin;
+    - prompt/slash-actions surface;
+    - без takeover orchestration policy;
+  - определить evaluation path:
+    - native Open WebUI RAG initially off;
+    - backend `agent_api` остаётся source of truth для routing/tool execution;
+    - проверить file handoff, attachments, streaming и UX prompt actions;
+  - описать границу между:
+    - `Open WebUI` shell;
+    - backend orchestration;
+    - external parsing / OCR;
+    - vector DB;
+  - подготовить migration notes для coexistence:
+    - `Chainlit` как dev/debug UI;
+    - `Open WebUI` как candidate end-user shell.
+  Acceptance:
+  - есть честный rollout/evaluation plan без смешивания UI и orchestration;
+  - `Open WebUI` не становится неявным вторым decision engine;
+  - направление совместимо с последующим выносом ingestion/retrieval в `Qdrant` + внешний document service.
 
 ### Антикризисные правила
 1. Не добавлять новые workflow до B3.31 cleanup
