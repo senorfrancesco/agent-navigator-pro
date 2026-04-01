@@ -126,9 +126,9 @@ def test_launcher_forwards_models_root_to_downloader(tmp_path):
     )
 
     assert result.returncode == 0
-    assert str(models_root / "gguf" / "qwen-14b" / "Qwen2.5-14B-Instruct-Q4_K_M.gguf") in result.stdout
+    assert str(models_root / "gguf" / "qwen-14b" / "Qwen3-14B.Q4_K_M.gguf") in result.stdout
     assert str(models_root / "gguf" / "Qwen3-VL-8B-Q4" / "mmproj-Qwen3-VL-8B-Instruct-F16.gguf") in result.stdout
-    assert str(models_root / "gguf" / "qwen-14b" / "Qwen2.5-14B-Instruct-Q4_K_M.gguf") in runtime_env.read_text(encoding="utf-8")
+    assert str(models_root / "gguf" / "qwen-14b" / "Qwen3-14B.Q4_K_M.gguf") in runtime_env.read_text(encoding="utf-8")
 
 
 def test_launcher_sources_native_overrides_before_runtime_preflight(tmp_path):
@@ -458,7 +458,7 @@ def test_run_native_from_launcher_accepts_backend_relative_model_paths(tmp_path)
             [
                 "CHAINLIT_AUTH_SECRET='ok'",
                 "CHAINLIT_ADMIN_PASSWORD='ok'",
-                "MODEL_PATH_LLM='./models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf'",
+                "MODEL_PATH_LLM='./models/gguf/qwen-14b/Qwen3-14B.Q4_K_M.gguf'",
                 "MODEL_PATH_VLM='./models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf'",
                 "MMPROJ_PATH='./models/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf'",
                 "MODEL_PATH_EMBEDDING_INTENT='./models/st/Qwen3-Embedding-0.6B'",

@@ -111,7 +111,7 @@ rsync -avz --progress \
 │   ├── models/
 │   │   ├── gguf/
 │   │   │   └── qwen-14b/
-│   │   │       └── Qwen2.5-14B-Instruct-Q4_K_M.gguf   # ~9 GB
+│   │   │       └── Qwen3-14B.Q4_K_M.gguf   # ~9 GB
 │   │   └── st/
 │   │       ├── LaBSE/                # ONNX FP32
 │   │       └── Qwen3-Embedding-0.6B/ # sentence-transformers
@@ -166,7 +166,7 @@ cp backend/.env.example backend/.env
 ```bash
 # Канонический registry и env contract для путей моделей: значения должны быть АБСОЛЮТНЫМИ на сервере
 MODEL_REGISTRY_CONFIG_PATH="/opt/agent-navigator-pro/backend/config/models.yaml"
-MODEL_PATH_LLM="/opt/agent-navigator-pro/backend/models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
+MODEL_PATH_LLM="/opt/agent-navigator-pro/backend/models/gguf/qwen-14b/Qwen3-14B.Q4_K_M.gguf"
 MODEL_PATH_VLM="/opt/agent-navigator-pro/backend/models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
 MODEL_PATH_EMBEDDING_INTENT="/opt/agent-navigator-pro/backend/models/st/Qwen3-Embedding-0.6B"
 MODEL_PATH_EMBEDDING_RETRIEVAL="/opt/agent-navigator-pro/backend/models/st/LaBSE"

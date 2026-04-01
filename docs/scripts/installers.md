@@ -168,10 +168,10 @@ scripts/
 - Успех проверяется через: наличие ожидаемых файлов/директорий, контроль путей и печать канонического env block для `MODEL_PATH_LLM`, `MODEL_PATH_VLM`, `MMPROJ_PATH`, `MODEL_PATH_EMBEDDING_INTENT`, `MODEL_PATH_EMBEDDING_RETRIEVAL`.
 - Official docs and source ids:
   - [Hugging Face model downloads](https://huggingface.co/docs/hub/en/models-downloading)
-  - `Qwen/Qwen2.5-14B-Instruct-GGUF`
+  - `MaziyarPanahi/Qwen3-14B-GGUF`
   - `Qwen/Qwen3-VL-8B-Instruct-GGUF`
   - `Qwen/Qwen3-Embedding-0.6B`
-  - `sentence-transformers/LaBSE`
+  - `cointegrated/LaBSE-en-ru`
 
 Примеры:
 

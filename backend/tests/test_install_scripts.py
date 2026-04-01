@@ -236,7 +236,7 @@ def test_model_downloader_dry_run_supports_custom_models_root(tmp_path):
     )
     assert result.returncode == 0
     assert "models:plan" in result.stdout
-    assert str(tmp_path / "gguf" / "qwen-14b" / "Qwen2.5-14B-Instruct-Q4_K_M.gguf") in result.stdout
+    assert str(tmp_path / "gguf" / "qwen-14b" / "Qwen3-14B.Q4_K_M.gguf") in result.stdout
     assert str(tmp_path / "st" / "Qwen3-Embedding-0.6B") in result.stdout
 
 
