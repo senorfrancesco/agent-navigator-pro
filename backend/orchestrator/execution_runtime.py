@@ -1422,6 +1422,7 @@ async def _execute_compare(
     new_files: List[Dict[str, Any]],
     session_docs: Dict[str, Any],
     deps: ExecutionDependencies,
+    compare_depth_mode: str = "fast",  # B3.51h: fast | deep
 ) -> Dict[str, Any]:
     from orchestrator.workflows.compare import create_compare_graph
 
@@ -1437,6 +1438,7 @@ async def _execute_compare(
             "input_2": deps.to_host_path(files[1]["path"]),
             "name_1": files[0]["name"],
             "name_2": files[1]["name"],
+            "compare_depth_mode": compare_depth_mode,  # B3.51h: pass depth mode
             "chunks_old": [],
             "chunks_new": [],
             "matches": [],
@@ -2747,7 +2749,14 @@ async def execute_orchestration(
         exec_span = start_current_span(name=str(executor), kind="stage", category="workflow")
         try:
             if executor == "compare_documents":
-                result = await _execute_compare(new_files=attachments_meta, session_docs=session_docs, deps=deps)
+                # B3.51h: Extract compare_depth_mode from request (default: fast)
+                compare_depth_mode = request.get("compare_depth_mode", "fast")
+                result = await _execute_compare(
+                    new_files=attachments_meta,
+                    session_docs=session_docs,
+                    deps=deps,
+                    compare_depth_mode=compare_depth_mode,
+                )
             elif executor == "equipment_analysis":
                 result = await _execute_equipment(
                     query=request.get("message", ""),

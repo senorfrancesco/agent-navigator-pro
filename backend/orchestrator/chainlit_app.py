@@ -1369,10 +1369,11 @@ def _build_execution_request(
     new_files: List[Dict[str, Any]],
     session_docs: Dict[str, Any],
     forced_route: Optional[str] = None,
+    compare_depth_mode: Optional[str] = None,  # B3.51h: fast | deep
 ) -> Dict[str, Any]:
     effective = _get_effective_settings()
     ids = _get_current_chainlit_session_ids()
-    return {
+    request = {
         "message": message,
         "run_id": cl.user_session.get("run_id"),
         "state_ref": cl.user_session.get("state_ref"),
@@ -1402,6 +1403,10 @@ def _build_execution_request(
         "effective_settings": effective,
         "runtime_budget_metadata": copy.deepcopy(cl.user_session.get("runtime_budget_metadata") or {}),
     }
+    # B3.51h: Add compare_depth_mode if provided
+    if compare_depth_mode:
+        request["compare_depth_mode"] = compare_depth_mode
+    return request
 
 
 def _get_runtime_mode() -> str:
@@ -2894,12 +2899,53 @@ async def on_message(message: cl.Message):
 
     active_session_docs = _get_active_session_docs()
 
+    # B3.51h: Check if this is a compare request and ask for depth mode
+    # Build a temporary request to check if compare will be executed
+    temp_request = _build_execution_request(
+        message=query,
+        trace_id=trace_id,
+        new_files=new_files,
+        session_docs=active_session_docs,
+    )
+    is_compare_request = _is_compare_execution_request(temp_request)
+    compare_depth_mode = None
+
+    if is_compare_request and not cl.user_session.get("compare_depth_mode_selected"):
+        # Ask user to choose between fast and deep compare
+        actions_response = await cl.AskActionMessage(
+            content="Выберите режим сравнения документов:",
+            actions=[
+                cl.Action(name="compare_fast", payload={"depth_mode": "fast"}, label="⚡ Быстрое сравнение (топ-12 различий, ~90 сек)"),
+                cl.Action(name="compare_deep", payload={"depth_mode": "deep"}, label="🔍 Глубокое сравнение (топ-30 различий, до 6 мин)"),
+            ],
+            timeout=60,
+            raise_on_timeout=False,
+        ).send()
+
+        if actions_response and actions_response.get("payload", {}).get("depth_mode"):
+            compare_depth_mode = actions_response["payload"]["depth_mode"]
+            cl.user_session.set("compare_depth_mode_selected", compare_depth_mode)
+            logger.info(
+                "Compare depth mode selected trace=%s mode=%s",
+                trace_id,
+                compare_depth_mode,
+            )
+        else:
+            # No selection within timeout, default to fast
+            compare_depth_mode = "fast"
+            cl.user_session.set("compare_depth_mode_selected", compare_depth_mode)
+            await cl.Message(content="Выбор не получен, используется быстрое сравнение по умолчанию.").send()
+    elif is_compare_request:
+        # Reuse previously selected mode
+        compare_depth_mode = cl.user_session.get("compare_depth_mode_selected", "fast")
+
     response = await _await_backend_execution(
         _build_execution_request(
             message=query,
             trace_id=trace_id,
             new_files=new_files,
             session_docs=active_session_docs,
+            compare_depth_mode=compare_depth_mode,
         ),
     )
     if response is None:

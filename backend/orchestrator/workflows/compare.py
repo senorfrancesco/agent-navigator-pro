@@ -33,6 +33,10 @@ COMPARE_SECTION_MAX_CHARS = int(os.getenv("COMPARE_SECTION_MAX_CHARS", "2000"))
 COMPARE_MIN_CHUNK_CHARS = int(os.getenv("COMPARE_MIN_CHUNK_CHARS", "40"))
 COMPARE_ANALYSIS_MAX_TOKENS = int(os.getenv("COMPARE_ANALYSIS_MAX_TOKENS", "600"))
 COMPARE_ANALYSIS_TEMPERATURE = float(os.getenv("COMPARE_ANALYSIS_TEMPERATURE", "0.1"))
+
+# B3.51g & B3.51h: Bounded latency and depth modes
+COMPARE_FAST_TOP_N = int(os.getenv("COMPARE_FAST_TOP_N", "12"))  # fast mode: top 12 items
+COMPARE_DEEP_TOP_N = int(os.getenv("COMPARE_DEEP_TOP_N", "30"))  # deep mode: top 30 items
 logger = logging.getLogger("compare_workflow")
 _LEGAL_COMPARE_SELECTION = resolve_model_selection("llm.legal_compare")
 
@@ -82,6 +86,7 @@ class CompareState(TypedDict):
     base_document_title_2: str
     pair_relation_type: str
     compare_mode_selected: str
+    compare_depth_mode: str  # B3.51h: "fast" | "deep" - user choice for analysis depth
     semantic_fallback_triggered: bool
     chunks_old: List[str]
     chunks_new: List[str]
@@ -645,10 +650,14 @@ async def analyze_differences_node(state: CompareState):
     print(f"[Workflow] Structural: {len(structural)}, needs LLM: {len(to_analyze)}")
 
     compare_mode_selected = state.get("compare_mode_selected", "redline_compare")
+    compare_depth_mode = state.get("compare_depth_mode", "fast")  # B3.51h: default to fast
     role_1 = state.get("document_role_1", "other")
     role_2 = state.get("document_role_2", "other")
+
+    # B3.51g: Make summary mandatory for all non-redline compares
     should_run_semantic_fallback = (
-        compare_mode_selected == "heterogeneous_alignment"
+        compare_mode_selected != "redline_compare"  # Always run for non-redline
+        or compare_mode_selected == "heterogeneous_alignment"
         or state.get("pair_relation_type") == "same_base_law_amendments"
         or (
             compare_mode_selected == "semantic_compare"
@@ -677,15 +686,28 @@ async def analyze_differences_node(state: CompareState):
 
     semantic_candidates = _prioritize_semantic_candidates(to_analyze + structural)
 
+    # B3.51g: Apply top-N bounded analysis based on depth mode
+    top_n_limit = COMPARE_DEEP_TOP_N if compare_depth_mode == "deep" else COMPARE_FAST_TOP_N
+    total_candidates = len(semantic_candidates)
+    candidates_to_analyze = semantic_candidates[:top_n_limit]
+    candidates_appendix_only = semantic_candidates[top_n_limit:]
+
+    print(
+        f"[Workflow] Depth mode: {compare_depth_mode}, "
+        f"total candidates: {total_candidates}, "
+        f"deep analysis: {len(candidates_to_analyze)}, "
+        f"appendix only: {len(candidates_appendix_only)}"
+    )
+
     # Batch LLM анализ: по BATCH_SIZE различий в одном промпте
     analysis_batch_size = _resolve_analysis_batch_size(state)
     print(
         f"[Workflow] Pair relation={state.get('pair_relation_type', 'unknown')}, "
         f"threshold={_resolve_match_threshold(state):.2f}, analysis_batch_size={analysis_batch_size}"
     )
-    total_batches = (len(semantic_candidates) + analysis_batch_size - 1) // analysis_batch_size if semantic_candidates else 0
-    for batch_idx, batch_start in enumerate(range(0, len(semantic_candidates), analysis_batch_size)):
-        batch = semantic_candidates[batch_start:batch_start + analysis_batch_size]
+    total_batches = (len(candidates_to_analyze) + analysis_batch_size - 1) // analysis_batch_size if candidates_to_analyze else 0
+    for batch_idx, batch_start in enumerate(range(0, len(candidates_to_analyze), analysis_batch_size)):
+        batch = candidates_to_analyze[batch_start:batch_start + analysis_batch_size]
         print(f"[Workflow] LLM batch {batch_idx+1}/{total_batches} ({len(batch)} diffs)")
         try:
             results.extend(
@@ -716,6 +738,23 @@ async def analyze_differences_node(state: CompareState):
                         "new_text": m.get('new_text', '')
                     })
 
+    # B3.51g: Add appendix-only items (no deep LLM analysis)
+    for m in candidates_appendix_only:
+        diff_type = m.get("type", "MODIFIED")
+        if diff_type in {"ADDED", "DELETED"}:
+            _append_structural_result(results, m)
+        else:
+            # Add MODIFIED items to appendix without full LLM analysis
+            results.append({
+                "type": "MODIFIED",
+                "is_critical": False,
+                "diff": "Структурное изменение (не включено в глубокий анализ)",
+                "impact": "",
+                "old_text": m.get('old_text', ''),
+                "new_text": m.get('new_text', ''),
+                "appendix_only": True  # Mark as appendix-only for report generation
+            })
+
     return {
         "analysis_results": results,
         "model_execution": model_execution_events,
@@ -741,7 +780,22 @@ async def generate_report_node(state: CompareState):
         if elapsed_seconds is not None:
             report += f"**Время выполнения:** {_format_elapsed_seconds(elapsed_seconds)}\n"
     report += f"**Файлы:**\n- Старая версия: {name_1}\n- Новая версия: {name_2}\n\n"
-    report += f"**Найдено изменений:** {len(state['analysis_results'])}\n\n"
+
+    # B3.51g: Add depth mode metadata
+    compare_depth_mode = state.get("compare_depth_mode", "fast")
+    depth_mode_label = "Глубокое сравнение" if compare_depth_mode == "deep" else "Быстрое сравнение"
+    report += f"**Режим анализа:** {depth_mode_label}\n"
+
+    # B3.51g: Count deep vs appendix items
+    all_results = state['analysis_results']
+    deep_analysis_count = len([r for r in all_results if not r.get("appendix_only") and r.get("type") not in ["LEGAL_SUMMARY"]])
+    appendix_only_count = len([r for r in all_results if r.get("appendix_only")])
+
+    report += f"**Найдено изменений:** {len(all_results)}\n"
+    if appendix_only_count > 0:
+        report += f"- Проанализировано глубоко: {deep_analysis_count}\n"
+        report += f"- В приложении без глубокого анализа: {appendix_only_count}\n"
+    report += "\n"
     legal_summaries = [r for r in state["analysis_results"] if r.get("type") == "LEGAL_SUMMARY"]
     if legal_summaries:
         summary = legal_summaries[0]
