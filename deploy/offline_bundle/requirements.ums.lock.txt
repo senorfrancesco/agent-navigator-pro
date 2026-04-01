@@ -1,8 +1,5 @@
-# Временный lock-файл для оффлайн UMS GPU image.
-# Перед финальным `v1.0` его нужно заменить на полностью зафиксированный набор зависимостей.
-#
-# Рекомендуемый способ генерации на build-машине:
-#   pip freeze --exclude-editable > deploy/offline_bundle/requirements.ums.lock.txt
+# Offline lock-файл для UMS GPU image.
+# Сгенерирован через: pip freeze --exclude-editable > deploy/offline_bundle/requirements.ums.lock.txt
 #
 # Тяжёлый GGUF inference обслуживается бинарём `llama-server` из `llama.cpp` внутри image.
 # Этот lock-файл покрывает Python-слой оркестрации `UMS` вокруг этого бинаря.

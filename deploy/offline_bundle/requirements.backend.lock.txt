@@ -1,8 +1,5 @@
-# Временный lock-файл для оффлайн backend-image.
-# Перед финальным `v1.0` его нужно заменить на полностью зафиксированный набор зависимостей.
-#
-# Рекомендуемый способ генерации на build-машине:
-#   pip freeze --exclude-editable > deploy/offline_bundle/requirements.backend.lock.txt
+# Offline lock-файл для backend-image.
+# Сгенерирован через: pip freeze --exclude-editable > deploy/offline_bundle/requirements.backend.lock.txt
 
 aiosqlite==0.21.0
 aiofiles==24.1.0
@@ -37,7 +34,7 @@ sentence-transformers==5.1.1
 sse-starlette==3.0.2
 starlette==0.48.0
 starlette-context==0.4.0
-torch==2.8.0
+torch==2.10.0
 transformers==4.56.2
 uvicorn[standard]==0.37.0
 WeasyPrint==66.0

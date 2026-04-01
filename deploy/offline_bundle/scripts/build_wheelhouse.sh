@@ -10,7 +10,7 @@ CHAINLIT_REQ="$BUNDLE_ROOT/requirements.chainlit.lock.txt"
 UMS_REQ="$BUNDLE_ROOT/requirements.ums.lock.txt"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 DOWNLOAD_WHEELS=1
-TORCH_VERSION="${TORCH_VERSION:-2.8.0}"
+TORCH_VERSION="${TORCH_VERSION:-2.10.0}"
 TORCH_INDEX_URL="${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}"
 
 print_help() {
@@ -23,7 +23,7 @@ Downloads wheels for:
   - requirements.backend.lock.txt
   - requirements.chainlit.lock.txt
   - requirements.ums.lock.txt
-  - torch==2.8.0 from cu128 wheel index
+  - torch==2.10.0 from cu128 wheel index
 
 Flags:
   --skip-download   Only create the wheelhouse directory
