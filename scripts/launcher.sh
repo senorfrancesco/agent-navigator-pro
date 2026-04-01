@@ -489,7 +489,7 @@ echo "$PREFLIGHT_OUTPUT"
 
 if [ -n "$MODELS_ROOT" ]; then
   MODELS_ROOT_ABS="$(python -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).expanduser().resolve())' "$MODELS_ROOT")"
-  MODEL_PATH_LLM="$MODELS_ROOT_ABS/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
+  MODEL_PATH_LLM="$MODELS_ROOT_ABS/gguf/qwen-14b/Qwen3-14B.Q4_K_M.gguf"
   MODEL_PATH_VLM="$MODELS_ROOT_ABS/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
   MMPROJ_PATH="$MODELS_ROOT_ABS/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf"
   MODEL_PATH_EMBEDDING_INTENT="$MODELS_ROOT_ABS/st/Qwen3-Embedding-0.6B"

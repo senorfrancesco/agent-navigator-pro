@@ -283,7 +283,7 @@ cd ..
 MODEL_REGISTRY_CONFIG_PATH="/path/to/repo/backend/config/models.yaml"
 
 # Пути к артефактам моделей
-MODEL_PATH_LLM="/path/to/models/gguf/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
+MODEL_PATH_LLM="/path/to/models/gguf/Qwen3-14B.Q4_K_M.gguf"
 MODEL_PATH_VLM="/path/to/models/gguf/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
 MODEL_PATH_EMBEDDING_INTENT="/path/to/models/st/Qwen3-Embedding-0.6B"
 MODEL_PATH_EMBEDDING_RETRIEVAL="/path/to/models/st/LaBSE"
@@ -309,7 +309,7 @@ Universal failover теперь тоже опирается на этот regist
 
 ```bash
 MODEL_REGISTRY_CONFIG_PATH="/mnt/d/agent-navigator-pro/backend/config/models.yaml"
-MODEL_PATH_LLM="/mnt/d/agent-models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
+MODEL_PATH_LLM="/mnt/d/agent-models/gguf/qwen-14b/Qwen3-14B.Q4_K_M.gguf"
 MODEL_PATH_VLM="/mnt/d/agent-models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
 MMPROJ_PATH="/mnt/d/agent-models/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf"
 MODEL_PATH_EMBEDDING_INTENT="/mnt/d/agent-models/st/Qwen3-Embedding-0.6B"
@@ -511,10 +511,10 @@ conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/ma
 ```
 
 Используемые Hugging Face источники:
-- `Qwen/Qwen2.5-14B-Instruct-GGUF`
+- `MaziyarPanahi/Qwen3-14B-GGUF`
 - `Qwen/Qwen3-VL-8B-Instruct-GGUF`
 - `Qwen/Qwen3-Embedding-0.6B`
-- `sentence-transformers/LaBSE`
+- `cointegrated/LaBSE-en-ru`
 
 Полная карта runtime-скриптов, их роли и ограничения описана в [docs/scripts/README.md](docs/scripts/README.md).
 Полный справочник флагов, env-файлов, timeout/concurrency knobs и рекомендаций по placement находится в [docs/flags-reference.md](docs/flags-reference.md).

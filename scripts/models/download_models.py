@@ -13,7 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_DIR = PROJECT_ROOT / "backend"
 sys.path.insert(0, str(BACKEND_DIR))
 
-DEFAULT_LLM_PATH = "./models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
+DEFAULT_LLM_PATH = "./models/gguf/qwen-14b/Qwen3-14B.Q4_K_M.gguf"
 DEFAULT_VLM_PATH = "./models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
 DEFAULT_INTENT_EMBEDDING_PATH = "./models/st/Qwen3-Embedding-0.6B"
 DEFAULT_RETRIEVAL_EMBEDDING_PATH = "./models/st/LaBSE"
@@ -23,8 +23,8 @@ ASSETS: Dict[str, Dict[str, str]] = {
     "llm": {
         "asset_set": "core",
         "kind": "file",
-        "repo_id": "Qwen/Qwen2.5-14B-Instruct-GGUF",
-        "filename": "Qwen2.5-14B-Instruct-Q4_K_M.gguf",
+        "repo_id": "MaziyarPanahi/Qwen3-14B-GGUF",
+        "filename": "Qwen3-14B.Q4_K_M.gguf",
         "target_env": "MODEL_PATH_LLM",
         "default_path": DEFAULT_LLM_PATH,
     },
@@ -38,7 +38,7 @@ ASSETS: Dict[str, Dict[str, str]] = {
     "retrieval_embedding": {
         "asset_set": "core",
         "kind": "snapshot",
-        "repo_id": "sentence-transformers/LaBSE",
+        "repo_id": "cointegrated/LaBSE-en-ru",
         "target_env": "MODEL_PATH_EMBEDDING_RETRIEVAL",
         "default_path": DEFAULT_RETRIEVAL_EMBEDDING_PATH,
     },

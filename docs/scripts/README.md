@@ -36,7 +36,7 @@
 Если модели нужно хранить вне `C:` в `WSL`, используйте `/mnt/d/...` и пропишите абсолютные пути в `backend/.env.native`:
 
 ```bash
-MODEL_PATH_LLM="/mnt/d/agent-models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
+MODEL_PATH_LLM="/mnt/d/agent-models/gguf/qwen-14b/Qwen3-14B.Q4_K_M.gguf"
 MODEL_PATH_VLM="/mnt/d/agent-models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
 MMPROJ_PATH="/mnt/d/agent-models/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf"
 MODEL_PATH_EMBEDDING_INTENT="/mnt/d/agent-models/st/Qwen3-Embedding-0.6B"

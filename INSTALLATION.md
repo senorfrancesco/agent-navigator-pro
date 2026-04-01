@@ -62,7 +62,7 @@ pip install nvidia-ml-py
 - [GGUF модели TheBloke](https://huggingface.co/TheBloke)
 
 Примеры моделей:
-- `Qwen2.5-14B-Instruct-Q4_K_M.gguf`
+- `Qwen3-14B.Q4_K_M.gguf`
 - `Qwen3-VL-8B-Instruct-Q4_K_M.gguf`
 - `LaBSE-Q4_K_M.gguf`
 
@@ -80,7 +80,7 @@ cp .env.example .env
 **Пример содержимого `.env`:**
 ```
 # GGUF Модели (LLM)
-MODEL_PATH_QWEN14B="./models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
+MODEL_PATH_QWEN14B="./models/gguf/qwen-14b/Qwen3-14B.Q4_K_M.gguf"
 MODEL_PATH_QWENVL="./models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
 MMPROJ_PATH="./models/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf"
 
