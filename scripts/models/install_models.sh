@@ -6,7 +6,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
 BACKEND_DIR="$PROJECT_ROOT/backend"
 ENV_FILE="${AGENT_NAVIGATOR_BACKEND_ENV_FILE:-$BACKEND_DIR/.env}"
-NATIVE_ENV_FILE="${AGENT_NAVIGATOR_BACKEND_NATIVE_ENV_FILE:-$BACKEND_DIR/.env.native}"
 PYTHON_HELPER="$SCRIPT_DIR/download_models.py"
 
 MODE="ensure-present"
@@ -106,12 +105,6 @@ done
 if [ -f "$ENV_FILE" ]; then
   set -a
   source "$ENV_FILE"
-  set +a
-fi
-
-if [ -f "$NATIVE_ENV_FILE" ]; then
-  set -a
-  source "$NATIVE_ENV_FILE"
   set +a
 fi
 

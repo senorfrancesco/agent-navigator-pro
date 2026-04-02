@@ -15,8 +15,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BACKEND_DIR="$PROJECT_ROOT/backend"
 ENV_FILE="${AGENT_NAVIGATOR_BACKEND_ENV_FILE:-$BACKEND_DIR/.env}"
-NATIVE_ENV_FILE="${AGENT_NAVIGATOR_BACKEND_NATIVE_ENV_FILE:-$BACKEND_DIR/.env.native}"
 RUNTIME_ENV_FILE="${AGENT_NAVIGATOR_RUNTIME_ENV_FILE:-$BACKEND_DIR/.env.runtime}"
+ENV_ROOT="$(dirname "$ENV_FILE")"
 ATTACH_TMUX=true
 FROM_LAUNCHER=false
 
@@ -112,7 +112,7 @@ resolve_backend_relative_path() {
     printf '%s\n' "$raw_path"
     return 0
   fi
-  printf '%s\n' "$BACKEND_DIR/${raw_path#./}"
+  printf '%s\n' "$ENV_ROOT/${raw_path#./}"
 }
 
 validate_file_path_var() {
@@ -175,13 +175,6 @@ ensure_writable_dir() {
 }
 
 source_env_file "$ENV_FILE" "backend env"
-
-if [ -f "$NATIVE_ENV_FILE" ]; then
-  source_env_file "$NATIVE_ENV_FILE" "native override"
-else
-  warn "Файл $NATIVE_ENV_FILE не найден. Можно создать из .env.native.example"
-fi
-
 source_env_file "$RUNTIME_ENV_FILE" "runtime overrides"
 
 CONDA_ENV="${CONDA_ENV:-base}"

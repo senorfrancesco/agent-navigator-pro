@@ -5,9 +5,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BACKEND_DIR="$PROJECT_ROOT/backend"
-ENV_FILE="$BACKEND_DIR/.env"
-NATIVE_ENV_FILE="$BACKEND_DIR/.env.native"
-HARDWARE_OVERRIDE_ENV_FILE="${AGENT_NAVIGATOR_BACKEND_HARDWARE_OVERRIDE_FILE:-$BACKEND_DIR/.env.hardware.override}"
+ENV_FILE="${AGENT_NAVIGATOR_BACKEND_ENV_FILE:-$BACKEND_DIR/.env}"
 RUNTIME_ENV_FILE="${AGENT_NAVIGATOR_RUNTIME_ENV_FILE:-$BACKEND_DIR/.env.runtime}"
 TARGET="native"
 PROFILE="${UMS_RUNTIME_PROFILE:-adaptive}"
@@ -34,14 +32,13 @@ print_help() {
 launcher.sh
 
 Compatibility wrapper for manual/native shell usage around the Python-first operator control plane.
-Operator UI and `/operator/*` endpoints remain the canonical product API; this script is kept for CLI, install and recovery workflows.
+Operator UI and /operator/* endpoints remain the canonical product API; this script is kept for CLI, install and recovery workflows.
 
 Использование:
   ./scripts/launcher.sh --target native --profile adaptive
   ./scripts/launcher.sh --target container --profile default
   ./scripts/launcher.sh --install --platform ubuntu
   ./scripts/launcher.sh --target native --models-root /mnt/d/agent-models
-  ./scripts/launcher.sh --target native --hardware-override-file /mnt/d/agent-models/runtime.override.env
 
 Флаги:
   --target native|container
@@ -56,8 +53,6 @@ Operator UI and `/operator/*` endpoints remain the canonical product API; this s
       Корневой каталог моделей вместо стандартного layout внутри backend/models.
   --huggingface-cache <path>
       Каталог кэша Hugging Face для model provisioning.
-  --hardware-override-file <path>
-      Явный файл hardware/runtime overrides для текущего запуска.
   --gpu-layers-mode auto|max|manual
       Режим выбора GPU layers для LLM.
   --gpu-layers <int>
@@ -90,7 +85,6 @@ Operator UI and `/operator/*` endpoints remain the canonical product API; this s
 Interactive review:
   1. launcher показывает runtime plan только для текущего запуска
   2. launcher записывает applied backend/.env.runtime
-  3. launcher сохраняет backend/.env.hardware.override только по отдельному подтверждению
 EOF
 }
 
@@ -158,14 +152,6 @@ while [ $# -gt 0 ]; do
       ;;
     --huggingface-cache=*)
       HF_CACHE="${1#*=}"
-      shift
-      ;;
-    --hardware-override-file)
-      HARDWARE_OVERRIDE_ENV_FILE="$2"
-      shift 2
-      ;;
-    --hardware-override-file=*)
-      HARDWARE_OVERRIDE_ENV_FILE="${1#*=}"
       shift
       ;;
     --gpu-layers-mode)
@@ -369,29 +355,7 @@ items = [
 print("Applied env for this run (.env.runtime):")
 for key, value, source in items:
     print(f"  {key}={value} (source={source})")
-print("Persistent save (.env.hardware.override) is a separate step.")
 PY
-}
-
-save_hardware_override_file() {
-  local file="$1"
-  mkdir -p "$(dirname "$file")"
-  {
-    echo "# User-owned hardware/runtime overrides"
-    echo "UMS_RUNTIME_PROFILE=\"$PROFILE\""
-    [ -n "$DEVICE_MODE_OVERRIDE" ] && echo "DEVICE_MODE=\"$DEVICE_MODE_OVERRIDE\""
-    [ -n "$LLM_DEVICE_MODE_OVERRIDE" ] && echo "LLM_DEVICE_MODE=\"$LLM_DEVICE_MODE_OVERRIDE\""
-    [ -n "$VLM_DEVICE_MODE_OVERRIDE" ] && echo "VLM_DEVICE_MODE=\"$VLM_DEVICE_MODE_OVERRIDE\""
-    [ -n "$INTENT_EMBEDDER_DEVICE_MODE_OVERRIDE" ] && echo "INTENT_EMBEDDER_DEVICE_MODE=\"$INTENT_EMBEDDER_DEVICE_MODE_OVERRIDE\""
-    [ -n "$RETRIEVAL_EMBEDDER_DEVICE_MODE_OVERRIDE" ] && echo "RETRIEVAL_EMBEDDER_DEVICE_MODE=\"$RETRIEVAL_EMBEDDER_DEVICE_MODE_OVERRIDE\""
-    [ -n "$GPU_LAYERS_MODE_OVERRIDE" ] && echo "GPU_LAYERS_MODE=\"$GPU_LAYERS_MODE_OVERRIDE\""
-    if [ "$GPU_LAYERS_MODE_OVERRIDE" = "manual" ] && [ -n "$GPU_LAYERS_OVERRIDE_VALUE" ]; then
-      echo "N_GPU_LAYERS_OVERRIDE=\"$GPU_LAYERS_OVERRIDE_VALUE\""
-    elif [ "$GPU_LAYERS_MODE_OVERRIDE" = "max" ]; then
-      echo "N_GPU_LAYERS_OVERRIDE=\"-1\""
-    fi
-  } > "$file"
-  echo "hardware-override:saved:$file"
 }
 
 if [ "$INSTALL" = true ]; then
@@ -400,10 +364,6 @@ if [ "$INSTALL" = true ]; then
 fi
 
 source_env_file "$ENV_FILE"
-source_env_file "$NATIVE_ENV_FILE"
-source_env_file "$HARDWARE_OVERRIDE_ENV_FILE"
-export AGENT_NAVIGATOR_BACKEND_HARDWARE_OVERRIDE_FILE="$HARDWARE_OVERRIDE_ENV_FILE"
-
 bash "$SCRIPT_DIR/bootstrap_env.sh" --check "--target=$TARGET"
 
 if [ -z "$GPU_LAYERS_MODE_OVERRIDE" ]; then
@@ -475,13 +435,6 @@ if [ "$INTERACTIVE_REVIEW" = true ]; then
   render_runtime_review_summary "$PLAN_PREVIEW"
   echo ""
   render_applied_env_preview "$PLAN_PREVIEW"
-  echo ""
-  read -r -p "Сохранить текущие current-run overrides в $HARDWARE_OVERRIDE_ENV_FILE для будущих запусков? [y/N]: " SAVE_OVERRIDE
-  case "$(printf '%s' "$SAVE_OVERRIDE" | tr '[:upper:]' '[:lower:]')" in
-    "y"|"yes")
-      save_hardware_override_file "$HARDWARE_OVERRIDE_ENV_FILE"
-      ;;
-  esac
 fi
 
 PREFLIGHT_OUTPUT="$(run_preflight_json "apply" "$RUNTIME_ENV_FILE")"

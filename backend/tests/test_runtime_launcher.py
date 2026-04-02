@@ -65,7 +65,7 @@ def test_launcher_help_documents_install_and_platform_flags():
     assert "Compatibility wrapper" in result.stdout
     assert "Python-first operator control plane" in result.stdout
     assert "--install --platform ubuntu" in result.stdout
-    assert "--hardware-override-file <path>" in result.stdout
+    assert "--gpu-layers-mode auto|max|manual" in result.stdout
 
 
 def test_launcher_test_mode_writes_env_runtime_and_reports_target(tmp_path):
@@ -131,19 +131,16 @@ def test_launcher_forwards_models_root_to_downloader(tmp_path):
     assert str(models_root / "gguf" / "qwen-14b" / "Qwen2.5-14B-Instruct-Q4_K_M.gguf") in runtime_env.read_text(encoding="utf-8")
 
 
-def test_launcher_sources_native_overrides_before_runtime_preflight(tmp_path):
+def test_launcher_uses_backend_env_for_runtime_preflight(tmp_path):
     runtime_env = tmp_path / ".env.runtime"
     backend_env = tmp_path / ".env"
-    native_env = tmp_path / ".env.native"
-    hardware_env = tmp_path / ".env.hardware.override"
-    backend_env.write_text("CHAINLIT_AUTH_SECRET='ok'\nCHAINLIT_ADMIN_PASSWORD='ok'\n", encoding="utf-8")
-    native_env.write_text('DEVICE_MODE="gpu"\n', encoding="utf-8")
-    hardware_env.write_text("", encoding="utf-8")
+    backend_env.write_text(
+        "CHAINLIT_AUTH_SECRET='ok'\nCHAINLIT_ADMIN_PASSWORD='ok'\nDEVICE_MODE='gpu'\n",
+        encoding="utf-8",
+    )
     env = os.environ.copy()
     env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
     env["AGENT_NAVIGATOR_BACKEND_ENV_FILE"] = str(backend_env)
-    env["AGENT_NAVIGATOR_BACKEND_NATIVE_ENV_FILE"] = str(native_env)
-    env["AGENT_NAVIGATOR_BACKEND_HARDWARE_OVERRIDE_FILE"] = str(hardware_env)
     env["AGENT_NAVIGATOR_RUNTIME_ENV_FILE"] = str(runtime_env)
 
     result = _run_script(
@@ -160,43 +157,17 @@ def test_launcher_sources_native_overrides_before_runtime_preflight(tmp_path):
     assert "DEVICE_MODE=gpu" in runtime_env.read_text(encoding="utf-8")
 
 
-def test_launcher_sources_hardware_override_file_before_runtime_preflight(tmp_path):
+def test_launcher_cli_gpu_layers_override_beats_backend_env(tmp_path):
     runtime_env = tmp_path / ".env.runtime"
-    hardware_env = tmp_path / ".env.hardware.override"
-    hardware_env.write_text(
-        'GPU_LAYERS_MODE="manual"\nN_GPU_LAYERS_OVERRIDE="24"\nINTENT_EMBEDDER_DEVICE_MODE="gpu"\n',
+    backend_env = tmp_path / ".env"
+    backend_env.write_text(
+        "CHAINLIT_AUTH_SECRET='ok'\nCHAINLIT_ADMIN_PASSWORD='ok'\nGPU_LAYERS_MODE='manual'\nN_GPU_LAYERS_OVERRIDE='24'\n",
         encoding="utf-8",
     )
     env = os.environ.copy()
     env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
+    env["AGENT_NAVIGATOR_BACKEND_ENV_FILE"] = str(backend_env)
     env["AGENT_NAVIGATOR_RUNTIME_ENV_FILE"] = str(runtime_env)
-    env["AGENT_NAVIGATOR_BACKEND_HARDWARE_OVERRIDE_FILE"] = str(hardware_env)
-
-    result = _run_script(
-        "launcher.sh",
-        "--target",
-        "native",
-        "--profile",
-        "adaptive",
-        env=env,
-    )
-
-    assert result.returncode == 0
-    contents = runtime_env.read_text(encoding="utf-8")
-    assert "GPU_LAYERS_MODE=manual" in contents
-    assert "N_GPU_LAYERS_OVERRIDE=24" in contents
-    assert "UMS_SELECTED_GPU_LAYERS=24" in contents
-    assert "INTENT_EMBEDDER_DEVICE_MODE=gpu" in contents
-
-
-def test_launcher_cli_gpu_layers_override_beats_hardware_override_file(tmp_path):
-    runtime_env = tmp_path / ".env.runtime"
-    hardware_env = tmp_path / ".env.hardware.override"
-    hardware_env.write_text('GPU_LAYERS_MODE="manual"\nN_GPU_LAYERS_OVERRIDE="24"\n', encoding="utf-8")
-    env = os.environ.copy()
-    env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
-    env["AGENT_NAVIGATOR_RUNTIME_ENV_FILE"] = str(runtime_env)
-    env["AGENT_NAVIGATOR_BACKEND_HARDWARE_OVERRIDE_FILE"] = str(hardware_env)
 
     result = _run_script(
         "launcher.sh",
@@ -213,14 +184,17 @@ def test_launcher_cli_gpu_layers_override_beats_hardware_override_file(tmp_path)
     assert "UMS_SELECTED_GPU_LAYERS=-1" in contents
 
 
-def test_launcher_cli_component_device_override_beats_hardware_override_file(tmp_path):
+def test_launcher_cli_component_device_override_beats_backend_env(tmp_path):
     runtime_env = tmp_path / ".env.runtime"
-    hardware_env = tmp_path / ".env.hardware.override"
-    hardware_env.write_text('INTENT_EMBEDDER_DEVICE_MODE="cpu"\n', encoding="utf-8")
+    backend_env = tmp_path / ".env"
+    backend_env.write_text(
+        "CHAINLIT_AUTH_SECRET='ok'\nCHAINLIT_ADMIN_PASSWORD='ok'\nINTENT_EMBEDDER_DEVICE_MODE='cpu'\n",
+        encoding="utf-8",
+    )
     env = os.environ.copy()
     env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
+    env["AGENT_NAVIGATOR_BACKEND_ENV_FILE"] = str(backend_env)
     env["AGENT_NAVIGATOR_RUNTIME_ENV_FILE"] = str(runtime_env)
-    env["AGENT_NAVIGATOR_BACKEND_HARDWARE_OVERRIDE_FILE"] = str(hardware_env)
 
     result = _run_script(
         "launcher.sh",
@@ -235,36 +209,17 @@ def test_launcher_cli_component_device_override_beats_hardware_override_file(tmp
     assert "INTENT_EMBEDDER_DEVICE_MODE=gpu" in contents
 
 
-def test_launcher_can_use_custom_hardware_override_file_flag(tmp_path):
+def test_launcher_review_runtime_applies_current_run_override_without_legacy_persist(tmp_path):
     runtime_env = tmp_path / ".env.runtime"
-    hardware_env = tmp_path / "custom.hardware.override.env"
-    hardware_env.write_text('LLM_DEVICE_MODE="cpu"\n', encoding="utf-8")
-    env = os.environ.copy()
-    env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
-    env["AGENT_NAVIGATOR_RUNTIME_ENV_FILE"] = str(runtime_env)
-
-    result = _run_script(
-        "launcher.sh",
-        "--target",
-        "native",
-        "--hardware-override-file",
-        str(hardware_env),
-        env=env,
+    backend_env = tmp_path / ".env"
+    backend_env.write_text(
+        "CHAINLIT_AUTH_SECRET='ok'\nCHAINLIT_ADMIN_PASSWORD='ok'\nINTENT_EMBEDDER_DEVICE_MODE='cpu'\nRETRIEVAL_EMBEDDER_DEVICE_MODE='cpu'\n",
+        encoding="utf-8",
     )
-
-    assert result.returncode == 0
-    contents = runtime_env.read_text(encoding="utf-8")
-    assert "LLM_DEVICE_MODE=cpu" in contents
-
-
-def test_launcher_review_runtime_applies_current_run_override_without_persisting(tmp_path):
-    runtime_env = tmp_path / ".env.runtime"
-    hardware_env = tmp_path / ".env.hardware.override"
-    hardware_env.write_text('INTENT_EMBEDDER_DEVICE_MODE="cpu"\nRETRIEVAL_EMBEDDER_DEVICE_MODE="cpu"\n', encoding="utf-8")
     env = os.environ.copy()
     env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
+    env["AGENT_NAVIGATOR_BACKEND_ENV_FILE"] = str(backend_env)
     env["AGENT_NAVIGATOR_RUNTIME_ENV_FILE"] = str(runtime_env)
-    env["AGENT_NAVIGATOR_BACKEND_HARDWARE_OVERRIDE_FILE"] = str(hardware_env)
 
     result = _run_script_with_input(
         "launcher.sh",
@@ -281,37 +236,10 @@ def test_launcher_review_runtime_applies_current_run_override_without_persisting
     runtime_contents = runtime_env.read_text(encoding="utf-8")
     assert "INTENT_EMBEDDER_DEVICE_MODE=gpu" in runtime_contents
     assert "RETRIEVAL_EMBEDDER_DEVICE_MODE=gpu" in runtime_contents
-    hardware_contents = hardware_env.read_text(encoding="utf-8")
-    assert 'INTENT_EMBEDDER_DEVICE_MODE="cpu"' in hardware_contents
-    assert 'RETRIEVAL_EMBEDDER_DEVICE_MODE="cpu"' in hardware_contents
-    assert "Persistent save (.env.hardware.override) is a separate step." in result.stdout
-
-
-def test_launcher_review_runtime_can_persist_current_run_override(tmp_path):
-    runtime_env = tmp_path / ".env.runtime"
-    hardware_env = tmp_path / ".env.hardware.override"
-    hardware_env.write_text("", encoding="utf-8")
-    env = os.environ.copy()
-    env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
-    env["AGENT_NAVIGATOR_RUNTIME_ENV_FILE"] = str(runtime_env)
-    env["AGENT_NAVIGATOR_BACKEND_HARDWARE_OVERRIDE_FILE"] = str(hardware_env)
-
-    result = _run_script_with_input(
-        "launcher.sh",
-        "--target",
-        "native",
-        "--profile",
-        "adaptive",
-        "--review-runtime",
-        env=env,
-        user_input="c\n\n\ncpu\ncpu\ny\n",
-    )
-
-    assert result.returncode == 0
-    hardware_contents = hardware_env.read_text(encoding="utf-8")
-    assert 'INTENT_EMBEDDER_DEVICE_MODE="cpu"' in hardware_contents
-    assert 'RETRIEVAL_EMBEDDER_DEVICE_MODE="cpu"' in hardware_contents
-    assert 'UMS_RUNTIME_PROFILE="adaptive"' in hardware_contents
+    backend_contents = backend_env.read_text(encoding="utf-8")
+    assert "INTENT_EMBEDDER_DEVICE_MODE='cpu'" in backend_contents
+    assert "RETRIEVAL_EMBEDDER_DEVICE_MODE='cpu'" in backend_contents
+    assert ".env.hardware.override" not in result.stdout
 
 
 def test_run_native_is_wrapper_to_launcher(tmp_path):
@@ -328,12 +256,10 @@ def test_run_native_is_wrapper_to_launcher(tmp_path):
 
 def test_run_native_from_launcher_reports_invalid_model_path(tmp_path):
     backend_env = tmp_path / ".env"
-    native_env = tmp_path / ".env.native"
     runtime_env = tmp_path / ".env.runtime"
     uploads_dir = tmp_path / "uploads"
 
     backend_env.write_text("CHAINLIT_AUTH_SECRET='ok'\nCHAINLIT_ADMIN_PASSWORD='ok'\n", encoding="utf-8")
-    native_env.write_text("", encoding="utf-8")
     runtime_env.write_text(
         "\n".join(
             [
@@ -351,7 +277,6 @@ def test_run_native_from_launcher_reports_invalid_model_path(tmp_path):
     env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
     env["AGENT_NAVIGATOR_SKIP_CONDA_CHECKS"] = "1"
     env["AGENT_NAVIGATOR_BACKEND_ENV_FILE"] = str(backend_env)
-    env["AGENT_NAVIGATOR_BACKEND_NATIVE_ENV_FILE"] = str(native_env)
     env["AGENT_NAVIGATOR_RUNTIME_ENV_FILE"] = str(runtime_env)
 
     result = _run_script("run_native.sh", "--from-launcher", "--no-attach", env=env)
@@ -362,7 +287,6 @@ def test_run_native_from_launcher_reports_invalid_model_path(tmp_path):
 
 def test_run_native_from_launcher_repairs_writable_uploads_dir(tmp_path):
     backend_env = tmp_path / ".env"
-    native_env = tmp_path / ".env.native"
     runtime_env = tmp_path / ".env.runtime"
     uploads_dir = tmp_path / "uploads"
     uploads_dir.mkdir()
@@ -376,7 +300,6 @@ def test_run_native_from_launcher_repairs_writable_uploads_dir(tmp_path):
     retrieval_dir.mkdir()
 
     backend_env.write_text("CHAINLIT_AUTH_SECRET='ok'\nCHAINLIT_ADMIN_PASSWORD='ok'\n", encoding="utf-8")
-    native_env.write_text("", encoding="utf-8")
     runtime_env.write_text(
         "\n".join(
             [
@@ -394,7 +317,6 @@ def test_run_native_from_launcher_repairs_writable_uploads_dir(tmp_path):
     env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
     env["AGENT_NAVIGATOR_SKIP_CONDA_CHECKS"] = "1"
     env["AGENT_NAVIGATOR_BACKEND_ENV_FILE"] = str(backend_env)
-    env["AGENT_NAVIGATOR_BACKEND_NATIVE_ENV_FILE"] = str(native_env)
     env["AGENT_NAVIGATOR_RUNTIME_ENV_FILE"] = str(runtime_env)
 
     try:
@@ -408,7 +330,6 @@ def test_run_native_from_launcher_repairs_writable_uploads_dir(tmp_path):
 
 def test_run_native_from_launcher_validates_env_in_test_mode(tmp_path):
     backend_env = tmp_path / ".env"
-    native_env = tmp_path / ".env.native"
     runtime_env = tmp_path / ".env.runtime"
     uploads_dir = tmp_path / "uploads"
 
@@ -420,7 +341,6 @@ def test_run_native_from_launcher_validates_env_in_test_mode(tmp_path):
     retrieval_dir.mkdir()
 
     backend_env.write_text("CHAINLIT_AUTH_SECRET='ok'\nCHAINLIT_ADMIN_PASSWORD='ok'\n", encoding="utf-8")
-    native_env.write_text("", encoding="utf-8")
     runtime_env.write_text(
         "\n".join(
             [
@@ -438,7 +358,6 @@ def test_run_native_from_launcher_validates_env_in_test_mode(tmp_path):
     env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
     env["AGENT_NAVIGATOR_SKIP_CONDA_CHECKS"] = "1"
     env["AGENT_NAVIGATOR_BACKEND_ENV_FILE"] = str(backend_env)
-    env["AGENT_NAVIGATOR_BACKEND_NATIVE_ENV_FILE"] = str(native_env)
     env["AGENT_NAVIGATOR_RUNTIME_ENV_FILE"] = str(runtime_env)
 
     result = _run_script("run_native.sh", "--from-launcher", "--no-attach", env=env)
@@ -449,9 +368,20 @@ def test_run_native_from_launcher_validates_env_in_test_mode(tmp_path):
 
 def test_run_native_from_launcher_accepts_backend_relative_model_paths(tmp_path):
     backend_env = tmp_path / ".env"
-    native_env = tmp_path / ".env.native"
     runtime_env = tmp_path / ".env.runtime"
     uploads_dir = tmp_path / "uploads"
+    llm_path = tmp_path / "models" / "gguf" / "qwen-14b" / "Qwen2.5-14B-Instruct-Q4_K_M.gguf"
+    vlm_path = tmp_path / "models" / "gguf" / "Qwen3-VL-8B-Q4" / "Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
+    mmproj_path = tmp_path / "models" / "gguf" / "Qwen3-VL-8B-Q4" / "mmproj-Qwen3-VL-8B-Instruct-F16.gguf"
+    intent_dir = tmp_path / "models" / "st" / "Qwen3-Embedding-0.6B"
+    retrieval_dir = tmp_path / "models" / "st" / "LaBSE"
+    llm_path.parent.mkdir(parents=True, exist_ok=True)
+    vlm_path.parent.mkdir(parents=True, exist_ok=True)
+    intent_dir.mkdir(parents=True, exist_ok=True)
+    retrieval_dir.mkdir(parents=True, exist_ok=True)
+    llm_path.write_text("stub", encoding="utf-8")
+    vlm_path.write_text("stub", encoding="utf-8")
+    mmproj_path.write_text("stub", encoding="utf-8")
 
     backend_env.write_text(
         "\n".join(
@@ -467,13 +397,11 @@ def test_run_native_from_launcher_accepts_backend_relative_model_paths(tmp_path)
         ),
         encoding="utf-8",
     )
-    native_env.write_text("", encoding="utf-8")
     runtime_env.write_text(f"UPLOADS_DIR='{uploads_dir}'\n", encoding="utf-8")
     env = os.environ.copy()
     env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
     env["AGENT_NAVIGATOR_SKIP_CONDA_CHECKS"] = "1"
     env["AGENT_NAVIGATOR_BACKEND_ENV_FILE"] = str(backend_env)
-    env["AGENT_NAVIGATOR_BACKEND_NATIVE_ENV_FILE"] = str(native_env)
     env["AGENT_NAVIGATOR_RUNTIME_ENV_FILE"] = str(runtime_env)
 
     result = _run_script("run_native.sh", "--from-launcher", "--no-attach", env=env)
@@ -484,7 +412,6 @@ def test_run_native_from_launcher_accepts_backend_relative_model_paths(tmp_path)
 
 def test_run_native_prefers_base_when_configured_conda_env_is_missing(tmp_path):
     backend_env = tmp_path / ".env"
-    native_env = tmp_path / ".env.native"
     runtime_env = tmp_path / ".env.runtime"
     uploads_dir = tmp_path / "uploads"
 
@@ -495,8 +422,7 @@ def test_run_native_prefers_base_when_configured_conda_env_is_missing(tmp_path):
     intent_dir.mkdir()
     retrieval_dir.mkdir()
 
-    backend_env.write_text("CHAINLIT_AUTH_SECRET='ok'\nCHAINLIT_ADMIN_PASSWORD='ok'\n", encoding="utf-8")
-    native_env.write_text("CONDA_ENV='diploma_llm'\n", encoding="utf-8")
+    backend_env.write_text("CHAINLIT_AUTH_SECRET='ok'\nCHAINLIT_ADMIN_PASSWORD='ok'\nCONDA_ENV='diploma_llm'\n", encoding="utf-8")
     runtime_env.write_text(
         "\n".join(
             [
@@ -513,7 +439,6 @@ def test_run_native_prefers_base_when_configured_conda_env_is_missing(tmp_path):
     env = os.environ.copy()
     env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
     env["AGENT_NAVIGATOR_BACKEND_ENV_FILE"] = str(backend_env)
-    env["AGENT_NAVIGATOR_BACKEND_NATIVE_ENV_FILE"] = str(native_env)
     env["AGENT_NAVIGATOR_RUNTIME_ENV_FILE"] = str(runtime_env)
     env["PATH"] = ""
     fake_conda_bin = tmp_path / "bin"

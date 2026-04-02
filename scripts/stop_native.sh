@@ -37,7 +37,6 @@ load_runtime_env() {
   set -a
   for env_file in \
     "$PROJECT_ROOT/backend/.env" \
-    "$PROJECT_ROOT/backend/.env.native" \
     "$PROJECT_ROOT/backend/.env.runtime"
   do
     if [ -f "$env_file" ]; then
