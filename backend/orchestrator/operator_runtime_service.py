@@ -131,9 +131,7 @@ class OperatorRuntimeService:
     def load_env_payloads(self) -> Dict[str, Dict[str, str]]:
         return {
             "backend_env": parse_env_file(self.backend_root / ".env"),
-            "backend_env_native": parse_env_file(self.backend_root / ".env.native"),
             "backend_env_runtime": parse_env_file(self.backend_root / ".env.runtime"),
-            "backend_env_override": parse_env_file(self.backend_root / ".env.hardware.override"),
             "bundle_env": parse_env_file(self.deploy_root / "env.bundle"),
         }
 
@@ -168,9 +166,7 @@ class OperatorRuntimeService:
                 "launchSource": "scripts/launcher.sh --target native --profile adaptive",
                 "configSources": [
                     {"path": "backend/.env", "role": "канонический env runtime и сервисов", "roleEn": "canonical env for runtime and services", "freshness": file_freshness(self.backend_root / ".env")},
-                    {"path": "backend/.env.native", "role": "переопределения для нативного пути запуска", "roleEn": "overrides for the native runtime path", "freshness": file_freshness(self.backend_root / ".env.native")},
                     {"path": "backend/.env.runtime", "role": "сгенерированный применённый план runtime", "roleEn": "generated applied runtime plan", "freshness": file_freshness(self.backend_root / ".env.runtime", generated=True)},
-                    {"path": "backend/.env.hardware.override", "role": "постоянные overrides размещения", "roleEn": "persistent placement overrides", "freshness": file_freshness(self.backend_root / ".env.hardware.override")},
                 ],
                 "summary": [
                     {"label": "Профили запуска", "labelEn": "Launch Profiles", "value": "4 готовы", "valueEn": "4 ready", "tone": "lime"},
@@ -195,8 +191,8 @@ class OperatorRuntimeService:
                     ],
                     "blockers": [],
                     "blockersEn": [],
-                    "remediation": "Нативный путь запуска использует backend/.env, .env.native, .env.runtime и .env.hardware.override как видимые operator-источники.",
-                    "remediationEn": "The native runtime path uses backend/.env, .env.native, .env.runtime, and .env.hardware.override as visible operator-side sources.",
+                    "remediation": "Нативный путь запуска использует backend/.env как user-owned config source и backend/.env.runtime как generated applied plan.",
+                    "remediationEn": "The native runtime path uses backend/.env as the user-owned config source and backend/.env.runtime as the generated applied plan.",
                 },
             },
             "container": {

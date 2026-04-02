@@ -14,10 +14,9 @@ def test_flags_reference_contains_runtime_env_matrix():
     text = _read("docs/flags-reference.md")
 
     assert "backend/.env" in text
-    assert "backend/.env.native" in text
-    assert "backend/.env.hardware.override" in text
     assert "backend/.env.runtime" in text
     assert "руками не редактировать" in text
+    assert "deprecated" in text
 
 
 def test_flags_reference_covers_timeout_flags():
@@ -40,12 +39,15 @@ def test_docs_distinguish_runtime_and_hardware_override_files():
     deploy = _read("docs/deploy-guide.md")
     scripts_readme = _read("docs/scripts/README.md")
 
-    assert "backend/.env.hardware.override" in readme
     assert "backend/.env.runtime" in readme
     assert "generated applied env" in readme
+    assert "backend/.env.native" in readme
+    assert "deprecated" in readme
 
     assert "backend/.env.runtime" in deploy
     assert "generated applied env" in deploy
+    assert "deprecated" in deploy
 
-    assert "backend/.env.hardware.override" in scripts_readme
     assert "backend/.env.runtime" in scripts_readme
+    assert "backend/.env.native" in scripts_readme
+    assert "deprecated" in scripts_readme

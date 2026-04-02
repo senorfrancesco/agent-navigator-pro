@@ -389,7 +389,7 @@ Launcher:
 HF_HOME=/mnt/d/hf-cache ./scripts/models/install_models.sh --ensure-present --asset-set=all
 ```
 
-`--models-root` в `launcher.sh` и `install_models.sh` строит канонический layout внутри указанного root. Для постоянной конфигурации всё равно лучше зафиксировать абсолютные пути в `backend/.env.native`.
+`--models-root` в `launcher.sh` и `install_models.sh` строит канонический layout внутри указанного root. Для постоянной конфигурации native/runtime path лучше фиксировать абсолютные пути прямо в `backend/.env`.
 
 Runtime preflight теперь прозрачно показывает placement plan:
 
@@ -445,15 +445,16 @@ RETRIEVAL_EMBEDDER_DEVICE_MODE=cpu|gpu|hybrid
 ./scripts/launcher.sh --target native --device-mode gpu
 ```
 
-Для постоянных user-owned overrides используйте `backend/.env.hardware.override`, а не applied `backend/.env.runtime`.
+Persistent runtime intent теперь должен жить в `backend/.env`, а не в отдельных override-файлах.
 `DEVICE_MODE` остаётся общим fallback для heavy runtime path, а component-specific переменные позволяют явно задать placement для LLM, VLM, intent embedder и retrieval embedder.
 
-Launcher review теперь работает в два шага:
-- сначала применяется план только для текущего запуска;
-- затем отдельно спрашивается, нужно ли сохранить выбранные overrides в `backend/.env.hardware.override`.
+Launcher review теперь работает как current-run preview:
+- показывает план только для текущего запуска;
+- пишет applied values только в `backend/.env.runtime`;
+- не сохраняет overrides в отдельный persistent runtime-файл.
 
 Это важный контракт:
-- `backend/.env.hardware.override` — persistent user-owned overrides;
+- `backend/.env` — единственный user-owned native/runtime config;
 - `backend/.env.runtime` — generated applied env только для текущего запуска.
 
 Если нужно оставить LLM/VLM на GPU, а embeddings на CPU, это теперь лучше задавать явно:
@@ -473,19 +474,19 @@ Launcher review теперь работает в два шага:
 ./scripts/launcher.sh --target native --review-runtime
 ```
 
-После review launcher покажет, что уйдёт в `.env.runtime`, и только потом отдельно спросит, сохранять ли эти значения в `.env.hardware.override`.
+После review launcher покажет, что уйдёт в `.env.runtime`, но не будет сохранять эти значения в отдельный persistent override-файл.
 
 Можно работать двумя способами:
-- через флаги `launcher.sh`
-- через файл overrides
+- через `backend/.env`
+- через current-run флаги `launcher.sh`
 
 Примеры:
 
 ```bash
 ./scripts/launcher.sh --target native --llm-device-mode gpu --gpu-layers-mode max
-./scripts/launcher.sh --target native --hardware-override-file /mnt/d/agent-models/runtime.override.env
-cp backend/.env.hardware.override.example backend/.env.hardware.override
 ```
+
+`backend/.env.native` и `backend/.env.hardware.override` считаются deprecated для native/operator path и больше не являются canonical source of truth.
 
 Если проект обновлялся поверх старого окружения или раньше ставился неполный набор пакетов, безопасно повторно выполнить:
 
@@ -632,6 +633,31 @@ docker compose logs --tail=200 -f vllm
 - `vLLM` profile не поднимается по умолчанию;
 - embeddings и `gguf-vl` остаются на локальном runtime path;
 - для container path `run_all.sh` автоматически добавит `vllm` service, если `BACKEND_MODE=vllm`.
+
+### 5.1. Прототип operator UI
+
+Отдельный web-прототип operator UI живёт в `prototype/operator-ui`.
+
+Быстрый статический preview:
+
+```bash
+npm run prototype:operator-ui
+```
+
+- `http://127.0.0.1:4173`
+
+Интегрированный backend-served запуск:
+
+```bash
+cd backend
+uvicorn orchestrator.agent_api:app --reload --port 8000
+```
+
+- `http://127.0.0.1:8000/operator-ui/`
+
+Детали и contract endpoints описаны в:
+
+- `prototype/operator-ui/README.md`
 
 ## Типовые сценарии
 

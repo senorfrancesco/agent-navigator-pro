@@ -10,9 +10,16 @@ def _write(path: Path, content: str = "") -> None:
 
 
 def test_config_service_returns_path_aware_sources_and_values(tmp_path, monkeypatch):
-    _write(tmp_path / "backend" / ".env", "BACKEND_MODE=llama-cpp-python\nMODEL_REGISTRY_CONFIG_PATH=backend/config/models.yaml\nDOC_SERVER_URL=http://127.0.0.1:8001\n")
-    _write(tmp_path / "backend" / ".env.native", "MODEL_PATH_LLM=/models/custom.gguf\n")
-    _write(tmp_path / "backend" / ".env.runtime", "UMS_RUNTIME_PROFILE=adaptive\nDEVICE_MODE=cpu+gpu hybrid\n")
+    _write(
+        tmp_path / "backend" / ".env",
+        "BACKEND_MODE=llama-cpp-python\n"
+        "MODEL_REGISTRY_CONFIG_PATH=backend/config/models.yaml\n"
+        "DOC_SERVER_URL=http://127.0.0.1:8001\n"
+        "MODEL_PATH_LLM=/models/custom.gguf\n"
+        "UMS_RUNTIME_PROFILE=adaptive\n"
+        "DEVICE_MODE=hybrid\n",
+    )
+    _write(tmp_path / "backend" / ".env.runtime", "UMS_RUNTIME_PROFILE=adaptive\nDEVICE_MODE=hybrid\n")
     _write(tmp_path / "deploy" / "offline_bundle" / "env.bundle", "BUNDLE_RUNTIME_PROFILE=default\nCHAINLIT_PORT=3000\n")
     _write(tmp_path / "deploy" / "offline_bundle" / "compose.offline.yaml", "services: {}\n")
     _write(tmp_path / "deploy" / "offline_bundle" / "manifest.json", "{}\n")
@@ -26,12 +33,19 @@ def test_config_service_returns_path_aware_sources_and_values(tmp_path, monkeypa
     config_service = OperatorConfigService(repo_root=tmp_path)
     state = config_service.get_config_state(runtime_service.get_runtime_paths())
 
-    assert state["native"]["sourceFiles"][0]["path"] == "backend/.env"
+    assert [item["path"] for item in state["native"]["sourceFiles"]] == [
+        "backend/.env",
+        "backend/.env.runtime",
+    ]
     runtime_group = state["native"]["variants"][0]["groups"][0]
     assert runtime_group["fields"][0]["key"] == "UMS_RUNTIME_PROFILE"
     assert runtime_group["fields"][0]["applied"] == "adaptive"
     assert runtime_group["fields"][0]["control"] == "select"
-    assert runtime_group["fields"][0]["options"][0]["value"] == "adaptive"
+    assert [option["value"] for option in runtime_group["fields"][0]["options"]] == [
+        "default",
+        "adaptive",
+        "manual",
+    ]
     assert runtime_group["fields"][0]["recommendedReasonEn"]
     assert runtime_group["fields"][0]["description"] != runtime_group["fields"][0]["recommendedReason"]
     assert "Рекомендуется" not in runtime_group["fields"][0]["description"]
@@ -42,6 +56,8 @@ def test_config_service_returns_path_aware_sources_and_values(tmp_path, monkeypa
         "llama-server",
         "vllm",
     ]
+    device_mode_field = next(field for field in runtime_group["fields"] if field["key"] == "DEVICE_MODE")
+    assert [option["value"] for option in device_mode_field["options"]] == ["cpu", "gpu", "hybrid"]
     assert state["native"]["variants"][0]["title"] == "Runtime / Profile"
     assert state["native"]["variants"][0]["titleEn"] == "Runtime / Profile"
 
@@ -57,8 +73,8 @@ def test_config_service_returns_path_aware_sources_and_values(tmp_path, monkeypa
 
 
 def test_config_service_apply_config_updates_selected_env_source(tmp_path, monkeypatch):
-    _write(tmp_path / "backend" / ".env", "BACKEND_MODE=llama-cpp-python\n")
-    _write(tmp_path / "backend" / ".env.runtime", "UMS_RUNTIME_PROFILE=adaptive\nDEVICE_MODE=cpu+gpu hybrid\n")
+    _write(tmp_path / "backend" / ".env", "BACKEND_MODE=llama-cpp-python\nUMS_RUNTIME_PROFILE=adaptive\n")
+    _write(tmp_path / "backend" / ".env.runtime", "UMS_RUNTIME_PROFILE=adaptive\nDEVICE_MODE=hybrid\n")
     _write(tmp_path / "scripts" / "launcher.sh", "#!/usr/bin/env bash\n")
     _write(tmp_path / "scripts" / "runtime_preflight.py", "print('ok')\n")
     _write(tmp_path / "deploy" / "offline_bundle" / "compose.offline.yaml", "services: {}\n")
@@ -70,17 +86,17 @@ def test_config_service_apply_config_updates_selected_env_source(tmp_path, monke
     monkeypatch.setattr(runtime_service, "_docker_socket_available", lambda: True)
 
     config_service = OperatorConfigService(repo_root=tmp_path)
-    result = config_service.apply_config("native", {"UMS_RUNTIME_PROFILE": "conservative"})
+    result = config_service.apply_config("native", {"UMS_RUNTIME_PROFILE": "manual"})
 
     assert result["updatedKeys"] == ["UMS_RUNTIME_PROFILE"]
     assert result["pathKey"] == "native"
-    assert "UMS_RUNTIME_PROFILE=conservative" in (tmp_path / "backend" / ".env.runtime").read_text(encoding="utf-8")
-    assert result["config"]["variants"][0]["groups"][0]["fields"][0]["applied"] == "conservative"
+    assert "UMS_RUNTIME_PROFILE=manual" in (tmp_path / "backend" / ".env").read_text(encoding="utf-8")
+    assert result["config"]["variants"][0]["groups"][0]["fields"][0]["applied"] == "adaptive"
 
 
 def test_config_service_preview_preset_returns_changed_fields(tmp_path, monkeypatch):
     _write(tmp_path / "backend" / ".env", "BACKEND_MODE=llama-cpp-python\n")
-    _write(tmp_path / "backend" / ".env.runtime", "UMS_RUNTIME_PROFILE=adaptive\nDEVICE_MODE=cpu+gpu hybrid\n")
+    _write(tmp_path / "backend" / ".env.runtime", "UMS_RUNTIME_PROFILE=adaptive\nDEVICE_MODE=hybrid\n")
     _write(tmp_path / "scripts" / "launcher.sh", "#!/usr/bin/env bash\n")
     _write(tmp_path / "scripts" / "runtime_preflight.py", "print('ok')\n")
     _write(
@@ -106,7 +122,7 @@ def test_config_service_preview_preset_returns_changed_fields(tmp_path, monkeypa
 
 def test_config_service_marks_boolean_parser_fields_as_selects(tmp_path, monkeypatch):
     _write(tmp_path / "backend" / ".env", "COMPARE_SINGLE_ITEM_STRICT_JSON=true\nCOMPARE_SINGLE_ITEM_RETRY_COUNT=1\n")
-    _write(tmp_path / "backend" / ".env.runtime", "UMS_RUNTIME_PROFILE=adaptive\nDEVICE_MODE=cpu+gpu hybrid\n")
+    _write(tmp_path / "backend" / ".env.runtime", "UMS_RUNTIME_PROFILE=adaptive\nDEVICE_MODE=hybrid\n")
     _write(tmp_path / "scripts" / "launcher.sh", "#!/usr/bin/env bash\n")
     _write(tmp_path / "scripts" / "runtime_preflight.py", "print('ok')\n")
     _write(tmp_path / "deploy" / "offline_bundle" / "env.bundle", "OFFLINE_COMPARE_STRICT_JSON=true\nBUNDLE_PREFLIGHT_REQUIRED=true\nBUNDLE_PARITY_SMOKE_REQUIRED=true\n")
@@ -131,9 +147,8 @@ def test_config_service_marks_boolean_parser_fields_as_selects(tmp_path, monkeyp
 def test_config_service_marks_native_model_paths_as_external_host_paths(tmp_path, monkeypatch):
     external_model = tmp_path / "external-models" / "qwen14b.gguf"
     _write(external_model, "weights")
-    _write(tmp_path / "backend" / ".env", "MODEL_REGISTRY_CONFIG_PATH=backend/config/models.yaml\n")
-    _write(tmp_path / "backend" / ".env.native", f"MODEL_PATH_LLM={external_model}\n")
-    _write(tmp_path / "backend" / ".env.runtime", "UMS_RUNTIME_PROFILE=adaptive\nDEVICE_MODE=cpu+gpu hybrid\n")
+    _write(tmp_path / "backend" / ".env", f"MODEL_REGISTRY_CONFIG_PATH=backend/config/models.yaml\nMODEL_PATH_LLM={external_model}\n")
+    _write(tmp_path / "backend" / ".env.runtime", "UMS_RUNTIME_PROFILE=adaptive\nDEVICE_MODE=hybrid\n")
     _write(tmp_path / "scripts" / "launcher.sh", "#!/usr/bin/env bash\n")
     _write(tmp_path / "scripts" / "runtime_preflight.py", "print('ok')\n")
     _write(tmp_path / "deploy" / "offline_bundle" / "env.bundle", "BUNDLE_RUNTIME_PROFILE=default\n")
@@ -184,7 +199,12 @@ def test_config_service_exposes_intuitive_container_model_path_descriptions(tmp_
 
 
 def test_config_service_exposes_native_runtime_gpu_and_context_knobs(tmp_path, monkeypatch):
-    _write(tmp_path / "backend" / ".env", "CONTEXT_SIZE_QWEN14B=16384\nN_GPU_LAYERS_QWEN14B=-1\n")
+    _write(
+        tmp_path / "backend" / ".env",
+        "CONTEXT_SIZE_QWEN14B=16384\n"
+        "N_GPU_LAYERS_QWEN14B=-1\n"
+        "UMS_LLM_GPU_INDICES=0,1\n",
+    )
     _write(
         tmp_path / "backend" / ".env.runtime",
         "UMS_MANUAL_EFFECTIVE_CONTEXT_TOKENS=8192\n"
@@ -197,7 +217,6 @@ def test_config_service_exposes_native_runtime_gpu_and_context_knobs(tmp_path, m
         "GPU_LAYERS_MODE=max\n"
         "N_GPU_LAYERS_OVERRIDE=-1\n",
     )
-    _write(tmp_path / "backend" / ".env.hardware.override", "UMS_LLM_GPU_INDICES=0,1\n")
     _write(tmp_path / "scripts" / "launcher.sh", "#!/usr/bin/env bash\n")
     _write(tmp_path / "scripts" / "runtime_preflight.py", "print('ok')\n")
     _write(tmp_path / "deploy" / "offline_bundle" / "env.bundle", "BUNDLE_RUNTIME_PROFILE=default\n")

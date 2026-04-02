@@ -64,8 +64,7 @@ Runtime profiles не меняют этот contract. Они управляют 
 
 Практическое правило:
 
-- `backend/.env` / `backend/.env.native` — paths и service/runtime env;
-- `backend/.env.hardware.override` — persistent placement overrides;
+- `backend/.env` — user-owned paths, service env и runtime intent;
 - `backend/.env.runtime` — generated applied plan.
 
 ## Профили

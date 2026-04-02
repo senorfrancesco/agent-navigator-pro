@@ -519,7 +519,7 @@ def build_operator_state(request_port: int | None = None) -> Dict[str, Any]:
         )
 
     log_lines = [
-        {"path": "native", "service": "operator", "text": "[operator][repository-derived] обнаружены env-источники: backend/.env, backend/.env.native, backend/.env.runtime"},
+        {"path": "native", "service": "operator", "text": "[operator][repository-derived] обнаружены env-источники: backend/.env, backend/.env.runtime"},
         {"path": "native", "service": "launcher", "text": "[launcher][repository-derived] scripts/launcher.sh найден в корне репозитория"},
         {"path": "container", "service": "bundle", "text": "[bundle][repository-derived] обнаружены manifest и env-источники deploy/offline_bundle"},
         {"path": "container", "service": "docker", "text": f"[docker][host-probe] socket {'available' if docker_socket.exists() else 'missing'} at /var/run/docker.sock"},

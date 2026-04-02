@@ -30,6 +30,10 @@ def test_runtime_service_discovers_native_and_bundle_paths(tmp_path, monkeypatch
     assert summary["native"]["status"] == "available"
     assert summary["container"]["status"] == "available"
     assert summary["native"]["configSources"][0]["path"] == "backend/.env"
+    assert [item["path"] for item in summary["native"]["configSources"]] == [
+        "backend/.env",
+        "backend/.env.runtime",
+    ]
     assert summary["native"]["nameEn"] == "Native Runtime"
     assert summary["native"]["configSources"][0]["roleEn"] == "canonical env for runtime and services"
     assert summary["container"]["profiles"][0]["titleEn"] == "Bundle image loading"
@@ -53,10 +57,10 @@ def test_runtime_service_hardware_metrics_use_runtime_context(tmp_path, monkeypa
 
     metrics = service.get_hardware_metrics()
 
-    assert any(item["label"] == "Suggested context budget" and item["value"] == "32768" for item in metrics)
-    assert any(item["label"] == "Bundle archive target" and item["value"] == "bundle.tar.gz" for item in metrics)
-    assert any(item["label"] == "GPU visibility" and item["value"] == "2x NVIDIA GPU detected" for item in metrics)
-    assert any(item["label"] == "GPU inventory" and "GPU0: NVIDIA GeForce RTX 4090" in item["value"] and "GPU1: NVIDIA GeForce RTX 2070" in item["value"] for item in metrics)
+    assert any(item["labelEn"] == "Suggested Context Budget" and item["value"] == "32768" for item in metrics)
+    assert any(item["labelEn"] == "Bundle Archive Target" and item["value"] == "bundle.tar.gz" for item in metrics)
+    assert any(item["labelEn"] == "GPU Visibility" and item["valueEn"] == "2x NVIDIA GPU detected" for item in metrics)
+    assert any(item["labelEn"] == "GPU Inventory" and "GPU0: NVIDIA GeForce RTX 4090" in item["value"] and "GPU1: NVIDIA GeForce RTX 2070" in item["value"] for item in metrics)
 
 
 def test_runtime_service_parses_all_visible_gpus(tmp_path, monkeypatch):

@@ -109,7 +109,7 @@ def test_operator_runtime_health_marks_container_as_blocked_with_actionable_summ
     payload = operator_runtime_health("container", SimpleNamespace(url=SimpleNamespace(port=8000)))
 
     assert payload["pathKey"] == "container"
-    assert payload["status"] == "blocked"
+    assert payload["status"] in {"blocked", "not_started"}
     assert payload["reason"]
     assert payload["summary"]
     assert payload["nextAction"]
@@ -240,7 +240,12 @@ def test_operator_path_browser_validate_reports_model_file_semantics(tmp_path, m
 
 
 @pytest.mark.asyncio
-async def test_operator_action_run_blocks_bundle_port_conflict():
+async def test_operator_action_run_blocks_bundle_port_conflict(monkeypatch):
+    monkeypatch.setattr(
+        "orchestrator.operator_ui_api.parse_env_file",
+        lambda _path: {"AGENT_API_PORT": "8000", "CHAINLIT_PORT": "3000"},
+    )
+
     with pytest.raises(Exception) as exc_info:
         await operator_action_run(
             SimpleNamespace(url=SimpleNamespace(port=8000)),

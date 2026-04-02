@@ -14,19 +14,20 @@
 | --- | --- | --- |
 | `backend/config/models.yaml` | registry моделей, role bindings `primary/fallback`, preload policy, canonical env names для model artifacts | разработчик / оператор только если осознанно меняется registry |
 | `backend/.env` | основной shared config: model paths, URLs, auth, backend mode, classifier/RAG defaults, timeout/concurrency defaults | пользователь / оператор |
-| `backend/.env.native` | host-only native overrides: absolute paths, `CONDA_ENV`, native ports, uploads | пользователь / оператор |
-| `backend/.env.hardware.override` | persistent hardware/runtime tuning: placement и GPU layers | пользователь / оператор |
 | `backend/.env.runtime` | applied runtime plan для текущего запуска | пишет `launcher.sh` / `runtime_preflight.py`; руками не редактировать |
 | `./scripts/launcher.sh ...` | current-run overrides и выбор target/install path | пользователь / оператор |
 
 Короткое правило:
 
 - registry и role bindings: `models.yaml`
-- постоянные пути, URL, auth, backend mode: `backend/.env`
-- native-only absolute paths и `CONDA_ENV`: `backend/.env.native`
-- постоянный tuning железа: `backend/.env.hardware.override`
+- постоянные пути, URL, auth, backend mode и runtime intent: `backend/.env`
 - разовый override на один запуск: флаги `launcher.sh`
 - generated applied file: `backend/.env.runtime`
+
+Legacy note:
+
+- `backend/.env.native` и `backend/.env.hardware.override` считаются deprecated для native/operator path
+- новый код и operator UI не должны использовать их как canonical source of truth
 
 ## Куда Писать Что
 
@@ -52,22 +53,8 @@
 - `UMS_INFER_TIMEOUT_S`
 - `UMS_CLIENT_TIMEOUT_S`
 - `VLLM_*`
-
-### Native-machine overrides
-
-Писать в `backend/.env.native`:
-
 - `CONDA_ENV`
 - `UPLOADS_DIR`
-- `HOST_UPLOADS_DIR`
-- `AGENT_API_PORT`, `UMS_PORT`, `CHAINLIT_PORT`
-- native-specific absolute `MODEL_PATH_*`, если они отличаются от shared `.env`
-- optional native-only `BACKEND_MODE`
-
-### Persistent runtime tuning
-
-Писать в `backend/.env.hardware.override`:
-
 - `UMS_RUNTIME_PROFILE`
 - `DEVICE_MODE`
 - `LLM_DEVICE_MODE`
@@ -114,7 +101,6 @@
 | `--profile default|adaptive|manual` | runtime profile для preflight |
 | `--models-root <path>` | корень для auto-derived model paths |
 | `--asset-set core|all` | какие модели проверять/докачивать |
-| `--hardware-override-file <path>` | custom persistent override file |
 | `--gpu-layers-mode auto|max|manual` | стратегия GPU layers |
 | `--gpu-layers <int>` | число GPU layers для `manual` |
 | `--device-mode cpu|gpu|hybrid` | общий fallback device mode |
@@ -130,7 +116,7 @@
 
 ## Backend Mode И vLLM
 
-Писать в `backend/.env` или `backend/.env.native`:
+Писать в `backend/.env`:
 
 - `BACKEND_MODE=llama-cpp-python|llama-server|vllm`
 - `UMS_LLAMA_CACHE_PROMPT=true|false`
@@ -146,7 +132,7 @@
 Практика:
 
 - shared deploy/server config: `backend/.env`
-- native dev machine-specific override: `backend/.env.native`
+- native runtime intent: `backend/.env`
 
 ## Placement И GPU Layers
 
@@ -162,7 +148,7 @@
 
 Где писать:
 
-- постоянно: `backend/.env.hardware.override`
+- постоянно: `backend/.env`
 - разово: `launcher.sh` flags
 
 Рекомендации:

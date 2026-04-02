@@ -218,14 +218,14 @@ Legacy aliases для rollout и старых инсталляций всё ещ
 
 ### 5.3. Модель env-файлов
 
-Для server/operator path важно не смешивать четыре разных env surface:
+Для server/operator path важно не смешивать user-owned env и generated applied env:
 
 | Файл | Назначение | Редактировать руками |
 | --- | --- | --- |
-| `backend/.env` | основной shared config: пути моделей, auth, URLs, backend mode, timeouts | да |
-| `backend/.env.native` | native host-specific absolute paths, `CONDA_ENV`, ports | да, только если используете native host path |
-| `backend/.env.hardware.override` | persistent placement overrides и GPU layers | да, если нужен постоянный tuning |
+| `backend/.env` | основной shared config: пути моделей, auth, URLs, backend mode, timeouts и runtime intent | да |
 | `backend/.env.runtime` | generated applied env для текущего запуска | нет |
+
+`backend/.env.native` и `backend/.env.hardware.override` считаются deprecated для native/operator path и не должны использоваться как canonical source of truth.
 
 Полный справочник по флагам и рекомендациям: [docs/flags-reference.md](./flags-reference.md).
 

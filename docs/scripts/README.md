@@ -33,7 +33,7 @@
 ./scripts/models/install_models.sh --ensure-present --models-root=/mnt/d/agent-models
 ```
 
-Если модели нужно хранить вне `C:` в `WSL`, используйте `/mnt/d/...` и пропишите абсолютные пути в `backend/.env.native`:
+Если модели нужно хранить вне `C:` в `WSL`, используйте `/mnt/d/...` и пропишите абсолютные пути в `backend/.env`:
 
 ```bash
 MODEL_PATH_LLM="/mnt/d/agent-models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
@@ -49,7 +49,7 @@ MODEL_PATH_EMBEDDING_RETRIEVAL="/mnt/d/agent-models/st/LaBSE"
 ./scripts/launcher.sh --target native --asset-set all --models-root /mnt/d/agent-models
 ```
 
-`--models-root` применяет derived `MODEL_PATH_*` к текущему runtime-запуску. Для постоянной конфигурации зафиксируйте эти же absolute paths в `backend/.env.native`.
+`--models-root` применяет derived `MODEL_PATH_*` к текущему runtime-запуску. Для постоянной конфигурации зафиксируйте эти же absolute paths в `backend/.env`.
 
 Runtime preflight/launcher теперь показывают placement decision, а не только budget:
 
@@ -67,9 +67,8 @@ Launcher поддерживает override без правки кода:
 ./scripts/launcher.sh --target native --device-mode gpu
 ```
 
-Persistent user-owned overrides:
-- `backend/.env.hardware.override`
-- custom file via `--hardware-override-file /path/to/runtime.override.env`
+Persistent user-owned runtime intent:
+- `backend/.env`
 
 Ключи:
 - `GPU_LAYERS_MODE=auto|max|manual`
@@ -89,19 +88,16 @@ Persistent user-owned overrides:
 `DEVICE_MODE` остаётся fallback для heavy runtime path. Если нужно задать placement точечно, используйте component-specific переменные выше.
 
 Практически это означает два равноправных пути:
-- флаги launcher: `--llm-device-mode`, `--intent-embedder-device-mode`, `--gpu-layers-mode`, `--gpu-layers`
-- override-file: `backend/.env.hardware.override` или кастомный путь через `--hardware-override-file`
+- `backend/.env`
+- current-run флаги launcher: `--llm-device-mode`, `--intent-embedder-device-mode`, `--gpu-layers-mode`, `--gpu-layers`
 
 Это важно, потому что общий `DEVICE_MODE` влияет прежде всего на heavy LLM/VLM path, а embeddings могут жить по отдельной tier policy.
 
-Interactive review в `launcher.sh` теперь разделён на два шага:
-- сначала настраивается план только для текущего запуска;
-- затем launcher показывает, что именно будет записано в `backend/.env.runtime`;
-- только после этого отдельно спрашивается, нужно ли сохранить текущие overrides в `backend/.env.hardware.override`.
+Interactive review в `launcher.sh` теперь показывает план только для текущего запуска и затем пишет applied значения в `backend/.env.runtime`.
 
 Это означает:
 - `backend/.env.runtime` всегда считается applied current-run файлом;
-- `backend/.env.hardware.override` остаётся persistent user-owned файлом и не должен silently перезаписываться launcher'ом.
+- `backend/.env` остаётся единственным user-owned native/runtime config файлом.
 
 Практический mixed-profile для 2x8GB класса машин:
 
@@ -122,20 +118,15 @@ Interactive review в `launcher.sh` теперь разделён на два ш
 | Файл | Роль | Кто редактирует | Комментарий |
 | --- | --- | --- | --- |
 | `backend/.env` | основной shared config | пользователь | базовые пути моделей, UI/auth, backend mode, classifier/retrieval policy |
-| `backend/.env.native` | host-only overrides | пользователь | native dev path: порты, uploads, conda env, absolute paths в WSL |
-| `backend/.env.hardware.override` | persistent runtime placement overrides | пользователь | `DEVICE_MODE`, component device modes, `GPU_LAYERS_MODE`, `N_GPU_LAYERS_OVERRIDE` |
 | `backend/.env.runtime` | applied output for current run | launcher/preflight | generated file; руками не редактировать; launcher перегенерирует его на каждом запуске |
 
 Шаблоны:
 - `backend/.env.example`
-- `backend/.env.native.example`
-- `backend/.env.hardware.override.example`
 
-Если нужен кастомный файл вместо `backend/.env.hardware.override`, используйте:
+Legacy note:
 
-```bash
-./scripts/launcher.sh --target native --hardware-override-file /path/to/runtime.override.env
-```
+- `backend/.env.native` и `backend/.env.hardware.override` считаются deprecated для native/operator path
+- не использовать их как canonical source of truth в новых настройках и документации
 
 После обновления проекта не пропускайте повторную установку Python-зависимостей:
 
@@ -244,7 +235,6 @@ cd backend && pip install -r requirements.txt
   - `--asset-set core|all`: какие модели дозагружать перед стартом.
   - `--models-root <path>`: корень моделей, например `/mnt/d/agent-models`.
   - `--huggingface-cache <path>`: путь к cache Hugging Face.
-  - `--hardware-override-file <path>`: custom override-file вместо `backend/.env.hardware.override`.
   - `--gpu-layers-mode auto|max|manual`: режим выбора GPU слоёв для LLM.
   - `--gpu-layers <int>`: значение для `manual`.
   - `--device-mode cpu|gpu|hybrid`: fallback device mode для heavy path.
@@ -445,7 +435,7 @@ powershell -ExecutionPolicy Bypass -File scripts/install/install_windows.ps1 -Ap
 ```
 
 - Основные флаги: нет.
-- Важные env vars: читает `backend/.env`, `backend/.env.native`, `backend/.env.runtime` для определения service ports.
+- Важные env vars: читает `backend/.env`, `backend/.env.runtime` для определения service ports.
 - Side effects: убивает tmux session `agent-navigator-native`, завершает связанные runtime-процессы и процессы на service ports.
 - Ограничения: Docker intentionally не останавливает.
 
@@ -460,7 +450,7 @@ powershell -ExecutionPolicy Bypass -File scripts/install/install_windows.ps1 -Ap
 ```
 
 - Основные флаги: нет.
-- Важные env vars: читает `backend/.env`, `backend/.env.native`, `backend/.env.runtime` для определения service ports.
+- Важные env vars: читает `backend/.env`, `backend/.env.runtime` для определения service ports.
 - Side effects: завершает tmux session `agent-navigator` и `agent-navigator-native`, делает `docker compose down`, затем зачищает зависшие процессы.
 - Ограничения: это более широкий cleanup, чем `stop_native.sh`; для native-only path лучше использовать именно `stop_native.sh`.
 

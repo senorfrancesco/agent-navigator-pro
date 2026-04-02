@@ -163,7 +163,7 @@ scripts/
 ### `scripts/models/install_models.sh`
 
 - Делает: скачивает или валидирует наличие model artifacts в канонических `MODEL_PATH_*`, разделяя `core` set (`LLM + intent + retrieval`) и `all` (`core + VLM + mmproj`).
-- Не делает: не меняет runtime profile; если модели лежат на другом диске, пользователь фиксирует absolute paths в `backend/.env.native`. При этом bootstrap/install path может создать `backend/.env` из шаблона и автоматически записать `CHAINLIT_AUTH_SECRET`, если он отсутствует или остался дефолтным.
+- Не делает: не меняет runtime profile; если модели лежат на другом диске, пользователь фиксирует absolute paths в `backend/.env`. При этом bootstrap/install path может создать `backend/.env` из шаблона и автоматически записать `CHAINLIT_AUTH_SECRET`, если он отсутствует или остался дефолтным.
 - Зависимости: `huggingface_hub`, доступ к model source, свободное место на диске, явные target directories.
 - Успех проверяется через: наличие ожидаемых файлов/директорий, контроль путей и печать канонического env block для `MODEL_PATH_LLM`, `MODEL_PATH_VLM`, `MMPROJ_PATH`, `MODEL_PATH_EMBEDDING_INTENT`, `MODEL_PATH_EMBEDDING_RETRIEVAL`.
 - Official docs and source ids:
@@ -181,7 +181,7 @@ scripts/
 ./scripts/models/install_models.sh --ensure-present --asset-set=all --huggingface-cache=/mnt/d/hf-cache
 ```
 
-Для `WSL` и другого диска модели можно хранить вне `C:` и прописывать absolute paths в `backend/.env.native`, например `/mnt/d/agent-models/...`.
+Для `WSL` и другого диска модели можно хранить вне `C:` и прописывать absolute paths в `backend/.env`, например `/mnt/d/agent-models/...`.
 
 ### `scripts/utils/system_check.sh`
 
@@ -274,7 +274,7 @@ python scripts/runtime_preflight.py plan --profile adaptive
 ./scripts/launcher.sh --target native --device-mode gpu
 ```
 
-Для постоянных user-owned overrides используйте `backend/.env.hardware.override`, а не `backend/.env.runtime`.
+Для постоянного user-owned runtime intent используйте `backend/.env`, а `backend/.env.runtime` оставляйте generated applied файлом.
 
 `runtime_preflight plan` теперь показывает placement summary по компонентам, а не только один общий `device_mode`:
 - `llm`
@@ -291,8 +291,7 @@ python scripts/runtime_preflight.py plan --profile adaptive
 `DEVICE_MODE` остаётся fallback для heavy runtime path и не означает автоматически, что embeddings тоже пойдут в тот же placement.
 
 Launcher поддерживает оба режима:
-- через флаги, например `--llm-device-mode gpu --gpu-layers-mode max`
-- через файл, например `--hardware-override-file /path/to/runtime.override.env`
+- через `backend/.env`
+- через current-run флаги, например `--llm-device-mode gpu --gpu-layers-mode max`
 
-Базовый шаблон лежит в:
-- `backend/.env.hardware.override.example`
+`backend/.env.native` и `backend/.env.hardware.override` считаются deprecated для native/operator path.
