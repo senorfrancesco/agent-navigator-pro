@@ -2,6 +2,55 @@
 
 Backend-served shell для unified runtime-control operator UI.
 
+## Как запускать прототип UI
+
+Канонический прототип находится в `prototype/operator-ui` и поддерживает два режима запуска.
+
+### 1. Быстрый локальный preview без backend
+
+Подходит для проверки вёрстки, navigation shell и статического поведения frontend.
+
+Из корня репозитория:
+
+```bash
+npm run prototype:operator-ui
+```
+
+Потом открыть:
+
+- `http://127.0.0.1:4173`
+
+Важно:
+
+- это только статический preview;
+- backend API, гидратация состояния, действия и live-данные в этом режиме не работают.
+
+### 2. Backend-served режим с реальным control plane
+
+Это основной способ смотреть прототип как интегрированный UI.
+
+Запустить `agent-api`:
+
+```bash
+cd backend
+uvicorn orchestrator.agent_api:app --reload --port 8000
+```
+
+Потом открыть:
+
+- `http://127.0.0.1:8000/operator-ui/`
+
+Альтернатива для docker path:
+
+```bash
+docker compose --profile backend up -d agent-api document-server legal-server ums
+docker compose logs --tail=200 -f agent-api
+```
+
+После этого тот же UI доступен по:
+
+- `http://127.0.0.1:8000/operator-ui/`
+
 Расположение:
 - `prototype/operator-ui/index.html`
 
@@ -18,16 +67,7 @@ Backend-served shell для unified runtime-control operator UI.
   - привязкой к каноническим `deploy/offline_bundle/scripts`
 - observability summary и deep links в `Grafana` / `Prometheus`
 
-Быстрый локальный просмотр:
-
-```bash
-npm run prototype:operator-ui
-```
-
-Потом открыть:
-- `http://127.0.0.1:4173`
-
-Backend-served запуск:
+Backend-served контракт:
 
 - когда поднят `backend/orchestrator/agent_api.py`, тот же UI доступен по:
   - `http://127.0.0.1:8000/operator-ui/`
