@@ -26,8 +26,10 @@
   Progress: начат реальный web-first slice — `agent_api` теперь монтирует `/operator-ui/` и `/operator-assets/`, а `prototype/operator-ui` умеет гидратироваться из backend endpoint `GET /operator/state`.
   Progress: `Config` переведён на path-aware variants и preset preview flow; для `native` и `container` появились отдельные variant tabs, staged-presets без auto-write и `Local safe ports` / `Target default ports` для `env.bundle`.
   Workaround: container deploy/run из текущего backend-served operator UI теперь блокируется, если `env.bundle` пытается поднять `agent-api` на том же порту, что и текущий UI (`8000` по умолчанию). Это intentional self-conflict guard, пока не появится detached deploy mode или отдельный портовый профиль для offline bundle.
+  Workaround: новый `Help` drawer для panel review реализован frontend-first внутри `prototype/operator-ui/app.js`. Он уже позволяет вынести объясняющий copy из рабочих карточек, но пока не получает page-specific content из backend/source-of-truth контракта.
   Follow-up: добавить настоящие live runtime probes для offline/container stack и полноценный backend-level bilingual payload, чтобы RU/EN toggle не зависел только от frontend shell translation.
   Follow-up: текущая settings-plane для языка/видимости env keys/source/recommendations живёт во frontend shell; если нужен server-side preference sync, это надо вынести в `/operator/preferences`.
+  Follow-up: перевести `Help` drawer на backend-driven page contract, чтобы объяснения блоков, терминология и operator runbooks не жили как вручную поддерживаемая frontend-таблица.
 - [x] R1.0.9a — Сделать Python control plane каноническим backend-контуром для operator UI
   План: `docs/plans/2026-03-29-python-operator-control-plane-migration.md`
   Цель: UI должен разговаривать только с Python API и Python job/action model; shell не должен оставаться продуктовым API для экрана запуска, конфига, deploy/build и maintenance.
@@ -2512,6 +2514,7 @@ DOCUMENT_ANALYSIS_SUMMARIZE_MAX_TOKENS=512
     - native Open WebUI RAG initially off;
     - backend `agent_api` остаётся source of truth для routing/tool execution;
     - проверить file handoff, attachments, streaming и UX prompt actions;
+    - отдельно проверить prompt leakage / echo system instructions в пользовательский ответ на thin-shell path; текущий `Chainlit` уже показывал риск, когда модель на вопросах про погоду/интернет частично воспроизводила системную инструкцию про отсутствие realtime-доступа;
   - описать границу между:
     - `Open WebUI` shell;
     - backend orchestration;
