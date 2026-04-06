@@ -346,6 +346,8 @@ let selectedServicesPath = "native";
 let selectedLaunchPath = "native";
 let selectedDeployMode = "build";
 let launchMenuOpen = false;
+let helpDrawerOpen = false;
+let mobileNavOpen = false;
 let dirtyFields = new Set();
 let stagedFieldValues = new Map();
 let revealedSecretFields = new Set();
@@ -381,6 +383,94 @@ let runningJobs = new Map();
 let lastJobSummary = null;
 let runtimeHealthByPath = {};
 let localRuntimeStateOverrides = new Map();
+const helpContent = {
+  overview: {
+    title: { ru: "Обзор", en: "Overview" },
+    body: {
+      ru: "Короткая сводка системы: пути запуска, железо, сервисы и блокеры. Если что-то требует внимания, это должно читаться без скролла.",
+      en: "A short system summary: runtime paths, hardware, services, and blockers. Attention states should be visible without scrolling.",
+    },
+    terms: [
+      { ru: "Путь запуска: канонический сценарий старта среды.", en: "Runtime path: canonical scenario used to start the environment." },
+      { ru: "Блокеры: то, что мешает запуску или стабильной работе.", en: "Blockers: conditions that prevent launch or stable runtime." },
+    ],
+    actions: [
+      { ru: "Если видишь жёлтый или красный статус, открой «Запуск» или «Сервисы».", en: "If you see a warning or failure state, open Launch or Services." },
+      { ru: "Подробные объяснения держи здесь, а не в карточках дашборда.", en: "Keep explanations here instead of inside dashboard cards." },
+    ],
+  },
+  launch: {
+    title: { ru: "Запуск", en: "Launch" },
+    body: {
+      ru: "Рабочая поверхность для выбора пути и контроля текущего старта. Кнопка и лог важнее описательных абзацев.",
+      en: "Workspace for choosing a path and tracking the current start flow. The button and log matter more than explanatory copy.",
+    },
+    terms: [
+      { ru: "Профиль запуска: конкретный подрежим внутри выбранного пути.", en: "Launch profile: specific sub-mode inside the selected runtime path." },
+      { ru: "Проверки: prerequisite-сигналы перед стартом.", en: "Checks: prerequisite signals before start." },
+    ],
+    actions: [
+      { ru: "Если старт идёт долго, смотри лог и затем вкладку «Сервисы».", en: "If launch takes too long, inspect the log and then Services." },
+      { ru: "Если путь недоступен, открой «Показать проверки».", en: "If the path is unavailable, open Show Checks." },
+    ],
+  },
+  config: {
+    title: { ru: "Конфиг", en: "Config" },
+    body: {
+      ru: "Редактируй только видимые runtime-поля, затем явно применяй изменения. Источник и applied value важнее описания.",
+      en: "Edit only the visible runtime fields, then apply changes explicitly. Source and applied value matter more than description.",
+    },
+    terms: [
+      { ru: "Applied: фактическое значение после последнего применения.", en: "Applied: effective value after the last apply." },
+      { ru: "Suggested: рекомендованное, но не автоматически применённое значение.", en: "Suggested: recommended but not auto-applied value." },
+    ],
+    actions: [
+      { ru: "Если не уверен в поле, сначала проверь источник, потом правь значение.", en: "If you're unsure about a field, check its source before editing." },
+    ],
+  },
+  services: {
+    title: { ru: "Сервисы", en: "Services" },
+    body: {
+      ru: "Здесь оператор видит, что реально работает, что деградировало и какие логи подтверждают состояние.",
+      en: "Here the operator sees what is really running, what degraded, and which logs confirm the state.",
+    },
+    terms: [
+      { ru: "Готово: сервис отвечает и проходит проверки.", en: "Ready: the service responds and passes checks." },
+      { ru: "Частично: часть сигналов есть, но запуск ещё не завершён.", en: "Partial: some signals are present, but startup is not finished." },
+    ],
+    actions: [
+      { ru: "Пустую диагностику можно игнорировать; ориентируйся на список сервисов и лог.", en: "Empty diagnostics can be ignored; rely on the service list and log." },
+    ],
+  },
+  deploy: {
+    title: { ru: "Сборка / Деплой", en: "Build / Deploy" },
+    body: {
+      ru: "Пошаговый поток для офлайн-бандла: этап, лог, действия и артефакты. Источники нужны редко и не должны забивать экран.",
+      en: "A step-by-step offline bundle flow: stage, log, actions, and artifacts. Sources are secondary and should not dominate the screen.",
+    },
+    terms: [
+      { ru: "Стадия: текущий шаг канонического потока сборки и деплоя.", en: "Stage: current step in the canonical build/deploy flow." },
+      { ru: "Артефакт: результат сборки или импорта, который можно проверить отдельно.", en: "Artifact: build or import output that can be verified separately." },
+    ],
+    actions: [
+      { ru: "Если поток завис, сначала смотри stepper и лог, потом уже отдельные действия.", en: "If the flow stalls, inspect the stepper and log before individual actions." },
+    ],
+  },
+  maintenance: {
+    title: { ru: "Действия", en: "Actions" },
+    body: {
+      ru: "Safe maintenance-операции без toolbox-шума. Если блокеров нет, страница остаётся короткой и служебной.",
+      en: "Safe maintenance operations without toolbox noise. When there are no blockers, the page should stay short and utilitarian.",
+    },
+    terms: [
+      { ru: "Перечитать: заново загрузить данные из источников.", en: "Reload: read data again from source files or APIs." },
+      { ru: "Пересчитать: заново вычислить производные значения.", en: "Recompute: derive computed values again." },
+    ],
+    actions: [
+      { ru: "Используй эти действия как recovery flow, а не как постоянную навигацию.", en: "Use these actions as recovery flow, not as primary navigation." },
+    ],
+  },
+};
 
 function trimUiCopy(value, limit = 96) {
   const normalized = String(value || "").replace(/\s+/g, " ").trim();
@@ -574,6 +664,15 @@ function localizedField(item, key) {
   if (!item) return "";
   if (currentLanguage === "en" && item[`${key}En`]) return item[`${key}En`];
   return item[key];
+}
+
+function localizedHelpText(entry) {
+  if (!entry) return "";
+  return currentLanguage === "en" ? (entry.en || entry.ru || "") : (entry.ru || entry.en || "");
+}
+
+function currentHelpContent() {
+  return helpContent[activeSection] || helpContent.overview;
 }
 
 function displayLabel(label) {
@@ -1274,6 +1373,10 @@ function localizeStaticShell() {
     ['.nav-item[data-target="maintenance"]', "Actions"],
     ["#ui-settings-button-label", "UI Settings"],
     ["#ui-settings-button-note", "Interface language, metrics density, env keys, and secret visibility."],
+    ["#help-drawer-button-label", "Help"],
+    ["#help-drawer-eyebrow", "Help"],
+    ["#help-drawer-button-note", "Section descriptions, terms, and short operator scenarios."],
+    ["#mobile-nav-toggle", "Menu"],
     ["#topbar-start-button-label", "Launch"],
     ["#sidebar-hardware-label", "Hardware Environment"],
     ["#sidebar-summary-label", "Status Summary"],
@@ -1281,15 +1384,15 @@ function localizeStaticShell() {
     ["#sidebar-healthy-services-label", "Healthy Services"],
     ["#sidebar-dirty-config-label", "Unsaved Changes"],
     ["#section-overview .eyebrow", "Overview"],
-    ["#section-overview h2", "Launch availability, hardware, service state, and parser status"],
-    ["#section-overview .support-copy", "This workspace shows what can run now and where to inspect the system."],
+    ["#section-overview h2", "System overview"],
+    ["#section-overview .support-copy", "Start with runtime paths, then hardware, services, and blockers."],
     ["#overview-metrics-eyebrow", "Metrics"],
     ["#overview-metrics-title", "Key Prometheus signals for the operator summary"],
     ["#overview-metrics-pill", "Observability"],
     ["#overview-hardware-eyebrow", "Hardware"],
     ["#section-launch .eyebrow", "Launch"],
-    ["#section-launch h2", "Runtime cards with explicit source and availability"],
-    ["#section-launch .support-copy", "The main workflow starts with a visible runtime path, not hidden assumptions."],
+    ["#section-launch h2", "Choose and launch a path"],
+    ["#section-launch .support-copy", "Choose a path, inspect its current state, and launch without unnecessary scrolling."],
     ["#launch-profiles-eyebrow", "Run Profiles"],
     ["#launch-profiles-title", "Subordinate presets for the selected runtime path"],
     ["#launch-log-eyebrow", "Launch Log"],
@@ -1305,13 +1408,13 @@ function localizeStaticShell() {
     ["#section-services h2", "State, readiness, logs, and parser diagnostics"],
     ["#section-services .support-copy", "Logs and metrics are part of the operator decision loop."],
     ["#section-deploy .eyebrow", "Build / Deploy"],
-    ["#section-deploy h2", "Build a portable bundle and import it back into the runtime"],
-    ["#section-deploy .support-copy", "This workspace covers build, export, pack, unpack, validate, install, deploy, and verify."],
+    ["#section-deploy h2", "Offline bundle control"],
+    ["#section-deploy .support-copy", "Current stage, log, and actions matter more than descriptive cards."],
     ["#section-maintenance .eyebrow", "Actions"],
     ["#section-maintenance h2", "Only allowlisted maintenance scenarios"],
     ["#section-maintenance .support-copy", "Safe operator actions stay visible, typed, and bound to the selected runtime path."],
     ["#sidebar-system-label", "System"],
-    ["#overview-hardware-title", "Detected capabilities and suggested env defaults"],
+    ["#overview-hardware-title", "Hardware summary"],
     ["#overview-hardware-pill", "Informational only"],
     ["#overview-warnings-eyebrow", "Warnings"],
     ["#overview-warnings-title", "Parser and runtime blockers"],
@@ -1368,6 +1471,10 @@ function localizeStaticShell() {
     ['.nav-item[data-target="maintenance"]', "Действия"],
     ["#ui-settings-button-label", "Настройки UI"],
     ["#ui-settings-button-note", "Язык интерфейса, метрики, env keys и показ секретов."],
+    ["#help-drawer-button-label", "Справка"],
+    ["#help-drawer-eyebrow", "Справка"],
+    ["#help-drawer-button-note", "Описания разделов, термины и короткие сценарии."],
+    ["#mobile-nav-toggle", "Меню"],
     ["#topbar-start-button-label", "Запуск"],
     ["#sidebar-hardware-label", "Аппаратная среда"],
     ["#sidebar-summary-label", "Сводка состояния"],
@@ -1375,15 +1482,15 @@ function localizeStaticShell() {
     ["#sidebar-healthy-services-label", "Здоровые сервисы"],
     ["#sidebar-dirty-config-label", "Незасейвленные правки"],
     ["#section-overview .eyebrow", "Обзор"],
-    ["#section-overview h2", "Доступность запуска, железо, состояние сервисов и статус парсинга"],
-    ["#section-overview .support-copy", "Эта панель показывает, что можно запустить сейчас, и где смотреть состояние системы."],
+    ["#section-overview h2", "Обзор системы"],
+    ["#section-overview .support-copy", "Сначала статус путей, потом железо, сервисы и блокеры."],
     ["#overview-metrics-eyebrow", "Метрики"],
     ["#overview-metrics-title", "Ключевые сигналы Prometheus для сводки оператора"],
     ["#overview-metrics-pill", "Наблюдаемость"],
     ["#overview-hardware-eyebrow", "Железо"],
     ["#section-launch .eyebrow", "Запуск"],
-    ["#section-launch h2", "Карточки запуска с явным источником и доступностью"],
-    ["#section-launch .support-copy", "Основной сценарий начинается с выбора доступного пути запуска, а не со скрытых допущений."],
+    ["#section-launch h2", "Выбор и запуск пути"],
+    ["#section-launch .support-copy", "Выбери путь, смотри текущее состояние и запускай без лишней прокрутки."],
     ["#launch-profiles-eyebrow", "Профили запуска"],
     ["#launch-profiles-title", "Подчинённые пресеты выбранного пути запуска"],
     ["#launch-log-eyebrow", "Лог запуска"],
@@ -1399,12 +1506,12 @@ function localizeStaticShell() {
     ["#section-services h2", "Состояние, готовность, логи и диагностика парсинга"],
     ["#section-services .support-copy", "Логи и метрики входят в операторский цикл принятия решения."],
     ["#section-deploy .eyebrow", "Сборка / Деплой"],
-    ["#section-deploy h2", "Сборка переносимого офлайн-бандла и обратный импорт в рабочую систему"],
-    ["#section-deploy .support-copy", "Панель покрывает сборку, экспорт, упаковку, распаковку, проверку, установку, деплой и верификацию."],
+    ["#section-deploy h2", "Управление офлайн-бандлом"],
+    ["#section-deploy .support-copy", "Текущий этап, лог и действия важнее описательных карточек."],
     ["#section-maintenance .eyebrow", "Действия"],
     ["#section-maintenance h2", "Только разрешённые maintenance-сценарии"],
     ["#section-maintenance .support-copy", "Безопасные действия оператора видны, типизированы и привязаны к выбранному пути запуска."],
-    ["#overview-hardware-title", "Обнаруженные возможности и базовые env-настройки"],
+    ["#overview-hardware-title", "Аппаратная сводка"],
     ["#overview-hardware-pill", "Только справка"],
     ["#overview-warnings-eyebrow", "Предупреждения"],
     ["#overview-warnings-title", "Блокеры парсинга и среды выполнения"],
@@ -1539,6 +1646,7 @@ function setLaunchPath(pathKey) {
 function rerenderAll() {
   renderSidebarState();
   renderSystemStatus();
+  renderTopbarHint();
   renderOverviewHero();
   renderOverviewPathCards();
   renderOverviewMetrics();
@@ -1556,6 +1664,8 @@ function rerenderAll() {
   renderDeployStrip();
   renderDeploy();
   renderMaintenance();
+  renderHelpDrawer();
+  syncMobileNav();
   updateDirtyState();
   updateCounters();
   updateTopbarAction();
@@ -1577,24 +1687,124 @@ function formatHardwareMetricValue(metric) {
   return escapeHtml(String(value));
 }
 
-function getMetricValue(label) {
-  return hardwareMetrics.find((metric) => metric.label === label)?.value || "Неизвестно";
+function getMetricValue(labels, fallback) {
+  const labelList = Array.isArray(labels) ? labels : [labels];
+  for (const label of labelList) {
+    const metric = hardwareMetrics.find((item) => item.label === label || item.labelEn === label);
+    if (metric?.value !== undefined && metric?.value !== null && String(metric.value).trim()) {
+      return metric.value;
+    }
+  }
+  if (fallback !== undefined) {
+    return fallback;
+  }
+  return currentLanguage === "en" ? "Unknown" : "Неизвестно";
 }
 
 function renderSidebarState() {
-  const hostSummary = getMetricValue("CPU / memory");
-  const gpuSummary = getMetricValue("GPU visibility");
-  const availablePaths = Object.values(runtimePaths).filter((path) => path.status === "available").length;
-  const partialPaths = Object.values(runtimePaths).filter((path) => path.status === "partial").length;
+  const sidebar = document.querySelector("#operator-sidebar");
+  if (sidebar) {
+    const hostSummary = getMetricValue(["CPU / memory", "CPU / память"]);
+    const gpuSummary = getMetricValue(["GPU visibility", "Инвентарь GPU"]);
+    sidebar.title = currentLanguage === "en"
+      ? `Host: ${hostSummary}; GPU: ${gpuSummary}; warnings: ${warnings.length}`
+      : `Хост: ${hostSummary}; GPU: ${gpuSummary}; предупреждений: ${warnings.length}`;
+  }
+}
 
-  document.querySelector("#sidebar-host-summary").textContent = hostSummary || "Неизвестно";
-  document.querySelector("#sidebar-runtime-summary").textContent =
-    currentLanguage === "en"
-      ? `${gpuSummary}. Ready: ${availablePaths}, partial: ${partialPaths}, warnings: ${warnings.length}.`
-      : `${gpuSummary}. Доступно: ${availablePaths}, частично: ${partialPaths}, предупреждений: ${warnings.length}.`;
+function renderTopbarHint() {
+  const node = document.querySelector("#topbar-inline-hint");
+  if (!node) return;
+  const activeJob = [...runningJobs.values()].find((job) => isActiveJobStatus(job.status));
+  if (activeJob) {
+    node.textContent = currentLanguage === "en"
+      ? `Active job: ${activeJob.label}. Inspect the current state before switching context.`
+      : `Активная задача: ${activeJob.label}. Сначала проверь текущее состояние, потом переключай контекст.`;
+    return;
+  }
+  const sectionHints = {
+    overview: currentLanguage === "en"
+      ? "This screen should answer whether the system is okay in a few seconds."
+      : "Этот экран должен за несколько секунд отвечать, всё ли в порядке с системой.",
+    launch: currentLanguage === "en"
+      ? "Choose a path, inspect checks, then launch and follow the log."
+      : "Выбери путь, проверь проверки, затем запускай и смотри лог.",
+    config: currentLanguage === "en"
+      ? "Edit only what you need and apply changes explicitly."
+      : "Меняй только нужное и применяй изменения явно.",
+    services: currentLanguage === "en"
+      ? "The service list and the log are the primary evidence surfaces."
+      : "Список сервисов и лог здесь являются главными evidence-поверхностями.",
+    deploy: currentLanguage === "en"
+      ? "Use the stepper and log first, then the actions and artifacts."
+      : "Сначала смотри stepper и лог, затем действия и артефакты.",
+    maintenance: currentLanguage === "en"
+      ? "Maintenance actions are recovery tools, not a primary workflow."
+      : "Maintenance-действия нужны для recovery, а не как основной сценарий.",
+  };
+  node.textContent = sectionHints[activeSection] || sectionHints.overview;
+}
+
+function isActiveJobStatus(status) {
+  return ["queued", "running", "cancelling"].includes(status);
+}
+
+function getActiveJobForPath(pathKey) {
+  return [...runningJobs.values()].find((job) => job.pathKey === pathKey && isActiveJobStatus(job.status));
+}
+
+function renderHelpDrawer() {
+  const drawer = document.querySelector("#help-drawer");
+  if (!drawer) return;
+  const content = currentHelpContent();
+  drawer.hidden = !helpDrawerOpen;
+  document.querySelector("#help-drawer-eyebrow").textContent = currentLanguage === "en" ? "Help" : "Справка";
+  document.querySelector("#help-drawer-section-title").textContent = localizedHelpText(content.title);
+  document.querySelector("#help-drawer-section-body").textContent = localizedHelpText(content.body);
+  document.querySelector("#help-drawer-title").textContent = currentLanguage === "en" ? "Current section context" : "Контекст текущего раздела";
+  document.querySelector("#help-drawer-close").textContent = currentLanguage === "en" ? "Close" : "Закрыть";
+  document.querySelector("#help-drawer-section-label").textContent = currentLanguage === "en" ? "Section" : "Раздел";
+  document.querySelector("#help-drawer-terms-label").textContent = currentLanguage === "en" ? "Terms" : "Термины";
+  document.querySelector("#help-drawer-actions-label").textContent = currentLanguage === "en" ? "What to do if..." : "Что делать если...";
+  document.querySelector("#help-drawer-terms").innerHTML = (content.terms || []).map((item) => `
+    <div class="metric-card">
+      <p>${displayText(localizedHelpText(item))}</p>
+    </div>
+  `).join("");
+  document.querySelector("#help-drawer-actions").innerHTML = (content.actions || []).map((item) => `
+    <div class="metric-card">
+      <p>${displayText(localizedHelpText(item))}</p>
+    </div>
+  `).join("");
+}
+
+function setHelpDrawerOpen(nextValue) {
+  helpDrawerOpen = Boolean(nextValue);
+  renderHelpDrawer();
+}
+
+function syncMobileNav() {
+  const sidebar = document.querySelector("#operator-sidebar");
+  const toggle = document.querySelector("#mobile-nav-toggle");
+  if (!sidebar || !toggle) return;
+  const isMobileViewport = window.matchMedia("(max-width: 1180px)").matches;
+  const shouldShowMobileDrawer = isMobileViewport && mobileNavOpen;
+  sidebar.classList.toggle("mobile-open", shouldShowMobileDrawer);
+  toggle.setAttribute("aria-expanded", shouldShowMobileDrawer ? "true" : "false");
+  toggle.setAttribute("aria-label", currentLanguage === "en" ? "Toggle section navigation" : "Открыть или закрыть навигацию по разделам");
+  if (isMobileViewport) {
+    sidebar.hidden = !shouldShowMobileDrawer;
+    sidebar.setAttribute("aria-hidden", shouldShowMobileDrawer ? "false" : "true");
+    sidebar.inert = !shouldShowMobileDrawer;
+  } else {
+    sidebar.hidden = false;
+    sidebar.removeAttribute("aria-hidden");
+    sidebar.inert = false;
+  }
 }
 
 function runtimeHealthTone(status) {
+  if (status === "stopping") return "neutral";
   if (["running", "healthy"].includes(status)) return "lime";
   if (["building", "deploying", "not_started"].includes(status)) return "cyan";
   if (status === "not_started") return "cyan";
@@ -1607,6 +1817,7 @@ function runtimeHealthLabel(status) {
     ? {
         healthy: "Runtime healthy",
         running: "Runtime healthy",
+        stopping: "Stopping",
         building: "Build in progress",
         deploying: "Deploy in progress",
         failed: "Runtime failed",
@@ -1618,6 +1829,7 @@ function runtimeHealthLabel(status) {
     : {
         healthy: "Система работает",
         running: "Система работает",
+        stopping: "Остановка",
         building: "Идёт сборка",
         deploying: "Идёт деплой",
         failed: "Запуск завершился ошибкой",
@@ -1632,10 +1844,18 @@ function runtimeHealthLabel(status) {
 function deriveLaunchRuntimeState(pathKey) {
   const localOverride = localRuntimeStateOverrides.get(pathKey);
   const runtimeHealth = runtimeHealthByPath[pathKey];
-  const runtimeJob = [...runningJobs.values()].find((job) => job.pathKey === pathKey);
+  const runtimeJob = getActiveJobForPath(pathKey);
   const pathLogs = logLines.filter((line) => line.path === pathKey);
   const latestLog = pathLogs[pathLogs.length - 1]?.text || "";
 
+  if (runtimeJob?.actionKind === "stop" || runtimeJob?.status === "cancelling") {
+    return {
+      status: "stopping",
+      detail: runtimeJob.detail,
+      reason: runtimeJob.detail,
+      nextAction: currentLanguage === "en" ? "Wait until the current stop operation finishes." : "Дождись завершения текущей операции остановки.",
+    };
+  }
   if (runtimeJob?.status === "queued" || runtimeJob?.status === "running") {
     return {
       status: pathKey === "container" ? "building" : "deploying",
@@ -1686,12 +1906,12 @@ function deriveLaunchRuntimeState(pathKey) {
 }
 
 function shouldShowLaunchFailSummary(state) {
-  return ["building", "deploying", "failed", "blocked", "degraded"].includes(state.status);
+  return ["building", "deploying", "stopping", "failed", "blocked", "degraded"].includes(state.status);
 }
 
 function renderSystemStatus() {
   const selectedRows = serviceRows.filter((row) => row.path === selectedServicesPath);
-  const activeJobCount = [...runningJobs.values()].filter((job) => job.status === "queued" || job.status === "running").length;
+  const activeJobCount = [...runningJobs.values()].filter((job) => isActiveJobStatus(job.status)).length;
   const shellHealth = operatorShellHealth();
 
   let pillClass = shellHealth.status === "healthy" ? "lime" : shellHealth.status === "degraded" ? "orange" : "neutral";
@@ -1709,7 +1929,7 @@ function renderSystemStatus() {
     sideBody = lastJobSummary.detail;
   }
 
-  const activeJob = [...runningJobs.values()].find((job) => job.status === "queued" || job.status === "running");
+  const activeJob = [...runningJobs.values()].find((job) => isActiveJobStatus(job.status));
   const failedJob = !activeJob && lastJobSummary?.outcome === "failed" ? lastJobSummary : null;
   const jobPillText = activeJob
     ? summarizeJobForSidebar(activeJob.label, activeJob.detail)
@@ -1753,11 +1973,10 @@ function renderOverviewSummaryCard(path) {
     <div class="service-row">
       <div>
         <div class="source-label">${pathTitle(path)}</div>
-        <h4>${cap(path.status)}</h4>
-        <p>${displayText(localizedField(path, "description"))}</p>
+        <h4>${displayText(path.launchSource)}</h4>
+        <p>${currentLanguage === "en" ? `${path.configSources.length} config sources visible` : `Видно ${path.configSources.length} источника конфига`}</p>
         <div class="service-meta-list">
-          <span class="service-meta-pill">${path.launchSource}</span>
-          <span class="service-meta-pill">${currentLanguage === "en" ? "Sources" : "Источников"}: ${path.configSources.length}</span>
+          <span class="service-meta-pill">${cap(path.status)}</span>
         </div>
       </div>
       <span class="status-pill ${chipClass(path.status)}">${cap(path.status)}</span>
@@ -1807,16 +2026,108 @@ function isPathRunning(pathKey) {
 }
 
 function launchPrimaryLabel(pathKey) {
-  const activeJob = [...runningJobs.values()].find((job) => job.pathKey === pathKey && (job.status === "queued" || job.status === "running"));
-  if (activeJob?.actionKind === "stop") {
+  const activeJob = getActiveJobForPath(pathKey);
+  if (activeJob?.actionKind === "stop" || activeJob?.status === "cancelling") {
     return currentLanguage === "en" ? "Stopping..." : "Остановка...";
   }
   if (activeJob?.actionKind === "start") {
-    return currentLanguage === "en" ? "Starting..." : "Запуск...";
+    return currentLanguage === "en" ? "Stop" : "Остановить";
   }
   return isPathRunning(pathKey)
     ? (currentLanguage === "en" ? "Stop" : "Остановить")
     : (currentLanguage === "en" ? "Launch" : "Запуск");
+}
+
+function topbarRuntimeBadgeState(pathKey) {
+  const activeJob = getActiveJobForPath(pathKey);
+  if (activeJob?.actionKind === "stop" || activeJob?.status === "cancelling") {
+    return { tone: "neutral", text: currentLanguage === "en" ? "Stopping..." : "Остановка..." };
+  }
+  if (activeJob?.actionKind === "start") {
+    return { tone: "cyan", text: currentLanguage === "en" ? "Starting..." : "Запуск..." };
+  }
+  if (isPathRunning(pathKey)) {
+    return { tone: "lime", text: currentLanguage === "en" ? "Running" : "Запущено" };
+  }
+  return { tone: runtimeHealthTone(deriveLaunchRuntimeState(pathKey).status), text: currentLanguage === "en" ? "Stopped" : "Остановлено" };
+}
+
+function launchInlineState(path, runtimeState, runtimeJob) {
+  if (runtimeJob?.actionKind === "stop" || runtimeJob?.status === "cancelling") {
+    return {
+      tone: "neutral",
+      title: currentLanguage === "en" ? "Stopping current path" : "Останавливаю текущий путь",
+      body: currentLanguage === "en"
+        ? "The stop operation is in progress. Wait until the runtime path is released."
+        : "Идёт операция остановки. Дождись, пока путь запуска будет освобождён.",
+      badge: currentLanguage === "en" ? "Stopping..." : "Остановка...",
+    };
+  }
+  if (runtimeJob?.actionKind === "start") {
+    return {
+      tone: "cyan",
+      title: path.key === "container"
+        ? (currentLanguage === "en" ? "Offline bundle launch is active" : "Идёт запуск офлайн-бандла")
+        : (currentLanguage === "en" ? "Native launch is active" : "Идёт нативный запуск"),
+      body: path.key === "container"
+        ? (currentLanguage === "en" ? "The offline bundle launch is still running. You can stop the process from this card." : "Запуск офлайн-бандла ещё выполняется. Процесс можно остановить прямо из этой карточки.")
+        : (currentLanguage === "en" ? "The native launch is still running. You can stop the process from this card." : "Нативный запуск ещё выполняется. Процесс можно остановить прямо из этой карточки."),
+      badge: currentLanguage === "en" ? "Starting..." : "Запуск...",
+    };
+  }
+  if (isPathRunning(path.key)) {
+    return {
+      tone: "lime",
+      title: path.key === "container"
+        ? (currentLanguage === "en" ? "Offline bundle is running" : "Офлайн-бандл запущен")
+        : (currentLanguage === "en" ? "Runtime is running" : "Среда запущена"),
+      body: currentLanguage === "en"
+        ? "The selected path is active. Use the same button to stop it."
+        : "Выбранный путь активен. Для остановки используй ту же кнопку.",
+      badge: currentLanguage === "en" ? "Running" : "Запущено",
+    };
+  }
+  return {
+    tone: runtimeHealthTone(runtimeState.status),
+    title: currentLanguage === "en" ? "Launch state" : "Состояние запуска",
+    body: runtimeState.nextAction || runtimeState.reason || (currentLanguage === "en" ? "Choose the path and start it when ready." : "Выбери путь и запусти его, когда будешь готов."),
+    badge: runtimeHealthLabel(runtimeState.status),
+  };
+}
+
+async function cancelOperatorJob(jobId, context) {
+  const response = await fetch(`/operator/jobs/${jobId}/cancel`, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+    },
+  });
+  if (!response.ok) {
+    throw new Error(await responseDetail(response));
+  }
+  const job = await response.json();
+  runningJobs.set(jobId, {
+    jobId,
+    label: context.label,
+    pathKey: context.pathKey || selectedLaunchPath,
+    status: job.status,
+    actionKind: "stop",
+    detail: currentLanguage === "en" ? "cancelling launch" : "отмена запуска",
+  });
+  appendImmediateJobLifecycleLog(
+    context,
+    currentLanguage === "en"
+      ? `cancelling ${context.label}`
+      : `отмена запуска: ${context.label}`,
+  );
+  showToast(
+    currentLanguage === "en" ? "Launch is stopping" : "Запуск останавливается",
+    pathTitle(runtimePaths[context.pathKey || selectedLaunchPath]),
+    "info",
+  );
+  renderActivity();
+  renderSystemStatus();
+  rerenderAll();
 }
 
 async function triggerPrimaryActionForPath(pathKey) {
@@ -1824,6 +2135,19 @@ async function triggerPrimaryActionForPath(pathKey) {
   if (!path) return;
   selectedLaunchPath = pathKey;
   rerenderAll();
+  const activeJob = getActiveJobForPath(pathKey);
+  if (activeJob?.actionKind === "start" && activeJob.status !== "cancelling") {
+    await cancelOperatorJob(activeJob.jobId, {
+      surface: "runtime",
+      pathKey,
+      label: pathTitle(path),
+      actionKind: "stop",
+    });
+    return;
+  }
+  if (activeJob) {
+    return;
+  }
   const shouldStop = isPathRunning(pathKey);
   if (!shouldStop && !isLaunchable(pathKey)) {
     switchSection("launch");
@@ -1879,12 +2203,13 @@ function formatConfigSources(sources) {
 function renderPathCard(path, includeProfiles = true) {
   const showSafePortsButton = path.key === "container" && hasBundlePortConflict();
   const runtimeState = deriveLaunchRuntimeState(path.key);
-  const runtimeJob = [...runningJobs.values()].find((job) => job.pathKey === path.key && (job.status === "queued" || job.status === "running"));
+  const runtimeJob = getActiveJobForPath(path.key);
+  const inlineState = launchInlineState(path, runtimeState, runtimeJob);
   const isRunning = ["healthy", "running"].includes(runtimeState.status);
-  const primaryLabel = runtimeJob?.actionKind === "stop"
+  const primaryLabel = runtimeJob?.actionKind === "stop" || runtimeJob?.status === "cancelling"
     ? (currentLanguage === "en" ? "Stopping..." : "Остановка...")
     : runtimeJob?.actionKind === "start"
-      ? (currentLanguage === "en" ? "Starting..." : "Запуск...")
+      ? (currentLanguage === "en" ? "Stop" : "Остановить")
       : isRunning
         ? (currentLanguage === "en" ? "Stop" : "Остановить")
         : path.key === "container"
@@ -1933,9 +2258,16 @@ function renderPathCard(path, includeProfiles = true) {
         <div class="button-row">${path.profiles.map((profile) => `<span class="profile-pill ${chipClass(profile.status)}">${displayLabel(localizedField(profile, "title"))} · ${cap(profile.status)}</span>`).join("")}</div>
       </div>
     ` : ""}
+    <div class="launch-runtime-inline" data-agent-nav-hook="operator-launch-runtime-state">
+      <div class="launch-runtime-inline-head">
+        <strong class="launch-runtime-inline-title">${inlineState.title}</strong>
+        <span class="status-pill ${inlineState.tone}">${inlineState.badge}</span>
+      </div>
+      <p class="launch-runtime-inline-copy">${inlineState.body}</p>
+    </div>
     <div class="button-row">
-      <button class="primary-button launch-button" data-path="${path.key}" ${(!isLaunchable(path.key) && !isRunning) || runtimeJob ? "disabled" : ""}>
-        ${!isLaunchable(path.key) ? blockedLabel : primaryLabel}
+      <button class="primary-button launch-button" data-path="${path.key}" ${(runtimeJob?.actionKind === "stop" || runtimeJob?.status === "cancelling") || ((!isLaunchable(path.key) && !isRunning) && !runtimeJob) ? "disabled" : ""}>
+        ${(!isLaunchable(path.key) && !runtimeJob && !isRunning) ? blockedLabel : primaryLabel}
       </button>
       ${showSafePortsButton ? `
         <button class="ghost-button safe-ports-button" data-path="${path.key}">
@@ -1964,13 +2296,58 @@ function renderOverviewPathCards() {
 
 function renderHardware() {
   const container = document.querySelector("#hardware-summary");
-  container.innerHTML = hardwareMetrics.map((metric) => `
-      <div class="metric-card">
-      <div class="metric-label">${displayLabel(metric.label)}</div>
-      <strong class="metric-strong-multiline">${formatHardwareMetricValue(metric)}</strong>
-      <p>${displayText(metric.note)}</p>
+  const os = getMetricValue(["Определённая ОС", "Detected OS", "Detected host OS", "Detected Host OS"]);
+  const cpu = getMetricValue(["CPU / память", "CPU / memory"]);
+  const gpuVisibility = getMetricValue(["Видимость GPU", "GPU visibility", "GPU Visibility"]);
+  const gpuInventory = getMetricValue(["Инвентарь GPU", "GPU inventory", "GPU Inventory"], "");
+  const cpuParts = String(cpu || "").split(" / ").map((item) => item.trim()).filter(Boolean);
+  const architecture = cpuParts[0] || (currentLanguage === "en" ? "Unknown" : "Неизвестно");
+  const memory = cpuParts.slice(1).join(" / ") || (currentLanguage === "en" ? "Unknown" : "Неизвестно");
+  const hasDetailedInventory = String(gpuInventory || "").trim() && !["Неизвестно", "Unknown", "GPU NVIDIA не обнаружены", "No NVIDIA GPU detected"].includes(String(gpuInventory).trim());
+  const hardwareFacts = [
+    {
+      label: currentLanguage === "en" ? "Kernel / OS" : "Ядро / ОС",
+      value: os,
+    },
+    {
+      label: currentLanguage === "en" ? "Architecture" : "Архитектура",
+      value: architecture,
+    },
+    {
+      label: currentLanguage === "en" ? "Memory" : "Память",
+      value: memory,
+    },
+    {
+      label: currentLanguage === "en" ? "GPU Status" : "GPU статус",
+      value: gpuVisibility,
+    },
+  ].filter((item) => {
+    const normalized = String(item.value || "").trim();
+    return normalized && !["Неизвестно", "Unknown"].includes(normalized);
+  });
+  const inventoryRows = hasDetailedInventory ? String(gpuInventory).split("; ").map((item) => item.trim()).filter(Boolean) : [];
+  container.innerHTML = `
+    <div class="metric-card hardware-card">
+      <div class="metric-label">${currentLanguage === "en" ? "Hardware Summary" : "Аппаратная сводка"}</div>
+      <div class="hardware-facts">
+        ${hardwareFacts.map((item) => `
+          <div class="hardware-fact-row">
+            <div class="source-label">${displayText(item.label)}</div>
+            <div class="source-value hardware-fact-value">${displayText(item.value)}</div>
+          </div>
+        `).join("")}
+      </div>
+      ${inventoryRows.length ? `
+        <div class="hardware-inventory">
+          <div class="source-label">${currentLanguage === "en" ? "GPU Inventory" : "Инвентарь GPU"}</div>
+          <div class="hardware-inventory-list">
+            ${inventoryRows.map((item) => `<div class="source-value hardware-inventory-item">${displayText(item)}</div>`).join("")}
+          </div>
+        </div>
+      ` : ""}
+      <p>${currentLanguage === "en" ? "The card separates host, architecture, memory, and GPU details into a quick operator checklist." : "Карточка разделяет хост, архитектуру, память и детали GPU в быстрый операторский список."}</p>
     </div>
-  `).join("");
+  `;
 }
 
 function renderMetricCards(targetId, items, emptyTitle, emptyBody) {
@@ -2134,21 +2511,20 @@ function renderWarnings() {
 
 function renderServiceOverview() {
   const container = document.querySelector("#service-overview-list");
+  container.className = "service-overview-list service-compact-list";
   container.innerHTML = Object.values(runtimePaths).map((path) => {
     const rows = serviceRows.filter((row) => row.path === path.key);
     const running = rows.filter((row) => row.status === "running").length;
     const degraded = rows.filter((row) => row.status === "degraded").length;
     const blocked = rows.filter((row) => row.status === "blocked").length;
     return `
-      <div class="service-card">
-        <div class="service-row">
-          <div>
-            <div class="source-label">${pathTitle(path)}</div>
-            <h4>${currentLanguage === "en" ? `${running}/${rows.length} ready, ${degraded} degraded, ${blocked} blocked` : `${running}/${rows.length} готовы, ${degraded} снижены, ${blocked} заблокированы`}</h4>
-            <p>${rows.length ? displayText(path.key === "native" ? "Проверки нативного пути и хоста берутся из состояния репозитория." : "Состояние бандла видно сразу, а запуск контейнеров зависит от Docker Engine и доступа к сокету.") : (currentLanguage === "en" ? "No published service probes for this runtime path yet." : "Для этого пути запуска ещё нет опубликованных проверок сервисов.")}</p>
-          </div>
-          <span class="status-pill ${chipClass(path.status)}">${cap(path.status)}</span>
+      <div class="service-compact-row">
+        <div class="service-compact-copy">
+          <div class="source-label">${pathTitle(path)}</div>
+          <strong>${currentLanguage === "en" ? `${running}/${rows.length} ready, ${blocked} blocked` : `${running}/${rows.length} готовы, ${blocked} заблокированы`}</strong>
+          <p>${currentLanguage === "en" ? `${degraded} degraded services` : `${degraded} сервисов в деградации`}</p>
         </div>
+        <span class="status-pill ${chipClass(path.status)}">${cap(path.status)}</span>
       </div>
     `;
   }).join("");
@@ -2156,44 +2532,43 @@ function renderServiceOverview() {
 
 function renderActivity() {
   const container = document.querySelector("#recent-activity");
-  if (!activityFeed.length) {
-    container.innerHTML = `
-      <div class="metric-card">
-        <div class="activity-row">
-          <div>
-            <div class="source-label">${currentLanguage === "en" ? "No Operator Activity Yet" : "Пока нет активности оператора"}</div>
-            <strong>${displayText("Здесь появятся действия, применение конфига и завершённые jobs.")}</strong>
-          </div>
-        </div>
-      </div>
-    `;
-    return;
-  }
-  container.innerHTML = activityFeed.map((item) => `
+  const maintenanceContainer = document.querySelector("#maintenance-activity-feed");
+  const recentItems = activityFeed.slice(0, 5);
+  const emptyMarkup = `
     <div class="metric-card">
-      <div class="activity-row">
-        <div>
-          <div class="source-label">${currentLanguage === "en" ? "Latest Event" : "Последнее событие"}</div>
-          <strong>${displayText(translateSeedLogLine(item))}</strong>
-        </div>
-      </div>
+      <div class="source-label">${currentLanguage === "en" ? "No Recent Activity" : "Пока нет недавней активности"}</div>
+      <p>${currentLanguage === "en" ? "Completed jobs and maintenance actions appear here." : "Здесь появятся завершённые jobs и maintenance-действия."}</p>
     </div>
-  `).join("");
+  `;
+  const overviewItems = recentItems.slice(0, 3);
+  container.innerHTML = overviewItems.length ? overviewItems.map((item) => `
+    <div class="metric-card">
+      <div class="source-label">${currentLanguage === "en" ? "Latest Event" : "Последнее событие"}</div>
+      <strong>${displayText(translateSeedLogLine(item))}</strong>
+    </div>
+  `).join("") : emptyMarkup;
+  if (maintenanceContainer) {
+    maintenanceContainer.innerHTML = recentItems.length ? recentItems.map((item) => `
+      <div class="metric-card">
+        <div class="source-label">${currentLanguage === "en" ? "Latest Event" : "Последнее событие"}</div>
+        <strong>${displayText(translateSeedLogLine(item))}</strong>
+      </div>
+    `).join("") : emptyMarkup;
+  }
 }
 
 function renderProfiles() {
   const container = document.querySelector("#profile-grid");
   const profiles = runtimePaths[selectedLaunchPath].profiles;
+  container.className = "profile-grid profile-list";
   container.innerHTML = profiles.map((profile) => `
-    <div class="profile-card">
-      <div class="service-row">
-        <div>
-          <div class="source-label">${pathTitle(runtimePaths[selectedLaunchPath])}</div>
-          <h4>${displayLabel(localizedField(profile, "title"))}</h4>
-          <p>${displayText(localizedField(profile, "body"))}</p>
-        </div>
-        <span class="status-pill ${chipClass(profile.status)}">${cap(profile.status)}</span>
+    <div class="profile-row">
+      <div class="profile-row-copy">
+        <div class="source-label">${pathTitle(runtimePaths[selectedLaunchPath])}</div>
+        <strong>${displayLabel(localizedField(profile, "title"))}</strong>
+        <p>${cap(profile.status)}</p>
       </div>
+      <span class="profile-radio-dot ${chipClass(profile.status)}" aria-hidden="true"></span>
     </div>
   `).join("");
 }
@@ -2203,7 +2578,7 @@ function renderLaunchStrip() {
   if (!container) return;
   const path = runtimePaths[selectedLaunchPath];
   const state = deriveLaunchRuntimeState(selectedLaunchPath);
-  const runtimeJob = [...runningJobs.values()].find((job) => job.pathKey === selectedLaunchPath);
+  const runtimeJob = getActiveJobForPath(selectedLaunchPath);
   const runtimeStateDetail = state.status === "failed" ? summarizeFailureDetail(state.detail) : state.detail;
   const activeJobDetail = runtimeJob
     ? runtimeJob.detail
@@ -2399,6 +2774,88 @@ function pathValidationMapKey(pathKey, fieldKey) {
   return `${pathKey}:${fieldKey}`;
 }
 
+function isBundleInternalModelField(field) {
+  return Boolean(field?.pathPolicy === "bundle_internal_path" && [
+    "MODEL_PATH_LLM",
+    "MODEL_PATH_VLM",
+    "MMPROJ_PATH",
+    "MODEL_PATH_EMBEDDING_INTENT",
+    "MODEL_PATH_EMBEDDING_RETRIEVAL",
+  ].includes(field.key));
+}
+
+function bundleSelectionToContainerPath(selectedPath) {
+  const normalized = String(selectedPath || "").replaceAll("\\", "/");
+  const marker = "/deploy/offline_bundle/models/";
+  const markerIndex = normalized.indexOf(marker);
+  if (markerIndex === -1) return null;
+  const relativePath = normalized.slice(markerIndex + marker.length).replace(/^\/+/, "");
+  if (!relativePath) return null;
+  return `/app/backend/models/${relativePath}`;
+}
+
+function bundleContainerPathToBrowserPath(containerPath) {
+  const rawValue = String(containerPath || "").trim().replaceAll("\\", "/");
+  if (!rawValue.startsWith("/app/backend/models/")) return "./deploy/offline_bundle/models";
+  const relativePath = rawValue.slice("/app/backend/models/".length).replace(/^\/+/, "");
+  return relativePath
+    ? `./deploy/offline_bundle/models/${relativePath}`
+    : "./deploy/offline_bundle/models";
+}
+
+function isResolvableHostBrowserPath(pathValue) {
+  const rawValue = String(pathValue || "").trim();
+  if (!rawValue) return false;
+  if (rawValue.startsWith("/models/")) return false;
+  if (rawValue.startsWith("/app/")) return false;
+  if (rawValue.startsWith("/opt/agent-nav/")) return false;
+  return true;
+}
+
+function getPathBrowserStartPath(field, currentValue) {
+  if (field?.pathPolicy === "bundle_internal_path") {
+    return bundleContainerPathToBrowserPath(currentValue);
+  }
+  if (field?.pathPolicy === "host_path_flexible") {
+    return isResolvableHostBrowserPath(currentValue) ? currentValue : "";
+  }
+  return currentValue;
+}
+
+function localBundlePathValidation(field, value) {
+  const rawValue = String(value || "").trim();
+  if (!rawValue) {
+    return {
+      status: "info",
+      message: currentLanguage === "en"
+        ? "Value is empty and must be set explicitly."
+        : "Значение пустое и должно быть задано явно.",
+    };
+  }
+  if (rawValue.startsWith("/app/backend/models/")) {
+    return {
+      status: "info",
+      message: currentLanguage === "en"
+        ? "Container-side model path will be validated against the offline bundle layout after apply."
+        : "Container-side путь модели будет проверен относительно layout офлайн-бандла после применения.",
+    };
+  }
+  if (rawValue.startsWith("/opt/agent-nav/external/")) {
+    return {
+      status: "info",
+      message: currentLanguage === "en"
+        ? "This container target is expected to be provided by an external host mount before startup."
+        : "Этот container path должен быть заполнен внешним host mount перед запуском.",
+    };
+  }
+  return {
+    status: "warning",
+    message: currentLanguage === "en"
+      ? "Expected a container-side model path under /app/backend/models/ or an external mount target under /opt/agent-nav/external/."
+      : "Ожидается container-side путь под /app/backend/models/ или target внешнего mount под /opt/agent-nav/external/.",
+  };
+}
+
 function getModelPairValidation(pathKey, field) {
   if (pathKey !== "container") return null;
   const modelSourceMode = String(getFieldValue(pathKey, findField(pathKey, "MODEL_SOURCE_MODE")) || "");
@@ -2438,7 +2895,20 @@ function getFieldValidation(pathKey, field) {
 async function validatePathField(pathKey, field, value) {
   const rawValue = String(value || "").trim();
   const mapKey = pathValidationMapKey(pathKey, field.key);
-  if (!rawValue || field.pathPolicy !== "host_path_flexible") {
+  if (!rawValue) {
+    stagedPathValidations.delete(mapKey);
+    renderConfig();
+    return;
+  }
+  if (isBundleInternalModelField(field)) {
+    stagedPathValidations.set(mapKey, {
+      value: rawValue,
+      validation: localBundlePathValidation(field, rawValue),
+    });
+    renderConfig();
+    return;
+  }
+  if (field.pathPolicy !== "host_path_flexible") {
     stagedPathValidations.delete(mapKey);
     renderConfig();
     return;
@@ -2551,7 +3021,37 @@ function generateSecretValue(field) {
 }
 
 async function copyToClipboard(value) {
-  await navigator.clipboard.writeText(String(value ?? ""));
+  const text = String(value ?? "");
+  if (navigator.clipboard?.writeText && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch (_error) {
+      // Fall through to legacy copy path when the browser rejects clipboard access.
+    }
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "true");
+  textarea.setAttribute("aria-hidden", "true");
+  textarea.style.position = "fixed";
+  textarea.style.top = "-1000px";
+  textarea.style.left = "-1000px";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  textarea.setSelectionRange(0, textarea.value.length);
+
+  try {
+    const copied = document.execCommand("copy");
+    if (!copied) {
+      throw new Error("clipboard-copy-command-failed");
+    }
+  } finally {
+    textarea.remove();
+  }
 }
 
 function showToast(title, body, tone = "success") {
@@ -2934,10 +3434,8 @@ function renderConfig() {
       const fieldNode = button.closest(".config-field");
       const field = findField(selectedConfigPath, button.dataset.copySecret);
       if (!fieldNode || !field) return;
-      const input = fieldNode.querySelector("input");
-      if (!input) return;
       try {
-        await copyToClipboard(input.value);
+        await copyToClipboard(getFieldValue(selectedConfigPath, field));
         showToast(
           currentLanguage === "en" ? "Value copied" : "Значение скопировано",
           displayLabel(localizedField(field, "label")),
@@ -3056,8 +3554,21 @@ function renderPathBrowserModal() {
 function applyPathBrowserSelection(pathValue) {
   const field = findField(pathBrowserState.pathKey, pathBrowserState.fieldKey);
   if (!field) return;
-  setStagedFieldValue(pathBrowserState.pathKey, field.key, pathValue);
-  queuePathValidation(pathBrowserState.pathKey, field, pathValue);
+  const resolvedPathValue = isBundleInternalModelField(field)
+    ? bundleSelectionToContainerPath(pathValue)
+    : pathValue;
+  if (isBundleInternalModelField(field) && !resolvedPathValue) {
+    showToast(
+      currentLanguage === "en" ? "Could not use this path" : "Не удалось использовать этот путь",
+      currentLanguage === "en"
+        ? "For container-side model paths choose a file or folder inside deploy/offline_bundle/models."
+        : "Для container-side model paths выбери файл или папку внутри deploy/offline_bundle/models.",
+      "error",
+    );
+    return;
+  }
+  setStagedFieldValue(pathBrowserState.pathKey, field.key, resolvedPathValue);
+  queuePathValidation(pathBrowserState.pathKey, field, resolvedPathValue);
   showToast(
     currentLanguage === "en" ? "Path selected" : "Путь выбран",
     displayLabel(localizedField(field, "label")),
@@ -3133,6 +3644,7 @@ function renderConfigVariantHelper(pathKey, variant) {
 
 async function openPathBrowser(pathKey, field) {
   const currentValue = String(getFieldValue(pathKey, field) || "").trim();
+  const startPath = getPathBrowserStartPath(field, currentValue);
   pathBrowserState = {
     pathKey,
     fieldKey: field.key,
@@ -3145,7 +3657,7 @@ async function openPathBrowser(pathKey, field) {
   try {
     pathBrowserState = {
       ...pathBrowserState,
-      ...(await fetchPathBrowser(currentValue || "", pathBrowserState.kind)),
+      ...(await fetchPathBrowser(startPath, pathBrowserState.kind)),
     };
     renderPathBrowserModal();
   } catch (error) {
@@ -3230,15 +3742,46 @@ async function applyConfigChanges() {
     }
     const payload = await response.json();
     configState[selectedConfigPath] = payload.config;
+    (payload.updatedKeys || []).forEach((fieldKey) => {
+      stagedPathValidations.delete(pathValidationMapKey(selectedConfigPath, fieldKey));
+    });
     [...stagedFieldValues.keys()]
       .filter((key) => key.startsWith(`${selectedConfigPath}:`))
       .forEach((key) => stagedFieldValues.delete(key));
     dirtyFields = new Set([...dirtyFields].filter((key) => !key.startsWith(`${selectedConfigPath}:`)));
+    const appliedPathValidations = (payload.updatedKeys || [])
+      .map((fieldKey) => findField(selectedConfigPath, fieldKey))
+      .filter((field) => field?.pathPolicy)
+      .map((field) => ({
+        field,
+        validation: getModelPairValidation(selectedConfigPath, field) || field.validation || null,
+      }))
+      .filter((entry) => entry.validation);
     activityFeed.unshift(
       currentLanguage === "en"
         ? `Applied ${payload.updatedKeys.length} config changes for ${pathTitle(runtimePaths[selectedConfigPath])}`
         : `Применено ${payload.updatedKeys.length} изменений конфига для ${pathTitle(runtimePaths[selectedConfigPath])}`,
     );
+    appliedPathValidations.forEach(({ field, validation }) => {
+      activityFeed.unshift(
+        currentLanguage === "en"
+          ? `Validation for ${displayLabel(localizedField(field, "label"))}: ${validation.message || validation.status || "info"}`
+          : `Валидация для ${displayLabel(localizedField(field, "label"))}: ${validation.message || validation.status || "к сведению"}`,
+      );
+    });
+    if (appliedPathValidations.length) {
+      const hasError = appliedPathValidations.some(({ validation }) => validation.status === "error");
+      const hasWarning = appliedPathValidations.some(({ validation }) => validation.status === "warning");
+      showToast(
+        currentLanguage === "en" ? "Path validation refreshed" : "Валидация путей обновлена",
+        hasError
+          ? (currentLanguage === "en" ? "One or more applied paths are invalid." : "Один или несколько применённых путей некорректны.")
+          : hasWarning
+            ? (currentLanguage === "en" ? "Applied paths need review." : "Применённые пути требуют проверки.")
+            : (currentLanguage === "en" ? "Applied paths look consistent." : "Применённые пути выглядят согласованно."),
+        hasError ? "error" : hasWarning ? "warning" : "success",
+      );
+    }
     rerenderAll();
   } catch (error) {
     activityFeed.unshift(
@@ -3259,22 +3802,16 @@ function updateDirtyState() {
 
 function renderServices() {
   const grid = document.querySelector("#services-grid");
+  grid.className = "service-grid service-compact-list";
   const rows = serviceRows.filter((row) => row.path === selectedServicesPath);
   grid.innerHTML = rows.length ? rows.map((row) => `
-    <div class="service-card">
-      <div class="service-row">
-          <div>
-            <div class="source-label">${pathTitle(runtimePaths[row.path])}</div>
-            <h4>${displayLabel(row.name)}</h4>
-            <p>${displayText(localizedField(row, "note"))}</p>
-            <div class="service-meta-list">
-              <span class="service-meta-pill">${displayText(localizedField(row, "stage"))}</span>
-              <span class="service-meta-pill mono-line">${row.endpoint}</span>
-              <span class="service-meta-pill">${displayText(localizedField(row, "freshness"))}</span>
-            </div>
-          </div>
-          <span class="status-pill ${chipClass(row.status)}">${cap(row.status)}</span>
+    <div class="service-compact-row">
+      <div class="service-compact-copy">
+        <div class="source-label">${displayLabel(row.name)}</div>
+        <strong>${row.endpoint}</strong>
+        <p>${displayText(localizedField(row, "stage"))} · ${displayText(localizedField(row, "freshness"))}</p>
       </div>
+      <span class="status-pill ${chipClass(row.status)}">${cap(row.status)}</span>
     </div>
   `).join("") : `
     <div class="metric-card">
@@ -3285,10 +3822,12 @@ function renderServices() {
 
   const pathDiagnostics = diagnostics.filter((item) => item.path === selectedServicesPath);
   const diagnosticsPill = document.querySelector("#diagnostics-status-pill");
+  const diagnosticsPanel = document.querySelector("#diagnostics-list").closest(".panel");
   diagnosticsPill.className = `status-pill ${pathDiagnostics.some((item) => item.tone === "orange") ? "orange" : (pathDiagnostics.length ? "cyan" : "neutral")}`;
   diagnosticsPill.textContent = pathDiagnostics.length
     ? (currentLanguage === "en" ? `Diagnostics: ${pathDiagnostics.length}` : `Диагностика: ${pathDiagnostics.length}`)
     : (currentLanguage === "en" ? "No runtime diagnostics" : "Нет диагностики среды");
+  diagnosticsPanel.hidden = !pathDiagnostics.length;
   document.querySelector("#diagnostics-list").innerHTML = pathDiagnostics.length ? pathDiagnostics.map((item) => `
       <div class="diagnostic-card">
         <div class="diagnostic-row">
@@ -3299,12 +3838,7 @@ function renderServices() {
           <span class="status-pill ${item.tone === "orange" ? "orange" : "cyan"}">${item.tone === "orange" ? (currentLanguage === "en" ? "Attention" : "Внимание") : (currentLanguage === "en" ? "Info" : "Информация")}</span>
         </div>
       </div>
-    `).join("") : `
-      <div class="metric-card">
-        <div class="source-label">${currentLanguage === "en" ? "No Diagnostics" : "Нет диагностики"}</div>
-        <p>${displayText("Backend ещё не сообщил блокеры парсинга или запуска для этого пути.")}</p>
-      </div>
-    `;
+    `).join("") : "";
 
   renderMetricCards(
     "#services-metrics-grid",
@@ -3372,14 +3906,15 @@ function renderDeploy() {
     </div>
   `).join("");
 
-  document.querySelector("#deploy-stage-grid").innerHTML = mode.stages.map((item) => `
-    <div class="service-card deploy-stage-card">
-      <div class="deploy-stage-head">
-        <div class="source-label mono-line">${item.script}</div>
-        <span class="status-pill ${chipClass(item.status)}">${cap(item.status)}</span>
+  document.querySelector("#deploy-stage-grid").innerHTML = mode.stages.map((item, index) => `
+    <div class="deploy-step-card">
+      <span class="deploy-step-index">${index + 1}</span>
+      <div class="deploy-step-copy">
+        <div class="source-label">${displayLabel(localizedField(item, "title"))}</div>
+        <strong>${displayText(localizedField(item, "body"))}</strong>
+        <span class="deploy-step-script">${item.script}</span>
       </div>
-      <h4>${displayLabel(localizedField(item, "title"))}</h4>
-      <p>${displayText(localizedField(item, "body"))}</p>
+      <span class="status-pill ${chipClass(item.status)}">${cap(item.status)}</span>
     </div>
   `).join("");
 
@@ -3463,24 +3998,20 @@ function renderMaintenance() {
   document.querySelector("#action-grid").innerHTML = maintenanceActions.map((item) => `
     <div class="action-card">
       <h4>${displayLabel(localizedField(item, "title"))}</h4>
-      <p>${displayText(localizedField(item, "body"))}</p>
       <div class="button-row" style="margin-top: 14px;">
         <button class="primary-button action-button" data-action="${item.action}">${displayLabel(localizedField(item, "action"))}</button>
       </div>
     </div>
   `).join("");
 
+  const blockersPanel = document.querySelector("#maintenance-blockers-panel");
+  blockersPanel.hidden = !blockers.length;
   document.querySelector("#blocker-list").innerHTML = blockers.length ? blockers.map((item) => `
     <div class="blocker-card">
       <h4>${displayLabel(localizedField(item, "title"))}</h4>
       <p>${displayText(localizedField(item, "body"))}</p>
     </div>
-  `).join("") : `
-    <div class="metric-card">
-      <div class="source-label">${currentLanguage === "en" ? "No Blockers" : "Нет блокеров"}</div>
-      <p>${currentLanguage === "en" ? "The backend has not published any maintenance blockers yet." : "Backend пока не опубликовал maintenance-блокеры."}</p>
-    </div>
-  `;
+  `).join("") : "";
 
   [...document.querySelectorAll(".action-button")].forEach((button) => {
     button.addEventListener("click", async () => {
@@ -3542,12 +4073,31 @@ function switchSection(sectionId) {
   activeSection = sectionId;
   sectionButtons.forEach((button) => button.classList.toggle("active", button.dataset.target === sectionId));
   Object.entries(sections).forEach(([key, section]) => section.classList.toggle("active", key === sectionId));
+  mobileNavOpen = false;
+  renderTopbarHint();
+  renderHelpDrawer();
+  syncMobileNav();
 }
 
 function initNavigation() {
   sectionButtons.forEach((button) => {
     button.addEventListener("click", () => switchSection(button.dataset.target));
   });
+  const mobileToggle = document.querySelector("#mobile-nav-toggle");
+  if (mobileToggle) {
+    mobileToggle.addEventListener("click", () => {
+      mobileNavOpen = !mobileNavOpen;
+      syncMobileNav();
+    });
+  }
+  window.matchMedia("(max-width: 1180px)").addEventListener("change", () => {
+    mobileNavOpen = false;
+    syncMobileNav();
+  });
+  const helpOpen = document.querySelector("#help-drawer-open");
+  const helpClose = document.querySelector("#help-drawer-close");
+  helpOpen?.addEventListener("click", () => setHelpDrawerOpen(true));
+  helpClose?.addEventListener("click", () => setHelpDrawerOpen(false));
 }
 
 function initLogFilter() {
@@ -3561,6 +4111,7 @@ function updateTopbarAction() {
   const button = document.querySelector("#topbar-start-button");
   const label = document.querySelector("#topbar-start-button-label");
   const note = document.querySelector("#topbar-start-button-note");
+  const badge = document.querySelector("#topbar-runtime-badge");
   const path = runtimePaths[selectedLaunchPath];
   if (!button) return;
   button.setAttribute("aria-expanded", launchMenuOpen ? "true" : "false");
@@ -3570,14 +4121,19 @@ function updateTopbarAction() {
   if (note) {
     note.textContent = pathTitle(path);
   }
+  if (badge) {
+    const badgeState = topbarRuntimeBadgeState(selectedLaunchPath);
+    badge.className = `status-pill topbar-runtime-badge ${badgeState.tone}`;
+    badge.textContent = badgeState.text;
+  }
   const isRunning = isPathRunning(selectedLaunchPath);
-  const activeJob = [...runningJobs.values()].find((job) => job.pathKey === selectedLaunchPath && (job.status === "queued" || job.status === "running"));
-  button.dataset.mode = isPathRunning(selectedLaunchPath) ? "stop" : "launch";
-  button.disabled = Boolean(activeJob);
-  const actionLabel = activeJob?.actionKind === "stop"
+  const activeJob = getActiveJobForPath(selectedLaunchPath);
+  button.dataset.mode = activeJob?.actionKind === "start" || isRunning ? "stop" : "launch";
+  button.disabled = activeJob?.actionKind === "stop" || activeJob?.status === "cancelling";
+  const actionLabel = activeJob?.actionKind === "stop" || activeJob?.status === "cancelling"
     ? (currentLanguage === "en" ? "Stop runtime" : "Остановить среду")
     : activeJob?.actionKind === "start"
-      ? (currentLanguage === "en" ? "Launch runtime" : "Запустить среду")
+      ? (currentLanguage === "en" ? "Cancel launch" : "Остановить запуск")
       : isRunning
         ? (currentLanguage === "en" ? "Stop runtime" : "Остановить среду")
         : (currentLanguage === "en" ? "Launch runtime" : "Запустить среду");
@@ -3910,6 +4466,7 @@ async function pollJob(jobId, context) {
     const existingJob = runningJobs.get(jobId);
     jobPollFailures.delete(jobId);
     runningJobs.set(jobId, {
+      jobId,
       label: context.label,
       pathKey: context.pathKey || selectedLaunchPath,
       status: job.status,
@@ -3919,7 +4476,7 @@ async function pollJob(jobId, context) {
     appendJobLogs(job, context);
     renderSystemStatus();
 
-    if (job.status === "completed" || job.status === "failed") {
+    if (["completed", "failed", "cancelled"].includes(job.status)) {
       clearInterval(jobPollTimers.get(jobId));
       jobPollTimers.delete(jobId);
       jobPollFailures.delete(jobId);
@@ -3931,6 +4488,8 @@ async function pollJob(jobId, context) {
         outcome: job.status,
         detail: job.status === "completed"
           ? (currentLanguage === "en" ? `completed (${job.current_stage || "done"})` : `завершено (${job.current_stage || "готово"})`)
+          : job.status === "cancelled"
+            ? (currentLanguage === "en" ? "cancelled by operator" : "остановлено оператором")
           : `${currentLanguage === "en" ? `failed (${job.current_stage || "error"})` : `ошибка (${job.current_stage || "ошибка"})`}: ${failureDetail}`,
       };
       if (job.status === "failed") {
@@ -3939,11 +4498,17 @@ async function pollJob(jobId, context) {
           summarizeFailureDetail(job.logs?.at(-1)?.message || lastJobSummary.detail),
           "error",
         );
+      } else if (job.status === "cancelled") {
+        showToast(
+          currentLanguage === "en" ? "Launch cancelled" : "Запуск остановлен",
+          pathTitle(runtimePaths[context.pathKey || selectedLaunchPath]),
+          "success",
+        );
       }
       activityFeed.unshift(
         currentLanguage === "en"
-          ? `${context.label} ${job.status === "completed" ? "completed" : "failed"} (${job.current_stage || "done"})`
-          : `${context.label} ${job.status === "completed" ? "завершён" : "завершился с ошибкой"} (${job.current_stage || "done"})`,
+          ? `${context.label} ${job.status === "completed" ? "completed" : job.status === "cancelled" ? "cancelled" : "failed"} (${job.current_stage || "done"})`
+          : `${context.label} ${job.status === "completed" ? "завершён" : job.status === "cancelled" ? "остановлен" : "завершился с ошибкой"} (${job.current_stage || "done"})`,
       );
       if (job.status === "completed" && context.actionKind === "stop") {
         setLocalRuntimeOverride(context.pathKey || selectedLaunchPath, {
@@ -3951,6 +4516,14 @@ async function pollJob(jobId, context) {
           detail: currentLanguage === "en" ? "Runtime was stopped." : "Среда остановлена.",
           reason: currentLanguage === "en" ? "The selected runtime path is no longer running." : "Выбранный путь запуска больше не работает.",
           nextAction: currentLanguage === "en" ? "Start the selected path when needed." : "При необходимости снова запусти выбранный путь.",
+        });
+      }
+      if (job.status === "cancelled") {
+        setLocalRuntimeOverride(context.pathKey || selectedLaunchPath, {
+          status: "not_started",
+          detail: currentLanguage === "en" ? "Launch was cancelled." : "Запуск остановлен.",
+          reason: currentLanguage === "en" ? "The current operator launch job was interrupted by the operator." : "Текущая задача запуска была прервана оператором.",
+          nextAction: currentLanguage === "en" ? "Start the selected path again when you are ready." : "При необходимости снова запусти выбранный путь.",
         });
       }
       await hydrateOperatorState();
@@ -3970,9 +4543,11 @@ async function pollJob(jobId, context) {
     jobPollFailures.set(jobId, failures);
     if (failures < 3) {
       runningJobs.set(jobId, {
+        jobId,
         label: context.label,
         pathKey: context.pathKey || selectedLaunchPath,
         status: "running",
+        actionKind: context.actionKind || "start",
         detail: currentLanguage === "en" ? "refreshing state" : "обновление состояния",
       });
       renderSystemStatus();
@@ -4070,6 +4645,7 @@ async function runOperatorAction(actionId, context) {
     }
     const job = await response.json();
     runningJobs.set(job.job_id, {
+      jobId: job.job_id,
       label: context.label,
       pathKey: context.pathKey || selectedLaunchPath,
       status: "queued",

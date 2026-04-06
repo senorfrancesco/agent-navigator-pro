@@ -21,6 +21,7 @@ test.describe('Operator UI smoke', () => {
     await page.goto(operatorUrl!, { waitUntil: 'domcontentloaded' });
 
     await expect(page.locator('[data-agent-nav-hook="operator-topbar-start"]')).toBeVisible();
+    await expect(page.locator('[data-agent-nav-hook="operator-topbar-runtime-badge"]')).toBeVisible();
     await expect(page.locator('[data-agent-nav-hook="operator-section-overview"]')).toBeVisible();
     await expect(page.locator('[data-agent-nav-hook="operator-overview-metrics"]')).toBeVisible();
 
@@ -38,11 +39,26 @@ test.describe('Operator UI smoke', () => {
     await expect(page.locator('[data-agent-nav-hook="operator-deploy-summary"]')).toBeVisible();
     await expect(page.locator('[data-agent-nav-hook="operator-deploy-metrics"]')).toBeVisible();
     await expect(page.locator('[data-agent-nav-hook="operator-deploy-links"]')).toBeVisible();
-    await expect(page.locator('[data-agent-nav-hook="operator-deploy-stages"]')).toBeVisible();
+    await expect(page.locator('[data-agent-nav-hook="operator-deploy-stepper"]')).toBeVisible();
     await expect(page.locator('[data-agent-nav-hook="operator-deploy-logs"]')).toBeVisible();
 
     await page.locator('[data-agent-nav-hook="operator-nav-config"]').click();
     await expect(page.locator('[data-agent-nav-hook="operator-section-config"]')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Применить изменения' })).toBeVisible();
+
+    await page.getByRole('button', { name: 'Реестр моделей и пути' }).click();
+    await expect(page.getByRole('button', { name: /Выбрать (файл|папку)/ }).first()).toBeVisible();
+
+    await page.getByRole('button', { name: 'Офлайн-бандл / Контейнеры' }).click();
+    await page.getByRole('button', { name: 'Артефакты и пути' }).click();
+    await expect(page.getByRole('button', { name: /Выбрать (файл|папку)/ }).first()).toBeVisible();
+
+    await expect(page.locator('[data-agent-nav-hook="operator-help-open"]')).toBeVisible();
+    await page.locator('[data-agent-nav-hook="operator-help-open"]').click();
+    await expect(page.locator('[data-agent-nav-hook="operator-help-drawer"]')).toBeVisible();
+    await page.locator('[data-agent-nav-hook="operator-help-close"]').click();
+
+    await page.locator('[data-agent-nav-hook="operator-nav-launch"]').click();
+    await expect(page.locator('[data-agent-nav-hook="operator-launch-runtime-state"]').first()).toBeVisible();
   });
 });

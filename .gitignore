@@ -86,3 +86,7 @@ package-lock.json
 output/
 tmp/
 agent-navigator-offline-bundle*.tar.gz
+
+.playwright-cli
+test-results
+.codex
