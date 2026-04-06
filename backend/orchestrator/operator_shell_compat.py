@@ -28,7 +28,7 @@ def _offline_deploy(args: argparse.Namespace) -> int:
         print(
             "operator-shell-compat:test-mode "
             f"entrypoint=offline-deploy bundle_root={bundle_root} "
-            f"skip_host_check={int(args.skip_host_check)} skip_image_load={int(args.skip_image_load)}"
+            f"skip_host_check={int(args.skip_host_check)} skip_image_load={int(not args.ensure_image_load)}"
         )
         return 0
 
@@ -43,7 +43,7 @@ def _offline_deploy(args: argparse.Namespace) -> int:
     _run_command(["python3", str(script_dir / "validate_bundle.py"), "--mode", "deploy"], cwd=bundle_root)
     _run_command(["python3", str(script_dir / "preflight_runtime.py"), "--env-file", str(env_file)], cwd=bundle_root)
 
-    if not args.skip_image_load:
+    if args.ensure_image_load:
         _run_command(["bash", str(script_dir / "load_images.sh")], cwd=bundle_root)
 
     _run_command(["bash", str(script_dir / "restore_state.sh")], cwd=bundle_root)
@@ -66,7 +66,7 @@ def _offline_run(args: argparse.Namespace) -> int:
             f"entrypoint=offline-run bundle_root={bundle_root} "
             f"with_monitoring={int(args.with_monitoring)} start_tmux={int(not args.no_tmux)} "
             f"attach_tmux={int(args.attach_tmux)} skip_host_check={int(args.skip_host_check)} "
-            f"skip_image_load={int(args.skip_image_load)} tmux_session={args.tmux_session}"
+            f"skip_image_load={int(not args.ensure_image_load)} tmux_session={args.tmux_session}"
         )
         return 0
 
@@ -82,8 +82,8 @@ def _offline_run(args: argparse.Namespace) -> int:
         "--bundle-root",
         str(bundle_root),
     ]
-    if args.skip_image_load:
-        deploy_args.append("--skip-image-load")
+    if args.ensure_image_load:
+        deploy_args.append("--ensure-image-load")
     if args.skip_host_check:
         deploy_args.append("--skip-host-check")
     _run_command(deploy_args, cwd=bundle_root)
@@ -131,7 +131,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Compatibility wrapper for deploy/offline_bundle/scripts/deploy.sh",
     )
     deploy_parser.add_argument("--bundle-root", required=True)
-    deploy_parser.add_argument("--skip-image-load", action="store_true")
+    deploy_parser.set_defaults(ensure_image_load=False)
+    deploy_parser.add_argument(
+        "--ensure-image-load",
+        dest="ensure_image_load",
+        action="store_true",
+        help="Explicitly import image archives from images/ before compose up.",
+    )
+    deploy_parser.add_argument(
+        "--skip-image-load",
+        dest="ensure_image_load",
+        action="store_false",
+        help="Compatibility alias; image import is already skipped by default.",
+    )
     deploy_parser.add_argument("--skip-host-check", action="store_true")
     deploy_parser.set_defaults(func=_offline_deploy)
 
@@ -143,7 +155,19 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--with-monitoring", action="store_true")
     run_parser.add_argument("--no-tmux", action="store_true")
     run_parser.add_argument("--attach-tmux", action="store_true")
-    run_parser.add_argument("--skip-image-load", action="store_true")
+    run_parser.set_defaults(ensure_image_load=False)
+    run_parser.add_argument(
+        "--ensure-image-load",
+        dest="ensure_image_load",
+        action="store_true",
+        help="Explicitly import image archives from images/ before compose up.",
+    )
+    run_parser.add_argument(
+        "--skip-image-load",
+        dest="ensure_image_load",
+        action="store_false",
+        help="Compatibility alias; image import is already skipped by default.",
+    )
     run_parser.add_argument("--skip-host-check", action="store_true")
     run_parser.add_argument("--tmux-session", default="agent-nav-offline")
     run_parser.set_defaults(func=_offline_run)

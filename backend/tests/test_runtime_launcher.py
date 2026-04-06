@@ -66,6 +66,7 @@ def test_launcher_help_documents_install_and_platform_flags():
     assert "Python-first operator control plane" in result.stdout
     assert "--install --platform ubuntu" in result.stdout
     assert "--gpu-layers-mode auto|max|manual" in result.stdout
+    assert "--ensure-model-download" in result.stdout
 
 
 def test_launcher_test_mode_writes_env_runtime_and_reports_target(tmp_path):
@@ -84,13 +85,13 @@ def test_launcher_test_mode_writes_env_runtime_and_reports_target(tmp_path):
     )
 
     assert result.returncode == 0
-    assert "models:plan" in result.stdout
+    assert "models:plan" not in result.stdout
     assert "launcher:test-mode target=container profile=adaptive" in result.stdout
     assert runtime_env.exists()
     assert "UMS_RUNTIME_PROFILE=adaptive" in runtime_env.read_text(encoding="utf-8")
 
 
-def test_launcher_can_skip_model_download_phase(tmp_path):
+def test_launcher_does_not_run_model_download_phase_by_default(tmp_path):
     runtime_env = tmp_path / ".env.runtime"
     env = os.environ.copy()
     env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
@@ -100,12 +101,30 @@ def test_launcher_can_skip_model_download_phase(tmp_path):
         "launcher.sh",
         "--target",
         "native",
-        "--skip-model-download",
         env=env,
     )
 
     assert result.returncode == 0
     assert "models:plan" not in result.stdout
+    assert "launcher:test-mode target=native" in result.stdout
+
+
+def test_launcher_can_explicitly_enable_model_download_phase(tmp_path):
+    runtime_env = tmp_path / ".env.runtime"
+    env = os.environ.copy()
+    env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
+    env["AGENT_NAVIGATOR_RUNTIME_ENV_FILE"] = str(runtime_env)
+
+    result = _run_script(
+        "launcher.sh",
+        "--target",
+        "native",
+        "--ensure-model-download",
+        env=env,
+    )
+
+    assert result.returncode == 0
+    assert "models:plan" in result.stdout
     assert "launcher:test-mode target=native" in result.stdout
 
 
@@ -120,6 +139,7 @@ def test_launcher_forwards_models_root_to_downloader(tmp_path):
         "launcher.sh",
         "--target",
         "native",
+        "--ensure-model-download",
         f"--models-root={models_root}",
         "--asset-set=all",
         env=env,

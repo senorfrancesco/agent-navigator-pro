@@ -15,7 +15,7 @@ NON_INTERACTIVE=false
 REVIEW_RUNTIME=false
 INSTALL=false
 INSTALL_PLATFORM="auto"
-ENSURE_MODELS=true
+ENSURE_MODELS=false
 MODEL_ASSET_SET="${AGENT_NAVIGATOR_MODEL_ASSET_SET:-core}"
 MODELS_ROOT="${AGENT_NAVIGATOR_MODELS_ROOT:-}"
 HF_CACHE="${HF_HOME:-${AGENT_NAVIGATOR_HF_CACHE:-}}"
@@ -72,7 +72,9 @@ Operator UI and /operator/* endpoints remain the canonical product API; this scr
   --review-runtime
       Показать и подтвердить runtime plan перед запуском.
   --skip-model-download
-      Пропустить pre-launch model provisioning phase.
+      Compatibility alias: не запускать model provisioning phase.
+  --ensure-model-download
+      Явно включить model provisioning phase перед запуском.
   --no-attach
       Не подключаться к tmux после запуска target runner.
   --report-only
@@ -220,6 +222,10 @@ while [ $# -gt 0 ]; do
       ;;
     --skip-model-download)
       ENSURE_MODELS=false
+      shift
+      ;;
+    --ensure-model-download)
+      ENSURE_MODELS=true
       shift
       ;;
     *)

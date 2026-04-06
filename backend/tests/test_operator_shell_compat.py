@@ -50,6 +50,24 @@ def test_operator_shell_compat_offline_deploy_test_mode_reports_flags(tmp_path):
     assert "operator-shell-compat:test-mode" in result.stdout
     assert "entrypoint=offline-deploy" in result.stdout
     assert "skip_host_check=1" in result.stdout
+    assert "skip_image_load=1" in result.stdout
+
+
+def test_operator_shell_compat_offline_deploy_can_explicitly_enable_image_load(tmp_path):
+    bundle_root = tmp_path / "deploy" / "offline_bundle"
+    bundle_root.mkdir(parents=True, exist_ok=True)
+
+    result = _run(
+        "offline-deploy",
+        "--bundle-root",
+        str(bundle_root),
+        "--ensure-image-load",
+        env={"AGENT_NAVIGATOR_TEST_MODE": "1"},
+    )
+
+    assert result.returncode == 0
+    assert "entrypoint=offline-deploy" in result.stdout
+    assert "skip_image_load=0" in result.stdout
 
 
 def test_operator_shell_compat_offline_run_test_mode_reports_flags(tmp_path):
@@ -69,6 +87,24 @@ def test_operator_shell_compat_offline_run_test_mode_reports_flags(tmp_path):
     assert "entrypoint=offline-run" in result.stdout
     assert "with_monitoring=1" in result.stdout
     assert "start_tmux=0" in result.stdout
+    assert "skip_image_load=1" in result.stdout
+
+
+def test_operator_shell_compat_offline_run_can_explicitly_enable_image_load(tmp_path):
+    bundle_root = tmp_path / "deploy" / "offline_bundle"
+    bundle_root.mkdir(parents=True, exist_ok=True)
+
+    result = _run(
+        "offline-run",
+        "--bundle-root",
+        str(bundle_root),
+        "--ensure-image-load",
+        env={"AGENT_NAVIGATOR_TEST_MODE": "1"},
+    )
+
+    assert result.returncode == 0
+    assert "entrypoint=offline-run" in result.stdout
+    assert "skip_image_load=0" in result.stdout
 
 
 def test_deploy_shell_wrapper_delegates_to_python_compat_in_test_mode():

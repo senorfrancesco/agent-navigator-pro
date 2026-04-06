@@ -317,14 +317,18 @@ tmux list-sessions
 - `--allow-missing-manifest`: разрешить запуск без `manifest.json`.
 
 `deploy.sh`
-- `--skip-image-load`: не вызывать `load_images.sh`.
+- По умолчанию не вызывает `load_images.sh`; offline deploy использует уже загруженные local images.
+- `--ensure-image-load`: явно импортировать `*.tar` и `*.tar.gz` из `images/` перед `compose up`.
+- `--skip-image-load`: compatibility alias; оставлен для старых вызовов, но ничего дополнительно не меняет.
 - `--skip-host-check`: не вызывать `check_host.sh`.
 
 `run_offline_bundle.sh`
 - `--with-monitoring`: поднять compose profile `monitoring`.
 - `--no-tmux`: не создавать tmux workspace.
 - `--attach-tmux`: после старта сразу подключиться к tmux-сессии.
-- `--skip-image-load`: не вызывать `load_images.sh`.
+- По умолчанию не вызывает `load_images.sh`; runtime стартует из уже присутствующих local images.
+- `--ensure-image-load`: явно импортировать `*.tar` и `*.tar.gz` из `images/` перед стартом.
+- `--skip-image-load`: compatibility alias; оставлен для старых вызовов, но ничего дополнительно не меняет.
 - `--skip-host-check`: не вызывать `check_host.sh`.
 - `--tmux-session <name>`: задать имя tmux-сессии.
 - `-h`, `--help`: показать справку.
