@@ -30,3 +30,27 @@ def test_action_catalog_exposes_runtime_stop_actions():
 
     assert actions["runtime.native.stop"].command[-1].endswith("scripts/stop_native.sh")
     assert actions["runtime.container.stop"].command[-1].endswith("deploy/offline_bundle/scripts/stop_offline_bundle.sh")
+
+
+@pytest.mark.asyncio
+async def test_cancel_action_job_marks_running_job_as_cancelling(monkeypatch):
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.pid = 4321
+
+    job = operator_ui_actions.JOB_STORE.create_job(
+        action_id="deploy.runtime.run",
+        title="Run Offline Bundle",
+        command=["bash", "run_offline_bundle.sh"],
+        cwd="/tmp",
+        privileged=False,
+    )
+    operator_ui_actions.JOB_STORE.mark_running(job.job_id)
+    monkeypatch.setattr(operator_ui_actions.os, "killpg", lambda pid, sig: None)
+    operator_ui_actions.JOB_PROCESSES[job.job_id] = FakeProcess()
+
+    cancelled = await operator_ui_actions.cancel_action_job(job.job_id)
+
+    assert cancelled.status == "cancelling"
+    assert cancelled.current_stage == "cancel"
+    assert cancelled.logs[-1].message == f"cancelling:{job.action_id}"

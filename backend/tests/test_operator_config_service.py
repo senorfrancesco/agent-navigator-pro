@@ -94,6 +94,40 @@ def test_config_service_apply_config_updates_selected_env_source(tmp_path, monke
     assert result["config"]["variants"][0]["groups"][0]["fields"][0]["applied"] == "adaptive"
 
 
+def test_config_service_apply_config_preserves_explicit_empty_native_model_paths(tmp_path, monkeypatch):
+    _write(
+        tmp_path / "backend" / ".env",
+        "MODEL_REGISTRY_CONFIG_PATH=backend/config/models.yaml\n"
+        "MODEL_PATH_VLM=/models/qwenvl.gguf\n"
+        "MMPROJ_PATH=/models/mmproj.gguf\n",
+    )
+    _write(tmp_path / "backend" / ".env.runtime", "UMS_RUNTIME_PROFILE=adaptive\nDEVICE_MODE=hybrid\n")
+    _write(tmp_path / "scripts" / "launcher.sh", "#!/usr/bin/env bash\n")
+    _write(tmp_path / "scripts" / "runtime_preflight.py", "print('ok')\n")
+    _write(tmp_path / "deploy" / "offline_bundle" / "compose.offline.yaml", "services: {}\n")
+    _write(tmp_path / "deploy" / "offline_bundle" / "env.bundle", "BUNDLE_RUNTIME_PROFILE=default\n")
+    _write(tmp_path / "deploy" / "offline_bundle" / "manifest.json", "{}\n")
+
+    runtime_service = OperatorRuntimeService(repo_root=tmp_path)
+    monkeypatch.setattr(runtime_service, "_find_binary", lambda name: "/usr/bin/docker" if name == "docker" else f"/usr/bin/{name}")
+    monkeypatch.setattr(runtime_service, "_docker_socket_available", lambda: True)
+
+    config_service = OperatorConfigService(repo_root=tmp_path)
+    result = config_service.apply_config("native", {"MODEL_PATH_VLM": "", "MMPROJ_PATH": ""})
+
+    env_text = (tmp_path / "backend" / ".env").read_text(encoding="utf-8")
+    assert "MODEL_PATH_VLM=\n" in env_text
+    assert "MMPROJ_PATH=\n" in env_text
+
+    model_fields = {
+        field["key"]: field
+        for field in result["config"]["variants"][1]["groups"][0]["fields"]
+    }
+    assert result["updatedKeys"] == ["MODEL_PATH_VLM", "MMPROJ_PATH"]
+    assert model_fields["MODEL_PATH_VLM"]["applied"] == ""
+    assert model_fields["MMPROJ_PATH"]["applied"] == ""
+
+
 def test_config_service_preview_preset_returns_changed_fields(tmp_path, monkeypatch):
     _write(tmp_path / "backend" / ".env", "BACKEND_MODE=llama-cpp-python\n")
     _write(tmp_path / "backend" / ".env.runtime", "UMS_RUNTIME_PROFILE=adaptive\nDEVICE_MODE=hybrid\n")
@@ -167,6 +201,39 @@ def test_config_service_marks_native_model_paths_as_external_host_paths(tmp_path
     assert llm_field["pathPolicy"] == "host_path_flexible"
     assert llm_field["validation"]["status"] == "ok"
     assert str(external_model) in llm_field["validation"]["message"]
+
+
+def test_config_service_preserves_explicit_empty_native_model_path_values(tmp_path, monkeypatch):
+    _write(
+        tmp_path / "backend" / ".env",
+        "MODEL_REGISTRY_CONFIG_PATH=backend/config/models.yaml\n"
+        "MODEL_PATH_VLM=\n"
+        "MMPROJ_PATH=\n",
+    )
+    _write(tmp_path / "backend" / ".env.runtime", "UMS_RUNTIME_PROFILE=adaptive\nDEVICE_MODE=hybrid\n")
+    _write(tmp_path / "scripts" / "launcher.sh", "#!/usr/bin/env bash\n")
+    _write(tmp_path / "scripts" / "runtime_preflight.py", "print('ok')\n")
+    _write(tmp_path / "deploy" / "offline_bundle" / "env.bundle", "BUNDLE_RUNTIME_PROFILE=default\n")
+    _write(tmp_path / "deploy" / "offline_bundle" / "compose.offline.yaml", "services: {}\n")
+    _write(tmp_path / "deploy" / "offline_bundle" / "manifest.json", "{}\n")
+
+    runtime_service = OperatorRuntimeService(repo_root=tmp_path)
+    monkeypatch.setattr(runtime_service, "_find_binary", lambda name: "/usr/bin/docker" if name == "docker" else f"/usr/bin/{name}")
+    monkeypatch.setattr(runtime_service, "_docker_socket_available", lambda: True)
+
+    config_service = OperatorConfigService(repo_root=tmp_path)
+    state = config_service.get_config_state(runtime_service.get_runtime_paths())
+
+    model_fields = {
+        field["key"]: field
+        for field in state["native"]["variants"][1]["groups"][0]["fields"]
+    }
+
+    assert model_fields["MODEL_PATH_VLM"]["applied"] == ""
+    assert model_fields["MODEL_PATH_VLM"]["value"] == ""
+    assert model_fields["MMPROJ_PATH"]["applied"] == ""
+    assert model_fields["MMPROJ_PATH"]["value"] == ""
+    assert model_fields["MODEL_PATH_VLM"]["suggested"] == "/models/qwenvl.gguf"
 
 
 def test_config_service_exposes_intuitive_container_model_path_descriptions(tmp_path, monkeypatch):

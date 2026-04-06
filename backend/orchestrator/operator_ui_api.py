@@ -12,14 +12,14 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 try:
-    from orchestrator.operator_ui_actions import get_action, get_job, list_actions, start_action_job
+    from orchestrator.operator_ui_actions import cancel_action_job, get_action, get_job, list_actions, start_action_job
     from orchestrator.operator_config_service import OperatorConfigService
     from orchestrator.operator_deploy_service import OperatorDeployService
     from orchestrator.operator_observability_service import OperatorObservabilityService
     from orchestrator.operator_runtime_service import OperatorRuntimeService, env_value, file_freshness, parse_env_file
     from orchestrator.telemetry_runtime import get_timing_summary
 except ModuleNotFoundError:  # pragma: no cover - direct module import fallback
-    from backend.orchestrator.operator_ui_actions import get_action, get_job, list_actions, start_action_job
+    from backend.orchestrator.operator_ui_actions import cancel_action_job, get_action, get_job, list_actions, start_action_job
     from backend.orchestrator.operator_config_service import OperatorConfigService
     from backend.orchestrator.operator_deploy_service import OperatorDeployService
     from backend.orchestrator.operator_observability_service import OperatorObservabilityService
@@ -126,7 +126,8 @@ class OperatorConfigPresetPreviewRequest(BaseModel):
 
 
 def _resolve_allowed_path(raw_path: str) -> Path:
-    candidate = Path(raw_path).expanduser().resolve()
+    raw_candidate = Path(raw_path).expanduser()
+    candidate = raw_candidate.resolve() if raw_candidate.is_absolute() else (REPO_ROOT / raw_candidate).resolve()
     for root in PATH_BROWSER_ROOTS:
         try:
             candidate.relative_to(root.resolve())
@@ -897,4 +898,15 @@ def operator_job(job_id: str) -> Dict[str, Any]:
     job = get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"unknown-job:{job_id}")
+    return job.to_dict()
+
+
+@router.post("/jobs/{job_id}/cancel")
+async def operator_job_cancel(job_id: str) -> Dict[str, Any]:
+    try:
+        job = await cancel_action_job(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"unknown-job:{job_id}") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return job.to_dict()

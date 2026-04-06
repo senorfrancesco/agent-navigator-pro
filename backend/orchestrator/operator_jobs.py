@@ -90,6 +90,11 @@ class OperatorJobStore:
         job.started_at = utc_now()
         return job
 
+    def mark_cancelling(self, job_id: str) -> OperatorJob:
+        job = self._require(job_id)
+        job.status = "cancelling"
+        return job
+
     def set_stage(self, job_id: str, stage: str, status: str) -> OperatorJob:
         job = self._require(job_id)
         job.current_stage = stage
@@ -121,6 +126,13 @@ class OperatorJobStore:
         job.exit_code = exit_code
         job.finished_at = utc_now()
         job.status = "completed" if exit_code == 0 else "failed"
+        return job
+
+    def finish_cancelled(self, job_id: str) -> OperatorJob:
+        job = self._require(job_id)
+        job.exit_code = None
+        job.finished_at = utc_now()
+        job.status = "cancelled"
         return job
 
     def _require(self, job_id: str) -> OperatorJob:

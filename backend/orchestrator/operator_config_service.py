@@ -34,6 +34,17 @@ class OperatorConfigService:
         self.repo_root = Path(repo_root or DEFAULT_REPO_ROOT)
         self.runtime_service = OperatorRuntimeService(self.repo_root)
 
+    def _applied_env_value(
+        self,
+        env: Dict[str, str],
+        key: str,
+        *,
+        default: str,
+    ) -> str:
+        if key in env:
+            return str(env.get(key, "")).strip()
+        return default
+
     def _field(
         self,
         env: Dict[str, str],
@@ -60,7 +71,11 @@ class OperatorConfigService:
         picker_label: str | None = None,
         picker_label_en: str | None = None,
     ) -> Dict[str, object]:
-        applied = env_value(env, key, default=applied_default or default or suggested)
+        applied = self._applied_env_value(
+            env,
+            key,
+            default=applied_default or default or suggested,
+        )
         validation = self._validate_field_value(
             key=key,
             value=applied,
@@ -567,6 +582,9 @@ class OperatorConfigService:
                                 recommended_reason_en="Set the primary LLM artifact for this runtime path.",
                                 path_policy="host_path_flexible",
                                 path_example="/mnt/models/qwen14b.gguf",
+                                picker_kind="file",
+                                picker_label="Выбрать файл",
+                                picker_label_en="Choose File",
                             ),
                             self._field(
                                 backend_env,
@@ -579,6 +597,9 @@ class OperatorConfigService:
                                 recommended_reason_en="Fill this only if the multimodal path is actually used.",
                                 path_policy="host_path_flexible",
                                 path_example="/mnt/models/qwenvl.gguf",
+                                picker_kind="file",
+                                picker_label="Выбрать файл",
+                                picker_label_en="Choose File",
                             ),
                             self._field(
                                 backend_env,
@@ -591,6 +612,9 @@ class OperatorConfigService:
                                 recommended_reason_en="When VLM is enabled, the matching mmproj path must also be present.",
                                 path_policy="host_path_flexible",
                                 path_example="/mnt/models/mmproj.gguf",
+                                picker_kind="file",
+                                picker_label="Выбрать файл",
+                                picker_label_en="Choose File",
                             ),
                             self._field(
                                 backend_env,
@@ -603,6 +627,9 @@ class OperatorConfigService:
                                 recommended_reason_en="Should point to the intent embedder used by the current runtime path.",
                                 path_policy="host_path_flexible",
                                 path_example="/mnt/models/Qwen3-Embedding-0.6B",
+                                picker_kind="directory",
+                                picker_label="Выбрать папку",
+                                picker_label_en="Choose Folder",
                             ),
                             self._field(
                                 backend_env,
@@ -615,6 +642,9 @@ class OperatorConfigService:
                                 recommended_reason_en="Should point to the retrieval embedder used by the current runtime path.",
                                 path_policy="host_path_flexible",
                                 path_example="/mnt/models/LaBSE",
+                                picker_kind="directory",
+                                picker_label="Выбрать папку",
+                                picker_label_en="Choose Folder",
                             ),
                         ],
                     }
@@ -1614,11 +1644,11 @@ class OperatorConfigService:
                         "title": "Container-side пути",
                         "titleEn": "Container-side Paths",
                         "fields": [
-                            self._field(bundle_env, "MODEL_PATH_LLM", "LLM model path", "LLM model path", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "MODEL_PATH_LLM", default="/app/backend/models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"), recommended_reason="Container-side путь к основному LLM artifact.", recommended_reason_en="Container-side path to the main LLM artifact.", path_policy="bundle_internal_path", path_example="/app/backend/models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"),
-                            self._field(bundle_env, "MODEL_PATH_VLM", "VLM model path", "VLM model path", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "MODEL_PATH_VLM", default="/app/backend/models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"), recommended_reason="Container-side путь к multimodal model, если VLM path включён.", recommended_reason_en="Container-side path to the multimodal model when the VLM path is enabled.", path_policy="bundle_internal_path", path_example="/app/backend/models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"),
-                            self._field(bundle_env, "MMPROJ_PATH", "mmproj path", "mmproj path", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "MMPROJ_PATH", default="/app/backend/models/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf"), recommended_reason="Container-side путь к mmproj для VLM contract.", recommended_reason_en="Container-side path to the mmproj artifact for the VLM contract.", path_policy="bundle_internal_path", path_example="/app/backend/models/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf"),
-                            self._field(bundle_env, "MODEL_PATH_EMBEDDING_INTENT", "Intent embedder path", "Intent embedder path", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "MODEL_PATH_EMBEDDING_INTENT", default="/app/backend/models/st/Qwen3-Embedding-0.6B"), recommended_reason="Container-side путь к директории intent embedder.", recommended_reason_en="Container-side path to the intent embedder directory.", path_policy="bundle_internal_path", path_example="/app/backend/models/st/Qwen3-Embedding-0.6B"),
-                            self._field(bundle_env, "MODEL_PATH_EMBEDDING_RETRIEVAL", "Retrieval embedder path", "Retrieval embedder path", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "MODEL_PATH_EMBEDDING_RETRIEVAL", default="/app/backend/models/st/LaBSE"), recommended_reason="Container-side путь к директории retrieval embedder.", recommended_reason_en="Container-side path to the retrieval embedder directory.", path_policy="bundle_internal_path", path_example="/app/backend/models/st/LaBSE"),
+                            self._field(bundle_env, "MODEL_PATH_LLM", "LLM model path", "LLM model path", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "MODEL_PATH_LLM", default="/app/backend/models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"), recommended_reason="Container-side путь к основному LLM artifact.", recommended_reason_en="Container-side path to the main LLM artifact.", path_policy="bundle_internal_path", path_example="/app/backend/models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf", picker_kind="file", picker_label="Выбрать файл", picker_label_en="Choose File"),
+                            self._field(bundle_env, "MODEL_PATH_VLM", "VLM model path", "VLM model path", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "MODEL_PATH_VLM", default="/app/backend/models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"), recommended_reason="Container-side путь к multimodal model, если VLM path включён.", recommended_reason_en="Container-side path to the multimodal model when the VLM path is enabled.", path_policy="bundle_internal_path", path_example="/app/backend/models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf", picker_kind="file", picker_label="Выбрать файл", picker_label_en="Choose File"),
+                            self._field(bundle_env, "MMPROJ_PATH", "mmproj path", "mmproj path", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "MMPROJ_PATH", default="/app/backend/models/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf"), recommended_reason="Container-side путь к mmproj для VLM contract.", recommended_reason_en="Container-side path to the mmproj artifact for the VLM contract.", path_policy="bundle_internal_path", path_example="/app/backend/models/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf", picker_kind="file", picker_label="Выбрать файл", picker_label_en="Choose File"),
+                            self._field(bundle_env, "MODEL_PATH_EMBEDDING_INTENT", "Intent embedder path", "Intent embedder path", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "MODEL_PATH_EMBEDDING_INTENT", default="/app/backend/models/st/Qwen3-Embedding-0.6B"), recommended_reason="Container-side путь к директории intent embedder.", recommended_reason_en="Container-side path to the intent embedder directory.", path_policy="bundle_internal_path", path_example="/app/backend/models/st/Qwen3-Embedding-0.6B", picker_kind="directory", picker_label="Выбрать папку", picker_label_en="Choose Folder"),
+                            self._field(bundle_env, "MODEL_PATH_EMBEDDING_RETRIEVAL", "Retrieval embedder path", "Retrieval embedder path", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "MODEL_PATH_EMBEDDING_RETRIEVAL", default="/app/backend/models/st/LaBSE"), recommended_reason="Container-side путь к директории retrieval embedder.", recommended_reason_en="Container-side path to the retrieval embedder directory.", path_policy="bundle_internal_path", path_example="/app/backend/models/st/LaBSE", picker_kind="directory", picker_label="Выбрать папку", picker_label_en="Choose Folder"),
                             self._field(bundle_env, "MODEL_REGISTRY_CONFIG_PATH", "Model registry config", "Model registry config", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "MODEL_REGISTRY_CONFIG_PATH", default="/app/backend/config/models.yaml"), recommended_reason="Container-side путь к конфигу реестра моделей для backend/runtime.", recommended_reason_en="Container-side path to the model registry config used by the backend/runtime.", path_policy="bundle_internal_path", path_example="/app/backend/config/models.yaml"),
                             self._field(bundle_env, "BUNDLE_MODEL_ROOT", "Bundle model root", "Bundle model root", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "BUNDLE_MODEL_ROOT", default="/opt/agent-nav/models"), recommended_reason="Путь должен совпадать с runtime layout bundle.", recommended_reason_en="This path must stay aligned with the bundle runtime layout.", path_policy="bundle_internal_path", path_example="/opt/agent-nav/models", visible_when={"MODEL_SOURCE_MODE": "bundle_layout"}),
                             self._field(bundle_env, "BUNDLE_UPLOADS_ROOT", "Uploads root", "Uploads root", "deploy/offline_bundle/env.bundle", suggested=env_value(bundle_env, "BUNDLE_UPLOADS_ROOT", default="/opt/agent-nav/uploads"), recommended_reason="Путь должен совпадать с runtime layout bundle.", recommended_reason_en="This path must stay aligned with the bundle runtime layout.", path_policy="bundle_internal_path", path_example="/opt/agent-nav/uploads"),

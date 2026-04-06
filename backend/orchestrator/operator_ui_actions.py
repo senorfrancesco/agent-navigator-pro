@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -179,6 +181,8 @@ def build_action_catalog() -> Dict[str, OperatorActionSpec]:
 
 ACTION_CATALOG = build_action_catalog()
 JOB_STORE = OperatorJobStore()
+JOB_TASKS: Dict[str, asyncio.Task[Any]] = {}
+JOB_PROCESSES: Dict[str, asyncio.subprocess.Process] = {}
 
 
 def list_actions() -> List[Dict[str, Any]]:
@@ -205,29 +209,81 @@ async def _stream_reader(stream: asyncio.StreamReader, job: OperatorJob, prefix:
 
 
 async def _run_job(job: OperatorJob, spec: OperatorActionSpec) -> None:
-    JOB_STORE.mark_running(job.job_id)
-    JOB_STORE.set_stage(job.job_id, spec.group, "running")
-    JOB_STORE.append_log(job.job_id, spec.group, f"starting:{spec.action_id}", stream="system")
-    JOB_STORE.append_log(job.job_id, spec.group, f"cwd:{spec.cwd}", stream="system")
-    JOB_STORE.append_log(job.job_id, spec.group, f"command:{' '.join(spec.command)}", stream="system")
-    process = await asyncio.create_subprocess_exec(
-        *spec.command,
-        cwd=spec.cwd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout_task = asyncio.create_task(_stream_reader(process.stdout, job, "stdout"))
-    stderr_task = asyncio.create_task(_stream_reader(process.stderr, job, "stderr"))
-    exit_code = await process.wait()
-    await asyncio.gather(stdout_task, stderr_task)
-    JOB_STORE.set_stage(job.job_id, spec.group, "completed" if exit_code == 0 else "failed")
-    JOB_STORE.finish_job(job.job_id, exit_code=exit_code)
-    JOB_STORE.append_log(
-        job.job_id,
-        spec.group,
-        f"{'completed' if exit_code == 0 else 'failed'}:{spec.action_id}:exit={exit_code}",
-        stream="system",
-    )
+    try:
+        JOB_STORE.mark_running(job.job_id)
+        JOB_STORE.set_stage(job.job_id, spec.group, "running")
+        JOB_STORE.append_log(job.job_id, spec.group, f"starting:{spec.action_id}", stream="system")
+        JOB_STORE.append_log(job.job_id, spec.group, f"cwd:{spec.cwd}", stream="system")
+        JOB_STORE.append_log(job.job_id, spec.group, f"command:{' '.join(spec.command)}", stream="system")
+        process = await asyncio.create_subprocess_exec(
+            *spec.command,
+            cwd=spec.cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        JOB_PROCESSES[job.job_id] = process
+        stdout_task = asyncio.create_task(_stream_reader(process.stdout, job, "stdout"))
+        stderr_task = asyncio.create_task(_stream_reader(process.stderr, job, "stderr"))
+        exit_code = await process.wait()
+        await asyncio.gather(stdout_task, stderr_task)
+        current_job = JOB_STORE.get(job.job_id)
+        if current_job is not None and current_job.status == "cancelling":
+            JOB_STORE.set_stage(job.job_id, "cancel", "cancelled")
+            JOB_STORE.finish_cancelled(job.job_id)
+            JOB_STORE.append_log(
+                job.job_id,
+                "cancel",
+                f"cancelled:{spec.action_id}:exit={exit_code}",
+                stream="system",
+            )
+            return
+        JOB_STORE.set_stage(job.job_id, spec.group, "completed" if exit_code == 0 else "failed")
+        JOB_STORE.finish_job(job.job_id, exit_code=exit_code)
+        JOB_STORE.append_log(
+            job.job_id,
+            spec.group,
+            f"{'completed' if exit_code == 0 else 'failed'}:{spec.action_id}:exit={exit_code}",
+            stream="system",
+        )
+    except asyncio.CancelledError:
+        if JOB_STORE.get(job.job_id) is not None:
+            JOB_STORE.set_stage(job.job_id, "cancel", "cancelled")
+            JOB_STORE.finish_cancelled(job.job_id)
+            JOB_STORE.append_log(job.job_id, "cancel", f"cancelled:{spec.action_id}", stream="system")
+        raise
+    finally:
+        JOB_PROCESSES.pop(job.job_id, None)
+        JOB_TASKS.pop(job.job_id, None)
+
+
+async def cancel_action_job(job_id: str) -> OperatorJob:
+    job = JOB_STORE.get(job_id)
+    if job is None:
+        raise KeyError(job_id)
+    if job.status in {"completed", "failed", "cancelled"}:
+        return job
+
+    if job.status == "queued":
+        JOB_STORE.set_stage(job.job_id, "cancel", "cancelled")
+        JOB_STORE.append_log(job.job_id, "cancel", f"cancelled:{job.action_id}", stream="system")
+        JOB_STORE.finish_cancelled(job.job_id)
+        task = JOB_TASKS.pop(job.job_id, None)
+        if task is not None:
+            task.cancel()
+        JOB_PROCESSES.pop(job.job_id, None)
+        return JOB_STORE.get(job.job_id) or job
+
+    JOB_STORE.mark_cancelling(job.job_id)
+    JOB_STORE.set_stage(job.job_id, "cancel", "cancelling")
+    JOB_STORE.append_log(job.job_id, "cancel", f"cancelling:{job.action_id}", stream="system")
+    process = JOB_PROCESSES.get(job.job_id)
+    if process is not None and getattr(process, "returncode", None) is None:
+        try:
+            os.killpg(process.pid, signal.SIGINT)
+        except ProcessLookupError:
+            pass
+    return JOB_STORE.get(job.job_id) or job
 
 
 async def start_action_job(action_id: str, *, allow_privileged: bool = False) -> OperatorJob:
@@ -246,5 +302,6 @@ async def start_action_job(action_id: str, *, allow_privileged: bool = False) ->
     )
     JOB_STORE.append_log(job.job_id, spec.group, f"queued:{spec.action_id}", stream="system")
     loop = asyncio.get_running_loop()
-    loop.create_task(_run_job(job, spec))
+    task = loop.create_task(_run_job(job, spec))
+    JOB_TASKS[job.job_id] = task
     return job

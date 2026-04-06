@@ -19,6 +19,7 @@ from orchestrator.operator_ui_api import (
     operator_runtime_health,
     operator_metrics_summary,
     operator_grafana_links,
+    operator_job_cancel,
 )
 
 
@@ -208,6 +209,26 @@ async def test_operator_action_run_accepts_runtime_stop_action(monkeypatch):
     assert payload["action_id"] == "runtime.native.stop"
 
 
+@pytest.mark.asyncio
+async def test_operator_job_cancel_returns_job_snapshot(monkeypatch):
+    fake_job = SimpleNamespace(
+        to_dict=lambda: {
+            "job_id": "job-cancel-123",
+            "action_id": "deploy.runtime.run",
+            "status": "cancelling",
+        }
+    )
+    monkeypatch.setattr(
+        "orchestrator.operator_ui_api.cancel_action_job",
+        AsyncMock(return_value=fake_job),
+    )
+
+    payload = await operator_job_cancel("job-cancel-123")
+
+    assert payload["job_id"] == "job-cancel-123"
+    assert payload["status"] == "cancelling"
+
+
 def test_operator_path_browser_lists_allowed_roots():
     payload = operator_path_browser()
 
@@ -237,6 +258,19 @@ def test_operator_path_browser_validate_reports_model_file_semantics(tmp_path, m
     assert payload["valid"] is True
     assert payload["status"] == "ok"
     assert "GGUF extension detected" in payload["checks"]
+
+
+def test_operator_path_browser_resolves_repo_relative_paths_from_repo_root(tmp_path, monkeypatch):
+    bundle_model = tmp_path / "deploy" / "offline_bundle" / "models" / "gguf" / "qwen.gguf"
+    bundle_model.parent.mkdir(parents=True, exist_ok=True)
+    bundle_model.write_text("weights", encoding="utf-8")
+    monkeypatch.setattr("orchestrator.operator_ui_api.REPO_ROOT", tmp_path)
+    monkeypatch.setattr("orchestrator.operator_ui_api.PATH_BROWSER_ROOTS", [tmp_path])
+
+    payload = operator_path_browser(path="./deploy/offline_bundle/models/gguf/qwen.gguf", kind="file")
+
+    assert payload["cwd"] == str(bundle_model.parent.resolve())
+    assert any(entry["path"] == str(bundle_model.resolve()) for entry in payload["entries"])
 
 
 @pytest.mark.asyncio
