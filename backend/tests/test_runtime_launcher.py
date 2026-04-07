@@ -518,6 +518,7 @@ def test_run_all_from_launcher_enables_vllm_compose_profile(tmp_path):
     assert result.returncode == 0
     assert "run_all:test-mode backend_mode=vllm" in result.stdout
     assert "compose_profiles=--profile backend --profile vllm" in result.stdout
+    assert "compose_up_mode=--no-build" in result.stdout
     assert "phase1_services=document-server legal-server ums vllm" in result.stdout
     assert "phase2_services=agent-api chainlit" in result.stdout
 
@@ -534,6 +535,7 @@ def test_run_all_from_launcher_keeps_chainlit_only_for_local_backend(tmp_path):
     assert result.returncode == 0
     assert "run_all:test-mode backend_mode=llama-server" in result.stdout
     assert "compose_profiles=--profile backend" in result.stdout
+    assert "compose_up_mode=--no-build" in result.stdout
     assert "phase1_services=document-server legal-server ums" in result.stdout
     assert "phase2_services=agent-api chainlit" in result.stdout
 
@@ -741,17 +743,25 @@ def test_run_all_never_prints_default_password_hint(tmp_path):
     assert "admin/admin" not in result.stdout
 
 
-def test_native_and_legacy_scripts_export_backend_pythonpath_for_service_servers():
+def test_native_and_start_system_test_export_backend_pythonpath_for_service_servers():
     run_native = (SCRIPTS_DIR / "run_native.sh").read_text(encoding="utf-8")
-    run_openwebui = (SCRIPTS_DIR / "run_openwebui.sh").read_text(encoding="utf-8")
     start_system_test = (SCRIPTS_DIR / "start_system_test.sh").read_text(encoding="utf-8")
 
     assert "export PYTHONPATH='$BACKEND_DIR' && uvicorn mcp_document_server:app" in run_native
     assert "export PYTHONPATH='$BACKEND_DIR' && uvicorn mcp_legal_server:app" in run_native
-    assert "export PYTHONPATH='$BACKEND_DIR' && uvicorn mcp_document_server:app" in run_openwebui
-    assert "export PYTHONPATH='$BACKEND_DIR' && uvicorn mcp_legal_server:app" in run_openwebui
     assert "export PYTHONPATH='$BACKEND_DIR' && uvicorn mcp_document_server:app" in start_system_test
     assert "export PYTHONPATH='$BACKEND_DIR' && uvicorn mcp_legal_server:app" in start_system_test
+
+
+def test_run_openwebui_is_compose_only_eval_helper():
+    run_openwebui = (SCRIPTS_DIR / "run_openwebui.sh").read_text(encoding="utf-8")
+
+    assert "docker compose --profile legacy up -d open-webui" in run_openwebui
+    assert "Backend должен быть поднят отдельно через canonical runtime path." in run_openwebui
+    assert "tmux new-session" not in run_openwebui
+    assert "uvicorn mcp_document_server:app" not in run_openwebui
+    assert "uvicorn mcp_legal_server:app" not in run_openwebui
+    assert "python agent_api.py" not in run_openwebui
 
 
 def test_start_system_test_contains_executable_tmux_commands():

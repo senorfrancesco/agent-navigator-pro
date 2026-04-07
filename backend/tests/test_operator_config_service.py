@@ -337,6 +337,13 @@ def test_config_service_exposes_native_admin_and_secret_controls(tmp_path, monke
         "CHAINLIT_ADMIN_USER=admin\n"
         "CHAINLIT_ADMIN_PASSWORD=password\n"
         "CHAINLIT_AUTH_SECRET=secret\n"
+        "WEBUI_SECRET_KEY=open-webui-secret\n"
+        "WEBUI_ADMIN_EMAIL=admin@example.com\n"
+        "WEBUI_ADMIN_PASSWORD=webui-password\n"
+        "WEBUI_ADMIN_NAME=Agent Navigator Admin\n"
+        "ENABLE_SIGNUP=true\n"
+        "DEFAULT_USER_ROLE=pending\n"
+        "OPERATOR_UI_LOCALHOST_ONLY=true\n"
         "GF_SECURITY_ADMIN_USER=admin\n"
         "GF_SECURITY_ADMIN_PASSWORD=grafana-password\n",
     )
@@ -363,10 +370,22 @@ def test_config_service_exposes_native_admin_and_secret_controls(tmp_path, monke
     assert "CHAINLIT_ADMIN_USER" in secret_fields
     assert "CHAINLIT_ADMIN_PASSWORD" in secret_fields
     assert "CHAINLIT_AUTH_SECRET" in secret_fields
+    assert "WEBUI_SECRET_KEY" in secret_fields
+    assert "WEBUI_ADMIN_EMAIL" in secret_fields
+    assert "WEBUI_ADMIN_PASSWORD" in secret_fields
+    assert "WEBUI_ADMIN_NAME" in secret_fields
+    assert "ENABLE_SIGNUP" in secret_fields
+    assert "DEFAULT_USER_ROLE" in secret_fields
+    assert "OPERATOR_UI_LOCALHOST_ONLY" in secret_fields
     assert "GF_SECURITY_ADMIN_USER" in secret_fields
     assert "GF_SECURITY_ADMIN_PASSWORD" in secret_fields
     assert secret_fields["CHAINLIT_ADMIN_PASSWORD"]["secret"] is True
     assert secret_fields["CHAINLIT_AUTH_SECRET"]["secret"] is True
+    assert secret_fields["WEBUI_SECRET_KEY"]["secret"] is True
+    assert secret_fields["WEBUI_ADMIN_PASSWORD"]["secret"] is True
+    assert secret_fields["ENABLE_SIGNUP"]["control"] == "toggle"
+    assert secret_fields["DEFAULT_USER_ROLE"]["control"] == "select"
+    assert secret_fields["OPERATOR_UI_LOCALHOST_ONLY"]["control"] == "toggle"
     assert secret_fields["GF_SECURITY_ADMIN_PASSWORD"]["secret"] is True
     assert secret_fields["CHAINLIT_ADMIN_PASSWORD"]["description"]
     assert secret_fields["CHAINLIT_ADMIN_PASSWORD"]["descriptionEn"]

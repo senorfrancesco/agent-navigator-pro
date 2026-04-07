@@ -1,5 +1,6 @@
 import os
 import sys
+import asyncio
 
 import pytest
 from pydantic import ValidationError
@@ -10,6 +11,8 @@ from orchestrator.agent_api import (
     OrchestrationRequest,
     _build_api_execution_dependencies,
     execute_orchestration_api,
+    get_tool_job_result_route,
+    get_tool_job_status_route,
     orchestrate,
 )
 from orchestrator.knowledge_base_ingestion import ingest_text_source_sync
@@ -64,6 +67,35 @@ async def test_orchestrate_request_accepts_specialized_tasks_runtime_mode():
     response = await orchestrate(request)
 
     assert response["mode"] == "specialized_tasks"
+
+
+@pytest.mark.asyncio
+async def test_orchestrate_prefers_requested_tool_over_classifier_route():
+    request = OrchestrationRequest(
+        message="Что написано про штраф?",
+        requested_tool="compare_documents_fast",
+        routing_mode="explicit",
+        file_count=2,
+        has_session_docs=True,
+        session_docs={
+            "old.pdf": {"text": "v1"},
+            "new.pdf": {"text": "v2"},
+        },
+        active_doc_ids=["old", "new"],
+        classifier_result={
+            "intent": "document_question",
+            "confidence": 0.98,
+            "margin": 0.8,
+            "needs_rag": True,
+        },
+    )
+
+    response = await orchestrate(request)
+
+    assert response["route"] == "compare_documents"
+    assert response["reason"] == "forced_route"
+    assert response["requested_tool"] == "compare_documents_fast"
+    assert response["routing_mode"] == "explicit"
 
 
 def test_orchestration_request_rejects_unknown_runtime_mode():
@@ -152,6 +184,117 @@ async def test_execute_orchestration_api_returns_execution_metadata():
     assert response["pending_action_id"]
     assert response["action_required"]["type"] == "choose_route"
     assert response["ui_effects"]["set_pending_action"]["type"] == "choose_route"
+
+
+@pytest.mark.asyncio
+async def test_execute_orchestration_api_maps_requested_tool_to_legacy_forced_route(monkeypatch):
+    captured = {}
+
+    async def fake_execute_orchestration(payload, deps=None):
+        captured["payload"] = payload
+        return {
+            "route": payload.get("forced_route"),
+            "assistant_message": "ok",
+        }
+
+    monkeypatch.setattr("orchestrator.agent_api.execute_orchestration", fake_execute_orchestration)
+
+    request = OrchestrationRequest(
+        message="Что написано про штраф?",
+        requested_tool="ask_document",
+        routing_mode="explicit",
+        file_count=1,
+        has_session_docs=True,
+        session_docs={
+            "contract.pdf": {"text": "Штраф 10 процентов"},
+        },
+        active_doc_ids=["contract.pdf"],
+    )
+
+    response = await execute_orchestration_api(request)
+
+    assert response["route"] == "document_question"
+    assert captured["payload"]["requested_tool"] == "ask_document"
+    assert captured["payload"]["routing_mode"] == "explicit"
+    assert captured["payload"]["forced_route"] == "document_question"
+    assert captured["payload"]["runtime_mode"] == "specialized_tasks"
+    assert captured["payload"]["rag_scope"] == "session_rag"
+
+
+@pytest.mark.asyncio
+async def test_execute_orchestration_api_returns_accepted_job_for_deep_tool(monkeypatch):
+    async def fake_execute_orchestration(payload, deps=None):
+        await asyncio.sleep(0)
+        return {
+            "route": payload.get("forced_route"),
+            "assistant_message": "deep completed",
+            "run_id": "run-deep-1",
+            "state_ref": "run:run-deep-1",
+        }
+
+    monkeypatch.setattr("orchestrator.agent_api.execute_orchestration", fake_execute_orchestration)
+
+    request = OrchestrationRequest(
+        message="Сделай глубокий анализ документа",
+        requested_tool="analyze_document_deep",
+        routing_mode="explicit",
+        file_count=1,
+        has_session_docs=True,
+        session_docs={
+            "contract.pdf": {"text": "Штраф 10 процентов"},
+        },
+        active_doc_ids=["contract.pdf"],
+    )
+
+    response = await execute_orchestration_api(request)
+
+    assert response["status"] == "accepted"
+    assert response["tool_name"] == "analyze_document_deep"
+    assert response["job_id"]
+    assert response["status_url"].endswith(response["job_id"])
+    assert response["execution_metadata"]["execution_mode"] == "async"
+
+
+@pytest.mark.asyncio
+async def test_tool_job_polling_returns_completed_result(monkeypatch):
+    async def fake_execute_orchestration(payload, deps=None):
+        await asyncio.sleep(0)
+        return {
+            "route": payload.get("forced_route"),
+            "assistant_message": "deep completed",
+            "run_id": "run-deep-2",
+            "state_ref": "run:run-deep-2",
+        }
+
+    monkeypatch.setattr("orchestrator.agent_api.execute_orchestration", fake_execute_orchestration)
+
+    request = OrchestrationRequest(
+        message="Сделай глубокий анализ документа",
+        requested_tool="analyze_document_deep",
+        routing_mode="explicit",
+        file_count=1,
+        has_session_docs=True,
+        session_docs={
+            "contract.pdf": {"text": "Штраф 10 процентов"},
+        },
+        active_doc_ids=["contract.pdf"],
+    )
+
+    accepted = await execute_orchestration_api(request)
+    status = None
+    for _ in range(5):
+        await asyncio.sleep(0)
+        status = await get_tool_job_status_route(accepted["job_id"])
+        if status["status"] == "completed":
+            break
+
+    assert status is not None
+    assert status["status"] == "completed"
+    result = await get_tool_job_result_route(accepted["job_id"])
+
+    assert status["result_ref"].endswith("/result")
+    assert result["assistant_message"] == "deep completed"
+    assert result["run_id"] == "run-deep-2"
 
 
 def test_build_api_execution_dependencies_collects_model_execution_events():

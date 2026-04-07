@@ -1,6 +1,8 @@
 # TASKS - Agent Navigator Pro
 
 > **Единственный operational backlog.** Планы в `docs/plans/` — исторические артефакты, не operational source.
+>
+> **Migration note:** отдельный backlog по `Open WebUI` migration, backend tool contracts и upload/document binding теперь ведётся в [TASKS_MIGRATION.md](/home/seral/HDD/proj/agent-navigator-pro/TASKS_MIGRATION.md). Здесь оставляем только общепроектные cross-project follow-up без детального migration ledger.
 
 ## Release/v1.0 Transition (2026-03-22)
 
@@ -116,6 +118,8 @@
   Scope: собрать единый UI-contract поверх `backend/.env`, `backend/.env.runtime` и `backend/.env.hardware.override`, чтобы `Config` умел редактировать `BACKEND_MODE`, `*_DEVICE_MODE`, `GPU_LAYERS_MODE`, `N_GPU_LAYERS_OVERRIDE`, context budgets и per-model runtime knobs без ручного поиска по файлам.
   Progress: native `Config` уже расширен typed-вариантами `GPU / Placement`, `LLM / Context` и `Model Runtime`; добавлены `LLM/VLM/INTENT/RETRIEVAL *_DEVICE_MODE`, `GPU_LAYERS_MODE`, `N_GPU_LAYERS_OVERRIDE`, context-budget knobs и per-model runtime fields (`CONTEXT_SIZE_*`, `N_GPU_LAYERS_QWEN14B`) с unit coverage.
   Progress: для `Native Runtime` добавлен отдельный variant `Secrets / Access`, который выводит и позволяет редактировать `CHAINLIT_ADMIN_USER`, `CHAINLIT_ADMIN_PASSWORD`, `CHAINLIT_AUTH_SECRET`, `GF_SECURITY_ADMIN_USER`, `GF_SECURITY_ADMIN_PASSWORD` прямо из `backend/.env`, чтобы локальный admin/operator path не оставался вне operator UI.
+  Progress: тот же `Secrets / Access` теперь покрывает и `Open WebUI` bootstrap/access knobs (`WEBUI_SECRET_KEY`, `WEBUI_ADMIN_EMAIL`, `WEBUI_ADMIN_PASSWORD`, `WEBUI_ADMIN_NAME`, `ENABLE_SIGNUP`, `DEFAULT_USER_ROLE`) плюс `OPERATOR_UI_LOCALHOST_ONLY`, чтобы dev/eval auth policy не жила отдельно от operator surface.
+  Workaround: до отдельной фазы auth/ACL весь backend-served operator surface (`/operator`, `/operator-ui`, `/operator-assets`) принудительно закрыт для non-loopback клиентов через `OPERATOR_UI_LOCALHOST_ONLY=true` по умолчанию. Это intentional localhost-only guard, а не полноценный внешний auth layer.
   Done: `Native Runtime` теперь покрывает practically-used operator knobs из `backend/.env`, `backend/.env.runtime` и `backend/.env.hardware.override`: runtime/backend profile, device placement, GPU-layer strategy, context budget, generation controls (`TEMPERATURE`, `TOP_P`, `REPETITION_PENALTY`, `MAX_TOKENS`), `MMPROJ_PATH`, native ports/URLs (`AGENT_API_PORT`, `UMS_PORT`, `UMS_URL`, `DOC_SERVER_URL`, `LEGAL_SERVER_URL`) и admin secrets. Осознанно вне UI оставлены только non-operator/internal ключи (`ACTIVE_MODEL_ID`, `AGENT_API_HOST`, `CHAINLIT_DB_URL`, `MODEL_PATH_E5_LEGAL`, `MODEL_PATH_RUBERT`, `UMS_HOST`, `UMS_SELECTED_GPU_LAYERS`).
 - [x] R1.0.9p — Расширить Offline Bundle Config для secrets, profiles, GPU placement и Chainlit knobs
   План: `docs/plans/2026-03-29-operator-ui-runtime-knobs-and-help-plan.md`
@@ -2445,88 +2449,10 @@ DOCUMENT_ANALYSIS_SUMMARIZE_MAX_TOKENS=512
   - manual overrides для GPU sets работают предсказуемо и не ломают auto-policy;
   - есть тесты, которые подтверждают поведение для `4 GPU` и регрессии не завязаны на реальное железо конкретной машины.
 
-### Future Task — B3.52: Явный tool/graph contract вместо UI-профилей как основного способа выбора сценария
+### Migration backlog moved
 
-- [ ] **B3.52 — Ввести backend-first contract `requested_tool` / `routing_mode` для action-first чата**
-  Контекст:
-  - текущий `Chainlit`-контур перегружен `assistant_mode` / `runtime_mode` / `rag_scope` / `tool_scope` / `model_profile` и выглядит как operator panel, а не как обычный пользовательский чат;
-  - в коде уже есть переходный механизм `forced_route`, но он живёт как service override, а не как публичный основной контракт выбора действия;
-  - пользовательский сценарий должен начинаться с обычного чата, поверх которого доступны явные действия-инструменты, а не с набора слабопонятных профилей.
-  Что нужно сделать:
-  - определить публичный orchestration contract:
-    - `requested_tool` или `requested_graph`;
-    - `routing_mode=explicit|assisted|auto`;
-    - явное правило приоритета между `requested_tool`, planner/classifier hint и fallback routing;
-  - не опираться на classifier как на единственный центр выбора graph;
-  - перевести `forced_route` в нормализованный и документированный backend-owned contract;
-  - подготовить registry/каталог доступных действий:
-    - `compare_documents`
-    - `document_analysis`
-    - `document_question`
-    - `equipment_analysis`
-    - `documents_summary`
-  - отделить product-facing labels от внутренних executor/route names.
-  Acceptance:
-  - backend умеет выполнить явный пользовательский выбор инструмента без classifier;
-  - classifier остаётся optional hint / planner helper, а не hard dependency;
-  - один и тот же contract пригоден для `Chainlit`, `Open WebUI` и будущего custom frontend.
-
-### Future Task — B3.53: Упростить Chainlit до action-first UX и убрать ощущение недостоверного control panel
-
-- [ ] **B3.53 — Радикально упростить основной `Chainlit` UI для обычного чата с инструментами**
-  Контекст:
-  - текущий `Chainlit` использует starter cards плюс многовкладочный `ChatSettings`, что визуально перегружает стартовый экран;
-  - часть настроек полезна оператору, но не должна быть основной surface для конечного пользователя;
-  - нужен UX уровня “обычный чат + понятные действия”, а не “консоль с профилями”.
-  Что нужно сделать:
-  - сократить главный UI до action-first surface:
-    - несколько крупных product actions;
-    - минимальный набор видимых настроек;
-    - advanced/settings path отдельно и не в центре опыта;
-  - перевести starter cards с preset-centric логики на явные продуктовые действия;
-  - использовать `requested_tool` contract из `B3.52`, а не только `preset:*`;
-  - сохранить `Chainlit` как полезный debug/dev shell:
-    - progress steps;
-    - route choice fallback;
-    - trace/debug visibility.
-  Не делать:
-  - не строить хрупкий Claude-like hover-prefill на DOM hacks как основной UX path;
-  - не плодить новые вкладки/селекты вместо сокращения surface.
-  Acceptance:
-  - стартовый экран `Chainlit` объясним без знания внутренних runtime policy;
-  - пользователь видит 4-5 понятных действий вместо набора слабоочевидных профилей;
-  - advanced knobs сохранены, но не мешают основному сценарию.
-
-### Future Task — B3.54: Оценить Open WebUI как пользовательский shell поверх backend orchestration, не как второй мозг системы
-
-- [ ] **B3.54 — Подготовить controlled migration/evaluation contour для `Open WebUI` как thin shell**
-  Контекст:
-  - `agent_api.py` уже даёт `/v1/chat/completions`, что делает `Open WebUI` технически совместимым frontend-кандидатом;
-  - при этом нельзя допустить появления второго orchestration engine внутри UI или конфликта между native Open WebUI RAG и backend-owned routing;
-  - основной интерес — обычный чатовый интерфейс с понятным выбором действий, а не замена логики всей LLM-системы.
-  Что нужно сделать:
-  - зафиксировать роль `Open WebUI`:
-    - UI shell;
-    - auth/history/admin;
-    - prompt/slash-actions surface;
-    - без takeover orchestration policy;
-  - определить evaluation path:
-    - native Open WebUI RAG initially off;
-    - backend `agent_api` остаётся source of truth для routing/tool execution;
-    - проверить file handoff, attachments, streaming и UX prompt actions;
-    - отдельно проверить prompt leakage / echo system instructions в пользовательский ответ на thin-shell path; текущий `Chainlit` уже показывал риск, когда модель на вопросах про погоду/интернет частично воспроизводила системную инструкцию про отсутствие realtime-доступа;
-  - описать границу между:
-    - `Open WebUI` shell;
-    - backend orchestration;
-    - external parsing / OCR;
-    - vector DB;
-  - подготовить migration notes для coexistence:
-    - `Chainlit` как dev/debug UI;
-    - `Open WebUI` как candidate end-user shell.
-  Acceptance:
-  - есть честный rollout/evaluation plan без смешивания UI и orchestration;
-  - `Open WebUI` не становится неявным вторым decision engine;
-  - направление совместимо с последующим выносом ingestion/retrieval в `Qdrant` + внешний document service.
+- [ ] Detailed migration work по `requested_tool` / action-first UX / `Open WebUI` eval contour теперь ведётся в [TASKS_MIGRATION.md](/home/seral/HDD/proj/agent-navigator-pro/TASKS_MIGRATION.md).
+- [ ] Cross-project rule здесь остаётся прежним: migration slices не должны ломать текущий `Chainlit`-first runtime без явного approved rollout.
 
 ### Антикризисные правила
 1. Не добавлять новые workflow до B3.31 cleanup

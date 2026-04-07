@@ -1,14 +1,14 @@
 # Open WebUI Tool Server Integration Plan
 
-**Дата:** 2026-04-01  
-**Статус:** Proposed  
-**Связанные документы:**  
-- [TASKS.md](/home/seral/HDD/proj/agent-navigator-pro/TASKS.md)  
-- [MIGRATION_TOOLS.md](/home/seral/HDD/proj/agent-navigator-pro/MIGRATION_TOOLS.md)  
-- [MIGRATION_RAG_OPENWEBUI.md](/home/seral/HDD/proj/agent-navigator-pro/MIGRATION_RAG_OPENWEBUI.md)  
-- [MIGRATION_OVERIEW_WITH_LEAKS.md](/home/seral/HDD/proj/agent-navigator-pro/MIGRATION_OVERIEW_WITH_LEAKS.md)  
-- [2026-04-01-knowledge-base-store-protocol-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/2026-04-01-knowledge-base-store-protocol-plan.md)  
-- [2026-04-01-qdrant-knowledge-base-store-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/2026-04-01-qdrant-knowledge-base-store-plan.md)
+**Дата:** 2026-04-01
+**Статус:** Proposed
+**Связанные документы:**
+- [TASKS.md](/home/seral/HDD/proj/agent-navigator-pro/TASKS.md)
+- [MIGRATION_TOOLS.md](/home/seral/HDD/proj/agent-navigator-pro/MIGRATION_TOOLS.md)
+- [MIGRATION_RAG_OPENWEBUI.md](/home/seral/HDD/proj/agent-navigator-pro/MIGRATION_RAG_OPENWEBUI.md)
+- [MIGRATION_OVERIEW_WITH_LEAKS.md](/home/seral/HDD/proj/agent-navigator-pro/MIGRATION_OVERIEW_WITH_LEAKS.md)
+- [2026-04-01-knowledge-base-store-protocol-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-01-knowledge-base-store-protocol-plan.md)
+- [2026-04-01-qdrant-knowledge-base-store-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-01-qdrant-knowledge-base-store-plan.md)
 
 ## 1. Цель
 
@@ -23,7 +23,7 @@
   - [ ] `QdrantKnowledgeBaseStore`
 - [ ] Сохранить `Chainlit` как transitional UI, а не ломать систему одним большим переносом.
 
-**Ключевое правило:**  
+**Ключевое правило:**
 Никакого `big-bang rewrite`.  
 Переход идёт слоями: сначала tool contracts и backend boundaries, потом storage/retrieval, потом upload/document binding, и только потом primary UI shift в `Open WebUI`.
 

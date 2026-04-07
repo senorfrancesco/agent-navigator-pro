@@ -152,12 +152,15 @@ services:
     profiles:
       - backend
 
-  # --- Open WebUI (legacy, можно отключить после перехода на Chainlit) ---
+  # --- Open WebUI (legacy/eval contour, отдельный от canonical Chainlit path) ---
   open-webui:
-    image: ghcr.io/open-webui/open-webui:main
+    image: ghcr.io/open-webui/open-webui:latest
     container_name: open-webui
     ports:
       - "3001:8080"
+    env_file:
+      - path: ./backend/.env
+        required: false
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -177,7 +180,7 @@ services:
     profiles:
       - legacy
 
-  # --- Chainlit UI (основной фронтенд v3.0) ---
+  # --- Chainlit UI (основной фронтенд) ---
   chainlit:
     build:
       context: .

@@ -24,8 +24,9 @@ warnings.filterwarnings("ignore", category=FutureWarning, module="pynvml")
 # Загрузка переменных окружения
 load_dotenv()
 from fastapi import FastAPI, Request
+from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -45,6 +46,18 @@ from orchestrator.execution_runtime import (
     execute_orchestration,
     resolve_request_runtime_mode,
 )
+from orchestrator.tool_catalog import RoutingMode, ToolName
+from orchestrator.openapi_tools_api import create_openapi_tools_router
+from orchestrator.tool_execution import (
+    apply_tool_contract_to_payload,
+    build_accepted_tool_job_response,
+    build_tool_job_status_response,
+    get_tool_job_result,
+    get_tool_job_store,
+    inject_tool_contract_metadata,
+    should_start_async_tool_job,
+    submit_async_tool_job,
+)
 from orchestrator.doc_question_heuristics import (
     build_doc_question_deterministic_fallback,
     citations_are_valid,
@@ -59,6 +72,7 @@ from orchestrator.ui_control_plane import (
     resolve_effective_settings,
 )
 from orchestrator.operator_ui_api import router as operator_ui_router
+from orchestrator.operator_ui_api import enforce_operator_localhost_only, is_operator_surface_path
 
 try:
     from services.resource_monitor import get_system_resources
@@ -76,6 +90,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(ObservabilityMiddleware, service_name="agent_api", logger=logger)
+
+
+@app.middleware("http")
+async def restrict_operator_surface_to_localhost(request: Request, call_next):
+    if is_operator_surface_path(request.url.path):
+        try:
+            enforce_operator_localhost_only(request)
+        except Exception as exc:
+            status_code = getattr(exc, "status_code", 403)
+            detail = getattr(exc, "detail", "operator-ui-access-denied")
+            return JSONResponse(status_code=status_code, content={"detail": detail})
+    return await call_next(request)
+
+
 app.include_router(operator_ui_router)
 
 _OPERATOR_UI_DIR = Path(__file__).resolve().parents[2] / "prototype" / "operator-ui"
@@ -166,6 +194,9 @@ class OrchestrationRequest(BaseModel):
     has_session_docs: bool = False
     session_docs: Optional[Dict[str, Any]] = None
     classifier_result: Optional[Dict[str, Any]] = None
+    requested_tool: Optional[ToolName] = None
+    routing_mode: RoutingMode = "explicit"
+    job_mode: Literal["sync_if_possible", "force_async"] = "sync_if_possible"
     trace_id: Optional[str] = None
     idempotency_key: Optional[str] = None
     forced_route: Optional[str] = None
@@ -191,6 +222,28 @@ def _collect_request_control_plane(request: OrchestrationRequest) -> Dict[str, A
         raw_control_plane["custom_system_prompt"] = request.custom_system_prompt
     if "tool_scope" in request.model_fields_set:
         raw_control_plane["tool_scope"] = request.tool_scope
+    return raw_control_plane
+
+
+def _collect_request_control_plane_with_payload_overrides(
+    request: OrchestrationRequest,
+    request_payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    raw_control_plane = _collect_request_control_plane(request)
+    for key in (
+        "assistant_mode",
+        "runtime_mode",
+        "rag_scope",
+        "knowledge_collection_id",
+        "model_profile",
+        "prompt_profile",
+        "custom_system_prompt",
+        "tool_scope",
+    ):
+        if key in request_payload and (
+            key in request.model_fields_set or request_payload.get(key) != getattr(request, key, None)
+        ):
+            raw_control_plane[key] = request_payload[key]
     return raw_control_plane
 
 
@@ -762,23 +815,26 @@ def metrics():
 
 async def orchestrate(request: OrchestrationRequest, http_request: Optional[Request] = None):
     request.trace_id = request.trace_id or _resolve_http_trace_id(http_request)
-    effective_settings = resolve_effective_settings(_collect_request_control_plane(request))
+    payload = request.model_dump(exclude_none=True)
+    apply_tool_contract_to_payload(payload)
+    effective_settings = resolve_effective_settings(_collect_request_control_plane_with_payload_overrides(request, payload))
     response = decide_orchestration(
-        query=request.message,
+        query=str(payload.get("message", request.message)),
         trace_id=request.trace_id,
-        runtime_mode=resolve_request_runtime_mode(request.model_dump(exclude_none=True), effective_settings),
+        runtime_mode=resolve_request_runtime_mode(payload, effective_settings),
         rag_scope=str(effective_settings.get("rag_scope") or "off"),
         knowledge_collection_id=effective_settings.get("knowledge_collection_id"),
-        file_count=request.file_count,
-        has_session_docs=request.has_session_docs,
-        session_docs=request.session_docs or {},
-        classifier_result=request.classifier_result,
-        new_files=request.attachments_meta or [],
-        active_doc_ids=request.active_doc_ids or [],
-        forced_route=request.forced_route,
+        file_count=int(payload.get("file_count", request.file_count)),
+        has_session_docs=bool(payload.get("has_session_docs", request.has_session_docs)),
+        session_docs=payload.get("session_docs") or request.session_docs or {},
+        classifier_result=payload.get("classifier_result") or request.classifier_result,
+        new_files=payload.get("attachments_meta") or request.attachments_meta or [],
+        active_doc_ids=payload.get("active_doc_ids") or request.active_doc_ids or [],
+        forced_route=payload.get("forced_route") or request.forced_route,
     )
-    response.update(build_control_plane_metadata(request.model_dump(exclude_none=True), effective_settings))
+    response.update(build_control_plane_metadata(payload, effective_settings))
     response["effective_settings"] = effective_settings
+    inject_tool_contract_metadata(response, payload)
     inc_metric_counter(
         "agent_nav_agent_api_orchestration_requests_total",
         labels={"endpoint": "/orchestrate", "result": str(response.get("route") or "unknown")},
@@ -793,12 +849,21 @@ async def orchestrate_route(request: OrchestrationRequest, http_request: Request
 
 async def execute_orchestration_api(request: OrchestrationRequest, http_request: Optional[Request] = None):
     request.trace_id = request.trace_id or _resolve_http_trace_id(http_request)
-    effective_settings = resolve_effective_settings(_collect_request_control_plane(request))
-    deps = _build_api_execution_dependencies(request, effective_settings)
     payload = request.model_dump(exclude_none=True)
+    apply_tool_contract_to_payload(payload)
+    effective_settings = resolve_effective_settings(_collect_request_control_plane_with_payload_overrides(request, payload))
+    deps = _build_api_execution_dependencies(request, effective_settings)
     payload["runtime_mode"] = resolve_request_runtime_mode(payload, effective_settings)
     payload["effective_settings"] = effective_settings
+    if should_start_async_tool_job(payload):
+        job = submit_async_tool_job(
+            request_payload=payload,
+            deps=deps,
+            execute_fn=execute_orchestration,
+        )
+        return build_accepted_tool_job_response(job, payload)
     response = await execute_orchestration(payload, deps=deps)
+    inject_tool_contract_metadata(response, payload)
     inc_metric_counter(
         "agent_nav_agent_api_orchestration_requests_total",
         labels={"endpoint": "/execute_orchestration", "result": str(response.get("route") or "unknown")},
@@ -808,7 +873,42 @@ async def execute_orchestration_api(request: OrchestrationRequest, http_request:
 
 @app.post("/execute_orchestration")
 async def execute_orchestration_route(request: OrchestrationRequest, http_request: Request):
+    response = await execute_orchestration_api(request, http_request)
+    if response.get("status") == "accepted":
+        return JSONResponse(status_code=202, content=response)
+    return response
+
+
+async def get_tool_job_status_route(job_id: str):
+    job = get_tool_job_store().get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"unknown-tool-job:{job_id}")
+    return build_tool_job_status_response(job)
+
+
+async def get_tool_job_result_route(job_id: str):
+    try:
+        return get_tool_job_result(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"unknown-tool-job:{job_id}") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+async def _execute_openapi_tool_request(
+    request: OrchestrationRequest,
+    http_request: Optional[Request] = None,
+):
     return await execute_orchestration_api(request, http_request)
+
+
+app.include_router(
+    create_openapi_tools_router(
+        app=app,
+        orchestration_request_model=OrchestrationRequest,
+        execute_orchestration_request=_execute_openapi_tool_request,
+    )
+)
 
 
 # === OpenAI Compatible API ===

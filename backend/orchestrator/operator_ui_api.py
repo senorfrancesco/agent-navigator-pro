@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import os
 import shutil
 import subprocess
@@ -8,7 +9,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 try:
@@ -27,8 +28,6 @@ except ModuleNotFoundError:  # pragma: no cover - direct module import fallback
     from backend.orchestrator.telemetry_runtime import get_timing_summary
 
 
-router = APIRouter(prefix="/operator", tags=["operator-ui"])
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_ROOT = REPO_ROOT / "backend"
 DEPLOY_ROOT = REPO_ROOT / "deploy" / "offline_bundle"
@@ -40,6 +39,18 @@ PATH_BROWSER_ROOTS = [
     Path("/mnt"),
     Path("/media"),
 ]
+OPERATOR_SURFACE_PREFIXES = ("/operator", "/operator-ui", "/operator-assets")
+
+
+def _operator_localhost_dependency(request: Request) -> None:
+    enforce_operator_localhost_only(request)
+
+
+router = APIRouter(
+    prefix="/operator",
+    tags=["operator-ui"],
+    dependencies=[Depends(_operator_localhost_dependency)],
+)
 
 
 def _http_probe(url: str, timeout: float = 0.75) -> bool:
@@ -49,6 +60,49 @@ def _http_probe(url: str, timeout: float = 0.75) -> bool:
             return 200 <= getattr(response, "status", 0) < 500
     except (urllib.error.URLError, TimeoutError, ValueError):
         return False
+
+
+def _operator_localhost_only_enabled() -> bool:
+    raw_value = os.getenv("OPERATOR_UI_LOCALHOST_ONLY")
+    if raw_value is None:
+        backend_env_path = BACKEND_ROOT / ".env"
+        if backend_env_path.exists():
+            raw_value = parse_env_file(backend_env_path).get("OPERATOR_UI_LOCALHOST_ONLY")
+    normalized = str(raw_value or "true").strip().lower()
+    return normalized not in {"0", "false", "no", "off"}
+
+
+def _is_loopback_host(host: str | None) -> bool:
+    if not host:
+        return False
+    normalized = str(host).strip()
+    if normalized.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def is_operator_surface_path(path: str | None) -> bool:
+    normalized = str(path or "").strip()
+    return any(
+        normalized == prefix or normalized.startswith(f"{prefix}/")
+        for prefix in OPERATOR_SURFACE_PREFIXES
+    )
+
+
+def enforce_operator_localhost_only(request: Request) -> None:
+    if not _operator_localhost_only_enabled():
+        return
+    client = getattr(request, "client", None)
+    client_host = getattr(client, "host", None)
+    if _is_loopback_host(client_host):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail="operator-ui-localhost-only",
+    )
 
 
 def _probe_row(

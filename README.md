@@ -549,6 +549,12 @@ Tier выбирается автоматически по железу чере�
 
 Они делегируют в `launcher.sh` и оставлены как compatibility aliases, а не как конкурирующие canonical entrypoints.
 
+Для container path важно разделять `build` и `run`:
+
+- `./scripts/run_all.sh` и `./scripts/launcher.sh --target container --profile default` только запускают уже собранные образы через `docker compose up --no-build`;
+- backend образы (`agent-api`, `document-server`, `legal-server`, `ums`) нужно собирать отдельно явной командой `docker compose --profile backend build agent-api document-server legal-server ums`;
+- для Chainlit rebuild остаётся отдельным шагом: `docker compose build chainlit`.
+
 Для install-path launcher тоже остаётся user-facing entrypoint. Внутренний coordinator находится в `./scripts/install/install.sh`: сейчас он делегирует `native` установку в `scripts/setup_ubuntu.sh`, а для `container` target выводит guidance без host-install действий.
 
 Platform-specific install paths:
@@ -587,13 +593,15 @@ UI будет доступен на:
 
 - `http://localhost:3000`
 
-Legacy Open WebUI при необходимости:
+Open WebUI evaluation contour при необходимости:
 
 ```bash
 docker compose --profile legacy up -d open-webui
 ```
 
-Для старого mixed runtime path существует `./scripts/run_openwebui.sh`, но это только legacy-скрипт и не рекомендованный путь для новых сценариев.
+Этот путь не меняет текущий product truth: основным UI проекта остаётся `Chainlit`, а `Open WebUI` поднимается только как отдельный `legacy/eval` profile для controlled migration contour.
+
+`./scripts/run_openwebui.sh` сохраняется как compatibility helper для этого контура, но backend по-прежнему должен быть поднят отдельно через canonical runtime path (`launcher.sh`, `run_native.sh` или уже работающий host backend).
 
 Он будет доступен на:
 

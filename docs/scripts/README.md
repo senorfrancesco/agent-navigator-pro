@@ -165,7 +165,7 @@ cd backend && pip install -r requirements.txt
 | `scripts/bootstrap_env.sh` | `internal` | `check`, `install` | В основном используется через `launcher.sh`; вручную полезен только для диагностики bootstrap слоя | Создаёт `backend/.env` из шаблона при отсутствии, автогенерирует/ротирует `CHAINLIT_AUTH_SECRET`, валидирует команды и остальные critical secrets; `--install` делегирует в `scripts/install/install.sh` | Internal helper for launcher/bootstrap |
 | `scripts/stop_native.sh` | `canonical` | `native stop` | Каноническая остановка native tmux/runtime path | Убивает native tmux session и процессы на service ports; Docker не трогает | Canonical native stop script |
 | `scripts/stop_all.sh` | `canonical` | `container stop`, `global cleanup` | Каноническая остановка compose/container path | Делает `docker compose down`, завершает обе tmux session и зачищает runtime-процессы на service ports | Canonical container/global stop script |
-| `scripts/run_openwebui.sh` | `legacy` | `open-webui` | Только если нужен старый Open WebUI path | Поднимает legacy docker/webui flow и mixed tmux runtime; не синхронизирован с current Chainlit-first docs | Legacy path, не рекомендован как основной |
+| `scripts/run_openwebui.sh` | `legacy` | `open-webui` | Только если нужен `Open WebUI` evaluation contour | Должен оставаться узким compatibility helper для compose-only Open WebUI path и не поднимать отдельный mixed tmux runtime | Legacy/eval helper, не рекомендован как основной |
 | `scripts/install/install.sh` | `canonical-installer` | installer | Guided install path за `launcher.sh --install` | Выбирает platform wrapper (`ubuntu`, `ubuntu-server`, `wsl`, `windows`); heavy Linux install всё ещё сводится к legacy `setup_ubuntu.sh` через wrapper layer | Canonical install coordinator |
 | `scripts/install/install_ubuntu.sh`, `install_ubuntu_server.sh`, `install_wsl.sh`, `install_windows.ps1` | `platform-wrapper` | installer-platform | Platform-specific install handoff за unified `install.sh` | Linux wrappers пока делегируют в legacy `setup_ubuntu.sh`; Windows path остаётся guided/manual | Platform-specific wrapper layer |
 | `scripts/install/*.sh` (кроме `install.sh`) | `planned` | installer-step | Не использовать как самостоятельный install path | Step scripts intentionally scaffold-only | Scaffold-only contracts |
@@ -315,6 +315,7 @@ python scripts/runtime_preflight.py apply --profile adaptive --gpu-layers-mode m
 - Важные env vars: `BACKEND_MODE`, `VLLM_BASE_URL`, `VLLM_PORT`, `VLLM_MODEL_ID_QWEN_14B_LLM`, `AGENT_NAVIGATOR_RUNTIME_ENV_FILE`, `AGENT_NAVIGATOR_TEST_MODE`.
 - Side effects: вызывает `stop_all.sh`, поднимает Docker Compose backend/Chainlit stack, при `BACKEND_MODE=vllm` добавляет профиль `vllm`, создаёт tmux session `agent-navigator`.
 - Ограничения: не описывать как независимый canonical orchestration path; canonical выбор между native/container делает `launcher.sh`.
+- Build contract: `run_all.sh` и `launcher.sh --target container` запускают `docker compose up --no-build`, то есть используют только уже собранные образы. Сборка backend образов должна запускаться отдельно явной командой `docker compose --profile backend build agent-api document-server legal-server ums`; для Chainlit остаётся отдельный `docker compose build chainlit`.
 
 ### `scripts/run_container.sh`
 

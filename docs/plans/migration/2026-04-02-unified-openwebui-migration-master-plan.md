@@ -2,7 +2,9 @@
 
 **Дата:** 2026-04-02
 **Статус:** рабочий черновик / живой документ
-**Назначение:** единый отчёт-план по миграции `Chainlit -> Open WebUI`, переводу инструментов в явный контракт инструментов (`tools`) и серверов инструментов (`OpenAPI` / `MCP`), внедрению `Qdrant`, разбору незавершённых веток и порядку выполнения работ.
+**Назначение:** единый отчёт-план по controlled migration/evaluation contour `Chainlit -> Open WebUI`, переводу инструментов в явный контракт инструментов (`tools`) и серверов инструментов (`OpenAPI` / `MCP`), внедрению `Qdrant`, разбору незавершённых веток и порядку выполнения работ.
+
+> **Current truth / target direction:** на момент этого документа canonical UI проекта остаётся `Chainlit`, а `Open WebUI` рассматривается как `candidate shell` и controlled evaluation contour до functional parity. Этот документ не объявляет migration завершённой и не отменяет текущий `Chainlit-first` runtime contract в `AGENTS.md` и `README.md`.
 
 ## 1. Связанные документы
 
@@ -11,11 +13,11 @@
 - [MIGRATION_TOOLS.md](/home/seral/HDD/proj/agent-navigator-pro/MIGRATION_TOOLS.md)
 - [MIGRATION_RAG_OPENWEBUI.md](/home/seral/HDD/proj/agent-navigator-pro/MIGRATION_RAG_OPENWEBUI.md)
 - [MIGRATION_OVERIEW_WITH_LEAKS.md](/home/seral/HDD/proj/agent-navigator-pro/MIGRATION_OVERIEW_WITH_LEAKS.md)
-- [docs/plans/2026-04-01-knowledge-base-store-protocol-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/2026-04-01-knowledge-base-store-protocol-plan.md)
-- [docs/plans/2026-04-01-qdrant-knowledge-base-store-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/2026-04-01-qdrant-knowledge-base-store-plan.md)
-- [docs/plans/2026-04-01-openwebui-tool-server-integration-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/2026-04-01-openwebui-tool-server-integration-plan.md)
-- [docs/plans/2026-04-01-openwebui-migration-sprint-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/2026-04-01-openwebui-migration-sprint-plan.md)
-- [docs/plans/2026-04-01-migration-readiness-pr-decision-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/2026-04-01-migration-readiness-pr-decision-plan.md)
+- [docs/plans/2026-04-01-knowledge-base-store-protocol-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-01-knowledge-base-store-protocol-plan.md)
+- [docs/plans/2026-04-01-qdrant-knowledge-base-store-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-01-qdrant-knowledge-base-store-plan.md)
+- [docs/plans/2026-04-01-openwebui-tool-server-integration-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-01-openwebui-tool-server-integration-plan.md)
+- [docs/plans/2026-04-01-openwebui-migration-sprint-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-01-openwebui-migration-sprint-plan.md)
+- [docs/plans/2026-04-01-migration-readiness-pr-decision-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-01-migration-readiness-pr-decision-plan.md)
 - [conversation_about_rag.pdf](/home/seral/HDD/proj/agent-navigator-pro/conversation_about_rag.pdf)
 - [conversation_about_tools.pdf](/home/seral/HDD/proj/agent-navigator-pro/conversation_about_tools.pdf)
 
@@ -25,12 +27,16 @@
 
 ### 2.1 Главные решения
 
-- [ ] Основной пользовательский UI переводим на `Open WebUI`.
-- [ ] `Chainlit` не развиваем как основной продуктовый интерфейс; оставляем только как отладочную и переходную оболочку.
+- [ ] Ближайшая цель — не немедленный `main UI switch`, а controlled re-entry `Open WebUI` как candidate shell поверх существующего backend.
+- [ ] До достижения functional parity `Chainlit` остаётся canonical UI и не считается уже снятым с основной роли.
+- [ ] После достижения parity `Chainlit` переводим в роль отладочной и переходной оболочки.
 - [ ] `Chainlit`-профили не считаются стратегическим направлением; новые вложения в перегруженный профилями UX не делаем.
 - [ ] Основной backend остаётся нашим `FastAPI`-слоем, а не переносится в Open WebUI.
 - [ ] Основной путь интеграции с Open WebUI делаем через **сервер инструментов OpenAPI** (`OpenAPI Tool Server`).
 - [ ] `MCP` поддерживаем как второй, совместимый слой, но не как основной производственный путь интеграции.
+- [ ] `backend/open_webui_uploads` считаем текущим shared storage contract; ранний rename откладываем до отдельного approved slice после стабилизации upload/document binding.
+- [ ] Не переносим бизнес-логику, orchestration policy и document lifecycle внутрь `Open WebUI`.
+- [ ] На baseline-этапе оркестратором остаётся сам пользователь: он явно выбирает tool и режим работы, а UI не принимает скрытые backend-решения вместо него.
 - [ ] Инструменты становятся **явными** и вызываются по именованным контрактам:
   - [ ] `ask_document`
   - [ ] `analyze_document_fast`
@@ -51,6 +57,16 @@
   - [ ] пересборку embeddings
   - [ ] reindex / delete / verify flows
 
+### 2.1.1 Future directions, не входящие в текущий baseline
+
+- [ ] В будущем `Open WebUI` может использоваться как внешний orchestration shell через native workflows / pipelines, но только поверх уже стабилизированного backend tool contract.
+- [ ] Это не отменяет baseline-модель `user as orchestrator`: до появления отдельного approved режима пользователь остаётся явным источником выбора `requested_tool`.
+- [ ] Будущий assisted-layer должен быть classifier-based, а не embedding-based:
+  - [ ] classifier выбирает `requested_tool`
+  - [ ] classifier задаёт `routing_mode`
+  - [ ] classifier не исполняет domain logic сам по себе
+- [ ] Даже при добавлении classifier-assisted routing backend остаётся source-of-truth для tool execution, job state, document lifecycle и retrieval policy.
+
 ### 2.2 Что точно не делаем
 
 - [ ] Не делаем `big-bang rewrite`.
@@ -61,7 +77,7 @@
 
 ### 2.3 Главный порядок работ
 
-- [ ] Этап 0: зафиксировать единый контракт запуска (`single-runtime contract`), контракт явных инструментов (`tool-first`) и снять наследованный долг, мешающий миграции.
+- [ ] Этап 0: зафиксировать controlled evaluation contour, единый контракт запуска (`single-runtime contract`), контракт явных инструментов (`tool-first`) и снять наследованный долг, мешающий миграции.
 - [ ] Этап 1: внедрить `KnowledgeBaseStoreProtocol`.
 - [ ] Этап 2: внедрить `QdrantKnowledgeBaseStore`.
 - [ ] Этап 3: перевести документные инструменты на явные backend-endpoint'ы.
@@ -77,6 +93,7 @@
 - [ ] Manual-first interaction остаётся главным продуктовым принципом.
 - [ ] Пользователь должен явно выбирать инструмент, а не доверять обязательному classifier-first маршруту.
 - [ ] `Open WebUI` рассматривается как оболочка (`shell`) для чата, истории, аутентификации и вызова инструментов (`tool-calling`), а не как место, где живёт основная бизнес-логика.
+- [ ] Возможный будущий orchestration shell в `Open WebUI` допускается только как внешний слой над stable backend contracts, а не как перенос core orchestration внутрь UI.
 - [ ] Retrieval, storage, parsing, orchestration и UI должны эволюционировать независимо.
 - [ ] По итогам `conversation_about_rag.pdf` и `conversation_about_tools.pdf` правильное разделение уже зафиксировано:
   - [ ] `document_question` = вопрос по документу с retrieval и цитатами
@@ -328,8 +345,8 @@
 - [ ] Сначала внедряем `KnowledgeBaseStoreProtocol`.
 - [ ] Только после этого внедряем `QdrantKnowledgeBaseStore`.
 - [ ] Это уже зафиксировано в:
-  - [ ] [docs/plans/2026-04-01-knowledge-base-store-protocol-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/2026-04-01-knowledge-base-store-protocol-plan.md)
-  - [ ] [docs/plans/2026-04-01-qdrant-knowledge-base-store-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/2026-04-01-qdrant-knowledge-base-store-plan.md)
+  - [ ] [docs/plans/2026-04-01-knowledge-base-store-protocol-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-01-knowledge-base-store-protocol-plan.md)
+  - [ ] [docs/plans/2026-04-01-qdrant-knowledge-base-store-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-01-qdrant-knowledge-base-store-plan.md)
 
 ## 6.3 Сессионный RAG и RAG базы знаний
 
@@ -621,8 +638,13 @@
 
 **Смысл этапа:** прежде чем трогать `Open WebUI`, нужно убрать всё, что размывает контракт системы уже сейчас: многофайловые `env`, неочевидные профили в `Chainlit`, размытый список инструментов и незафиксированные обязательные решения.
 
-- [ ] Зафиксировать в документации и backlog, что `Open WebUI` становится основной целевой пользовательской оболочкой.
+- [ ] Зафиксировать в документации и backlog, что текущий canonical UI — `Chainlit`, а `Open WebUI` возвращается как controlled evaluation contour и candidate shell.
 - [ ] Зафиксировать, что `Chainlit`-профили больше не развиваем.
+- [ ] Зафиксировать phase-0 decision record:
+  - [ ] `OpenAPI-first`
+  - [ ] `MCP-secondary`
+  - [ ] `backend/open_webui_uploads` rename postponed
+  - [ ] no business logic inside `Open WebUI`
 - [ ] Зафиксировать, что `backend/.env` становится единственным каноническим источником конфигурации и запуска для native-пути.
 - [ ] Вывести `backend/.env.runtime` и `backend/.env.hardware.override` из канонического контракта.
 - [ ] Перевести `runtime_preflight.py` в режим:
@@ -1013,8 +1035,8 @@
 - [ ] Не менять retrieval-semantics в том же diff, где появляется `Protocol`.
 
 **Источники:**
-- [ ] [2026-04-01-knowledge-base-store-protocol-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/2026-04-01-knowledge-base-store-protocol-plan.md)
-- [ ] [2026-04-01-migration-readiness-pr-decision-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/2026-04-01-migration-readiness-pr-decision-plan.md)
+- [ ] [2026-04-01-knowledge-base-store-protocol-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-01-knowledge-base-store-protocol-plan.md)
+- [ ] [2026-04-01-migration-readiness-pr-decision-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-01-migration-readiness-pr-decision-plan.md)
 
 ### Эпик C. Векторное хранилище Qdrant
 
@@ -1032,7 +1054,7 @@
 - [ ] Переиндексацию делать через версионирование `document_version` и `index_version`, а не через silent overwrite.
 
 **Источники:**
-- [ ] [2026-04-01-qdrant-knowledge-base-store-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/2026-04-01-qdrant-knowledge-base-store-plan.md)
+- [ ] [2026-04-01-qdrant-knowledge-base-store-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-01-qdrant-knowledge-base-store-plan.md)
 - [ ] <https://qdrant.tech/documentation/concepts/filtering/>
 - [ ] <https://qdrant.tech/documentation/guides/multitenancy/>
 - [ ] <https://qdrant.tech/documentation/advanced-tutorials/reranking-hybrid-search/>

@@ -2,12 +2,18 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 import pytest
+from starlette.testclient import TestClient
 
 from orchestrator.operator_ui_api import (
     OperatorConfigApplyRequest,
     OperatorConfigPresetPreviewRequest,
     build_operator_state,
+    enforce_operator_localhost_only,
+    is_operator_surface_path,
     operator_path_browser,
     operator_path_browser_validate,
     operator_config_apply,
@@ -20,6 +26,7 @@ from orchestrator.operator_ui_api import (
     operator_metrics_summary,
     operator_grafana_links,
     operator_job_cancel,
+    router,
 )
 
 
@@ -39,6 +46,53 @@ def test_operator_health_exposes_delivery_contract():
     assert payload["operator_ui_served"] is True
     assert payload["delivery"]["control_plane"] == "python"
     assert payload["delivery"]["shell_role"] == "compatibility"
+
+
+def _make_request(path: str, client_host: str) -> Request:
+    return Request(
+        {
+            "type": "http",
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": path,
+            "raw_path": path.encode("utf-8"),
+            "query_string": b"",
+            "headers": [],
+            "client": (client_host, 40000),
+            "server": ("testserver", 80),
+        }
+    )
+
+
+def test_operator_access_guard_allows_loopback(monkeypatch):
+    monkeypatch.setenv("OPERATOR_UI_LOCALHOST_ONLY", "true")
+
+    enforce_operator_localhost_only(_make_request("/operator/state", "127.0.0.1"))
+    enforce_operator_localhost_only(_make_request("/operator-ui/", "::1"))
+
+
+def test_operator_access_guard_blocks_remote_host(monkeypatch):
+    monkeypatch.setenv("OPERATOR_UI_LOCALHOST_ONLY", "true")
+
+    with pytest.raises(Exception) as exc_info:
+        enforce_operator_localhost_only(_make_request("/operator/state", "203.0.113.10"))
+
+    assert getattr(exc_info.value, "status_code", None) == 403
+    assert getattr(exc_info.value, "detail", "") == "operator-ui-localhost-only"
+
+
+def test_operator_access_guard_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("OPERATOR_UI_LOCALHOST_ONLY", "false")
+
+    enforce_operator_localhost_only(_make_request("/operator/state", "203.0.113.10"))
+
+
+def test_operator_surface_path_matches_api_and_static_paths():
+    assert is_operator_surface_path("/operator/state") is True
+    assert is_operator_surface_path("/operator-ui/") is True
+    assert is_operator_surface_path("/operator-assets/app.css") is True
+    assert is_operator_surface_path("/health") is False
 
 
 def test_operator_ui_state_exposes_observability_contract():
@@ -288,3 +342,37 @@ async def test_operator_action_run_blocks_bundle_port_conflict(monkeypatch):
 
     assert getattr(exc_info.value, "status_code", None) == 409
     assert "port-conflict:agent-api:8000" in str(getattr(exc_info.value, "detail", ""))
+
+
+def test_operator_surface_middleware_blocks_remote_static_access(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPERATOR_UI_LOCALHOST_ONLY", "true")
+    static_root = tmp_path / "operator-ui"
+    static_root.mkdir(parents=True, exist_ok=True)
+    (static_root / "index.html").write_text("<html>operator</html>", encoding="utf-8")
+
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def restrict_operator_surface(request: Request, call_next):
+        if is_operator_surface_path(request.url.path):
+            try:
+                enforce_operator_localhost_only(request)
+            except Exception as exc:
+                return JSONResponse(
+                    status_code=getattr(exc, "status_code", 403),
+                    content={"detail": getattr(exc, "detail", "operator-ui-access-denied")},
+                )
+        return await call_next(request)
+
+    app.include_router(router)
+    app.mount("/operator-ui", StaticFiles(directory=str(static_root), html=True), name="operator-ui")
+
+    remote_client = TestClient(app, client=("203.0.113.10", 50000))
+    local_client = TestClient(app, client=("127.0.0.1", 50001))
+
+    remote_response = remote_client.get("/operator-ui/")
+    local_response = local_client.get("/operator-ui/")
+
+    assert remote_response.status_code == 403
+    assert remote_response.json()["detail"] == "operator-ui-localhost-only"
+    assert local_response.status_code == 200

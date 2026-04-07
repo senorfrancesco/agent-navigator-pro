@@ -8,7 +8,7 @@
 - [MIGRATION_RAG_OPENWEBUI.md](/home/seral/HDD/proj/agent-navigator-pro/MIGRATION_RAG_OPENWEBUI.md)  
 - [MIGRATION_OVERIEW_WITH_LEAKS.md](/home/seral/HDD/proj/agent-navigator-pro/MIGRATION_OVERIEW_WITH_LEAKS.md)  
 - [2026-03-13-b333-knowledge-base-rag.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/2026-03-13-b333-knowledge-base-rag.md)  
-- [2026-04-01-knowledge-base-store-protocol-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/2026-04-01-knowledge-base-store-protocol-plan.md)
+- [2026-04-01-knowledge-base-store-protocol-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-01-knowledge-base-store-protocol-plan.md)
 
 ## 1. Назначение плана
 

@@ -1,14 +1,14 @@
 # Open WebUI Migration Sprint Plan
 
-**Дата:** 2026-04-01  
-**Статус:** Proposed  
-**Формат:** agent-ready sprint breakdown  
-**Связанные документы:**  
-- [2026-04-01-knowledge-base-store-protocol-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/2026-04-01-knowledge-base-store-protocol-plan.md)  
-- [2026-04-01-qdrant-knowledge-base-store-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/2026-04-01-qdrant-knowledge-base-store-plan.md)  
-- [2026-04-01-openwebui-tool-server-integration-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/2026-04-01-openwebui-tool-server-integration-plan.md)  
-- [MIGRATION_TOOLS.md](/home/seral/HDD/proj/agent-navigator-pro/MIGRATION_TOOLS.md)  
-- [MIGRATION_RAG_OPENWEBUI.md](/home/seral/HDD/proj/agent-navigator-pro/MIGRATION_RAG_OPENWEBUI.md)  
+**Дата:** 2026-04-01
+**Статус:** Proposed
+**Формат:** agent-ready sprint breakdown
+**Связанные документы:**
+- [2026-04-01-knowledge-base-store-protocol-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-01-knowledge-base-store-protocol-plan.md)
+- [2026-04-01-qdrant-knowledge-base-store-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-01-qdrant-knowledge-base-store-plan.md)
+- [2026-04-01-openwebui-tool-server-integration-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-01-openwebui-tool-server-integration-plan.md)
+- [MIGRATION_TOOLS.md](/home/seral/HDD/proj/agent-navigator-pro/MIGRATION_TOOLS.md)
+- [MIGRATION_RAG_OPENWEBUI.md](/home/seral/HDD/proj/agent-navigator-pro/MIGRATION_RAG_OPENWEBUI.md)
 - [TASKS.md](/home/seral/HDD/proj/agent-navigator-pro/TASKS.md)
 
 ## 1. Цель sprint-плана
@@ -18,7 +18,7 @@
 - [ ] Исключить `big-bang rewrite`.
 - [ ] Зафиксировать зависимости между slices, чтобы агенты не полезли в конфликтующие зоны одновременно.
 
-**Ключевой принцип:**  
+**Ключевой принцип:**
 Сначала стабилизируем backend boundaries, потом меняем storage backend, потом подключаем новый UI/tool-server path.
 
 ---
