@@ -3,6 +3,7 @@ import sys
 from typing import Any, Dict
 
 import pytest
+from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -265,3 +266,118 @@ async def test_openai_chat_completions_loads_attachment_text_into_session_docs(m
     assert response["choices"][0]["message"]["content"] == "summary"
     assert captured["request"]["has_session_docs"] is True
     assert captured["request"]["session_docs"]["contract.pdf"]["text"] == "Штраф составляет 10 процентов."
+
+
+def test_raw_models_lists_chat_capable_models_without_agent_wrapper(monkeypatch):
+    monkeypatch.setattr(
+        agent_api,
+        "get_all_models",
+        lambda: {
+            "qwen-14b-llm": {"kind": "llm"},
+            "qwen-vl-8b": {"kind": "vision"},
+            "labse-embedding": {"kind": "retrieval_embedder"},
+        },
+    )
+
+    response = agent_api.list_raw_models()
+
+    assert response["object"] == "list"
+    assert [item["id"] for item in response["data"]] == ["qwen-14b-llm", "qwen-vl-8b"]
+    assert all(item["id"] != "agent-navigator" for item in response["data"])
+
+
+@pytest.mark.asyncio
+async def test_raw_chat_completions_non_streaming_proxies_to_ums(monkeypatch):
+    captured: Dict[str, Any] = {}
+
+    async def fake_async_infer(model_id: str, payload: Dict[str, Any], device_mode: str = "hybrid"):
+        captured["model_id"] = model_id
+        captured["payload"] = payload
+        captured["device_mode"] = device_mode
+        return {
+            "id": "chatcmpl-raw",
+            "object": "chat.completion",
+            "created": 123,
+            "model": model_id,
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "raw answer"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    monkeypatch.setattr(agent_api, "get_all_models", lambda: {"qwen-14b-llm": {"kind": "llm"}})
+    monkeypatch.setattr(
+        agent_api,
+        "resolve_model_selection",
+        lambda role_key: type("Selection", (), {"resolved_model_id": "qwen-14b-llm"})(),
+    )
+    monkeypatch.setattr(agent_api.ums_client, "async_infer", fake_async_infer)
+
+    response = await agent_api.raw_openai_completions(
+        _FakeRequest(
+            {
+                "messages": [{"role": "user", "content": "Привет"}],
+                "stream": False,
+            }
+        )
+    )
+
+    assert response["choices"][0]["message"]["content"] == "raw answer"
+    assert captured["model_id"] == "qwen-14b-llm"
+    assert captured["payload"]["messages"] == [{"role": "user", "content": "Привет"}]
+
+
+@pytest.mark.asyncio
+async def test_raw_chat_completions_streaming_proxies_to_ums(monkeypatch):
+    captured: Dict[str, Any] = {}
+
+    async def fake_stream(*, target_model: str, payload: Dict[str, Any]):
+        captured["model_id"] = target_model
+        captured["payload"] = payload
+        yield "data: {\"choices\":[{\"delta\":{\"content\":\"Пр\"},\"finish_reason\":null}]}\n\n".encode("utf-8")
+        yield "data: {\"choices\":[{\"delta\":{\"content\":\"ивет\"},\"finish_reason\":null}]}\n\n".encode("utf-8")
+        yield b"data: [DONE]\n\n"
+
+    monkeypatch.setattr(agent_api, "get_all_models", lambda: {"qwen-14b-llm": {"kind": "llm"}})
+    monkeypatch.setattr(
+        agent_api,
+        "resolve_model_selection",
+        lambda role_key: type("Selection", (), {"resolved_model_id": "qwen-14b-llm"})(),
+    )
+    monkeypatch.setattr(agent_api, "_proxy_raw_openai_stream", fake_stream)
+
+    response = await agent_api.raw_openai_completions(
+        _FakeRequest(
+            {
+                "messages": [{"role": "user", "content": "Привет"}],
+            }
+        )
+    )
+    body = await _read_streaming_body(response)
+
+    assert isinstance(response, StreamingResponse)
+    assert captured["model_id"] == "qwen-14b-llm"
+    assert "\"content\":\"Пр\"" in body
+    assert "\"content\":\"ивет\"" in body
+    assert "data: [DONE]" in body
+
+
+@pytest.mark.asyncio
+async def test_raw_chat_completions_rejects_unknown_model(monkeypatch):
+    monkeypatch.setattr(agent_api, "get_all_models", lambda: {"qwen-14b-llm": {"kind": "llm"}})
+    monkeypatch.setattr(
+        agent_api,
+        "resolve_model_selection",
+        lambda role_key: type("Selection", (), {"resolved_model_id": "qwen-14b-llm"})(),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await agent_api.raw_openai_completions(
+            _FakeRequest(
+                {
+                    "model": "unknown-model",
+                    "messages": [{"role": "user", "content": "Привет"}],
+                    "stream": False,
+                }
+            )
+        )
+
+    assert exc.value.status_code == 404

@@ -34,6 +34,10 @@
 - [ ] Основной backend остаётся нашим `FastAPI`-слоем, а не переносится в Open WebUI.
 - [ ] Основной путь интеграции с Open WebUI делаем через **сервер инструментов OpenAPI** (`OpenAPI Tool Server`).
 - [ ] `MCP` поддерживаем как второй, совместимый слой, но не как основной производственный путь интеграции.
+- [ ] В `Open WebUI` жёстко разводим `model provider surface` и `tool server surface`:
+  - [ ] raw `OpenAI-compatible` model provider подключается отдельно через connections/providers;
+  - [ ] backend tools подключаются отдельно через `OpenAPI Tool Server`;
+  - [ ] `agent-navigator` wrapper не используем как default chat model для native tool-calling path.
 - [ ] `backend/open_webui_uploads` считаем текущим shared storage contract; ранний rename откладываем до отдельного approved slice после стабилизации upload/document binding.
 - [ ] Не переносим бизнес-логику, orchestration policy и document lifecycle внутрь `Open WebUI`.
 - [ ] На baseline-этапе оркестратором остаётся сам пользователь: он явно выбирает tool и режим работы, а UI не принимает скрытые backend-решения вместо него.
@@ -93,6 +97,7 @@
 - [ ] Manual-first interaction остаётся главным продуктовым принципом.
 - [ ] Пользователь должен явно выбирать инструмент, а не доверять обязательному classifier-first маршруту.
 - [ ] `Open WebUI` рассматривается как оболочка (`shell`) для чата, истории, аутентификации и вызова инструментов (`tool-calling`), а не как место, где живёт основная бизнес-логика.
+- [ ] Для `Open WebUI` native tool-calling выбранная модель должна быть raw provider surface, а не product-specific assistant wrapper; иначе возникает `double wrapping`, при котором tool result повторно проходит через `agent-navigator`.
 - [ ] Возможный будущий orchestration shell в `Open WebUI` допускается только как внешний слой над stable backend contracts, а не как перенос core orchestration внутрь UI.
 - [ ] Retrieval, storage, parsing, orchestration и UI должны эволюционировать независимо.
 - [ ] По итогам `conversation_about_rag.pdf` и `conversation_about_tools.pdf` правильное разделение уже зафиксировано:
@@ -209,6 +214,25 @@
   - [ ] `compare_documents_deep`
   - [ ] ingestion/reindex flows
   - [ ] OCR / Docling pipelines
+
+## 5.1.2 Практические ограничения пути через model wrapper
+
+- [ ] `OpenAPI Tool Server` сам по себе не решает интеграцию, если выбранная в `Open WebUI` chat model уже является backend-specific assistant wrapper.
+- [ ] Если `Open WebUI` chat model = `agent-navigator`, получается `double wrapping`:
+  - [ ] `Open WebUI` вызывает tool;
+  - [ ] backend возвращает result;
+  - [ ] затем result снова интерпретируется product-specific assistant layer вместо raw provider model.
+- [ ] Это размывает границу между `model behavior` и `backend business logic` и делает tool UX трудноотлаживаемым.
+- [ ] Для корректного native tool-calling нужен отдельный raw `OpenAI-compatible` model provider surface.
+
+### Нормативное решение
+
+- [ ] `Open WebUI` должен использовать раздельные integration surfaces:
+  - [ ] raw model provider for chat/tool reasoning;
+  - [ ] `OpenAPI Tool Server` for backend tools;
+  - [ ] optional `agent-navigator` wrapper only as specialized assistant / compatibility mode.
+- [ ] `Direct Connections` не считаем canonical production path; baseline model connection должна идти через standard provider/connection layer, а не через experimental browser-direct route.
+- [ ] Пока `model/tool split` не выполнен, странный tool UX в `Open WebUI` не трактуем как чисто backend problem.
 
 ## 5.2 Как будут жить инструменты (`tools`)
 

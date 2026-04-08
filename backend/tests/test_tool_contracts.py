@@ -125,3 +125,13 @@ def test_accepted_tool_result_matches_job_contract_shape():
     assert result.model_dump()["status"] == "accepted"
     assert result.execution_metadata.execution_mode == "async"
     assert status.model_dump()["status"] == "queued"
+
+
+def test_tool_job_status_accepts_cancelling_state():
+    status = ToolJobStatus(
+        job_id="job-456",
+        status="cancelling",
+        submitted_at="2026-04-08T09:00:00Z",
+    )
+
+    assert status.model_dump()["status"] == "cancelling"

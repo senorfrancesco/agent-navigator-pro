@@ -59,7 +59,7 @@ class ToolArtifact(BaseModel):
 class ToolAction(BaseModel):
     action_id: str
     label: str
-    action_type: Literal["rerun_tool", "open_url", "download", "view_artifact"]
+    action_type: Literal["rerun_tool", "open_url", "download", "view_artifact", "cancel_job"]
     payload: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -184,7 +184,7 @@ class AcceptedToolResult(BaseModel):
 
 class ToolJobStatus(BaseModel):
     job_id: str
-    status: Literal["queued", "running", "completed", "failed", "cancelled"]
+    status: Literal["queued", "running", "cancelling", "completed", "failed", "cancelled"]
     current_stage: Optional[str] = None
     submitted_at: str
     started_at: Optional[str] = None

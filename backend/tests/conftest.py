@@ -42,6 +42,21 @@ def isolate_knowledge_base_store(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def isolate_tool_job_store(monkeypatch, tmp_path):
+    from orchestrator import tool_execution as tool_execution_module
+    from orchestrator import tool_job_store as tool_job_store_module
+
+    db_url = f"sqlite:///{tmp_path / 'tool_jobs.db'}"
+    monkeypatch.setenv("ORCHESTRATOR_TOOL_JOB_DB_URL", db_url)
+    monkeypatch.setattr(tool_job_store_module, "DEFAULT_TOOL_JOB_DB_URL", db_url, raising=False)
+    monkeypatch.setattr(tool_job_store_module, "_STORE_SINGLETON", None, raising=False)
+    tool_execution_module.reset_tool_job_runtime_state()
+    yield
+    monkeypatch.setattr(tool_job_store_module, "_STORE_SINGLETON", None, raising=False)
+    tool_execution_module.reset_tool_job_runtime_state()
+
+
+@pytest.fixture(autouse=True)
 def isolate_ums_runtime_state(monkeypatch):
     from services.model_manager import unified_model_server as ums_server
 

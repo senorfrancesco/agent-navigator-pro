@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from orchestrator.agent_api import (
     OrchestrationRequest,
     _build_api_execution_dependencies,
+    cancel_tool_job_route,
     execute_orchestration_api,
     get_tool_job_result_route,
     get_tool_job_status_route,
@@ -17,6 +18,8 @@ from orchestrator.agent_api import (
 )
 from orchestrator.knowledge_base_ingestion import ingest_text_source_sync
 from orchestrator.knowledge_base_store import get_knowledge_base_store
+from orchestrator.tool_job_store import get_tool_job_store
+from orchestrator.tool_execution import reconcile_incomplete_tool_jobs
 
 
 def _strip_timing_footer(text: str) -> str:
@@ -256,6 +259,37 @@ async def test_execute_orchestration_api_returns_accepted_job_for_deep_tool(monk
 
 
 @pytest.mark.asyncio
+async def test_execute_orchestration_api_routes_equipment_fast_without_documents(monkeypatch):
+    async def fake_infer_with_effective_settings(
+        effective_settings,
+        prompt,
+        *,
+        enforced_overrides=None,
+        device_mode=None,
+        record_model_execution=None,
+        **_,
+    ):
+        return "Краткий анализ оборудования без document-only fallback."
+
+    monkeypatch.setattr("orchestrator.agent_api._infer_with_effective_settings", fake_infer_with_effective_settings)
+
+    request = OrchestrationRequest(
+        message="Проверь насос НП-100 и дай краткий вывод",
+        requested_tool="analyze_equipment_fast",
+        routing_mode="explicit",
+        file_count=0,
+        has_session_docs=False,
+    )
+
+    response = await execute_orchestration_api(request)
+
+    assert response["route"] == "equipment_analysis"
+    assert response["requested_tool"] == "analyze_equipment_fast"
+    assert _strip_timing_footer(response["assistant_message"]) == "Краткий анализ оборудования без document-only fallback."
+    assert "минимум 2 документа" not in response["assistant_message"]
+
+
+@pytest.mark.asyncio
 async def test_tool_job_polling_returns_completed_result(monkeypatch):
     async def fake_execute_orchestration(payload, deps=None):
         await asyncio.sleep(0)
@@ -295,6 +329,136 @@ async def test_tool_job_polling_returns_completed_result(monkeypatch):
     assert status["result_ref"].endswith("/result")
     assert result["assistant_message"] == "deep completed"
     assert result["run_id"] == "run-deep-2"
+
+
+@pytest.mark.asyncio
+async def test_tool_job_result_returns_409_before_completion():
+    job = get_tool_job_store().create_job(
+        tool_name="analyze_document_deep",
+        route_prefix=None,
+        request_payload={"requested_tool": "analyze_document_deep"},
+        execution_metadata={"execution_mode": "async"},
+    )
+
+    with pytest.raises(Exception) as exc_info:
+        await get_tool_job_result_route(job.job_id)
+
+    assert getattr(exc_info.value, "status_code", None) == 409
+    assert getattr(exc_info.value, "detail", "") == f"job-not-ready:{job.job_id}"
+
+
+@pytest.mark.asyncio
+async def test_tool_job_failed_status_and_result_contract(monkeypatch):
+    async def fake_execute_orchestration(payload, deps=None):
+        await asyncio.sleep(0)
+        raise RuntimeError("deep-failure")
+
+    monkeypatch.setattr("orchestrator.agent_api.execute_orchestration", fake_execute_orchestration)
+
+    request = OrchestrationRequest(
+        message="Сделай глубокий анализ документа",
+        requested_tool="analyze_document_deep",
+        routing_mode="explicit",
+        file_count=1,
+        has_session_docs=True,
+        session_docs={"contract.pdf": {"text": "Штраф 10 процентов"}},
+        active_doc_ids=["contract.pdf"],
+    )
+
+    accepted = await execute_orchestration_api(request)
+    status = None
+    for _ in range(5):
+        await asyncio.sleep(0)
+        status = await get_tool_job_status_route(accepted["job_id"])
+        if status["status"] == "failed":
+            break
+
+    assert status is not None
+    assert status["status"] == "failed"
+    assert status["error_summary"] == "deep-failure"
+
+    with pytest.raises(Exception) as exc_info:
+        await get_tool_job_result_route(accepted["job_id"])
+
+    assert getattr(exc_info.value, "status_code", None) == 409
+    assert getattr(exc_info.value, "detail", "") == f"job-terminal-without-result:{accepted['job_id']}:failed"
+
+
+@pytest.mark.asyncio
+async def test_cancel_tool_job_route_cancels_running_job(monkeypatch):
+    async def fake_execute_orchestration(payload, deps=None):
+        await asyncio.sleep(10)
+        return {"assistant_message": "should-not-complete"}
+
+    monkeypatch.setattr("orchestrator.agent_api.execute_orchestration", fake_execute_orchestration)
+
+    request = OrchestrationRequest(
+        message="Сделай глубокий анализ документа",
+        requested_tool="analyze_document_deep",
+        routing_mode="explicit",
+        file_count=1,
+        has_session_docs=True,
+        session_docs={"contract.pdf": {"text": "Штраф 10 процентов"}},
+        active_doc_ids=["contract.pdf"],
+    )
+
+    accepted = await execute_orchestration_api(request)
+    await asyncio.sleep(0)
+    cancel_response = await cancel_tool_job_route(accepted["job_id"])
+    assert cancel_response["status"] == "cancelling"
+
+    final_status = None
+    for _ in range(10):
+        await asyncio.sleep(0)
+        final_status = await get_tool_job_status_route(accepted["job_id"])
+        if final_status["status"] == "cancelled":
+            break
+
+    assert final_status is not None
+    assert final_status["status"] == "cancelled"
+    assert final_status["error_summary"] == "cancelled-by-request"
+
+
+@pytest.mark.asyncio
+async def test_cancel_tool_job_route_rejects_terminal_job():
+    job = get_tool_job_store().create_job(
+        tool_name="analyze_document_deep",
+        route_prefix=None,
+        request_payload={"requested_tool": "analyze_document_deep"},
+        execution_metadata={"execution_mode": "async"},
+    )
+    get_tool_job_store().finish_completed(job.job_id, {"assistant_message": "done"})
+
+    with pytest.raises(Exception) as exc_info:
+        await cancel_tool_job_route(job.job_id)
+
+    assert getattr(exc_info.value, "status_code", None) == 409
+    assert getattr(exc_info.value, "detail", "") == f"job-already-terminal:{job.job_id}:completed"
+
+
+def test_reconcile_incomplete_tool_jobs_marks_orphaned_jobs_failed():
+    store = get_tool_job_store()
+    queued = store.create_job(
+        tool_name="analyze_document_deep",
+        route_prefix=None,
+        request_payload={"requested_tool": "analyze_document_deep"},
+        execution_metadata={"execution_mode": "async"},
+    )
+    running = store.create_job(
+        tool_name="analyze_equipment_deep",
+        route_prefix=None,
+        request_payload={"requested_tool": "analyze_equipment_deep"},
+        execution_metadata={"execution_mode": "async"},
+    )
+    store.mark_running(running.job_id)
+
+    updated_count = reconcile_incomplete_tool_jobs()
+
+    assert updated_count == 2
+    assert store.get(queued.job_id).status == "failed"
+    assert store.get(queued.job_id).error_summary == "interrupted:process-restart"
+    assert store.get(running.job_id).status == "failed"
+    assert store.get(running.job_id).current_stage == "interrupted"
 
 
 def test_build_api_execution_dependencies_collects_model_execution_events():

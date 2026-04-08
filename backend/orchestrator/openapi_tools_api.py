@@ -26,6 +26,8 @@ from orchestrator.tool_schemas import (
     ToolRequest,
     ToolSource,
 )
+from orchestrator.tool_bindings import build_result_available_actions, summarize_tool_binding_catalog
+from orchestrator.tool_execution import build_tool_job_status_response, cancel_tool_job, get_tool_job_result, get_tool_job_store
 
 _TOOL_SERVER_BEARER = HTTPBearer(auto_error=False)
 _TOOL_ROUTE_PREFIXES = ("/tools/", "/tool-jobs/")
@@ -209,6 +211,7 @@ def _build_completed_tool_result(tool_request: ToolRequest, response: Dict[str, 
         structured_result=structured_result,
         sources=_normalize_tool_sources(response.get("sources") or []),
         artifacts=_normalize_tool_artifacts(response),
+        available_actions=build_result_available_actions(tool_request.tool_name),
         execution_metadata=ExecutionMetadata(
             requested_tool=tool_request.tool_name,
             routing_mode=tool_request.routing_mode,
@@ -248,6 +251,7 @@ def _build_tool_server_config_payload() -> Dict[str, Any]:
         "server": {
             "name": "Agent Navigator OpenAPI Tool Server",
         },
+        "toolUx": summarize_tool_binding_catalog(),
     }
 
 
@@ -311,8 +315,6 @@ def create_openapi_tools_router(
         dependencies=[Depends(_require_tool_server_access)],
     )
     async def tool_job_status(job_id: str, request: Request) -> Dict[str, Any]:
-        from orchestrator.tool_execution import build_tool_job_status_response, get_tool_job_store
-
         job = get_tool_job_store().get(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail=f"unknown-tool-job:{job_id}")
@@ -324,14 +326,27 @@ def create_openapi_tools_router(
         dependencies=[Depends(_require_tool_server_access)],
     )
     async def tool_job_result(job_id: str, request: Request) -> Dict[str, Any]:
-        from orchestrator.tool_execution import get_tool_job_result
-
         try:
             return get_tool_job_result(job_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=f"unknown-tool-job:{job_id}") from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @router.post(
+        "/tool-jobs/{job_id}/cancel",
+        response_model=ToolJobStatus,
+        operation_id="cancel_tool_job",
+        dependencies=[Depends(_require_tool_server_access)],
+    )
+    async def tool_job_cancel(job_id: str, request: Request) -> Dict[str, Any]:
+        try:
+            job = cancel_tool_job(job_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"unknown-tool-job:{job_id}") from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return build_tool_job_status_response(job)
 
     @router.post(
         "/tools/ask_document",
@@ -431,6 +446,12 @@ def create_openapi_tools_router(
         f"{_TOOL_SERVER_ALIAS_PREFIX}/tool-jobs/{{job_id}}/result",
         tool_job_result,
         methods=["GET"],
+    )
+    _register_tool_server_alias(
+        f"{_TOOL_SERVER_ALIAS_PREFIX}/tool-jobs/{{job_id}}/cancel",
+        tool_job_cancel,
+        methods=["POST"],
+        response_model=ToolJobStatus,
     )
     _register_tool_server_alias(
         f"{_TOOL_SERVER_ALIAS_PREFIX}/tools/ask_document",

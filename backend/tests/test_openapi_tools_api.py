@@ -61,6 +61,7 @@ def test_tool_server_openapi_filters_non_tool_routes(monkeypatch):
     assert "/tools/ask_document" in payload["paths"]
     assert "/tool-jobs/{job_id}" in payload["paths"]
     assert "/tool-jobs/{job_id}/result" in payload["paths"]
+    assert "/tool-jobs/{job_id}/cancel" in payload["paths"]
     assert "/health" not in payload["paths"]
     assert "/v1/chat/completions" not in payload["paths"]
     assert "/execute_orchestration" not in payload["paths"]
@@ -193,6 +194,9 @@ def test_prefixed_sync_tool_route_returns_completed_contract(monkeypatch):
     assert payload["status"] == "completed"
     assert payload["tool_name"] == "analyze_equipment_fast"
     assert payload["assistant_message"] == "Готово"
+    assert payload["available_actions"][0]["action_id"] == "equipment.deep.direct"
+    assert payload["available_actions"][0]["action_type"] == "rerun_tool"
+    assert payload["available_actions"][0]["payload"]["binding_id"] == "equipment.deep.direct"
 
 
 def test_prefixed_async_tool_route_returns_prefixed_status_url(monkeypatch):
@@ -223,9 +227,51 @@ def test_prefixed_async_tool_route_returns_prefixed_status_url(monkeypatch):
     payload = response.json()
     assert payload["status"] == "accepted"
     assert payload["status_url"].startswith("/tool-server/tool-jobs/")
+    assert payload["available_actions"][0]["action_id"] == "tool-job.status.open"
+    assert payload["available_actions"][1]["action_id"] == "tool-job.result.open"
+    assert payload["available_actions"][2]["action_type"] == "cancel_job"
 
     status_response = client.get(payload["status_url"], headers=_auth_headers())
     assert status_response.status_code == 200
+
+
+def test_tool_job_result_returns_409_before_completion(monkeypatch):
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_TOKEN", "tool-secret")
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_ALLOWED_ORIGINS", "http://localhost:3001")
+
+    store = agent_api.get_tool_job_store()
+    job = store.create_job(
+        tool_name="analyze_document_deep",
+        route_prefix=None,
+        request_payload={"requested_tool": "analyze_document_deep"},
+        execution_metadata={"execution_mode": "async"},
+    )
+
+    client = TestClient(agent_api.app)
+    response = client.get(f"/tool-jobs/{job.job_id}/result", headers=_auth_headers())
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == f"job-not-ready:{job.job_id}"
+
+
+def test_tool_job_cancel_route_returns_conflict_for_terminal_job(monkeypatch):
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_TOKEN", "tool-secret")
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_ALLOWED_ORIGINS", "http://localhost:3001")
+
+    store = agent_api.get_tool_job_store()
+    job = store.create_job(
+        tool_name="analyze_document_deep",
+        route_prefix="/tool-server",
+        request_payload={"requested_tool": "analyze_document_deep"},
+        execution_metadata={"execution_mode": "async"},
+    )
+    store.finish_completed(job.job_id, {"assistant_message": "done"})
+
+    client = TestClient(agent_api.app)
+    response = client.post(f"/tool-server/tool-jobs/{job.job_id}/cancel", headers=_auth_headers())
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == f"job-already-terminal:{job.job_id}:completed"
 
 
 def test_tool_route_accepts_eval_only_session_file_ref(monkeypatch):

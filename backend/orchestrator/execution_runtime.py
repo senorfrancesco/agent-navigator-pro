@@ -69,6 +69,13 @@ GENERAL_CHAT_LANGUAGE_GUARD_TEMPERATURE = float(
 GENERAL_CHAT_LANGUAGE_GUARD_TOP_P = float(
     os.getenv("GENERAL_CHAT_LANGUAGE_GUARD_TOP_P", "0.6")
 )
+EQUIPMENT_TOOL_FALLBACK_SYSTEM_PROMPT = (
+    "Ты эксперт по оборудованию и закупкам. Пользователь явно запустил инструмент анализа оборудования, "
+    "но не передал полную пару документов для строгого сравнения ТЗ и КП. "
+    "Дай полезный предварительный анализ по тексту запроса: кратко сформулируй вывод, "
+    "отметь риски или проверки, а если данных недостаточно, перечисли что именно нужно уточнить. "
+    "Не отвечай шаблонной фразой про необходимость минимум двух документов."
+)
 SUMMARY_REDUCE_GROUP_SIZE = 4
 SUMMARY_DEGRADED_REDUCE_GROUP_SIZE = 2
 SUMMARY_STAGE_MAX_INPUT_CHARS = {
@@ -1510,12 +1517,27 @@ async def _execute_equipment(
     query: str,
     new_files: List[Dict[str, Any]],
     session_docs: Dict[str, Any],
+    history: List[Dict[str, Any]],
+    effective_settings: Optional[Dict[str, Any]],
     deps: ExecutionDependencies,
 ) -> Dict[str, Any]:
     from orchestrator.workflows.equipment import create_equipment_graph
 
     files, error_message = _select_pair_files(new_files, session_docs)
     if error_message:
+        available_docs_count = max(len(new_files or []), len(session_docs or {}))
+        if available_docs_count < 2:
+            fallback_settings = dict(effective_settings or {})
+            fallback_settings["custom_system_prompt"] = str(
+                fallback_settings.get("custom_system_prompt") or EQUIPMENT_TOOL_FALLBACK_SYSTEM_PROMPT
+            )
+            return await _execute_general_chat(
+                query=query,
+                history=history,
+                session_docs=session_docs,
+                effective_settings=fallback_settings,
+                deps=deps,
+            )
         return {"assistant_message": error_message}
 
     mode = detect_equipment_mode(
@@ -2753,6 +2775,8 @@ async def execute_orchestration(
                     query=request.get("message", ""),
                     new_files=attachments_meta,
                     session_docs=session_docs,
+                    history=history,
+                    effective_settings=effective_settings,
                     deps=deps,
                 )
             elif executor == "document_analysis":

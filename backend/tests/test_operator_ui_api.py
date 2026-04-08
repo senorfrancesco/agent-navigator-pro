@@ -26,6 +26,9 @@ from orchestrator.operator_ui_api import (
     operator_metrics_summary,
     operator_grafana_links,
     operator_job_cancel,
+    operator_tool_action_catalog,
+    operator_tool_bindings,
+    operator_tool_bindings_export_openwebui,
     router,
 )
 
@@ -37,6 +40,8 @@ def test_operator_ui_state_exposes_python_control_plane_contract():
     assert state["delivery"]["ui_mode"] == "web-first"
     assert state["delivery"]["shell_role"] == "compatibility"
     assert state["delivery"]["actions_backend"] == "python_operator_runner"
+    assert state["toolUx"]["directActionCount"] == 2
+    assert state["toolUx"]["promptShortcutCount"] == 2
 
 
 def test_operator_health_exposes_delivery_contract():
@@ -123,6 +128,61 @@ def test_operator_metrics_summary_exposes_timing_summary():
         assert isinstance(metrics_payload[section], list)
     assert "timingSummary" in metrics_payload
     assert {"latest", "by_executor"} <= set(metrics_payload["timingSummary"].keys())
+
+
+def test_operator_tool_bindings_expose_enabled_and_document_dependent_entries():
+    payload = operator_tool_bindings()
+
+    assert payload["summary"]["directActionCount"] == 2
+    assert payload["summary"]["disabledDocumentDependentCount"] >= 4
+    binding_ids = {item["binding_id"] for item in payload["bindings"]}
+    assert "equipment.fast.direct" in binding_ids
+    assert "document.ask.direct" in binding_ids
+
+
+def test_operator_tool_action_catalog_splits_direct_actions_and_prompts():
+    payload = operator_tool_action_catalog()
+
+    direct_ids = {item["binding_id"] for item in payload["directActions"]}
+    prompt_ids = {item["binding_id"] for item in payload["promptShortcuts"]}
+    blocked_ids = {item["binding_id"] for item in payload["blockedBindings"]}
+
+    assert direct_ids == {"equipment.fast.direct", "equipment.deep.direct"}
+    assert prompt_ids == {"equipment.fast.prompt", "equipment.deep.prompt"}
+    assert "document.ask.direct" in blocked_ids
+
+
+def test_operator_tool_bindings_export_openwebui_returns_manual_import_bundle():
+    payload = operator_tool_bindings_export_openwebui("http://127.0.0.1:18000")
+
+    assert payload["toolServer"]["baseUrl"] == "http://127.0.0.1:18000/tool-server"
+    assert payload["toolServer"]["browserReachableBaseUrl"] == "http://127.0.0.1:18000/tool-server"
+    assert payload["toolServer"]["containerReachableBaseUrl"] == "http://host.docker.internal:18000/tool-server"
+    assert payload["toolServer"]["manualEnableRequired"] is True
+    assert len(payload["workspaceTools"]) == 2
+    assert payload["workspaceTools"][0]["tool_id"] == "equipment_fast_tool"
+    assert "class Tools" in payload["workspaceTools"][0]["pythonCode"]
+    assert "/tools/analyze_equipment_fast" in payload["workspaceTools"][0]["pythonCode"]
+    assert payload["directActions"][0]["binding_id"] == "equipment.fast.direct"
+    assert payload["workspacePrompts"][0]["slash_command"] == "/hw_fast"
+    assert payload["workspacePrompts"][0]["manualImportRequired"] is True
+    assert payload["workspacePrompts"][0]["openwebui"]["command"] == "/hw_fast"
+    assert len(payload["actionFunctions"]) == 4
+    action_ids = {item["action_id"] for item in payload["actionFunctions"]}
+    assert action_ids == {
+        "equipment_fast_action",
+        "equipment_deep_action",
+        "tool_job_refresh_action",
+        "tool_job_cancel_action",
+    }
+    equipment_fast_action = next(item for item in payload["actionFunctions"] if item["action_id"] == "equipment_fast_action")
+    assert equipment_fast_action["manualImportRequired"] is True
+    assert equipment_fast_action["targetModels"] == ["raw.*"]
+    assert equipment_fast_action["isActive"] is True
+    assert equipment_fast_action["isGlobal"] is True
+    assert "Authorization" in equipment_fast_action["pythonCode"]
+    assert "/tools/analyze_equipment_fast" in equipment_fast_action["pythonCode"]
+    assert payload["importChecklist"][0].startswith("1.")
 
 
 def test_operator_config_apply_rejects_unknown_path():

@@ -18,6 +18,7 @@ try:
     from orchestrator.operator_deploy_service import OperatorDeployService
     from orchestrator.operator_observability_service import OperatorObservabilityService
     from orchestrator.operator_runtime_service import OperatorRuntimeService, env_value, file_freshness, parse_env_file
+    from orchestrator.tool_bindings import build_openwebui_binding_export, list_tool_bindings, summarize_tool_binding_catalog
     from orchestrator.telemetry_runtime import get_timing_summary
 except ModuleNotFoundError:  # pragma: no cover - direct module import fallback
     from backend.orchestrator.operator_ui_actions import cancel_action_job, get_action, get_job, list_actions, start_action_job
@@ -25,6 +26,7 @@ except ModuleNotFoundError:  # pragma: no cover - direct module import fallback
     from backend.orchestrator.operator_deploy_service import OperatorDeployService
     from backend.orchestrator.operator_observability_service import OperatorObservabilityService
     from backend.orchestrator.operator_runtime_service import OperatorRuntimeService, env_value, file_freshness, parse_env_file
+    from backend.orchestrator.tool_bindings import build_openwebui_binding_export, list_tool_bindings, summarize_tool_binding_catalog
     from backend.orchestrator.telemetry_runtime import get_timing_summary
 
 
@@ -620,6 +622,7 @@ def build_operator_state(request_port: int | None = None) -> Dict[str, Any]:
 
     return {
         "delivery": _build_delivery_contract(),
+        "toolUx": summarize_tool_binding_catalog(),
         "runtimePaths": runtime_paths,
         "hardwareMetrics": hardware_metrics,
         "warnings": warnings,
@@ -915,6 +918,30 @@ def operator_deploy_mode(mode: str, request: Request) -> Dict[str, Any]:
 @router.get("/actions/catalog")
 def operator_action_catalog() -> Dict[str, Any]:
     return {"actions": list_actions()}
+
+
+@router.get("/tool-bindings")
+def operator_tool_bindings() -> Dict[str, Any]:
+    return {
+        "summary": summarize_tool_binding_catalog(),
+        "bindings": [binding.to_dict() for binding in list_tool_bindings()],
+    }
+
+
+@router.get("/tool-actions/catalog")
+def operator_tool_action_catalog() -> Dict[str, Any]:
+    bindings = [binding.to_dict() for binding in list_tool_bindings()]
+    return {
+        "summary": summarize_tool_binding_catalog(),
+        "directActions": [binding for binding in bindings if binding["entrypoint_type"] == "direct_action" and binding["enabled"]],
+        "promptShortcuts": [binding for binding in bindings if binding["entrypoint_type"] == "prompt_shortcut" and binding["enabled"]],
+        "blockedBindings": [binding for binding in bindings if not binding["enabled"]],
+    }
+
+
+@router.get("/tool-bindings/export/openwebui")
+def operator_tool_bindings_export_openwebui(backend_base_url: str = "http://127.0.0.1:8000") -> Dict[str, Any]:
+    return build_openwebui_binding_export(backend_base_url=backend_base_url)
 
 
 @router.get("/actions/{action_id}")

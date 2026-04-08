@@ -14,6 +14,7 @@ import uuid
 import logging
 import warnings
 from pathlib import Path
+from contextlib import asynccontextmanager
 from typing import Dict, Any, Optional, List, AsyncGenerator, Literal
 from dotenv import load_dotenv
 import numpy as np
@@ -32,6 +33,7 @@ from pydantic import BaseModel
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from services.model_manager.ums_client import ums_client
 from services.model_manager.model_selection import resolve_execution_plan, resolve_model_selection
+from services.model_manager.models_config import get_all_models
 from services.observability import (
     inc_metric_counter,
     ObservabilityMiddleware,
@@ -52,9 +54,11 @@ from orchestrator.tool_execution import (
     apply_tool_contract_to_payload,
     build_accepted_tool_job_response,
     build_tool_job_status_response,
+    cancel_tool_job,
     get_tool_job_result,
     get_tool_job_store,
     inject_tool_contract_metadata,
+    reconcile_incomplete_tool_jobs,
     should_start_async_tool_job,
     submit_async_tool_job,
 )
@@ -79,7 +83,14 @@ try:
 except ImportError:
     def get_system_resources(): return {"error": "Resource monitor not found"}
 
-app = FastAPI(title="Agent Navigator Pro Orchestrator", version="2.3.0")
+
+@asynccontextmanager
+async def app_lifespan(app: FastAPI):
+    reconcile_incomplete_tool_jobs()
+    yield
+
+
+app = FastAPI(title="Agent Navigator Pro Orchestrator", version="2.3.0", lifespan=app_lifespan)
 logger = logging.getLogger("agent_api")
 
 app.add_middleware(
@@ -810,6 +821,69 @@ def _build_openai_chat_completion_response(*, target_model: str, text: str) -> D
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     }
 
+
+def _list_raw_chat_capable_models() -> List[Dict[str, Any]]:
+    payload: List[Dict[str, Any]] = []
+    for model_id, config in get_all_models().items():
+        kind = str(config.get("kind") or "")
+        if kind not in {"llm", "vision"}:
+            continue
+        payload.append(
+            {
+                "id": model_id,
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "agent-navigator-raw-provider",
+            }
+        )
+    return payload
+
+
+def _resolve_raw_model_id(data: Dict[str, Any]) -> str:
+    available_ids = {item["id"] for item in _list_raw_chat_capable_models()}
+    requested_model = str(data.get("model") or "").strip()
+    target_model = requested_model or str(resolve_model_selection("llm.default_chat").resolved_model_id or "").strip()
+    if not target_model:
+        raise HTTPException(status_code=503, detail="raw-model-provider-default-missing")
+    if target_model not in available_ids:
+        raise HTTPException(status_code=404, detail=f"unknown-raw-model:{target_model}")
+    return target_model
+
+
+def _build_raw_openai_payload(data: Dict[str, Any], *, target_model: str) -> Dict[str, Any]:
+    messages = data.get("messages")
+    if not isinstance(messages, list) or not messages:
+        raise HTTPException(status_code=422, detail="raw-chat-messages-required")
+    payload = dict(data)
+    payload["model"] = target_model
+    return payload
+
+
+def _sanitize_raw_openai_response(response: Dict[str, Any], *, target_model: str) -> Dict[str, Any]:
+    sanitized = dict(response)
+    sanitized.pop("model_execution", None)
+    sanitized["model"] = target_model
+    return sanitized
+
+
+async def _proxy_raw_openai_stream(*, target_model: str, payload: Dict[str, Any]) -> AsyncGenerator[bytes, None]:
+    client = await get_shared_client()
+    request_body = {
+        "model_id": target_model,
+        "payload": payload,
+        "device_mode": "hybrid",
+        "priority": "normal",
+        "stream": True,
+    }
+    async with client.stream("POST", f"{ums_client.base_url}/infer", json=request_body) as response:
+        try:
+            response.raise_for_status()
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"raw-model-stream-failed:{exc}") from exc
+        async for chunk in response.aiter_raw():
+            if chunk:
+                yield chunk
+
 # === Health ===
 
 @app.get("/health")
@@ -905,6 +979,16 @@ async def get_tool_job_result_route(job_id: str):
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+async def cancel_tool_job_route(job_id: str):
+    try:
+        job = cancel_tool_job(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"unknown-tool-job:{job_id}") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return build_tool_job_status_response(job)
+
+
 async def _execute_openapi_tool_request(
     request: OrchestrationRequest,
     http_request: Optional[Request] = None,
@@ -922,6 +1006,32 @@ app.include_router(
 
 
 # === OpenAI Compatible API ===
+
+@app.get("/raw/v1/models")
+def list_raw_models():
+    return {"object": "list", "data": _list_raw_chat_capable_models()}
+
+
+@app.post("/raw/v1/chat/completions")
+async def raw_openai_completions(request: Request):
+    data = await request.json()
+    target_model = _resolve_raw_model_id(data)
+    payload = _build_raw_openai_payload(data, target_model=target_model)
+    stream_mode = bool(data.get("stream", True))
+
+    if not stream_mode:
+        try:
+            response = await ums_client.async_infer(target_model, payload, device_mode="hybrid")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"raw-model-infer-failed:{exc}") from exc
+        return _sanitize_raw_openai_response(response, target_model=target_model)
+
+    return StreamingResponse(
+        _proxy_raw_openai_stream(target_model=target_model, payload=payload),
+        media_type="text/event-stream",
+    )
 
 @app.get("/v1/models")
 def list_models():

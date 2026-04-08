@@ -8,7 +8,11 @@
    Единый master-plan по migration contour.
 2. [2026-04-07-openapi-tool-server-mvp-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-07-openapi-tool-server-mvp-plan.md)
    MVP-contract для backend-owned OpenAPI Tool Server.
-3. [2026-04-07-openwebui-mcp-tools-actions-architecture-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-07-openwebui-mcp-tools-actions-architecture-plan.md)
+3. [2026-04-08-openwebui-model-tool-split-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-08-openwebui-model-tool-split-plan.md)
+   Source-backed plan по разделению raw model provider и tool server в `Open WebUI`.
+4. [2026-04-08-openwebui-named-tools-bootstrap-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-08-openwebui-named-tools-bootstrap-plan.md)
+   Execution-ready plan по named tools, thin Python wrappers и idempotent bootstrap в `Open WebUI`.
+5. [2026-04-07-openwebui-mcp-tools-actions-architecture-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-07-openwebui-mcp-tools-actions-architecture-plan.md)
    Подробное ТЗ по `MCP`, `OpenAPI`, slash/prompts, actions и rich UI.
 
 ## Supporting Migration Plans
