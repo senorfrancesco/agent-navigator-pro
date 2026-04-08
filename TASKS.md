@@ -2456,6 +2456,7 @@ DOCUMENT_ANALYSIS_SUMMARIZE_MAX_TOKENS=512
 - [ ] Detailed migration work по `requested_tool` / action-first UX / `Open WebUI` eval contour теперь ведётся в [TASKS_MIGRATION.md](./TASKS_MIGRATION.md).
 - [ ] Cross-project rule здесь остаётся прежним: migration slices не должны ломать текущий `Chainlit`-first runtime без явного approved rollout.
 - [x] Legacy root migration документы `MIGRATION_TOOLS.md`, `MIGRATION_RAG_OPENWEBUI.md`, `MIGRATION_OVERIEW_WITH_LEAKS.md` архивированы как alias-файлы; operational source-of-truth закреплён за `TASKS_MIGRATION.md` и `docs/plans/migration/README.md`.
+- [x] Удалён ad-hoc root Python smoke `test_rag_e2e.py` (вне `backend/tests`, без CI/runtime references), а `setup_windows.bat` свёрнут в compatibility-wrapper с делегацией на canonical `scripts/install/install_windows.ps1`.
 
 ### Антикризисные правила
 1. Не добавлять новые workflow до B3.31 cleanup
