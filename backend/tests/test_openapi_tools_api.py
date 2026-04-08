@@ -25,6 +25,30 @@ def test_tool_server_openapi_requires_bearer_token(monkeypatch):
     assert response.status_code == 401
 
 
+def test_tool_server_config_allows_unauthenticated_probe(monkeypatch):
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_TOKEN", "tool-secret")
+
+    client = TestClient(agent_api.app)
+    response = client.get("/tool-server/api/config")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["features"]["system"] is False
+
+
+def test_tool_server_config_returns_terminal_compatible_payload(monkeypatch):
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_TOKEN", "tool-secret")
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_ALLOWED_ORIGINS", "http://localhost:3001")
+
+    client = TestClient(agent_api.app)
+    response = client.get("/tool-server/api/config", headers=_auth_headers())
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["features"]["system"] is False
+    assert payload["server"]["name"] == "Agent Navigator OpenAPI Tool Server"
+
+
 def test_tool_server_openapi_filters_non_tool_routes(monkeypatch):
     monkeypatch.setenv("OPENAPI_TOOL_SERVER_TOKEN", "tool-secret")
     monkeypatch.setenv("OPENAPI_TOOL_SERVER_ALLOWED_ORIGINS", "http://localhost:3001")
@@ -139,6 +163,69 @@ def test_async_tool_route_returns_accepted_contract(monkeypatch):
     assert payload["status"] == "accepted"
     assert payload["tool_name"] == "analyze_document_deep"
     assert payload["job_id"] == "job-1"
+
+
+def test_prefixed_sync_tool_route_returns_completed_contract(monkeypatch):
+    async def fake_execute(orchestration_request, http_request=None):
+        return {
+            "assistant_message": "Готово",
+            "trace_id": "trace-tool-prefixed-sync",
+            "route": "equipment_analysis",
+            "source_scope_summary": "session",
+            "sources": [],
+        }
+
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_TOKEN", "tool-secret")
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_ALLOWED_ORIGINS", "http://localhost:3001")
+    monkeypatch.setattr(agent_api, "execute_orchestration_api", fake_execute)
+
+    client = TestClient(agent_api.app)
+    response = client.post(
+        "/tool-server/tools/analyze_equipment_fast",
+        headers=_auth_headers(),
+        json={
+            "equipment_query": "Проверь насос НП-100",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "completed"
+    assert payload["tool_name"] == "analyze_equipment_fast"
+    assert payload["assistant_message"] == "Готово"
+
+
+def test_prefixed_async_tool_route_returns_prefixed_status_url(monkeypatch):
+    async def fake_execute(request_payload, deps=None):
+        return {
+            "assistant_message": "Deep analysis completed",
+            "trace_id": "trace-tool-prefixed-async",
+            "route": "equipment_analysis",
+            "source_scope_summary": "session",
+            "sources": [],
+        }
+
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_TOKEN", "tool-secret")
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_ALLOWED_ORIGINS", "http://localhost:3001")
+    monkeypatch.setattr(agent_api, "execute_orchestration", fake_execute)
+    monkeypatch.setattr(agent_api, "_build_api_execution_dependencies", lambda request, settings: object())
+
+    client = TestClient(agent_api.app)
+    response = client.post(
+        "/tool-server/tools/analyze_equipment_deep",
+        headers=_auth_headers(),
+        json={
+            "equipment_query": "Проверь компрессор КМ-42",
+        },
+    )
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["status"] == "accepted"
+    assert payload["status_url"].startswith("/tool-server/tool-jobs/")
+
+    status_response = client.get(payload["status_url"], headers=_auth_headers())
+    assert status_response.status_code == 200
 
 
 def test_tool_route_accepts_eval_only_session_file_ref(monkeypatch):

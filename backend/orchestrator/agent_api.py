@@ -132,6 +132,15 @@ def _resolve_http_trace_id(http_request: Optional[Request]) -> str:
         return str(uuid.uuid4())[:8]
     return _get_request_trace_id(http_request)
 
+
+def _resolve_tool_job_route_prefix(http_request: Optional[Request]) -> str:
+    if http_request is None:
+        return ""
+    path = str(http_request.url.path or "")
+    if path.startswith("/tool-server/"):
+        return "/tool-server"
+    return ""
+
 # Дедупликация параллельных запросов от Open WebUI
 # Хранит dedup_key -> timestamp начала обработки
 _active_workflows: Dict[str, float] = {}
@@ -860,6 +869,7 @@ async def execute_orchestration_api(request: OrchestrationRequest, http_request:
             request_payload=payload,
             deps=deps,
             execute_fn=execute_orchestration,
+            route_prefix=_resolve_tool_job_route_prefix(http_request),
         )
         return build_accepted_tool_job_response(job, payload)
     response = await execute_orchestration(payload, deps=deps)

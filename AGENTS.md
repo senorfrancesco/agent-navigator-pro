@@ -13,6 +13,9 @@
 - `docker compose logs --tail=200 chainlit`: inspect Chainlit runtime logs.
 - `docker compose up -d --build --force-recreate chainlit`: rebuild Chainlit when `.chainlit`, `public/`, `Dockerfile.chainlit`, or `chainlit_app.py` changed.
 - `docker compose --profile legacy up open-webui`: start the legacy Open WebUI path when needed.
+- `docker compose --profile legacy up -d --force-recreate open-webui`: recreate legacy Open WebUI after `backend/.env` / `WEBUI_*` changes so container env is re-read.
+- `bash ~/.codex/skills/playwright/scripts/playwright_cli.sh open http://127.0.0.1:3001/ --browser firefox --headed`: open legacy Open WebUI in visible Firefox for live manual observation.
+- `bash ~/.codex/skills/playwright/scripts/playwright_cli.sh snapshot`: refresh refs before interactions; then use `fill` / `click` for fast checks or `run-code "async (page) => { await page.keyboard.type(..., { delay: 120 }); }"` when the user should see live typing.
 
 ## Coding Style & Naming Conventions
 Follow existing Python style: 4-space indentation, type hints on public interfaces, and `snake_case` for modules, functions, and variables. Keep FastAPI and workflow code split by domain instead of creating large utility files. Class names use `PascalCase`; constants use `UPPER_SNAKE_CASE`. No formatter or linter is enforced in the repo today, so keep imports tidy and match surrounding style before submitting changes.

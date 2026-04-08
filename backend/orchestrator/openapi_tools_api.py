@@ -29,6 +29,7 @@ from orchestrator.tool_schemas import (
 
 _TOOL_SERVER_BEARER = HTTPBearer(auto_error=False)
 _TOOL_ROUTE_PREFIXES = ("/tools/", "/tool-jobs/")
+_TOOL_SERVER_ALIAS_PREFIX = "/tool-server"
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -239,6 +240,17 @@ def _build_tool_server_openapi(app: FastAPI) -> Dict[str, Any]:
     )
 
 
+def _build_tool_server_config_payload() -> Dict[str, Any]:
+    return {
+        "features": {
+            "system": False,
+        },
+        "server": {
+            "name": "Agent Navigator OpenAPI Tool Server",
+        },
+    }
+
+
 def create_openapi_tools_router(
     *,
     app: FastAPI,
@@ -246,6 +258,26 @@ def create_openapi_tools_router(
     execute_orchestration_request: Callable[[Any, Optional[Request]], Awaitable[Dict[str, Any]]],
 ) -> APIRouter:
     router = APIRouter()
+
+    def _register_tool_server_alias(
+        path: str,
+        endpoint: Callable[..., Awaitable[Any]],
+        *,
+        methods: List[str],
+        response_model: Optional[Type[Any]] = None,
+        responses: Optional[Dict[int, Dict[str, Any]]] = None,
+    ) -> None:
+        alias_name = f"tool_server_alias_{endpoint.__name__}_{path.strip('/').replace('/', '_').replace('{', '').replace('}', '')}"
+        router.add_api_route(
+            path,
+            endpoint,
+            methods=methods,
+            response_model=response_model,
+            responses=responses,
+            dependencies=[Depends(_require_tool_server_access)],
+            include_in_schema=False,
+            name=alias_name,
+        )
 
     async def _execute_tool(tool_request: ToolRequest, http_request: Request) -> Dict[str, Any]:
         payload = _build_orchestration_payload(tool_request)
@@ -262,6 +294,15 @@ def create_openapi_tools_router(
     )
     async def tool_server_openapi_schema() -> Dict[str, Any]:
         return _build_tool_server_openapi(app)
+
+    @router.get(
+        "/tool-server/api/config",
+        include_in_schema=False,
+    )
+    async def tool_server_config() -> Dict[str, Any]:
+        if not _tool_server_enabled():
+            raise HTTPException(status_code=404, detail="tool-server-disabled")
+        return _build_tool_server_config_payload()
 
     @router.get(
         "/tool-jobs/{job_id}",
@@ -379,5 +420,63 @@ def create_openapi_tools_router(
         if response.get("status") == "accepted":
             return JSONResponse(status_code=202, content=response)
         return response
+
+    _register_tool_server_alias(
+        f"{_TOOL_SERVER_ALIAS_PREFIX}/tool-jobs/{{job_id}}",
+        tool_job_status,
+        methods=["GET"],
+        response_model=ToolJobStatus,
+    )
+    _register_tool_server_alias(
+        f"{_TOOL_SERVER_ALIAS_PREFIX}/tool-jobs/{{job_id}}/result",
+        tool_job_result,
+        methods=["GET"],
+    )
+    _register_tool_server_alias(
+        f"{_TOOL_SERVER_ALIAS_PREFIX}/tools/ask_document",
+        ask_document,
+        methods=["POST"],
+        response_model=CompletedToolResult,
+        responses={202: {"model": AcceptedToolResult}},
+    )
+    _register_tool_server_alias(
+        f"{_TOOL_SERVER_ALIAS_PREFIX}/tools/analyze_document_fast",
+        analyze_document_fast,
+        methods=["POST"],
+        response_model=CompletedToolResult,
+        responses={202: {"model": AcceptedToolResult}},
+    )
+    _register_tool_server_alias(
+        f"{_TOOL_SERVER_ALIAS_PREFIX}/tools/analyze_document_deep",
+        analyze_document_deep,
+        methods=["POST"],
+        response_model=AcceptedToolResult,
+    )
+    _register_tool_server_alias(
+        f"{_TOOL_SERVER_ALIAS_PREFIX}/tools/compare_documents_fast",
+        compare_documents_fast,
+        methods=["POST"],
+        response_model=CompletedToolResult,
+        responses={202: {"model": AcceptedToolResult}},
+    )
+    _register_tool_server_alias(
+        f"{_TOOL_SERVER_ALIAS_PREFIX}/tools/compare_documents_deep",
+        compare_documents_deep,
+        methods=["POST"],
+        response_model=AcceptedToolResult,
+    )
+    _register_tool_server_alias(
+        f"{_TOOL_SERVER_ALIAS_PREFIX}/tools/analyze_equipment_fast",
+        analyze_equipment_fast,
+        methods=["POST"],
+        response_model=CompletedToolResult,
+        responses={202: {"model": AcceptedToolResult}},
+    )
+    _register_tool_server_alias(
+        f"{_TOOL_SERVER_ALIAS_PREFIX}/tools/analyze_equipment_deep",
+        analyze_equipment_deep,
+        methods=["POST"],
+        response_model=AcceptedToolResult,
+    )
 
     return router

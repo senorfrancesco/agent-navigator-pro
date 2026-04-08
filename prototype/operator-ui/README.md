@@ -33,7 +33,7 @@ npm run prototype:operator-ui
 
 ```bash
 cd backend
-uvicorn orchestrator.agent_api:app --reload --port 8000
+uvicorn orchestrator.agent_api:app --reload --port 18000
 ```
 
 Потом открыть:

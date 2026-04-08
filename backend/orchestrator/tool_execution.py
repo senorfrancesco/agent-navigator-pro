@@ -15,6 +15,13 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _normalize_route_prefix(route_prefix: Optional[str]) -> str:
+    normalized = str(route_prefix or "").strip().strip("/")
+    if not normalized:
+        return ""
+    return f"/{normalized}"
+
+
 @dataclass
 class ToolJobRecord:
     job_id: str
@@ -37,15 +44,16 @@ class ToolJobStore:
     def __init__(self) -> None:
         self._jobs: Dict[str, ToolJobRecord] = {}
 
-    def create_job(self, *, tool_name: str) -> ToolJobRecord:
+    def create_job(self, *, tool_name: str, route_prefix: Optional[str] = None) -> ToolJobRecord:
         job_id = str(uuid.uuid4())
+        normalized_prefix = _normalize_route_prefix(route_prefix)
         job = ToolJobRecord(
             job_id=job_id,
             tool_name=tool_name,
             status="queued",
             submitted_at=utc_now(),
-            status_url=f"/tool-jobs/{job_id}",
-            result_ref=f"/tool-jobs/{job_id}/result",
+            status_url=f"{normalized_prefix}/tool-jobs/{job_id}",
+            result_ref=f"{normalized_prefix}/tool-jobs/{job_id}/result",
             current_stage="queued",
         )
         self._jobs[job_id] = job
@@ -194,9 +202,13 @@ def submit_async_tool_job(
     request_payload: Dict[str, Any],
     deps: Any,
     execute_fn: Callable[..., Awaitable[Dict[str, Any]]],
+    route_prefix: Optional[str] = None,
 ) -> ToolJobRecord:
     store = get_tool_job_store()
-    job = store.create_job(tool_name=str(request_payload.get("requested_tool") or request_payload.get("tool_name") or ""))
+    job = store.create_job(
+        tool_name=str(request_payload.get("requested_tool") or request_payload.get("tool_name") or ""),
+        route_prefix=route_prefix,
+    )
     payload_copy = copy.deepcopy(request_payload)
     payload_copy.setdefault("idempotency_key", f"tool-job:{job.job_id}")
 
