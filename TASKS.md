@@ -2320,6 +2320,21 @@ Update (2026-04-01):
 - MCP-интеграция нестабильна — использовать CLI fallback `nlm ...`
 - VS Code + Gemini Code Assist может циклически переподнимать `notebooklm-mcp`, если в `~/.gemini/settings.json` одновременно присутствуют `mcpServers.notebooklm` и `mcpServers.notebooklm-mcp`, а в `~/.gemini/mcp-server-enablement.json` отключён только `notebooklm`. Follow-up: оставить один канонический сервер и синхронизировать ключ enablement с фактическим именем сервера.
 
+### 2026-04-08 — NotebookLM MCP verification
+- Повторная живая проверка MCP по notebook `Production-Ready AI Agents` показала, что основной read/query path работает корректно.
+- `server_info` = `0.5.17`, `refresh_auth` успешен, `notebook_list` вернул 13 notebook'ов, включая `Production-Ready AI Agents` (`340b0685-a2f0-48ab-a1c3-68c7789be95c`).
+- `notebook_get`, `notebook_describe` и синхронный `notebook_query` возвращают содержательные ответы с `conversation_id`, `sources_used`, `citations` и `references`.
+- Follow-up query в рамках той же `conversation_id` тоже успешен, значит контекст диалога через MCP сейчас сохраняется.
+- Вывод: старое ограничение от 2026-03-11 для read/query сценариев больше не подтверждается; fallback на CLI оставлять как запасной путь, но не как обязательный default для запросов к уже существующим notebook'ам.
+- Не перепроверено в этой сессии: `research_start` / import pipeline. Если понадобится именно deep research path, его лучше проверить отдельно.
+
+### 2026-04-08 — Unified model catalog / gateway plan
+- Для post-M1-M3 cleanup slice зафиксирован отдельный migration plan: `docs/plans/migration/2026-04-08-unified-model-catalog-gateway-plan.md`.
+- Цель: сделать `UMS` canonical model catalog + OpenAI-compatible gateway для `Open WebUI` и внутренних клиентов, а raw catalog в `agent_api` перевести в compatibility shim.
+- В plan зафиксирован code-grounded gap текущей ветки: `UMS` уже публикует `/v1/embeddings`, но canonical `GET /v1/models` и `POST /v1/chat/completions` пока ещё живут не в `UMS`, а во временном raw-provider path `agent_api`.
+- Решение отложено как отдельный structural slice, чтобы не смешивать его с текущим `OpenAPI Tool Server` / `Open WebUI` migration contour.
+- Execution order зафиксирован явно: сначала `M3.5 — Named Tools + Bootstrap`, затем `Unified Model Catalog / Gateway`, потому что `M3.5` даёт immediate user-facing flow и не требует рискованных правок в `agent_api` / `UMS`.
+
 ### 2026-03-12 — Orchestration boundary review
 - B3.31 ядро закрыто в коде (3 новых модуля + 37 тестов)
 - `chainlit_app.py` делегирует в backend, `_execute_intent` удалён
