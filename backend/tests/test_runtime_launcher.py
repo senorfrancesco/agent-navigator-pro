@@ -107,6 +107,15 @@ def test_launcher_help_documents_install_and_platform_flags():
     assert "--install --platform ubuntu" in result.stdout
     assert "--gpu-layers-mode auto|max|manual" in result.stdout
     assert "--ensure-model-download" in result.stdout
+    assert "--skip-chainlit" in result.stdout
+
+
+def test_run_native_help_documents_skip_chainlit():
+    result = _run_script("run_native.sh", "--help", env=os.environ.copy())
+
+    assert result.returncode == 0
+    assert "--skip-chainlit" in result.stdout
+    assert "Не запускать окно Chainlit" in result.stdout
 
 
 def test_launcher_test_mode_writes_env_runtime_and_reports_target(tmp_path):
@@ -147,6 +156,25 @@ def test_launcher_does_not_run_model_download_phase_by_default(tmp_path):
     assert result.returncode == 0
     assert "models:plan" not in result.stdout
     assert "launcher:test-mode target=native" in result.stdout
+
+
+def test_launcher_forwards_skip_chainlit_to_native_runner(tmp_path):
+    runtime_env = tmp_path / ".env.runtime"
+    env = os.environ.copy()
+    env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
+    env["AGENT_NAVIGATOR_RUNTIME_ENV_FILE"] = str(runtime_env)
+
+    result = _run_script(
+        "launcher.sh",
+        "--target",
+        "native",
+        "--skip-chainlit",
+        env=env,
+    )
+
+    assert result.returncode == 0
+    assert "launcher:test-mode target=native" in result.stdout
+    assert "skip_chainlit=true" in result.stdout.lower()
 
 
 def test_launcher_can_explicitly_enable_model_download_phase(tmp_path):
@@ -338,6 +366,19 @@ def test_run_native_is_wrapper_to_launcher(tmp_path):
     assert "launcher:test-mode target=native" in result.stdout
 
 
+def test_run_native_wrapper_forwards_skip_chainlit_to_launcher(tmp_path):
+    runtime_env = tmp_path / ".env.runtime"
+    env = os.environ.copy()
+    env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
+    env["AGENT_NAVIGATOR_RUNTIME_ENV_FILE"] = str(runtime_env)
+
+    result = _run_script("run_native.sh", "--skip-chainlit", "--no-attach", env=env)
+
+    assert result.returncode == 0
+    assert "launcher:test-mode target=native" in result.stdout
+    assert "skip_chainlit=true" in result.stdout.lower()
+
+
 def test_stop_native_uses_override_env_files_and_safe_loader(tmp_path):
     backend_env = tmp_path / ".env"
     runtime_env = tmp_path / ".env.runtime"
@@ -415,6 +456,44 @@ def test_run_native_from_launcher_reports_invalid_model_path(tmp_path):
 
     assert result.returncode == 1
     assert "env-invalid:MODEL_PATH_LLM:missing-file:" in result.stderr
+
+
+def test_run_native_from_launcher_honors_skip_chainlit_in_test_mode(tmp_path):
+    backend_env = tmp_path / ".env"
+    runtime_env = tmp_path / ".env.runtime"
+    uploads_dir = tmp_path / "uploads"
+    llm_file = tmp_path / "model.gguf"
+    intent_dir = tmp_path / "intent"
+    retrieval_dir = tmp_path / "retrieval"
+    llm_file.write_text("stub", encoding="utf-8")
+    intent_dir.mkdir()
+    retrieval_dir.mkdir()
+
+    backend_env.write_text("CHAINLIT_AUTH_SECRET='ok'\nCHAINLIT_ADMIN_PASSWORD='ok'\n", encoding="utf-8")
+    runtime_env.write_text(
+        "\n".join(
+            [
+                f"UPLOADS_DIR='{uploads_dir}'",
+                f"MODEL_PATH_LLM='{llm_file}'",
+                "MODEL_PATH_VLM=''",
+                "MMPROJ_PATH=''",
+                f"MODEL_PATH_EMBEDDING_INTENT='{intent_dir}'",
+                f"MODEL_PATH_EMBEDDING_RETRIEVAL='{retrieval_dir}'",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
+    env["AGENT_NAVIGATOR_SKIP_CONDA_CHECKS"] = "1"
+    env["AGENT_NAVIGATOR_BACKEND_ENV_FILE"] = str(backend_env)
+    env["AGENT_NAVIGATOR_RUNTIME_ENV_FILE"] = str(runtime_env)
+
+    result = _run_script("run_native.sh", "--from-launcher", "--skip-chainlit", "--no-attach", env=env)
+
+    assert result.returncode == 0
+    assert "run_native:test-mode validated" in result.stdout
+    assert "skip_chainlit=true" in result.stdout.lower()
 
 
 def test_run_native_from_launcher_repairs_writable_uploads_dir(tmp_path):

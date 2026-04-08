@@ -72,6 +72,7 @@ Legacy note:
 ./scripts/launcher.sh --target native --profile adaptive
 ./scripts/launcher.sh --target native --llm-device-mode gpu --intent-embedder-device-mode cpu
 ./scripts/launcher.sh --target native --gpu-layers-mode manual --gpu-layers 24
+./scripts/launcher.sh --target native --skip-chainlit --no-attach
 ./scripts/launcher.sh --target container --profile default --no-attach
 ```
 
@@ -111,6 +112,7 @@ Legacy note:
 | `--review-runtime` | interactive review current-run plan |
 | `--non-interactive` | без interactive review |
 | `--skip-model-download` | не запускать downloader |
+| `--skip-chainlit` | только для `--target native`: не запускать окно Chainlit |
 | `--report-only` | только plan/report без запуска |
 | `--install --platform <platform>` | guided install path |
 

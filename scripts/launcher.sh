@@ -14,6 +14,7 @@ source "$SCRIPT_DIR/utils/env_loader.sh"
 TARGET="native"
 PROFILE="${UMS_RUNTIME_PROFILE:-adaptive}"
 NO_ATTACH=false
+SKIP_CHAINLIT=false
 REPORT_ONLY=false
 NON_INTERACTIVE=false
 REVIEW_RUNTIME=false
@@ -83,6 +84,9 @@ Operator UI and /operator/* endpoints remain the canonical product API; this scr
       Явно включить model provisioning phase перед запуском.
   --no-attach
       Не подключаться к tmux после запуска target runner.
+  --skip-chainlit
+      Только для `--target native`: не запускать окно Chainlit в native tmux-сессии.
+      Backend-сервисы и Agent API продолжают стартовать как обычно.
   --report-only
       Только вывести runtime plan без записи .env.runtime и без запуска.
   --install
@@ -120,6 +124,10 @@ while [ $# -gt 0 ]; do
       ;;
     --no-attach)
       NO_ATTACH=true
+      shift
+      ;;
+    --skip-chainlit)
+      SKIP_CHAINLIT=true
       shift
       ;;
     --report-only)
@@ -480,12 +488,19 @@ if [ "$ENSURE_MODELS" = true ]; then
 fi
 
 if [ "${AGENT_NAVIGATOR_TEST_MODE:-0}" = "1" ]; then
-  echo "launcher:test-mode target=$TARGET profile=$PROFILE env_runtime=$RUNTIME_ENV_FILE no_attach=$NO_ATTACH"
+  echo "launcher:test-mode target=$TARGET profile=$PROFILE env_runtime=$RUNTIME_ENV_FILE no_attach=$NO_ATTACH skip_chainlit=$SKIP_CHAINLIT"
   exit 0
 fi
 
 if [ "$TARGET" = "native" ]; then
-  exec bash "$SCRIPT_DIR/run_native.sh" --from-launcher $([ "$NO_ATTACH" = true ] && echo "--no-attach")
+  native_args=(--from-launcher)
+  if [ "$NO_ATTACH" = true ]; then
+    native_args+=(--no-attach)
+  fi
+  if [ "$SKIP_CHAINLIT" = true ]; then
+    native_args+=(--skip-chainlit)
+  fi
+  exec bash "$SCRIPT_DIR/run_native.sh" "${native_args[@]}"
 elif [ "$TARGET" = "container" ]; then
   exec bash "$SCRIPT_DIR/run_all.sh" --from-launcher $([ "$NO_ATTACH" = true ] && echo "--no-attach")
 else

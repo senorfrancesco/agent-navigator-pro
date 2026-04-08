@@ -23,6 +23,7 @@ source "$SCRIPT_DIR/utils/env_loader.sh"
 
 ATTACH_TMUX=true
 FROM_LAUNCHER=false
+SKIP_CHAINLIT=false
 
 print_help() {
   cat <<EOF
@@ -34,6 +35,7 @@ run_native.sh
 Использование:
   ./scripts/run_native.sh
   ./scripts/run_native.sh --no-attach
+  ./scripts/run_native.sh --skip-chainlit --no-attach
 
 Флаги:
   --from-launcher
@@ -41,12 +43,16 @@ run_native.sh
       и скрипт должен сразу запускать native runtime, а не делегировать обратно.
   --no-attach
       Не подключаться к tmux после запуска; оставить сессию в фоне.
+  --skip-chainlit
+      Не запускать окно Chainlit в native tmux-сессии. Backend-сервисы и Agent API
+      продолжают стартовать как обычно.
   -h, --help
       Показать эту справку.
 
 Примеры:
   ./scripts/run_native.sh
   ./scripts/run_native.sh --no-attach
+  ./scripts/run_native.sh --skip-chainlit --no-attach
   ./scripts/launcher.sh --target native --profile adaptive
 EOF
 }
@@ -63,6 +69,9 @@ for arg in "$@"; do
     --no-attach)
       ATTACH_TMUX=false
       ;;
+    --skip-chainlit)
+      SKIP_CHAINLIT=true
+      ;;
     *)
       echo "Неизвестный аргумент: $arg" >&2
       echo "Используйте --help для списка флагов." >&2
@@ -72,7 +81,14 @@ for arg in "$@"; do
 done
 
 if [ "$FROM_LAUNCHER" = false ]; then
-  exec bash "$SCRIPT_DIR/launcher.sh" --target native $([ "$ATTACH_TMUX" = false ] && echo "--no-attach")
+  launcher_args=(--target native)
+  if [ "$ATTACH_TMUX" = false ]; then
+    launcher_args+=(--no-attach)
+  fi
+  if [ "$SKIP_CHAINLIT" = true ]; then
+    launcher_args+=(--skip-chainlit)
+  fi
+  exec bash "$SCRIPT_DIR/launcher.sh" "${launcher_args[@]}"
 fi
 
 RED='\033[0;31m'
@@ -252,7 +268,7 @@ if [ "${AGENT_NAVIGATOR_SKIP_CONDA_CHECKS:-0}" != "1" ]; then
 fi
 
 if [ "${AGENT_NAVIGATOR_TEST_MODE:-0}" = "1" ]; then
-  echo "run_native:test-mode validated conda_env=${CONDA_ENV} uploads_dir=${UPLOADS_DIR}"
+  echo "run_native:test-mode validated conda_env=${CONDA_ENV} uploads_dir=${UPLOADS_DIR} skip_chainlit=${SKIP_CHAINLIT}"
   exit 0
 fi
 
@@ -402,9 +418,13 @@ if [ "$UMS_INFER_READY" = true ]; then
   wait_for_service "Agent API" "$AGENT_PORT" "/health" 30 || SERVICES_OK=false
 
   # 5) Chainlit (native)
-  echo -e "${GREEN}Запуск Chainlit (native) на порту $CHAINLIT_PORT...${NC}"
-  start_tmux_window "chainlit" "cd $BACKEND_DIR/orchestrator && $ACTIVATE_CMD && export MCP_DOCUMENT_SERVER_URL='$MCP_DOCUMENT_SERVER_URL' MCP_LEGAL_SERVER_URL='$MCP_LEGAL_SERVER_URL' UMS_URL='$UMS_URL' UPLOADS_DIR='$UPLOADS_DIR' HOST_UPLOADS_DIR='$HOST_UPLOADS_DIR' CHAINLIT_DB_URL='$CHAINLIT_DB_URL' CHAINLIT_ENABLE_DATA_LAYER='$CHAINLIT_ENABLE_DATA_LAYER' && chainlit run chainlit_app.py --host 0.0.0.0 --port $CHAINLIT_PORT 2>&1 | tee chainlit.log"
-  wait_for_service "Chainlit UI" "$CHAINLIT_PORT" "/" 60 || SERVICES_OK=false
+  if [ "$SKIP_CHAINLIT" = true ]; then
+    echo -e "${YELLOW}Пропуск запуска Chainlit (--skip-chainlit).${NC}"
+  else
+    echo -e "${GREEN}Запуск Chainlit (native) на порту $CHAINLIT_PORT...${NC}"
+    start_tmux_window "chainlit" "cd $BACKEND_DIR/orchestrator && $ACTIVATE_CMD && export MCP_DOCUMENT_SERVER_URL='$MCP_DOCUMENT_SERVER_URL' MCP_LEGAL_SERVER_URL='$MCP_LEGAL_SERVER_URL' UMS_URL='$UMS_URL' UPLOADS_DIR='$UPLOADS_DIR' HOST_UPLOADS_DIR='$HOST_UPLOADS_DIR' CHAINLIT_DB_URL='$CHAINLIT_DB_URL' CHAINLIT_ENABLE_DATA_LAYER='$CHAINLIT_ENABLE_DATA_LAYER' && chainlit run chainlit_app.py --host 0.0.0.0 --port $CHAINLIT_PORT 2>&1 | tee chainlit.log"
+    wait_for_service "Chainlit UI" "$CHAINLIT_PORT" "/" 60 || SERVICES_OK=false
+  fi
 else
   echo -e "${YELLOW}Пропуск запуска Agent API и Chainlit: UMS infer-ready не подтвержден.${NC}"
 fi
@@ -424,7 +444,11 @@ echo -e "${GREEN}║      Agent Navigator Pro v3.0 (Native Dev)               �
 echo -e "${GREEN}╠════════════════════════════════════════════════════════════╣${NC}"
 echo -e "${GREEN}║${NC} Статус:          $SYSTEM_STATUS"
 echo -e "${GREEN}║${NC} tmux сессия:     ${YELLOW}$SESSION_NAME${NC}"
-echo -e "${GREEN}║${NC} Chainlit UI:     ${YELLOW}http://localhost:$CHAINLIT_PORT${NC}"
+if [ "$SKIP_CHAINLIT" = true ]; then
+  echo -e "${GREEN}║${NC} Chainlit UI:     ${YELLOW}пропущен (--skip-chainlit)${NC}"
+else
+  echo -e "${GREEN}║${NC} Chainlit UI:     ${YELLOW}http://localhost:$CHAINLIT_PORT${NC}"
+fi
 echo -e "${GREEN}║${NC} Agent API:       ${YELLOW}http://localhost:$AGENT_PORT${NC}"
 echo -e "${GREEN}║${NC} Document Server: ${YELLOW}http://localhost:$DOC_PORT${NC}"
 echo -e "${GREEN}║${NC} Legal Server:    ${YELLOW}http://localhost:$LEGAL_PORT${NC}"

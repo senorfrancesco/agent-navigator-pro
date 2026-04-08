@@ -7,6 +7,7 @@
 ## Canonical Paths
 
 - Основной entrypoint для разработки: `./scripts/launcher.sh --target native --profile adaptive`
+- Основной entrypoint для разработки без UI Chainlit: `./scripts/launcher.sh --target native --profile adaptive --skip-chainlit`
 - Основной entrypoint для container/compose path: `./scripts/launcher.sh --target container --profile default`
 - Основной entrypoint для guided install path: `./scripts/launcher.sh --install --platform <platform>`
 - Основной entrypoint для Linux/WSL installer dispatch: `./scripts/install/install.sh --platform auto`
@@ -65,7 +66,11 @@ Launcher поддерживает override без правки кода:
 ./scripts/launcher.sh --target native --gpu-layers-mode max
 ./scripts/launcher.sh --target native --gpu-layers-mode manual --gpu-layers 24
 ./scripts/launcher.sh --target native --device-mode gpu
+./scripts/launcher.sh --target native --skip-chainlit --no-attach
 ```
+
+Если нужен только backend native runtime без окна `Chainlit`, используйте `--skip-chainlit`.
+Флаг работает для `launcher.sh --target native` и для прямого compatibility alias `./scripts/run_native.sh --skip-chainlit`.
 
 Persistent user-owned runtime intent:
 - `backend/.env`
@@ -159,7 +164,7 @@ cd backend && pip install -r requirements.txt
 | Script | Classification | Mode | Когда использовать | Риски / side effects | Текущий статус |
 | --- | --- | --- | --- | --- | --- |
 | `scripts/launcher.sh` | `canonical` | `native`, `container` | Основной запуск runtime с bootstrap/preflight слоем | Пишет `backend/.env.runtime`, запускает bootstrap checks, затем делегирует в target runner | Canonical entrypoint |
-| `scripts/run_native.sh` | `compatibility` | `native` | Для обратной совместимости или прямого native запуска | При прямом вызове уходит в `launcher.sh`; при запуске из launcher создаёт tmux-сессию, поднимает host-сервисы, вызывает `stop_native.sh` | Compatibility alias + native runner behind launcher |
+| `scripts/run_native.sh` | `compatibility` | `native` | Для обратной совместимости или прямого native запуска | При прямом вызове уходит в `launcher.sh`; при запуске из launcher создаёт tmux-сессию, поднимает host-сервисы, вызывает `stop_native.sh`; поддерживает `--skip-chainlit` для backend-only native запуска | Compatibility alias + native runner behind launcher |
 | `scripts/run_all.sh` | `compatibility` | `container-compose` | Для обратной совместимости container path | При прямом вызове уходит в `launcher.sh`; при запуске из launcher вызывает `stop_all.sh`, поднимает compose stack и tmux monitoring | Compatibility alias + container runner behind launcher |
 | `scripts/run_container.sh` | `compatibility` | `container` | Тонкий alias для старых вызовов container path | Немедленно делегирует в `launcher.sh --target container` | Thin compatibility alias |
 | `scripts/bootstrap_env.sh` | `internal` | `check`, `install` | В основном используется через `launcher.sh`; вручную полезен только для диагностики bootstrap слоя | Создаёт `backend/.env` из шаблона при отсутствии, автогенерирует/ротирует `CHAINLIT_AUTH_SECRET`, валидирует команды и остальные critical secrets; `--install` делегирует в `scripts/install/install.sh` | Internal helper for launcher/bootstrap |
