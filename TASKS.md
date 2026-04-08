@@ -2,7 +2,7 @@
 
 > **Единственный operational backlog.** Планы в `docs/plans/` — исторические артефакты, не operational source.
 >
-> **Migration note:** отдельный backlog по `Open WebUI` migration, backend tool contracts и upload/document binding теперь ведётся в [TASKS_MIGRATION.md](/home/seral/HDD/proj/agent-navigator-pro/TASKS_MIGRATION.md). Здесь оставляем только общепроектные cross-project follow-up без детального migration ledger.
+> **Migration note:** отдельный backlog по `Open WebUI` migration, backend tool contracts и upload/document binding теперь ведётся в [TASKS_MIGRATION.md](./TASKS_MIGRATION.md). Здесь оставляем только общепроектные cross-project follow-up без детального migration ledger.
 
 ## Release/v1.0 Transition (2026-03-22)
 
@@ -2291,7 +2291,7 @@ Update (2026-04-01):
   - `#10 add-document-type-keywords-section`
 - Кластер summary-memory (`#13/#14/#15`) оставлен в `defer` сознательно:
   - это усиливает `Chainlit`-specific session/prompt layer;
-  - не бьётся с текущим migration-фокусом из `MIGRATION_TOOLS.md` / `MIGRATION_RAG_OPENWEBUI.md`;
+  - не бьётся с текущим migration-фокусом из `TASKS_MIGRATION.md` и `docs/plans/migration/README.md`;
   - возвращаться к нему имеет смысл только как к backend-owned UI-agnostic summary contract, а не как к прямому порту старых PR.
 
 ---
@@ -2453,8 +2453,9 @@ DOCUMENT_ANALYSIS_SUMMARIZE_MAX_TOKENS=512
 
 ### Migration backlog moved
 
-- [ ] Detailed migration work по `requested_tool` / action-first UX / `Open WebUI` eval contour теперь ведётся в [TASKS_MIGRATION.md](/home/seral/HDD/proj/agent-navigator-pro/TASKS_MIGRATION.md).
+- [ ] Detailed migration work по `requested_tool` / action-first UX / `Open WebUI` eval contour теперь ведётся в [TASKS_MIGRATION.md](./TASKS_MIGRATION.md).
 - [ ] Cross-project rule здесь остаётся прежним: migration slices не должны ломать текущий `Chainlit`-first runtime без явного approved rollout.
+- [x] Legacy root migration документы `MIGRATION_TOOLS.md`, `MIGRATION_RAG_OPENWEBUI.md`, `MIGRATION_OVERIEW_WITH_LEAKS.md` архивированы как alias-файлы; operational source-of-truth закреплён за `TASKS_MIGRATION.md` и `docs/plans/migration/README.md`.
 
 ### Антикризисные правила
 1. Не добавлять новые workflow до B3.31 cleanup

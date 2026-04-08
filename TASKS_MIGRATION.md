@@ -2,7 +2,7 @@
 
 > **Primary operational backlog for migration scope.** Этот файл является каноническим source-of-truth для `Open WebUI` migration, backend tool contracts, upload/document binding, knowledge-base prerequisites и rollout-критериев. `TASKS.md` остаётся общепроектным backlog и хранит только краткие cross-project ссылки и follow-up.
 
-> **Plan library:** все migration-related планы теперь собраны в [docs/plans/migration/README.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/README.md).
+> **Plan library:** все migration-related планы теперь собраны в [docs/plans/migration/README.md](./docs/plans/migration/README.md).
 
 ## Scope
 
@@ -120,7 +120,7 @@
   - у каждого tool есть request/response schema;
   - `fast/deep` является частью tool contract, а не UI profile.
   Plan:
-  - [OpenAPI Tool Server MVP Implementation Plan](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-07-openapi-tool-server-mvp-plan.md)
+  - [OpenAPI Tool Server MVP Implementation Plan](./docs/plans/migration/2026-04-07-openapi-tool-server-mvp-plan.md)
   Done:
   - введены `backend/orchestrator/tool_catalog.py` и `backend/orchestrator/tool_schemas.py` как preparatory source-of-truth для names, execution modes и request/response contracts;
   - текущий slice не меняет transport layer и не переписывает `OrchestrationRequest`, а только нормализует backend-owned tool contract.
@@ -224,7 +224,7 @@
   - container smoke через `run_all.sh` / `launcher.sh --target container` теперь intentionally идёт через `--no-build`, поэтому при отсутствии локальных образов `agent-api` / `ums` сначала нужен отдельный explicit build step;
   - document-tool smoke остаётся зависимым от `M2.1/M2.2`, даже если non-document tools уже готовы.
   Guide:
-  - [Open WebUI Eval Contour](/home/seral/HDD/proj/agent-navigator-pro/docs/guides/openwebui-eval-contour.md)
+  - [Open WebUI Eval Contour](./docs/guides/openwebui-eval-contour.md)
 
 ### M4 — Hardening / Coexistence / Rollout
 
@@ -244,7 +244,7 @@
   - `MCP` не заменяет `OpenAPI-first` path;
   - prompt/slash scenarios опираются на тот же backend tool catalog.
   Plan:
-  - [Open WebUI MCP / OpenAPI / Actions Architecture Plan](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-07-openwebui-mcp-tools-actions-architecture-plan.md)
+  - [Open WebUI MCP / OpenAPI / Actions Architecture Plan](./docs/plans/migration/2026-04-07-openwebui-mcp-tools-actions-architecture-plan.md)
 - [ ] M4.2 — Определить coexistence contract для `Chainlit` и `Open WebUI`
   Нужно сделать:
   - зафиксировать роль `Chainlit` как debug/dev shell;

@@ -4,29 +4,29 @@
 
 ## Current Recommended Reading Order
 
-1. [2026-04-02-unified-openwebui-migration-master-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-02-unified-openwebui-migration-master-plan.md)
+1. [2026-04-02-unified-openwebui-migration-master-plan.md](./2026-04-02-unified-openwebui-migration-master-plan.md)
    Единый master-plan по migration contour.
-2. [2026-04-07-openapi-tool-server-mvp-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-07-openapi-tool-server-mvp-plan.md)
+2. [2026-04-07-openapi-tool-server-mvp-plan.md](./2026-04-07-openapi-tool-server-mvp-plan.md)
    MVP-contract для backend-owned OpenAPI Tool Server.
-3. [2026-04-07-openwebui-mcp-tools-actions-architecture-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-07-openwebui-mcp-tools-actions-architecture-plan.md)
+3. [2026-04-07-openwebui-mcp-tools-actions-architecture-plan.md](./2026-04-07-openwebui-mcp-tools-actions-architecture-plan.md)
    Подробное ТЗ по `MCP`, `OpenAPI`, slash/prompts, actions и rich UI.
 
 ## Supporting Migration Plans
 
-- [2026-04-01-knowledge-base-store-protocol-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-01-knowledge-base-store-protocol-plan.md)
+- [2026-04-01-knowledge-base-store-protocol-plan.md](./2026-04-01-knowledge-base-store-protocol-plan.md)
   Подготовка storage contract перед заменой backend.
-- [2026-04-01-qdrant-knowledge-base-store-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-01-qdrant-knowledge-base-store-plan.md)
+- [2026-04-01-qdrant-knowledge-base-store-plan.md](./2026-04-01-qdrant-knowledge-base-store-plan.md)
   План перехода на `Qdrant`.
 
 ## Historical Reference
 
-Эти документы полезны как контекст ранних решений, но не являются операционными source-of-truth. Актуальные фазы и acceptance criteria живут в [TASKS_MIGRATION.md](/home/seral/HDD/proj/agent-navigator-pro/TASKS_MIGRATION.md), а главный архитектурный narrative живёт в master-plan.
+Эти документы полезны как контекст ранних решений, но не являются операционными source-of-truth. Актуальные фазы и acceptance criteria живут в [TASKS_MIGRATION.md](../../../TASKS_MIGRATION.md), а главный архитектурный narrative живёт в master-plan.
 
-- [2026-04-01-openwebui-tool-server-integration-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-01-openwebui-tool-server-integration-plan.md)
+- [2026-04-01-openwebui-tool-server-integration-plan.md](./2026-04-01-openwebui-tool-server-integration-plan.md)
   Более ранний integration-plan, перекрыт master-plan и `TASKS_MIGRATION.md`.
-- [2026-04-01-openwebui-migration-sprint-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-01-openwebui-migration-sprint-plan.md)
+- [2026-04-01-openwebui-migration-sprint-plan.md](./2026-04-01-openwebui-migration-sprint-plan.md)
   Sprint decomposition раннего migration-stage, перекрыт текущими `M0-M4` фазами.
-- [2026-04-01-migration-readiness-pr-decision-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-01-migration-readiness-pr-decision-plan.md)
+- [2026-04-01-migration-readiness-pr-decision-plan.md](./2026-04-01-migration-readiness-pr-decision-plan.md)
   Audit/decision документ по старым PR и historical branch material.
 
 ## Operational Rule
