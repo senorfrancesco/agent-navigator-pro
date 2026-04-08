@@ -58,7 +58,7 @@ __pycache__/
 *.py[cod]
 
 # Local test documents and ad-hoc samples
-documents/
+#documents/
 test_document.pdf
 test_logs/
 all_logs/
