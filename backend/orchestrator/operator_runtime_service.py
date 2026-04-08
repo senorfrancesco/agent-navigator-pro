@@ -6,6 +6,8 @@ import subprocess
 from pathlib import Path
 from typing import Dict, List
 
+from dotenv import dotenv_values
+
 
 DEFAULT_REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -13,14 +15,12 @@ DEFAULT_REPO_ROOT = Path(__file__).resolve().parents[2]
 def parse_env_file(path: Path) -> Dict[str, str]:
     if not path.exists():
         return {}
-    payload: Dict[str, str] = {}
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        payload[key.strip()] = value.strip().strip("\"'")
-    return payload
+    payload = dotenv_values(path)
+    return {
+        str(key): "" if value is None else str(value)
+        for key, value in payload.items()
+        if key
+    }
 
 
 def file_freshness(path: Path, *, generated: bool = False) -> str:

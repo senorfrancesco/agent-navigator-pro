@@ -9,6 +9,9 @@ BACKEND_ENV_TEMPLATE_FILE="${AGENT_NAVIGATOR_BACKEND_ENV_TEMPLATE_FILE:-$PROJECT
 INSTALL_COORDINATOR_SCRIPT="$SCRIPT_DIR/install/install.sh"
 DEFAULT_CHAINLIT_AUTH_SECRET="agent-navigator-secret-key-change-me"
 
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/utils/env_loader.sh"
+
 MODE="check"
 TARGET="native"
 PLATFORM="auto"
@@ -103,9 +106,8 @@ ensure_env_file() {
 
 source_backend_env() {
   if [ -f "$BACKEND_ENV_FILE" ]; then
-    set -a
-    source "$BACKEND_ENV_FILE"
-    set +a
+    ENV_LOADER_PYTHON="$PYTHON_CMD"
+    load_env_file "$BACKEND_ENV_FILE" "backend env" || exit 1
   fi
 }
 

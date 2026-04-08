@@ -8,26 +8,15 @@ BACKEND_DIR="$PROJECT_ROOT/backend"
 ENV_FILE="${AGENT_NAVIGATOR_BACKEND_ENV_FILE:-$BACKEND_DIR/.env}"
 PYTHON_HELPER="$SCRIPT_DIR/download_models.py"
 
+# shellcheck disable=SC1091
+source "$PROJECT_ROOT/scripts/utils/env_loader.sh"
+
 MODE="ensure-present"
 ASSET_SET="${AGENT_NAVIGATOR_MODEL_ASSET_SET:-core}"
 MODELS_ROOT="${AGENT_NAVIGATOR_MODELS_ROOT:-}"
 HF_CACHE="${HF_HOME:-${AGENT_NAVIGATOR_HF_CACHE:-}}"
 DRY_RUN=0
-PYTHON_CMD=""
-
-resolve_python_cmd() {
-  if command -v python >/dev/null 2>&1; then
-    PYTHON_CMD="python"
-    return 0
-  fi
-
-  if command -v python3 >/dev/null 2>&1; then
-    PYTHON_CMD="python3"
-    return 0
-  fi
-
-  return 1
-}
+PYTHON_CMD="$(resolve_env_loader_python || true)"
 
 print_help() {
   cat <<EOF
@@ -102,13 +91,9 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-if [ -f "$ENV_FILE" ]; then
-  set -a
-  source "$ENV_FILE"
-  set +a
-fi
+load_env_file "$ENV_FILE" "backend env" || exit 1
 
-if ! resolve_python_cmd; then
+if [ -z "$PYTHON_CMD" ]; then
   echo "Не найден python/python3 для scripts/models/download_models.py" >&2
   exit 1
 fi

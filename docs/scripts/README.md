@@ -13,7 +13,7 @@
 - Основной entrypoint для Windows host bootstrap: `powershell -ExecutionPolicy Bypass -File scripts/install/install_windows.ps1 -CheckOnly`
 - Основной stop-path для native runtime: `./scripts/stop_native.sh`
 - Основной stop-path для compose/container runtime: `./scripts/stop_all.sh`
-- `Open WebUI` не является основным UI; его запуск через `scripts/run_openwebui.sh` считается legacy path.
+- `Open WebUI` не является основным UI; если нужен legacy/eval contour, его поднимают напрямую через `docker compose --profile legacy up -d open-webui`.
 
 ## Platform Install Quick Start
 
@@ -165,7 +165,7 @@ cd backend && pip install -r requirements.txt
 | `scripts/bootstrap_env.sh` | `internal` | `check`, `install` | В основном используется через `launcher.sh`; вручную полезен только для диагностики bootstrap слоя | Создаёт `backend/.env` из шаблона при отсутствии, автогенерирует/ротирует `CHAINLIT_AUTH_SECRET`, валидирует команды и остальные critical secrets; `--install` делегирует в `scripts/install/install.sh` | Internal helper for launcher/bootstrap |
 | `scripts/stop_native.sh` | `canonical` | `native stop` | Каноническая остановка native tmux/runtime path | Убивает native tmux session и процессы на service ports; Docker не трогает | Canonical native stop script |
 | `scripts/stop_all.sh` | `canonical` | `container stop`, `global cleanup` | Каноническая остановка compose/container path | Делает `docker compose down`, завершает обе tmux session и зачищает runtime-процессы на service ports | Canonical container/global stop script |
-| `scripts/run_openwebui.sh` | `legacy` | `open-webui` | Только если нужен `Open WebUI` evaluation contour | Должен оставаться узким compatibility helper для compose-only Open WebUI path и не поднимать отдельный mixed tmux runtime | Legacy/eval helper, не рекомендован как основной |
+| `scripts/utils/env_loader.sh` | `internal-helper` | `shared env parsing` | Общий helper для canonical runtime/start/stop scripts | Экспортирует `.env` значения через `python-dotenv`, не исполняя файл как shell-код | Shared env loader for canonical scripts |
 | `scripts/install/install.sh` | `canonical-installer` | installer | Guided install path за `launcher.sh --install` | Выбирает platform wrapper (`ubuntu`, `ubuntu-server`, `wsl`, `windows`); heavy Linux install всё ещё сводится к legacy `setup_ubuntu.sh` через wrapper layer | Canonical install coordinator |
 | `scripts/install/install_ubuntu.sh`, `install_ubuntu_server.sh`, `install_wsl.sh`, `install_windows.ps1` | `platform-wrapper` | installer-platform | Platform-specific install handoff за unified `install.sh` | Linux wrappers пока делегируют в legacy `setup_ubuntu.sh`; Windows path остаётся guided/manual | Platform-specific wrapper layer |
 | `scripts/install/*.sh` (кроме `install.sh`) | `planned` | installer-step | Не использовать как самостоятельный install path | Step scripts intentionally scaffold-only | Scaffold-only contracts |
@@ -211,7 +211,7 @@ cd backend && pip install -r requirements.txt
 
 - `run_native.sh`, `run_all.sh`, `run_container.sh` не должны описываться как отдельные конкурирующие entrypoints.
 - Их роль: compatibility aliases и target-specific runners за `launcher.sh`.
-- `run_openwebui.sh` не должен фигурировать как main path; это legacy script для старого UI contour.
+- Отдельного `run_openwebui.sh` больше нет; legacy/eval contour поднимается прямой `docker compose --profile legacy up -d open-webui` командой.
 
 ## Script Notes
 
@@ -436,7 +436,7 @@ powershell -ExecutionPolicy Bypass -File scripts/install/install_windows.ps1 -Ap
 ```
 
 - Основные флаги: нет.
-- Важные env vars: читает `backend/.env`, `backend/.env.runtime` для определения service ports.
+- Важные env vars: `AGENT_NAVIGATOR_BACKEND_ENV_FILE`, `AGENT_NAVIGATOR_RUNTIME_ENV_FILE`; по умолчанию читает `backend/.env` и `backend/.env.runtime` через `scripts/utils/env_loader.sh`.
 - Side effects: убивает tmux session `agent-navigator-native`, завершает связанные runtime-процессы и процессы на service ports.
 - Ограничения: Docker intentionally не останавливает.
 
@@ -451,24 +451,9 @@ powershell -ExecutionPolicy Bypass -File scripts/install/install_windows.ps1 -Ap
 ```
 
 - Основные флаги: нет.
-- Важные env vars: читает `backend/.env`, `backend/.env.runtime` для определения service ports.
+- Важные env vars: `AGENT_NAVIGATOR_BACKEND_ENV_FILE`, `AGENT_NAVIGATOR_RUNTIME_ENV_FILE`; по умолчанию читает `backend/.env` и `backend/.env.runtime` через `scripts/utils/env_loader.sh`.
 - Side effects: завершает tmux session `agent-navigator` и `agent-navigator-native`, делает `docker compose down`, затем зачищает зависшие процессы.
 - Ограничения: это более широкий cleanup, чем `stop_native.sh`; для native-only path лучше использовать именно `stop_native.sh`.
-
-### `scripts/run_openwebui.sh`
-
-- Назначение: legacy script для старого Open WebUI-first contour.
-- Кто использует: только при необходимости временно поднять legacy UI path.
-- Пример:
-
-```bash
-./scripts/run_openwebui.sh
-```
-
-- Основные флаги: отсутствуют.
-- Важные env vars: `CONDA_ENV`, `AGENT_API_PORT`, `UMS_PORT` и базовые runtime переменные из `backend/.env`.
-- Side effects: поднимает mixed tmux + Docker flow, вызывает `stop_all.sh`, использует старую модель `webui` окна и печатает Open WebUI как основной UI.
-- Ограничения: не соответствует Chainlit-first документации и не должен использоваться как canonical entrypoint.
 
 ### `scripts/models/install_models.sh`
 
@@ -485,6 +470,7 @@ powershell -ExecutionPolicy Bypass -File scripts/install/install_windows.ps1 -Ap
 - Флаги:
   - `--ensure-present`: скачать только недостающие артефакты.
   - `--asset-set core|all`: `core = LLM + intent + retrieval`, `all = core + VLM + mmproj`.
+ - Важные env vars: `AGENT_NAVIGATOR_BACKEND_ENV_FILE`, `AGENT_NAVIGATOR_MODEL_ASSET_SET`, `AGENT_NAVIGATOR_MODELS_ROOT`, `AGENT_NAVIGATOR_HF_CACHE`; `backend/.env` читается через `scripts/utils/env_loader.sh`, а не через shell `source`.
   - `--models-root <path>`: корень моделей.
   - `--huggingface-cache <path>`: путь к HF cache.
   - `--dry-run`: показать источники и target paths без скачивания.

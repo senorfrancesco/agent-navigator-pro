@@ -21,12 +21,6 @@
 docker compose --profile legacy up -d open-webui
 ```
 
-Или через compatibility helper:
-
-```bash
-./scripts/run_openwebui.sh
-```
-
 3. Открыть:
 
 - `http://localhost:3001`
@@ -91,7 +85,7 @@ docker compose --profile legacy up -d open-webui
 
 ## Known Limits
 
-- backend нужно поднимать отдельно; `run_openwebui.sh` больше не запускает mixed runtime;
+- backend нужно поднимать отдельно через canonical runtime path; отдельного `run_openwebui.sh` больше нет;
 - file handoff и document binding пока не переведены на backend-owned upload contract;
 - OpenAI-compatible path не даёт финальной model/tool/job semantics для migration target;
 - `MCP` пока не является основным путём интеграции;

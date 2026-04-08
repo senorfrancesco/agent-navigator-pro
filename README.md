@@ -601,8 +601,6 @@ docker compose --profile legacy up -d open-webui
 
 Этот путь не меняет текущий product truth: основным UI проекта остаётся `Chainlit`, а `Open WebUI` поднимается только как отдельный `legacy/eval` profile для controlled migration contour.
 
-`./scripts/run_openwebui.sh` сохраняется как compatibility helper для этого контура, но backend по-прежнему должен быть поднят отдельно через canonical runtime path (`launcher.sh`, `run_native.sh` или уже работающий host backend).
-
 Он будет доступен на:
 
 - `http://localhost:3001`

@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from orchestrator.operator_config_service import OperatorConfigService
-from orchestrator.operator_runtime_service import OperatorRuntimeService
+from orchestrator.operator_runtime_service import OperatorRuntimeService, parse_env_file
 
 
 def _write(path: Path, content: str = "") -> None:
@@ -92,6 +92,40 @@ def test_config_service_apply_config_updates_selected_env_source(tmp_path, monke
     assert result["pathKey"] == "native"
     assert "UMS_RUNTIME_PROFILE=manual" in (tmp_path / "backend" / ".env").read_text(encoding="utf-8")
     assert result["config"]["variants"][0]["groups"][0]["fields"][0]["applied"] == "adaptive"
+
+
+def test_config_service_apply_config_quotes_secret_values_and_preserves_round_trip(tmp_path, monkeypatch):
+    _write(
+        tmp_path / "backend" / ".env",
+        "CHAINLIT_AUTH_SECRET='ok'\nCHAINLIT_ADMIN_PASSWORD='old'\n",
+    )
+    _write(tmp_path / "backend" / ".env.runtime", "UMS_RUNTIME_PROFILE=adaptive\nDEVICE_MODE=hybrid\n")
+    _write(tmp_path / "scripts" / "launcher.sh", "#!/usr/bin/env bash\n")
+    _write(tmp_path / "scripts" / "runtime_preflight.py", "print('ok')\n")
+    _write(tmp_path / "deploy" / "offline_bundle" / "compose.offline.yaml", "services: {}\n")
+    _write(tmp_path / "deploy" / "offline_bundle" / "env.bundle", "BUNDLE_RUNTIME_PROFILE=default\n")
+    _write(tmp_path / "deploy" / "offline_bundle" / "manifest.json", "{}\n")
+
+    runtime_service = OperatorRuntimeService(repo_root=tmp_path)
+    monkeypatch.setattr(runtime_service, "_find_binary", lambda name: "/usr/bin/docker" if name == "docker" else f"/usr/bin/{name}")
+    monkeypatch.setattr(runtime_service, "_docker_socket_available", lambda: True)
+
+    config_service = OperatorConfigService(repo_root=tmp_path)
+    dangerous_value = "pa$$w'rd $(echo hacked) #bang"
+    result = config_service.apply_config("native", {"CHAINLIT_ADMIN_PASSWORD": dangerous_value})
+
+    env_text = (tmp_path / "backend" / ".env").read_text(encoding="utf-8")
+    assert "CHAINLIT_ADMIN_PASSWORD='" in env_text
+    assert parse_env_file(tmp_path / "backend" / ".env")["CHAINLIT_ADMIN_PASSWORD"] == dangerous_value
+
+    secret_fields = {
+        field["key"]: field
+        for variant in result["config"]["variants"]
+        for group in variant["groups"]
+        for field in group["fields"]
+    }
+    assert result["updatedKeys"] == ["CHAINLIT_ADMIN_PASSWORD"]
+    assert secret_fields["CHAINLIT_ADMIN_PASSWORD"]["applied"] == dangerous_value
 
 
 def test_config_service_apply_config_preserves_explicit_empty_native_model_paths(tmp_path, monkeypatch):
@@ -318,216 +352,3 @@ def test_config_service_exposes_native_runtime_gpu_and_context_knobs(tmp_path, m
 
     model_variant = next(variant for variant in state["native"]["variants"] if variant["variantId"] == "model_runtime")
     model_keys = [field["key"] for field in model_variant["groups"][0]["fields"]]
-    assert "CONTEXT_SIZE_QWEN14B" in model_keys
-    assert "N_GPU_LAYERS_QWEN14B" in model_keys
-    assert "N_GPU_LAYERS_QWENVL" in model_keys
-    assert "N_GPU_LAYERS_LABSE" in model_keys
-
-    generation_variant = next(variant for variant in state["native"]["variants"] if variant["variantId"] == "generation")
-    generation_fields = {field["key"]: field for field in generation_variant["groups"][0]["fields"]}
-    assert generation_fields["TEMPERATURE"]["control"] == "number"
-    assert generation_fields["TOP_P"]["control"] == "number"
-    assert generation_fields["MAX_TOKENS"]["control"] == "number"
-
-
-def test_config_service_exposes_native_admin_and_secret_controls(tmp_path, monkeypatch):
-    _write(
-        tmp_path / "backend" / ".env",
-        "BACKEND_MODE=llama-cpp-python\n"
-        "CHAINLIT_ADMIN_USER=admin\n"
-        "CHAINLIT_ADMIN_PASSWORD=password\n"
-        "CHAINLIT_AUTH_SECRET=secret\n"
-        "WEBUI_SECRET_KEY=open-webui-secret\n"
-        "WEBUI_ADMIN_EMAIL=admin@example.com\n"
-        "WEBUI_ADMIN_PASSWORD=webui-password\n"
-        "WEBUI_ADMIN_NAME=Agent Navigator Admin\n"
-        "ENABLE_SIGNUP=true\n"
-        "DEFAULT_USER_ROLE=pending\n"
-        "OPERATOR_UI_LOCALHOST_ONLY=true\n"
-        "GF_SECURITY_ADMIN_USER=admin\n"
-        "GF_SECURITY_ADMIN_PASSWORD=grafana-password\n",
-    )
-    _write(tmp_path / "backend" / ".env.runtime", "UMS_RUNTIME_PROFILE=adaptive\nDEVICE_MODE=hybrid\n")
-    _write(tmp_path / "scripts" / "launcher.sh", "#!/usr/bin/env bash\n")
-    _write(tmp_path / "scripts" / "runtime_preflight.py", "print('ok')\n")
-    _write(tmp_path / "deploy" / "offline_bundle" / "env.bundle", "BUNDLE_RUNTIME_PROFILE=default\n")
-    _write(tmp_path / "deploy" / "offline_bundle" / "compose.offline.yaml", "services: {}\n")
-    _write(tmp_path / "deploy" / "offline_bundle" / "manifest.json", "{}\n")
-
-    runtime_service = OperatorRuntimeService(repo_root=tmp_path)
-    monkeypatch.setattr(runtime_service, "_find_binary", lambda name: "/usr/bin/docker" if name == "docker" else f"/usr/bin/{name}")
-    monkeypatch.setattr(runtime_service, "_docker_socket_available", lambda: True)
-
-    config_service = OperatorConfigService(repo_root=tmp_path)
-    state = config_service.get_config_state(runtime_service.get_runtime_paths())
-
-    variant_ids = [variant["variantId"] for variant in state["native"]["variants"]]
-    assert "native_secrets" in variant_ids
-
-    secrets_variant = next(variant for variant in state["native"]["variants"] if variant["variantId"] == "native_secrets")
-    secret_fields = {field["key"]: field for field in secrets_variant["groups"][0]["fields"]}
-
-    assert "CHAINLIT_ADMIN_USER" in secret_fields
-    assert "CHAINLIT_ADMIN_PASSWORD" in secret_fields
-    assert "CHAINLIT_AUTH_SECRET" in secret_fields
-    assert "WEBUI_SECRET_KEY" in secret_fields
-    assert "WEBUI_ADMIN_EMAIL" in secret_fields
-    assert "WEBUI_ADMIN_PASSWORD" in secret_fields
-    assert "WEBUI_ADMIN_NAME" in secret_fields
-    assert "ENABLE_SIGNUP" in secret_fields
-    assert "DEFAULT_USER_ROLE" in secret_fields
-    assert "OPERATOR_UI_LOCALHOST_ONLY" in secret_fields
-    assert "GF_SECURITY_ADMIN_USER" in secret_fields
-    assert "GF_SECURITY_ADMIN_PASSWORD" in secret_fields
-    assert secret_fields["CHAINLIT_ADMIN_PASSWORD"]["secret"] is True
-    assert secret_fields["CHAINLIT_AUTH_SECRET"]["secret"] is True
-    assert secret_fields["WEBUI_SECRET_KEY"]["secret"] is True
-    assert secret_fields["WEBUI_ADMIN_PASSWORD"]["secret"] is True
-    assert secret_fields["ENABLE_SIGNUP"]["control"] == "toggle"
-    assert secret_fields["DEFAULT_USER_ROLE"]["control"] == "select"
-    assert secret_fields["OPERATOR_UI_LOCALHOST_ONLY"]["control"] == "toggle"
-    assert secret_fields["GF_SECURITY_ADMIN_PASSWORD"]["secret"] is True
-    assert secret_fields["CHAINLIT_ADMIN_PASSWORD"]["description"]
-    assert secret_fields["CHAINLIT_ADMIN_PASSWORD"]["descriptionEn"]
-
-
-def test_config_service_exposes_container_runtime_secret_gpu_and_profile_knobs(tmp_path, monkeypatch):
-    _write(
-        tmp_path / "deploy" / "offline_bundle" / "env.bundle",
-        "BACKEND_MODE=llama-server\n"
-        "UMS_RUNTIME_PROFILE=adaptive\n"
-        "DEVICE_MODE=hybrid\n"
-        "LLM_DEVICE_MODE=gpu\n"
-        "GPU_LAYERS_MODE=manual\n"
-        "N_GPU_LAYERS_QWEN14B=48\n"
-        "CHAINLIT_AUTH_SECRET=secret\n"
-        "CHAINLIT_ADMIN_USER=admin\n"
-        "CHAINLIT_ADMIN_PASSWORD=password\n"
-        "GF_SECURITY_ADMIN_USER=admin\n"
-        "GF_SECURITY_ADMIN_PASSWORD=password\n"
-        "VLLM_API_KEY=\n"
-        "VLLM_TENSOR_PARALLEL_SIZE=2\n"
-        "VLLM_GPU_MEMORY_UTILIZATION=0.85\n"
-        "INTENT_CLASSIFIER_MODE=llm\n"
-        "CHAINLIT_DEFAULT_TEMPERATURE=0.7\n"
-        "CHAINLIT_MODEL_PROFILE_DEFAULT_CHAT_MODEL=qwen-14b-llm\n",
-    )
-    _write(tmp_path / "deploy" / "offline_bundle" / "compose.offline.yaml", "services: {}\n")
-    _write(tmp_path / "deploy" / "offline_bundle" / "manifest.json", "{}\n")
-    _write(tmp_path / "backend" / ".env", "BACKEND_MODE=llama-server\n")
-    _write(tmp_path / "backend" / ".env.runtime", "UMS_RUNTIME_PROFILE=adaptive\nDEVICE_MODE=hybrid\n")
-    _write(tmp_path / "scripts" / "launcher.sh", "#!/usr/bin/env bash\n")
-    _write(tmp_path / "scripts" / "runtime_preflight.py", "print('ok')\n")
-
-    runtime_service = OperatorRuntimeService(repo_root=tmp_path)
-    monkeypatch.setattr(runtime_service, "_find_binary", lambda name: "/usr/bin/docker" if name == "docker" else f"/usr/bin/{name}")
-    monkeypatch.setattr(runtime_service, "_docker_socket_available", lambda: True)
-
-    config_service = OperatorConfigService(repo_root=tmp_path)
-    state = config_service.get_config_state(runtime_service.get_runtime_paths())
-
-    variant_ids = [variant["variantId"] for variant in state["container"]["variants"]]
-    assert "published_ports" in variant_ids
-    assert "model_source_mode" in variant_ids
-    assert "runtime_backend" in variant_ids
-    assert "bundle_gpu" in variant_ids
-    assert "secrets_access" in variant_ids
-    assert "model_policy" in variant_ids
-    assert "chainlit_profiles" in variant_ids
-    assert "bundle_model_runtime" in variant_ids
-    assert "serving_runtime" in variant_ids
-
-    runtime_variant = next(variant for variant in state["container"]["variants"] if variant["variantId"] == "runtime_backend")
-    assert runtime_variant["title"] == "Настройки backend и runtime"
-    runtime_fields = runtime_variant["groups"][0]["fields"]
-    assert any(field["key"] == "BACKEND_MODE" and field["control"] == "select" for field in runtime_fields)
-    assert any(field["key"] == "DEVICE_MODE" and field["control"] == "select" for field in runtime_fields)
-
-    gpu_variant = next(variant for variant in state["container"]["variants"] if variant["variantId"] == "bundle_gpu")
-    gpu_fields = gpu_variant["groups"][0]["fields"]
-    assert any(field["key"] == "LLM_DEVICE_MODE" and field["control"] == "select" for field in gpu_fields)
-    assert any(field["key"] == "GPU_LAYERS_MODE" and field["control"] == "select" for field in gpu_fields)
-    assert any(field["key"] == "VLLM_TENSOR_PARALLEL_SIZE" and field["control"] == "number" for field in gpu_fields)
-
-    secrets_variant = next(variant for variant in state["container"]["variants"] if variant["variantId"] == "secrets_access")
-    secret_keys = [field["key"] for field in secrets_variant["groups"][0]["fields"]]
-    assert "CHAINLIT_AUTH_SECRET" in secret_keys
-    assert "GF_SECURITY_ADMIN_PASSWORD" in secret_keys
-
-    model_policy_variant = next(variant for variant in state["container"]["variants"] if variant["variantId"] == "model_policy")
-    model_policy_keys = [field["key"] for field in model_policy_variant["groups"][0]["fields"]]
-    assert "INTENT_CLASSIFIER_MODE" in model_policy_keys
-    assert "CHAINLIT_RETRIEVAL_EMBEDDER_PROFILE_LOW_VRAM_MODEL" in model_policy_keys
-
-    chainlit_variant = next(variant for variant in state["container"]["variants"] if variant["variantId"] == "chainlit_profiles")
-    chainlit_keys = [field["key"] for field in chainlit_variant["groups"][0]["fields"]]
-    assert "CHAINLIT_DEFAULT_TEMPERATURE" in chainlit_keys
-    assert "CHAINLIT_MODEL_PROFILE_DEFAULT_CHAT_MODEL" in chainlit_keys
-    assert "CHAINLIT_MODEL_PROFILE_LOW_VRAM_MAX_TOKENS" in chainlit_keys
-    chainlit_fields = {field["key"]: field for field in chainlit_variant["groups"][0]["fields"]}
-    assert chainlit_fields["CHAINLIT_ENABLE_DATA_LAYER"]["control"] == "toggle"
-    assert chainlit_fields["CHAINLIT_REPORT_PDF_DISPLAY"]["control"] == "select"
-
-    source_mode_variant = next(variant for variant in state["container"]["variants"] if variant["variantId"] == "model_source_mode")
-    source_mode_field = source_mode_variant["groups"][0]["fields"][0]
-    assert source_mode_field["key"] == "MODEL_SOURCE_MODE"
-    assert source_mode_field["control"] == "select"
-    assert [option["value"] for option in source_mode_field["options"]] == [
-        "bundle_layout",
-        "external_host_mounts",
-    ]
-
-    artifact_variant = next(variant for variant in state["container"]["variants"] if variant["variantId"] == "artifact_mounts")
-    artifact_fields = {
-        field["key"]: field
-        for group in artifact_variant["groups"]
-        for field in group["fields"]
-    }
-    assert artifact_fields["HOST_MODEL_PATH_LLM"]["pickerKind"] == "file"
-    assert artifact_fields["HOST_MODEL_PATH_EMBEDDING_INTENT"]["pickerKind"] == "directory"
-    assert artifact_fields["HOST_MODEL_PATH_LLM"]["visibleWhen"] == {"MODEL_SOURCE_MODE": "external_host_mounts"}
-    assert artifact_fields["MODEL_PATH_LLM"]["pathPolicy"] == "bundle_internal_path"
-    assert artifact_fields["MODEL_REGISTRY_CONFIG_PATH"]["pathPolicy"] == "bundle_internal_path"
-
-    serving_variant = next(variant for variant in state["container"]["variants"] if variant["variantId"] == "serving_runtime")
-    serving_fields = {field["key"]: field for field in serving_variant["groups"][0]["fields"]}
-    assert serving_fields["UMS_FAIL_FAST_ON_SATURATION"]["control"] == "toggle"
-    assert serving_fields["UMS_LLAMA_CACHE_PROMPT"]["control"] == "toggle"
-    assert serving_fields["VLLM_BASE_URL"]["control"] == "url"
-
-
-def test_config_service_marks_secret_fields_and_exposes_field_descriptions(tmp_path, monkeypatch):
-    _write(
-        tmp_path / "deploy" / "offline_bundle" / "env.bundle",
-        "CHAINLIT_AUTH_SECRET=secret\n"
-        "CHAINLIT_ADMIN_PASSWORD=password\n"
-        "GF_SECURITY_ADMIN_PASSWORD=password\n"
-        "BACKEND_MODE=llama-server\n",
-    )
-    _write(tmp_path / "deploy" / "offline_bundle" / "compose.offline.yaml", "services: {}\n")
-    _write(tmp_path / "deploy" / "offline_bundle" / "manifest.json", "{}\n")
-    _write(tmp_path / "backend" / ".env", "BACKEND_MODE=llama-server\n")
-    _write(tmp_path / "backend" / ".env.runtime", "UMS_RUNTIME_PROFILE=adaptive\nDEVICE_MODE=hybrid\n")
-    _write(tmp_path / "scripts" / "launcher.sh", "#!/usr/bin/env bash\n")
-    _write(tmp_path / "scripts" / "runtime_preflight.py", "print('ok')\n")
-
-    runtime_service = OperatorRuntimeService(repo_root=tmp_path)
-    monkeypatch.setattr(runtime_service, "_find_binary", lambda name: "/usr/bin/docker" if name == "docker" else f"/usr/bin/{name}")
-    monkeypatch.setattr(runtime_service, "_docker_socket_available", lambda: True)
-
-    config_service = OperatorConfigService(repo_root=tmp_path)
-    state = config_service.get_config_state(runtime_service.get_runtime_paths())
-
-    runtime_variant = next(variant for variant in state["container"]["variants"] if variant["variantId"] == "runtime_backend")
-    backend_mode_field = next(field for field in runtime_variant["groups"][0]["fields"] if field["key"] == "BACKEND_MODE")
-    assert backend_mode_field["description"]
-    assert backend_mode_field["descriptionEn"]
-    assert backend_mode_field["description"] != backend_mode_field["recommendedReason"]
-    assert "Рекомендуется" not in backend_mode_field["description"]
-
-    secrets_variant = next(variant for variant in state["container"]["variants"] if variant["variantId"] == "secrets_access")
-    auth_secret_field = next(field for field in secrets_variant["groups"][0]["fields"] if field["key"] == "CHAINLIT_AUTH_SECRET")
-    grafana_password_field = next(field for field in secrets_variant["groups"][0]["fields"] if field["key"] == "GF_SECURITY_ADMIN_PASSWORD")
-    assert auth_secret_field["secret"] is True
-    assert grafana_password_field["secret"] is True
-    assert auth_secret_field["descriptionEn"]

@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import os
 import pathlib
+import socket
 import subprocess
+import sys
+import time
+
+from dotenv import set_key
 
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -35,6 +40,41 @@ def _run_script_with_input(
         capture_output=True,
         check=False,
     )
+
+
+def _write_executable(path: pathlib.Path, content: str) -> None:
+    path.write_text(content, encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _wait_for_port(port: int, *, timeout_s: float = 5.0) -> None:
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                return
+        except OSError:
+            time.sleep(0.05)
+    raise AssertionError(f"port-not-listening:{port}")
+
+
+def _spawn_http_server(port: int) -> subprocess.Popen[bytes]:
+    process = subprocess.Popen(
+        [sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    _wait_for_port(port)
+    return process
+
+
+def _build_stop_script_stub_path(tmp_path: pathlib.Path, *, docker_exit_code: int = 1) -> str:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_executable(bin_dir / "tmux", "#!/bin/sh\nexit 1\n")
+    _write_executable(bin_dir / "pgrep", "#!/bin/sh\nexit 1\n")
+    _write_executable(bin_dir / "docker", f"#!/bin/sh\nexit {docker_exit_code}\n")
+    return f"{bin_dir}:{os.environ.get('PATH', '')}"
 
 
 def test_launcher_report_only_outputs_runtime_plan(tmp_path):
@@ -229,6 +269,30 @@ def test_launcher_cli_component_device_override_beats_backend_env(tmp_path):
     assert "INTENT_EMBEDDER_DEVICE_MODE=gpu" in contents
 
 
+def test_launcher_loads_special_character_secrets_without_shell_evaluation(tmp_path):
+    runtime_env = tmp_path / ".env.runtime"
+    backend_env = tmp_path / ".env"
+    backend_env.write_text("CHAINLIT_AUTH_SECRET='ok'\nDEVICE_MODE='gpu'\n", encoding="utf-8")
+    set_key(backend_env, "CHAINLIT_ADMIN_PASSWORD", "pa$$w'rd $(echo hacked) #bang", quote_mode="always")
+    env = os.environ.copy()
+    env["AGENT_NAVIGATOR_TEST_MODE"] = "1"
+    env["AGENT_NAVIGATOR_BACKEND_ENV_FILE"] = str(backend_env)
+    env["AGENT_NAVIGATOR_RUNTIME_ENV_FILE"] = str(runtime_env)
+
+    result = _run_script(
+        "launcher.sh",
+        "--target",
+        "native",
+        "--profile",
+        "adaptive",
+        env=env,
+    )
+
+    assert result.returncode == 0
+    assert runtime_env.exists()
+    assert "DEVICE_MODE=gpu" in runtime_env.read_text(encoding="utf-8")
+
+
 def test_launcher_review_runtime_applies_current_run_override_without_legacy_persist(tmp_path):
     runtime_env = tmp_path / ".env.runtime"
     backend_env = tmp_path / ".env"
@@ -272,6 +336,54 @@ def test_run_native_is_wrapper_to_launcher(tmp_path):
 
     assert result.returncode == 0
     assert "launcher:test-mode target=native" in result.stdout
+
+
+def test_stop_native_uses_override_env_files_and_safe_loader(tmp_path):
+    backend_env = tmp_path / ".env"
+    runtime_env = tmp_path / ".env.runtime"
+    port = 18991
+    backend_env.write_text("CHAINLIT_AUTH_SECRET='ok'\n", encoding="utf-8")
+    set_key(backend_env, "CHAINLIT_ADMIN_PASSWORD", "pa$$w'rd $(echo hacked) #bang", quote_mode="always")
+    runtime_env.write_text(f"CHAINLIT_PORT='{port}'\n", encoding="utf-8")
+    server = _spawn_http_server(port)
+    env = os.environ.copy()
+    env["AGENT_NAVIGATOR_BACKEND_ENV_FILE"] = str(backend_env)
+    env["AGENT_NAVIGATOR_RUNTIME_ENV_FILE"] = str(runtime_env)
+    env["PATH"] = _build_stop_script_stub_path(tmp_path)
+
+    try:
+        result = _run_script("stop_native.sh", env=env)
+        assert result.returncode == 0
+        assert "command not found" not in result.stderr
+        server.wait(timeout=5)
+    finally:
+        if server.poll() is None:
+            server.kill()
+            server.wait(timeout=5)
+
+
+def test_stop_all_uses_override_env_files_and_safe_loader(tmp_path):
+    backend_env = tmp_path / ".env"
+    runtime_env = tmp_path / ".env.runtime"
+    port = 18992
+    backend_env.write_text("CHAINLIT_AUTH_SECRET='ok'\n", encoding="utf-8")
+    set_key(backend_env, "CHAINLIT_ADMIN_PASSWORD", "pa$$w'rd $(echo hacked) #bang", quote_mode="always")
+    runtime_env.write_text(f"AGENT_API_PORT='{port}'\n", encoding="utf-8")
+    server = _spawn_http_server(port)
+    env = os.environ.copy()
+    env["AGENT_NAVIGATOR_BACKEND_ENV_FILE"] = str(backend_env)
+    env["AGENT_NAVIGATOR_RUNTIME_ENV_FILE"] = str(runtime_env)
+    env["PATH"] = _build_stop_script_stub_path(tmp_path, docker_exit_code=0)
+
+    try:
+        result = _run_script("stop_all.sh", env=env)
+        assert result.returncode == 0
+        assert "command not found" not in result.stderr
+        server.wait(timeout=5)
+    finally:
+        if server.poll() is None:
+            server.kill()
+            server.wait(timeout=5)
 
 
 def test_run_native_from_launcher_reports_invalid_model_path(tmp_path):
@@ -753,15 +865,14 @@ def test_native_and_start_system_test_export_backend_pythonpath_for_service_serv
     assert "export PYTHONPATH='$BACKEND_DIR' && uvicorn mcp_legal_server:app" in start_system_test
 
 
-def test_run_openwebui_is_compose_only_eval_helper():
-    run_openwebui = (SCRIPTS_DIR / "run_openwebui.sh").read_text(encoding="utf-8")
+def test_openwebui_eval_docs_use_direct_compose_command():
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    guide = (PROJECT_ROOT / "docs" / "guides" / "openwebui-eval-contour.md").read_text(encoding="utf-8")
 
-    assert "docker compose --profile legacy up -d open-webui" in run_openwebui
-    assert "Backend должен быть поднят отдельно через canonical runtime path." in run_openwebui
-    assert "tmux new-session" not in run_openwebui
-    assert "uvicorn mcp_document_server:app" not in run_openwebui
-    assert "uvicorn mcp_legal_server:app" not in run_openwebui
-    assert "python agent_api.py" not in run_openwebui
+    assert "docker compose --profile legacy up -d open-webui" in readme
+    assert "./scripts/run_openwebui.sh" not in readme
+    assert "docker compose --profile legacy up -d open-webui" in guide
+    assert "./scripts/run_openwebui.sh" not in guide
 
 
 def test_start_system_test_contains_executable_tmux_commands():

@@ -12,8 +12,12 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BACKEND_DIR="$PROJECT_ROOT/backend"
-ENV_FILE="$BACKEND_DIR/.env"
+ENV_FILE="${AGENT_NAVIGATOR_BACKEND_ENV_FILE:-$BACKEND_DIR/.env}"
 RUNTIME_ENV_FILE="${AGENT_NAVIGATOR_RUNTIME_ENV_FILE:-$BACKEND_DIR/.env.runtime}"
+
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/utils/env_loader.sh"
+
 ATTACH_TMUX=true
 FROM_LAUNCHER=false
 
@@ -21,6 +25,8 @@ EXTERNAL_BACKEND_MODE="${BACKEND_MODE:-}"
 EXTERNAL_VLLM_BASE_URL="${VLLM_BASE_URL:-}"
 EXTERNAL_VLLM_PORT="${VLLM_PORT:-}"
 EXTERNAL_VLLM_MODEL_ID_QWEN_14B_LLM="${VLLM_MODEL_ID_QWEN_14B_LLM:-}"
+
+ENV_LOADER_PYTHON="$(resolve_env_loader_python || true)"
 
 print_help() {
   cat <<EOF
@@ -87,9 +93,7 @@ echo -e "${GREEN}=== Запуск системы Agent Navigator Pro v3.0 (Chain
 # -------------------------------------------
 if [ -f "$ENV_FILE" ]; then
     echo -e "${BLUE}Загрузка переменных из .env...${NC}"
-    set -a
-    source "$ENV_FILE"
-    set +a
+    load_env_file "$ENV_FILE" "backend env" || exit 1
 else
     echo -e "${YELLOW}Предупреждение: .env файл не найден. Используются значения по умолчанию.${NC}"
     echo -e "${YELLOW}Создайте .env из .env.example: cp .env.example .env${NC}"
@@ -97,9 +101,7 @@ fi
 
 if [ -f "$RUNTIME_ENV_FILE" ]; then
     echo -e "${BLUE}Загрузка runtime overrides $RUNTIME_ENV_FILE${NC}"
-    set -a
-    source "$RUNTIME_ENV_FILE"
-    set +a
+    load_env_file "$RUNTIME_ENV_FILE" "runtime overrides" || exit 1
 fi
 
 if [ -n "$EXTERNAL_BACKEND_MODE" ]; then

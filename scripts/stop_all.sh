@@ -8,6 +8,12 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BACKEND_DIR="$PROJECT_ROOT/backend"
+BACKEND_ENV_FILE="${AGENT_NAVIGATOR_BACKEND_ENV_FILE:-$BACKEND_DIR/.env}"
+RUNTIME_ENV_FILE="${AGENT_NAVIGATOR_RUNTIME_ENV_FILE:-$BACKEND_DIR/.env.runtime}"
+
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/utils/env_loader.sh"
+ENV_LOADER_PYTHON="$(resolve_env_loader_python || true)"
 
 # Цвета
 RED='\033[0;31m'
@@ -37,18 +43,8 @@ EOF
 fi
 
 load_runtime_env() {
-    local env_file
-    set -a
-    for env_file in \
-        "$BACKEND_DIR/.env" \
-        "$BACKEND_DIR/.env.runtime"
-    do
-        if [ -f "$env_file" ]; then
-            # shellcheck disable=SC1090
-            source "$env_file"
-        fi
-    done
-    set +a
+    load_env_file "$BACKEND_ENV_FILE" "backend env" || return 1
+    load_env_file "$RUNTIME_ENV_FILE" "runtime overrides" || return 1
 }
 
 kill_pid_list() {
@@ -79,7 +75,7 @@ kill_matching_processes() {
     kill_pid_list "$label" "$pids"
 }
 
-load_runtime_env
+load_runtime_env || exit 1
 
 CHAINLIT_PORT="${CHAINLIT_PORT:-3000}"
 AGENT_API_PORT="${AGENT_API_PORT:-8000}"

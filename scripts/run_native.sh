@@ -17,6 +17,10 @@ BACKEND_DIR="$PROJECT_ROOT/backend"
 ENV_FILE="${AGENT_NAVIGATOR_BACKEND_ENV_FILE:-$BACKEND_DIR/.env}"
 RUNTIME_ENV_FILE="${AGENT_NAVIGATOR_RUNTIME_ENV_FILE:-$BACKEND_DIR/.env.runtime}"
 ENV_ROOT="$(dirname "$ENV_FILE")"
+
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/utils/env_loader.sh"
+
 ATTACH_TMUX=true
 FROM_LAUNCHER=false
 
@@ -77,6 +81,8 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
+ENV_LOADER_PYTHON="$(resolve_env_loader_python || true)"
+
 echo -e "${GREEN}=== Native запуск Agent Navigator Pro (без Docker) ===${NC}"
 
 die() {
@@ -86,21 +92,6 @@ die() {
 
 warn() {
   echo -e "${YELLOW}$1${NC}"
-}
-
-source_env_file() {
-  local file="$1"
-  local label="$2"
-  if [ ! -e "$file" ]; then
-    return 0
-  fi
-  if [ ! -r "$file" ]; then
-    die "permission-denied:$label:$file"
-  fi
-  echo -e "${BLUE}Загрузка $label $file${NC}"
-  set -a
-  source "$file"
-  set +a
 }
 
 resolve_backend_relative_path() {
@@ -174,8 +165,10 @@ ensure_writable_dir() {
   rm -f "$probe_file"
 }
 
-source_env_file "$ENV_FILE" "backend env"
-source_env_file "$RUNTIME_ENV_FILE" "runtime overrides"
+echo -e "${BLUE}Загрузка backend env $ENV_FILE${NC}"
+load_env_file "$ENV_FILE" "backend env" || die "env-load-failed:backend env:$ENV_FILE"
+echo -e "${BLUE}Загрузка runtime overrides $RUNTIME_ENV_FILE${NC}"
+load_env_file "$RUNTIME_ENV_FILE" "runtime overrides" || die "env-load-failed:runtime overrides:$RUNTIME_ENV_FILE"
 
 CONDA_ENV="${CONDA_ENV:-base}"
 CONDA_SH_PATH=""

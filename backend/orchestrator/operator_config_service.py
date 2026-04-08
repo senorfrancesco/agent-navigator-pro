@@ -4,6 +4,8 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Dict, Iterable, List
 
+from dotenv import set_key
+
 try:
     from orchestrator.operator_runtime_service import OperatorRuntimeService, env_value
 except ModuleNotFoundError:  # pragma: no cover - direct module import fallback
@@ -2242,7 +2244,12 @@ class OperatorConfigService:
             if field is None or not field.get("editable", True):
                 continue
             source_path = self.repo_root / str(field["source"])
-            self._upsert_env_value(source_path, key, value)
+            self._upsert_env_value(
+                source_path,
+                key,
+                value,
+                quote_value=bool(field.get("secret")),
+            )
             updated_keys.append(key)
 
         refreshed_runtime_paths = self.runtime_service.get_runtime_paths()
@@ -2261,13 +2268,23 @@ class OperatorConfigService:
                     field_map[str(field["key"])] = field
         return field_map
 
-    def _upsert_env_value(self, path: Path, key: str, value: str) -> None:
+    def _upsert_env_value(self, path: Path, key: str, value: str, *, quote_value: bool = False) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
+        if value != "":
+            set_key(
+                path,
+                key,
+                value,
+                quote_mode="always" if quote_value else "never",
+                encoding="utf-8",
+            )
+            return
+
         lines = []
         if path.exists():
             lines = path.read_text(encoding="utf-8").splitlines()
 
-        replacement = f"{key}={value}"
+        replacement = f"{key}="
         updated = False
         next_lines = []
         for raw_line in lines:

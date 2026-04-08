@@ -255,6 +255,37 @@ def test_model_downloader_uses_python3_when_python_alias_is_missing(tmp_path):
     assert "models:plan" in result.stdout
 
 
+def test_model_downloader_reads_quoted_env_without_shell_evaluation(tmp_path):
+    env_file = tmp_path / ".env"
+    models_root = tmp_path / "models"
+    env_file.write_text(
+        "\n".join(
+            [
+                "CHAINLIT_AUTH_SECRET='ok'",
+                "CHAINLIT_ADMIN_PASSWORD='pa$$w\\'rd $(echo hacked) #bang'",
+                f"MODEL_PATH_LLM='{models_root / 'gguf' / 'qwen-14b' / 'Qwen2.5-14B-Instruct-Q4_K_M.gguf'}'",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = _run_script(
+        [
+            "bash",
+            str(SCRIPTS_DIR / "models" / "install_models.sh"),
+            "--dry-run",
+        ],
+        env={
+            "AGENT_NAVIGATOR_BACKEND_ENV_FILE": str(env_file),
+        },
+    )
+
+    assert result.returncode == 0
+    assert "command not found" not in result.stderr
+    assert str(models_root / "gguf" / "qwen-14b" / "Qwen2.5-14B-Instruct-Q4_K_M.gguf") in result.stdout
+
+
 def test_model_downloader_help_mentions_models_root_example():
     result = _run_script(["bash", str(SCRIPTS_DIR / "models" / "install_models.sh"), "--help"])
     assert result.returncode == 0

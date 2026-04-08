@@ -7,6 +7,10 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BACKEND_DIR="$PROJECT_ROOT/backend"
 ENV_FILE="${AGENT_NAVIGATOR_BACKEND_ENV_FILE:-$BACKEND_DIR/.env}"
 RUNTIME_ENV_FILE="${AGENT_NAVIGATOR_RUNTIME_ENV_FILE:-$BACKEND_DIR/.env.runtime}"
+
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/utils/env_loader.sh"
+
 TARGET="native"
 PROFILE="${UMS_RUNTIME_PROFILE:-adaptive}"
 NO_ATTACH=false
@@ -26,6 +30,8 @@ LLM_DEVICE_MODE_OVERRIDE="${LLM_DEVICE_MODE:-}"
 VLM_DEVICE_MODE_OVERRIDE="${VLM_DEVICE_MODE:-}"
 INTENT_EMBEDDER_DEVICE_MODE_OVERRIDE="${INTENT_EMBEDDER_DEVICE_MODE:-}"
 RETRIEVAL_EMBEDDER_DEVICE_MODE_OVERRIDE="${RETRIEVAL_EMBEDDER_DEVICE_MODE:-}"
+
+ENV_LOADER_PYTHON="$(resolve_env_loader_python || true)"
 
 print_help() {
   cat <<EOF
@@ -235,14 +241,6 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-source_env_file() {
-  local file="$1"
-  [ -f "$file" ] || return 0
-  set -a
-  source "$file"
-  set +a
-}
-
 build_preflight_args() {
   local command="$1"
   local output_path="${2:-}"
@@ -369,7 +367,7 @@ if [ "$INSTALL" = true ]; then
   exit $?
 fi
 
-source_env_file "$ENV_FILE"
+load_env_file "$ENV_FILE" "backend env" || exit 1
 bash "$SCRIPT_DIR/bootstrap_env.sh" --check "--target=$TARGET"
 
 if [ -z "$GPU_LAYERS_MODE_OVERRIDE" ]; then
