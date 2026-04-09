@@ -18,6 +18,7 @@ DEFAULT_BACKEND_BASE_URL = "http://127.0.0.1:8000"
 DEFAULT_OPENWEBUI_BASE_URL = "http://127.0.0.1:3001"
 DEFAULT_TOOL_SERVER_TOKEN = "agent-navigator-tool-server-dev-token"
 BOOTSTRAP_CONNECTION_ID = "agent_navigator_openapi_tool_server"
+TOOL_SERVER_TOKEN_PLACEHOLDER = "SET_OPENAPI_TOOL_SERVER_TOKEN"
 
 
 def parse_env_file(env_path: Path) -> Dict[str, str]:
@@ -129,11 +130,15 @@ def merge_tool_server_connections(
     return merged
 
 
-def tool_form_from_export(tool_export: Dict[str, Any]) -> Dict[str, Any]:
+def inject_tool_server_token(source: str, *, tool_server_token: str) -> str:
+    return source.replace(TOOL_SERVER_TOKEN_PLACEHOLDER, tool_server_token)
+
+
+def tool_form_from_export(tool_export: Dict[str, Any], *, tool_server_token: str) -> Dict[str, Any]:
     return {
         "id": tool_export["tool_id"],
         "name": tool_export["title"],
-        "content": tool_export["pythonCode"],
+        "content": inject_tool_server_token(tool_export["pythonCode"], tool_server_token=tool_server_token),
         "meta": {
             "description": tool_export.get("description", ""),
             "manifest": {"target_models": tool_export.get("targetModels", [])},
@@ -141,11 +146,11 @@ def tool_form_from_export(tool_export: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def function_form_from_export(function_export: Dict[str, Any]) -> Dict[str, Any]:
+def function_form_from_export(function_export: Dict[str, Any], *, tool_server_token: str) -> Dict[str, Any]:
     return {
         "id": function_export["action_id"],
         "name": function_export["title"],
-        "content": function_export["pythonCode"],
+        "content": inject_tool_server_token(function_export["pythonCode"], tool_server_token=tool_server_token),
         "meta": {
             "description": function_export.get("description", ""),
             "manifest": {"target_models": function_export.get("targetModels", [])},
@@ -228,9 +233,27 @@ class OpenWebUIBootstrapClient:
     def toggle_function_global(self, function_id: str) -> Any:
         return self._request("POST", f"/api/v1/functions/id/{function_id}/toggle/global")
 
+    def list_prompts(self) -> List[Dict[str, Any]]:
+        for path in ("/api/v1/prompts/list", "/api/v1/prompts/"):
+            try:
+                payload = self._request("GET", path)
+            except urllib.error.HTTPError as exc:
+                if exc.code == 404:
+                    continue
+                raise
+            if isinstance(payload, dict):
+                return list(payload.get("items", []))
+            if isinstance(payload, list):
+                return list(payload)
+        return []
+
     def get_prompt_by_command(self, command: str) -> Dict[str, Any] | None:
         try:
-            return self._request("GET", f"/api/v1/prompts/command/{urllib.parse.quote(command, safe='')}")
+            normalized_command = command.strip()
+            for prompt in self.list_prompts():
+                if str(prompt.get("command", "")).strip() == normalized_command:
+                    return prompt
+            return None
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
                 return None
@@ -249,9 +272,14 @@ def upsert_tool_server(client: OpenWebUIBootstrapClient, *, tool_server_export: 
     client.set_tool_server_connections(merged)
 
 
-def upsert_workspace_tools(client: OpenWebUIBootstrapClient, workspace_tools: Iterable[Dict[str, Any]]) -> None:
+def upsert_workspace_tools(
+    client: OpenWebUIBootstrapClient,
+    workspace_tools: Iterable[Dict[str, Any]],
+    *,
+    tool_server_token: str,
+) -> None:
     for tool_export in workspace_tools:
-        form_data = tool_form_from_export(tool_export)
+        form_data = tool_form_from_export(tool_export, tool_server_token=tool_server_token)
         existing = client.get_tool_by_id(form_data["id"])
         if existing is None:
             client.create_tool(form_data)
@@ -259,9 +287,14 @@ def upsert_workspace_tools(client: OpenWebUIBootstrapClient, workspace_tools: It
             client.update_tool(form_data["id"], form_data)
 
 
-def upsert_functions(client: OpenWebUIBootstrapClient, action_functions: Iterable[Dict[str, Any]]) -> None:
+def upsert_functions(
+    client: OpenWebUIBootstrapClient,
+    action_functions: Iterable[Dict[str, Any]],
+    *,
+    tool_server_token: str,
+) -> None:
     for function_export in action_functions:
-        form_data = function_form_from_export(function_export)
+        form_data = function_form_from_export(function_export, tool_server_token=tool_server_token)
         existing = client.get_function_by_id(form_data["id"])
         if existing is None:
             existing = client.create_function(form_data)
@@ -297,8 +330,8 @@ def bootstrap_openwebui(
     client = OpenWebUIBootstrapClient(openwebui_base_url=openwebui_base_url, admin_token=admin_token)
 
     upsert_tool_server(client, tool_server_export=export_bundle["toolServer"], tool_server_token=tool_server_token)
-    upsert_workspace_tools(client, export_bundle.get("workspaceTools", []))
-    upsert_functions(client, export_bundle.get("actionFunctions", []))
+    upsert_workspace_tools(client, export_bundle.get("workspaceTools", []), tool_server_token=tool_server_token)
+    upsert_functions(client, export_bundle.get("actionFunctions", []), tool_server_token=tool_server_token)
     upsert_prompts(client, export_bundle.get("workspacePrompts", []))
 
     return {

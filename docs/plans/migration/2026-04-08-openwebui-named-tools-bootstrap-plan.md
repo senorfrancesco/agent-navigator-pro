@@ -2,6 +2,8 @@
 
 Status: execution-ready after current `P0` backend fixes.
 
+> **2026-04-09 update:** этот plan остаётся execution plan для `M3.5`, но дальнейшая эволюция bootstrap/config теперь должна подчиняться [Open WebUI Responsibility Split Plan](/home/fisher/agent-navigator/docs/plans/migration/2026-04-09-openwebui-responsibility-split-plan.md): `raw model + explicit tools` как canonical contour, `agent-navigator` только как explicit agent mode, а runtime config tools/actions — по возможности в `Open WebUI`-native surfaces, а не в ручной `.env`-patching workflow.
+
 ## Summary
 
 Для production/eval contour не нужно делать отдельный server на каждый инструмент. Каноническая модель остаётся такой:
@@ -85,6 +87,23 @@ API `Open WebUI` для tools/functions/prompts нужно считать integr
 - избегать дублей при повторном запуске;
 - оставаться безопасным после обновлений `Open WebUI`.
 
+### 7. Runtime config должен уходить в native `Open WebUI` surfaces
+
+Bootstrap не должен навсегда оставлять imported tools/functions на placeholder-driven `.env` patching.
+
+Нормативное направление такое:
+
+- backend хранит secrets и export/control-plane metadata;
+- `Open WebUI` хранит connection/tool/function/prompt state и те runtime valves/settings, которые поддерживает его текущая версия;
+- non-secret user-facing defaults, labels, enable/disable state и другие UX-facing knobs должны materialize’иться именно в `Open WebUI`, а не оставаться ручной `.env` настройкой;
+- operator должен иметь предсказуемый re-bootstrap path без ручного редактирования imported code после каждого drift/change.
+
+Уточнение:
+
+- это не означает, что все значения переезжают в `Open WebUI`;
+- `backend/.env` остаётся местом для секретов, backend URLs и execution-policy значений, которые не должны жить в imported tool state.
+- low-level serving/runtime knobs и backend prompts не входят в target native-config migration.
+
 ## Target Open WebUI Surfaces
 
 ### A. Tool Server
@@ -135,6 +154,27 @@ API `Open WebUI` для tools/functions/prompts нужно считать integr
 
 Они остаются вторичным способом запуска.
 
+### E. Native runtime config
+
+В `Open WebUI` нужно считать operator-managed state:
+
+- tool server connection object;
+- tool/function/prompt enablement;
+- display metadata;
+- valves/runtime defaults, если их поддерживает текущая версия `Open WebUI`.
+
+В backend должны оставаться:
+
+- auth tokens;
+- backend base URLs/source-of-truth;
+- export metadata и secret references;
+- execution policy, не предназначенная для ручной UI-настройки;
+- `UMS` / provider runtime параметры вроде `num_ctx`, `num_gpu`, `num_thread`, `use_mmap`, `use_mlock`, `keep_alive`;
+- generation/parsing/RAG source-of-truth defaults;
+- `LangGraph` prompts и tool/workflow internal prompts.
+
+Отдельный узкий слой может позже быть разрешён как `request-time override` из UI, но только через backend allowlist/clamp, а не как новый source-of-truth.
+
 ## Wrapper Rules
 
 ### Equipment tools
@@ -174,6 +214,8 @@ Named tools и action functions должны привязываться толь
 
 `agent-navigator` wrapper path не должен быть primary execution model для этих flows.
 
+Если модель выбирает tool сама, это допустимо только внутри native tool-calling contour `Open WebUI`, когда tools уже явно переданы в chat runtime.
+
 ## Deep Job UX Contract
 
 Нельзя считать auto-polling `Open WebUI` гарантированным baseline.
@@ -207,12 +249,24 @@ Bootstrap должен уметь:
 7. Делать `upsert` prompts.
 8. Включать для action functions нужные flags.
 9. Печатать итоговый отчёт без дублей.
+10. Показывать ownership/drift summary: что остаётся backend-owned, а что materialize’ится в `Open WebUI`.
 
 Источники для bootstrap:
 
 - backend export endpoint;
-- `backend/.env`;
+- `backend/.env` как bootstrap input / backend-side source-of-truth;
 - admin token или admin credentials `Open WebUI`.
+
+Нормативное уточнение:
+
+- `.env` не должен оставаться долгосрочным user-facing config surface для imported tools;
+- bootstrap должен переносить runtime settings в `Open WebUI` connection / valves / admin-managed state там, где это поддерживает текущая версия `Open WebUI`;
+- export bundle должен описывать не только code templates, но и native-config blocks / default valves / ownership hints для bootstrap;
+- нужен drift-check path между export bundle и живым `Open WebUI` state, чтобы re-bootstrap не был blind overwrite;
+- ручной post-import edit допустим только как временный workaround, а не как canonical delivery path.
+- после стабилизации internal tools нужен минимум один follow-up smoke с community tool как compatibility harness: он проверяет не “новую фичу”, а то, что модели и native config contour работают не только с нашими wrappers.
+- этот compatibility harness должен отдельно прогоняться в `Native Function Calling` режиме минимум на `Qwen2.5` и `Qwen3`, с фиксацией различий по tool invocation quality/result.
+- `M3.7/P4` не являются планом по переносу operator runtime panels, `UMS` tuning и backend prompts в `Open WebUI`.
 
 ## Execution Phases
 
@@ -258,13 +312,28 @@ Acceptance:
 - action functions;
 - prompts.
 
+### P4 — Native Config Follow-up
+
+После стабилизации `M3.5` bootstrap должен эволюционировать дальше:
+
+- минимизировать hardcoded runtime settings внутри imported code;
+- использовать `Open WebUI`-native config surfaces для tool/action runtime settings;
+- расширить export bundle ownership/runtime-config metadata;
+- добавить drift-check/report перед и после re-bootstrap;
+- дать operator-friendly re-bootstrap path без ручного blind patching;
+- зафиксировать отдельный compatibility smoke для community tools после стабилизации internal tools;
+- прогнать минимум по одной community tool-конфигурации на `Qwen2.5` и `Qwen3` в `Native Function Calling` режиме и сохранить comparative notes.
+
 Acceptance:
 
 - повторный запуск не создаёт дубли;
 - обновление существующих записей предсказуемо;
-- поведение не зависит от ручного кликанья в админке.
+- поведение не зависит от ручного кликанья в админке;
+- ownership граница `backend secret` / `Open WebUI native config` явно описана и проверяема;
+- backend-owned runtime/prompt config не мигрирует в `Open WebUI` этим slice;
+- есть сравнительный smoke-result по community tool для `Qwen2.5` и `Qwen3`.
 
-### P4 — Document and Compare Tools
+### P5 — Document and Compare Tools
 
 После `M2.1/M2.2`:
 
@@ -288,6 +357,9 @@ Acceptance:
 - `equipment deep` работает end-to-end;
 - `refresh/cancel` работают без prompt hacks;
 - document wrappers без context дают понятное UX-сообщение.
+- есть хотя бы один compatibility smoke с community tool после стабилизации internal tools/native config.
+- comparative notes для `Qwen2.5` и `Qwen3` фиксируют, как каждая модель ведёт себя в `Native Function Calling` с community tool.
+- community tool используется именно как проверка native tool/model compatibility, а не как перенос продуктовой логики во внешний tool ecosystem.
 
 ## Operational Notes
 

@@ -2,7 +2,7 @@
 
 > **Primary operational backlog for migration scope.** Этот файл является каноническим source-of-truth для `Open WebUI` migration, backend tool contracts, upload/document binding, knowledge-base prerequisites и rollout-критериев. `TASKS.md` остаётся общепроектным backlog и хранит только краткие cross-project ссылки и follow-up.
 
-> **Plan library:** все migration-related планы теперь собраны в [docs/plans/migration/README.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/README.md).
+> **Plan library:** все migration-related планы теперь собраны в [docs/plans/migration/README.md](/home/fisher/agent-navigator/docs/plans/migration/README.md).
 
 ## Scope
 
@@ -23,10 +23,11 @@
 - общий release backlog, не меняющий migration contour
 - ранний rename `backend/open_webui_uploads` без стабилизированного upload contract
 
-## Current Migration Status (2026-04-07)
+## Current Migration Status (2026-04-09)
 
 - Текущий canonical UI проекта: `Chainlit`
 - `Open WebUI` в репозитории живёт как `legacy` docker profile на порту `3001`
+- Целевой следующий migration milestone: перевести `Open WebUI` в primary UI contour после закрытия `M3.5`, `M3.6`, `M3.7` и отдельного coexistence/sunset slice для `Chainlit`
 - `agent_api.py` уже даёт OpenAI-compatible surface и request dedup для Open WebUI, но это compatibility/eval path, а не финальный product contract
 - `backend/open_webui_uploads` фактически стал shared storage для обоих UI и report/export flows; это compatibility name, но живой storage contract
 - Уже закрыто в migration contour:
@@ -37,22 +38,31 @@
 - Сейчас в активном progress:
   - `M3.1` — compose contour / pinned image / runtime smoke
   - `M3.3` — реальный `Open WebUI` smoke через `User Tool Server`
-  - `M3.4` — `model/tool split` для `Open WebUI native tool-calling`
+  - `M3.5` — live bootstrap smoke / named tools stabilization
+  - следующий structural slice согласован как `M3.6` / `M3.7`: responsibility split и `Open WebUI`-native config/bootstrap
 - Самый устаревший слой migration path сейчас находится в:
   - `scripts/run_openwebui.sh`
   - частях docs, которые смешивают target vision, legacy path и текущее состояние
   - master-plan, который описывает `Open WebUI-first` как установленный факт, хотя repo policy пока фиксирует `Chainlit-first`
+  - implicit wrapper/tool routing, где `agent-navigator` и explicit tools пересекаются в одном user path
 
 ## Canonical Decisions
 
 - `Open WebUI` возвращаем как **controlled evaluation contour**, а не как немедленный `main UI switch`
 - До functional parity `Chainlit` остаётся canonical UI и debug shell
+- Целевое направление migration: перевести проект на `Open WebUI` как primary UI contour, а `Chainlit` понизить до временного compatibility/debug shell с последующим sunset slice
 - Основной integration path: `OpenAPI Tool Server`
 - `MCP` поддерживается как второй слой, но не как стартовый production path
 - Бизнес-логика и orchestration policy остаются во внешнем backend, не в `Open WebUI`
+- Для `Open WebUI` вводим три явных режима:
+  - `plain model` — backend не принимает tool decision;
+  - `explicit tools` — backend исполняет только явно выбранный tool; модель может выбирать только из тех tools, которые уже переданы ей нативным contour `Open WebUI`;
+  - `agent mode` — classifier/orchestration разрешены только как explicit opt-in profile
 - `backend/open_webui_uploads` сохраняется как текущее shared storage имя до отдельного approved rename slice
 - Migration идёт фазами; один implementation slice по умолчанию затрагивает не более `5` файлов
 - Long-running jobs, ingestion и reindex не проектируются как “магический streaming tool call”; backend остаётся source-of-truth для job state
+- `backend/.env` остаётся backend-side source-of-truth и bootstrap input, но не должен оставаться долгосрочным user-facing config path для imported `Open WebUI` tools/actions
+- после стабилизации internal tools нужен хотя бы один compatibility smoke с community tool, чтобы `Open WebUI`-native config/bootstrap не были завязаны только на наш export bundle
 
 ## Future Architecture Directions (not current scope)
 
@@ -264,7 +274,7 @@
   - backend log подтвердил split маршрутов: обычный чат идёт в `POST /raw/v1/chat/completions`, fast tool идёт в `POST /tool-server/tools/analyze_equipment_fast`, deep tool идёт в `POST /tool-server/tools/analyze_equipment_deep -> 202 Accepted`;
   - оставшийся хвост по auto-polling deep jobs отнесён к `M3.3` как UX limitation `Open WebUI`, а не как дефект model/tool split.
   Plan:
-  - [Open WebUI Model / Tool Split Plan](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-08-openwebui-model-tool-split-plan.md)
+  - [Open WebUI Model / Tool Split Plan](/home/fisher/agent-navigator/docs/plans/migration/2026-04-08-openwebui-model-tool-split-plan.md)
 - [ ] M3.5 — Ввести named tools и bootstrap automation для `Open WebUI`
   Контекст:
   - живой smoke подтвердил, что server-level tool picker в compose bar показывает источник инструментов, а не понятный каталог пользовательских задач;
@@ -290,17 +300,81 @@
     - читает `/operator/tool-bindings/export/openwebui`;
     - логинится в `Open WebUI` через `/api/v1/auths/signin`;
     - делает `upsert` для `tool server`, `Workspace > Tools`, `Action Functions` и `Prompts` через admin API без blind create и без дублей по canonical identity.
+  - live bootstrap smoke против реального `Open WebUI` container/admin state прогнан:
+    - первый live прогон вскрыл два реальных bootstrap defects, исправленных в том же slice:
+      - prompt lookup через `GET /api/v1/prompts/command/*` в текущем `Open WebUI` отдавал HTML SPA fallback вместо JSON; bootstrap переведён на list-based prompt discovery (`/api/v1/prompts/list` с fallback на `/api/v1/prompts/`);
+      - imported `Workspace > Tools` / `Action Functions` оставались с placeholder `SET_OPENAPI_TOOL_SERVER_TOKEN`, из-за чего live execution падал в `401`; bootstrap теперь inject’ит реальный `OPENAPI_TOOL_SERVER_TOKEN` при upsert.
+    - повторный live bootstrap после фиксов проходит успешно и materialize’ит:
+      - `Agent Navigator OpenAPI Tool Server` connection;
+      - `Workspace > Tools`: `equipment_fast_tool`, `equipment_deep_tool`;
+      - `Action Functions`: `equipment_fast_action`, `equipment_deep_action`, `tool_job_refresh_action`, `tool_job_cancel_action`;
+      - `Prompts`: `/hw_fast`, `/hw_deep`.
+  - browser-side smoke подтверждён в legacy `Open WebUI`:
+    - `Workspace > Tools` показывает оба named tools как отдельные записи;
+    - `Workspace > Prompts` показывает `/hw_fast` и `/hw_deep` без поломки prompts contour;
+    - action functions остаются активными/global по admin API и доступны в chat UI как follow-up buttons;
+    - user-level tools menu показывает named tools рядом с server-level sources, то есть пользователь видит не только provider entry, но и конкретные equipment tools.
+  - execution smoke подтверждён частично на живом contour:
+    - после token injection клик по `Быстрый анализ оборудования` даёт реальный `POST /tool-server/tools/analyze_equipment_fast -> 200 OK`;
+    - клик по `Глубокий анализ оборудования` даёт реальный `POST /tool-server/tools/analyze_equipment_deep -> 202 Accepted`;
+    - для clean chat path дополнительно подтверждено, что bootstrap больше не ломает обычный `agent-navigator` wrapper response после подъёма `UMS`.
   Blockers:
   - [x] backend bug в `analyze_equipment_fast` исправлен как обязательный `P0` gate перед rollout named tools;
   - [x] deep-job context стабилизирован так, чтобы `refresh/cancel` actions могли восстанавливать `status_url` / `job_id` из message context.
   Remaining:
-  - живой bootstrap smoke против реального `Open WebUI` container/admin state ещё не прогнан после добавления `scripts/bootstrap_openwebui.py`;
-  - нужно подтвердить, что `Workspace > Tools` entries после bootstrap действительно видны пользователю как named tools и не конфликтуют с existing `Action Functions` / `Prompts` contour.
+  - отдельный clean smoke для topology `raw model + named tool`, изолированный от `agent-navigator` wrapper path, ещё нужно зафиксировать как устойчивый browser-visible сценарий;
+  - clean browser-side end-to-end rendering результата после `equipment_fast_tool` ещё не подтверждено как устойчивое user-visible outcome: transport-level `200 OK` есть, но current `Open WebUI` action/chat contour не всегда materialize’ит отдельный post-action result bubble предсказуемо;
+  - usable live smoke для `refresh/cancel` пока не подтверждён: buttons присутствуют в UI, но в свежем browser run не зафиксирован надёжный `GET /tool-server/tool-jobs/{job}` / `POST .../cancel` со стороны `Open WebUI`;
+  - runtime smoke зависит от поднятого native `UMS` на `:8090`; без него legacy wrapper path даёт ложные ошибки даже при корректном bootstrap, поэтому M3.5 нельзя считать полностью закрытой только по bootstrap/import факту.
   Зависимости / порядок:
   - `M3.5` должен быть закрыт до начала structural slice по unified `Model Catalog / Gateway`;
   - причина: `M3.5` даёт immediate user-facing value и меньше риск конфликтов в `agent_api` / provider-tool integration surface.
   Plan:
-  - [Open WebUI Named Tools and Bootstrap Plan](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-08-openwebui-named-tools-bootstrap-plan.md)
+  - [Open WebUI Named Tools and Bootstrap Plan](/home/fisher/agent-navigator/docs/plans/migration/2026-04-08-openwebui-named-tools-bootstrap-plan.md)
+- [ ] M3.6 — Развести `plain model`, `explicit tools` и `agent mode`
+  Контекст:
+  - текущий `agent-navigator` wrapper всё ещё пересекается с `Open WebUI` tool UX и может скрыто выбирать backend tools в обычном chat path;
+  - для слабых машин canonical path должен быть проще: `raw/live model` плюс явно подключённые tools, без постоянной agentic orchestration;
+  - `Open WebUI` хотим сделать target primary UI, а `Chainlit` — временным compatibility shell до sunset slice.
+  Нужно сделать:
+  - зафиксировать три режима как явные runtime contours;
+  - запретить implicit backend tool routing для `plain model`;
+  - оставить model-side tool choice только внутри нативного `Open WebUI` tool-calling contour, когда tools уже явно переданы модели;
+  - оставить agentic decision только в отдельном `agent mode`;
+  - сделать `raw provider + explicit tools` canonical `Open WebUI` contour.
+  Acceptance:
+  - обычный `Open WebUI` chat не вызывает backend tools автоматически;
+  - `/tool-server/tools/*` выполняет только явно выбранный tool;
+  - `agent-navigator` больше не описывается как default Open WebUI model для tool workflows;
+  - docs/backlog последовательно разводят model path, tool path и agent mode.
+  Plan:
+  - [Open WebUI Responsibility Split Plan](/home/fisher/agent-navigator/docs/plans/migration/2026-04-09-openwebui-responsibility-split-plan.md)
+- [ ] M3.7 — Перенести runtime config инструментов в `Open WebUI`-native bootstrap/config contour
+  Контекст:
+  - текущий bootstrap уже умеет materialize’ить tool server, tools, functions и prompts, но долгосрочно не хочется держать imported tools на ручной `.env`-логике и ad-hoc patching;
+  - `Open WebUI` уже имеет native surfaces для connections, tools, functions, prompts и valves/admin-managed state.
+  Нужно сделать:
+  - определить ownership matrix: какие значения остаются backend-side secrets/source-of-truth, а какие должны жить как `Open WebUI`-native config;
+  - расширить bootstrap так, чтобы operator мог переbootstrap’ить `Open WebUI` без ручной правки imported code;
+  - использовать `Open WebUI` connections / valves / admin-managed state как основной runtime-config layer там, где это поддерживается версией;
+  - расширить export bundle ownership/runtime-config metadata и добавить drift-check между export и materialized `Open WebUI` state;
+  - зафиксировать smoke path для native config и хотя бы один follow-up compatibility smoke с community tool как проверку модели/инструментов вне нашего bundle;
+  - отдельно прогнать `Native Function Calling` smoke с community tool на `Qwen2.5` и `Qwen3` и зафиксировать comparative result.
+  Не входит в этот slice:
+  - перенос `UMS` / provider runtime knobs (`num_ctx`, `num_gpu`, `num_thread`, `use_mmap`, `use_mlock`, `keep_alive` и т.п.) в `Open WebUI`;
+  - перенос generation/parsing/RAG source-of-truth в `Open WebUI`;
+  - перенос `LangGraph` prompts и tool/workflow internal prompts в `Open WebUI`.
+  Acceptance:
+  - imported tools/actions не требуют ручного post-import редактирования для базового runtime;
+  - bootstrap/admin path управляет runtime-настройкой предсказуемо и идемпотентно;
+  - `.env` остаётся bootstrap input и backend secret source-of-truth, но не user-facing config surface для долгой жизни contour;
+  - ownership граница `backend secrets` / `Open WebUI native config` явно описана и проверяема;
+  - backend-owned runtime/prompt config остаётся вне `Open WebUI` migration contour;
+  - community tool smoke описан как обязательная compatibility check после стабилизации internal tools, а не как новый primary integration path;
+  - comparative notes по `Qwen2.5` и `Qwen3` сохраняют фактическое поведение native tool calling, а не предположения.
+  Plan:
+  - [Open WebUI Responsibility Split Plan](/home/fisher/agent-navigator/docs/plans/migration/2026-04-09-openwebui-responsibility-split-plan.md)
+  - [Open WebUI Named Tools and Bootstrap Plan](/home/fisher/agent-navigator/docs/plans/migration/2026-04-08-openwebui-named-tools-bootstrap-plan.md)
 
 ### M4 — Hardening / Coexistence / Rollout
 
@@ -327,6 +401,7 @@
   - это cleanup/consistency slice, а не immediate blocker для текущего tool flow.
   Precondition:
   - `M3.5 — Open WebUI Named Tools + Bootstrap` закрыт и eval contour устойчив.
+  - `M3.6 — Responsibility Split` и `M3.7 — Open WebUI-native Config` завершены.
   Plan:
   - [Unified Model Catalog / Gateway Implementation Plan](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-08-unified-model-catalog-gateway-plan.md)
 - [ ] M4.2 — Определить coexistence contract для `Chainlit` и `Open WebUI`
@@ -364,13 +439,15 @@
 ## Open Tasks / Priorities
 
 1. M3.3 — завершить controlled smoke через `Open WebUI` `User Tool Server` на native backend path
-2. M3.5 — ввести named tools и idempotent bootstrap automation для `Open WebUI`
-3. M3.1 — довести `Open WebUI` compose contour до pinned-tag + стабильного runtime smoke
-4. M2.1 / M2.2 — определить upload/document binding как backend-owned model
-5. Unified Model Catalog / Gateway — только после закрытия `M3.5` и стабилизации eval contour
-6. M2.5 / M2.6 — вынести parsing/corpus admin в backend-owned ingestion + admin UI contour
-7. M4.4 — довести tool UX control plane до persistent operator-managed registry и wiring в Open WebUI actions/prompts
-8. M4.1 / M4.2 — определить coexistence contract и MCP layer
+2. M3.5 — добить live smoke до clean `raw model + named tools` acceptance и refresh/cancel usability
+3. M3.6 — развести `plain model`, `explicit tools` и `agent mode` без hidden backend routing
+4. M3.7 — перенести runtime config инструментов в `Open WebUI`-native bootstrap/config contour
+5. M4.2 — оформить `Chainlit -> temporary compatibility shell` и условия sunset
+6. M3.1 — довести `Open WebUI` compose contour до pinned-tag + стабильного runtime smoke
+7. M2.1 / M2.2 — определить upload/document binding как backend-owned model
+8. Unified Model Catalog / Gateway — только после закрытия `M3.5`, `M3.6`, `M3.7` и стабилизации eval contour
+9. M2.5 / M2.6 — вынести parsing/corpus admin в backend-owned ingestion + admin UI contour
+10. M4.4 / M4.1 — довести tool registry и MCP/coexistence layer без возврата hidden routing
 
 ## Risks / Blockers / Workarounds
 

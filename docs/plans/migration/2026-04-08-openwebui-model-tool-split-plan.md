@@ -4,6 +4,8 @@
 **Статус:** рабочий implementation plan / source-backed decision record  
 **Назначение:** зафиксировать обязательное разделение между `model provider` и `tool server` в `Open WebUI`, чтобы native tool-calling не шёл через product-specific assistant wrapper `agent-navigator`.
 
+> **2026-04-09 update:** этот plan остаётся актуальным как source-backed decision для `raw model + tool server` split, но execution sequencing теперь подчинён более широкому [Open WebUI Responsibility Split Plan](/home/fisher/agent-navigator/docs/plans/migration/2026-04-09-openwebui-responsibility-split-plan.md), который дополнительно фиксирует режимы `plain model`, `explicit tools`, `agent mode` и переход `Chainlit -> temporary compatibility shell`.
+
 ## 1. Problem Statement
 
 Практический smoke показал архитектурный конфликт текущего eval-contour:
@@ -103,6 +105,16 @@ Docs Open WebUI прямо предупреждают:
    - `agent-navigator` wrapper остаётся отдельным specialized assistant mode / compatibility layer;
    - не используется как default model для native tool-calling path в Open WebUI.
 
+### 3.1.1 Runtime mode boundary
+
+После 2026-04-09 split считаем обязательным дополнительное правило:
+
+- `plain model` path не должен включать backend-owned tool decision;
+- `explicit tools` path работает только с уже выбранным tool contract; model-side choice допустим только если `Open WebUI` уже передал tools в native tool-calling contour;
+- `agent mode` остаётся единственным местом, где backend принимает orchestration decision.
+
+Это уточнение нужно, чтобы `model/tool split` не превратился в очередной wrapper-layer с implicit routing.
+
 ### 3.2 What must not happen
 
 Нельзя оставлять такую схему как canonical:
@@ -176,6 +188,7 @@ and separately
 - никакого forced route/tool selection;
 - никакого document lifecycle awareness;
 - only model inference, model discovery, streaming, and tool-calling compatibility.
+- если tools переданы модельному provider path нативно через `Open WebUI`, gateway лишь сохраняет protocol-clean surface и не принимает semantic tool decision сам.
 
 ## 6. Required Implementation Slices
 
@@ -216,7 +229,8 @@ Acceptance:
 Acceptance:
 
 - `Open WebUI` может выбрать raw model, который не injects `agent-navigator` behavior;
-- обычный чат через raw provider не идёт через product-specific orchestration.
+- обычный чат через raw provider не идёт через product-specific orchestration;
+- любое tool execution в этом contour либо приходит из native tool-calling модели, либо из explicit UI action/tool picker, но не из backend hidden router.
 
 ### Slice D — Rewire Open WebUI Eval Contour
 
@@ -224,7 +238,8 @@ Acceptance:
 
 - подключить raw model provider в `Open WebUI`;
 - оставить `Agent Navigator Tools` как отдельный tool server;
-- убрать `agent-navigator` wrapper из роли default chat model для native tool-calling smoke.
+- убрать `agent-navigator` wrapper из роли default chat model для native tool-calling smoke;
+- зафиксировать `agent-navigator` только как explicit agent/compatibility profile.
 
 Acceptance:
 
@@ -241,6 +256,8 @@ Acceptance:
 - выбранная для tool smoke модель больше не является `agent-navigator` wrapper;
 - fast tool end-to-end response не проходит через product-specific assistant layer;
 - docs/backlog фиксируют `agent-navigator` only as specialized assistant / compatibility mode.
+- `plain model` path больше не содержит hidden backend tool routing.
+- `explicit tools` path не содержит backend semantic guesswork сверх уже выбранного tool contract.
 
 ## 8. Explicit Non-Goals
 
@@ -258,5 +275,5 @@ Acceptance:
 
 1. не чинить дальше UX deep tools в текущем `agent-navigator` model path;
 2. сначала развести raw model и product wrapper;
-3. потом повторить `M3.3` smoke уже на raw provider + tool server split;
+3. затем повторить `M3.3/M3.5` smoke уже на raw provider + tool server split и отдельно проверить clean manual named-tool path;
 4. только затем решать, нужен ли дополнительный Open WebUI-side polling UX for async tools.

@@ -2,9 +2,11 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Свести выбор моделей и OpenAI-compatible provider path к одному registry-backed каталогу в `UMS`, чтобы `Open WebUI` и внутренние клиенты читали один и тот же актуальный список моделей, а `agent_api` перестал держать собственный raw model catalog.
+**Goal:** Свести выбор моделей и OpenAI-compatible provider path к одному registry-backed каталогу в `UMS`, чтобы `Open WebUI` и внутренние клиенты читали один и тот же актуальный список моделей для `plain/raw model` contour, а `agent_api` перестал держать собственный raw model catalog.
 
-**Architecture:** Не вводить новый сервис. Использовать существующий `UMS` как canonical `model catalog + runtime gateway`, а `backend/config/models.yaml` оставить операторским source of truth для модели, её видимости, capabilities и lifecycle policy. `agent_api` остаётся product/orchestration API, а его текущий raw-provider path становится временным compatibility shim до завершения migration cleanup slice.
+**Architecture:** Не вводить новый сервис. Использовать существующий `UMS` как canonical `model catalog + runtime gateway`, а `backend/config/models.yaml` оставить операторским source of truth для модели, её видимости, capabilities и lifecycle policy. `agent_api` остаётся product/orchestration API, а его текущий raw-provider path становится временным compatibility shim до завершения migration cleanup slice. Этот plan не должен повторно решать задачу tool-routing или agentic decision policy; она уже закрывается отдельным responsibility split.
+
+> **2026-04-09 update:** этот plan теперь зависит не только от `M3.5`, но и от [Open WebUI Responsibility Split Plan](/home/fisher/agent-navigator/docs/plans/migration/2026-04-09-openwebui-responsibility-split-plan.md). До unified catalog сначала нужно жёстко развести `plain model`, `explicit tools` и `agent mode`, иначе catalog cleanup снова смешается с hidden backend routing.
 
 **Tech Stack:** FastAPI, `UMS`, `models.yaml`, `Open WebUI`, `llama-server`, optional `vLLM`, sentence-transformers / embedding service.
 
@@ -19,13 +21,18 @@
 Нормативная зависимость по порядку такая:
 
 1. сначала `M3.5 — Open WebUI Named Tools + Bootstrap`
-2. затем `Unified Model Catalog / Gateway`
+2. затем `M3.6 — Responsibility Split`
+3. затем `M3.7 — Open WebUI-native Config`
+4. затем `Unified Model Catalog / Gateway`
 
 Причина:
 
 - `M3.5` разблокирует реальный пользовательский flow в `Open WebUI` на уже рабочем backend path;
+- `M3.6` убирает hidden backend tool routing из обычного model path;
+- `M3.7` стабилизирует bootstrap/config contour и убирает ручной drift между backend secrets и imported Open WebUI state;
 - текущая проблема model catalog является техдолгом и cleanup slice, а не immediate blocker для equipment tools flow;
 - `Model Catalog / Gateway` затрагивает `agent_api` и `UMS`, то есть ту же зону, где живёт provider/tool integration surface, поэтому его нельзя безопасно смешивать с `M3.5`.
+- native `Open WebUI` config/bootstrap должен сначала стабилизировать, какой provider вообще считается canonical, иначе catalog cleanup и admin wiring снова разъедутся.
 
 ### 1.1 Code-grounded current state
 
@@ -110,12 +117,22 @@
 - health/readiness-backed visibility модели;
 - routing в `llama-server` / `vLLM` / embedding runtime.
 
+Для `Open WebUI` это означает:
+
+- admin connection/config должен смотреть на один canonical raw provider;
+- tool server config остаётся отдельной плоскостью и не смешивается с model inventory;
+- model catalog не должен возвращать hidden agent/tool semantics.
+
 `agent_api` остаётся местом для:
 
 - orchestration;
-- product behavior;
+- explicit agent mode / product behavior;
 - tool-contract logic;
 - compatibility shim на период migration.
+
+При этом после `M3.6` он не должен оставаться местом hidden tool decision для обычного `Open WebUI` model path.
+
+После `M3.7` он также не должен оставаться source-of-truth для user-facing model connection settings, если эти settings уже материализуются нативно в `Open WebUI`.
 
 ### 3.2 Model classes
 
