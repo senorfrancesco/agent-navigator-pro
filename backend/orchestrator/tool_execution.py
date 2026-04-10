@@ -25,9 +25,8 @@ def apply_tool_contract_to_payload(request_payload: Dict[str, Any]) -> Optional[
     request_payload["routing_mode"] = routing_mode
     request_payload["forced_route"] = tool_definition.legacy_executor
     request_payload["tool_execution_mode"] = tool_definition.execution_mode
-
-    if str(request_payload.get("runtime_mode") or "auto") == "auto":
-        request_payload["runtime_mode"] = "specialized_tasks"
+    request_payload["execution_surface"] = "explicit_tool"
+    request_payload["runtime_mode"] = "specialized_tasks"
 
     if tool_definition.name == "ask_document" and not request_payload.get("rag_scope"):
         if str(request_payload.get("knowledge_collection_id") or "").strip():

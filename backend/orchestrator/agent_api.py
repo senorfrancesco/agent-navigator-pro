@@ -900,6 +900,7 @@ async def orchestrate(request: OrchestrationRequest, http_request: Optional[Requ
     request.trace_id = request.trace_id or _resolve_http_trace_id(http_request)
     payload = request.model_dump(exclude_none=True)
     apply_tool_contract_to_payload(payload)
+    payload.setdefault("execution_surface", "agent_mode")
     effective_settings = resolve_effective_settings(_collect_request_control_plane_with_payload_overrides(request, payload))
     response = decide_orchestration(
         query=str(payload.get("message", request.message)),
@@ -934,6 +935,7 @@ async def execute_orchestration_api(request: OrchestrationRequest, http_request:
     request.trace_id = request.trace_id or _resolve_http_trace_id(http_request)
     payload = request.model_dump(exclude_none=True)
     apply_tool_contract_to_payload(payload)
+    payload.setdefault("execution_surface", "agent_mode")
     effective_settings = resolve_effective_settings(_collect_request_control_plane_with_payload_overrides(request, payload))
     deps = _build_api_execution_dependencies(request, effective_settings)
     payload["runtime_mode"] = resolve_request_runtime_mode(payload, effective_settings)
@@ -1097,6 +1099,7 @@ async def openai_completions(request: Request):
             if target_model != "agent-navigator":
                 effective_settings["resolved_model_id"] = target_model
             payload = compat_request.model_dump(exclude_none=True)
+            payload["execution_surface"] = "agent_mode" if target_model == "agent-navigator" else "compat_chat"
             payload["idempotency_key"] = dedup_key
             payload["runtime_mode"] = resolve_request_runtime_mode(payload, effective_settings)
             payload["effective_settings"] = effective_settings
@@ -1124,6 +1127,7 @@ async def openai_completions(request: Request):
             if target_model != "agent-navigator":
                 effective_settings["resolved_model_id"] = target_model
             payload = compat_request.model_dump(exclude_none=True)
+            payload["execution_surface"] = "agent_mode" if target_model == "agent-navigator" else "compat_chat"
             payload["idempotency_key"] = dedup_key
             payload["runtime_mode"] = resolve_request_runtime_mode(payload, effective_settings)
             payload["effective_settings"] = effective_settings

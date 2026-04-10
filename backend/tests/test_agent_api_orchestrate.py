@@ -16,6 +16,7 @@ from orchestrator.agent_api import (
     get_tool_job_status_route,
     orchestrate,
 )
+from orchestrator.execution_runtime import execute_orchestration as execute_runtime_orchestration
 from orchestrator.knowledge_base_ingestion import ingest_text_source_sync
 from orchestrator.knowledge_base_store import get_knowledge_base_store
 from orchestrator.tool_job_store import get_tool_job_store
@@ -222,6 +223,72 @@ async def test_execute_orchestration_api_maps_requested_tool_to_legacy_forced_ro
     assert captured["payload"]["forced_route"] == "document_question"
     assert captured["payload"]["runtime_mode"] == "specialized_tasks"
     assert captured["payload"]["rag_scope"] == "session_rag"
+
+
+@pytest.mark.asyncio
+async def test_execute_orchestration_api_forces_explicit_tool_boundary_even_with_chat_only(monkeypatch):
+    captured = {}
+
+    async def fake_execute_orchestration(payload, deps=None):
+        captured["payload"] = payload
+        return {
+            "route": payload.get("forced_route"),
+            "assistant_message": "ok",
+        }
+
+    monkeypatch.setattr("orchestrator.agent_api.execute_orchestration", fake_execute_orchestration)
+
+    request = OrchestrationRequest(
+        message="Просто поговори, но вызови быстрый анализ оборудования",
+        requested_tool="analyze_equipment_fast",
+        routing_mode="explicit",
+        runtime_mode="chat_only",
+        classifier_result={
+            "intent": "general_chat",
+            "confidence": 0.99,
+            "margin": 0.9,
+            "needs_rag": False,
+        },
+    )
+
+    response = await execute_orchestration_api(request)
+
+    assert response["requested_tool"] == "analyze_equipment_fast"
+    assert captured["payload"]["forced_route"] == "equipment_analysis"
+    assert captured["payload"]["runtime_mode"] == "specialized_tasks"
+    assert captured["payload"]["execution_surface"] == "explicit_tool"
+
+
+@pytest.mark.asyncio
+async def test_execute_orchestration_chat_only_does_not_resolve_classifier(monkeypatch):
+    classifier_calls = {"count": 0}
+
+    async def fail_if_called(**kwargs):
+        classifier_calls["count"] += 1
+        return {
+            "intent": "equipment_analysis",
+            "confidence": 0.99,
+            "margin": 0.9,
+            "needs_rag": False,
+        }
+
+    monkeypatch.setattr(
+        "orchestrator.execution_runtime._resolve_classifier_result_for_request",
+        fail_if_called,
+    )
+
+    response = await execute_runtime_orchestration(
+        {
+            "message": "Проверь насос",
+            "session_id": "session-chat-only-no-classifier",
+            "runtime_mode": "chat_only",
+            "history": [],
+        }
+    )
+
+    assert classifier_calls["count"] == 0
+    assert response["executor"] == "chat"
+    assert response["reason"] == "chat_only_mode"
 
 
 @pytest.mark.asyncio

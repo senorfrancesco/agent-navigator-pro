@@ -852,6 +852,18 @@ def resolve_request_runtime_mode(
     return str(request.get("runtime_mode") or "auto")
 
 
+def _should_resolve_classifier_result(request: Dict[str, Any], runtime_mode: str) -> bool:
+    if request.get("classifier_result") is not None:
+        return False
+    if request.get("forced_route"):
+        return False
+    if runtime_mode == "chat_only":
+        return False
+    if str(request.get("execution_surface") or "") in {"explicit_tool", "compat_chat"}:
+        return False
+    return True
+
+
 def build_control_plane_metadata(
     request: Dict[str, Any],
     effective_settings: Dict[str, Any],
@@ -2698,7 +2710,7 @@ async def execute_orchestration(
         request["state_ref"] = run_record.state_ref
         request["state_version"] = run_record.version
         classifier_result = request.get("classifier_result")
-        if classifier_result is None and not request.get("forced_route"):
+        if _should_resolve_classifier_result(request, runtime_mode):
             classifier_span = start_current_span(name="resolve_classifier_result", kind="stage", category="tool")
             classifier_result = await _resolve_classifier_result_for_request(
                 query=str(request.get("message", "") or ""),

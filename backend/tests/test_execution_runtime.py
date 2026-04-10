@@ -354,8 +354,7 @@ def test_execute_orchestration_resolves_classifier_result_in_backend_when_missin
         execute_orchestration(
             {
                 "message": "Привет",
-                "assistant_mode": "general_chat",
-                "runtime_mode": "chat_only",
+                "runtime_mode": "auto",
                 "history": [],
             },
             deps=deps,
