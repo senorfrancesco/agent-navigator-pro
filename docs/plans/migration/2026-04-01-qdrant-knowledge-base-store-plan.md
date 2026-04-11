@@ -18,10 +18,11 @@
   - [ ] `session_rag`
   - [ ] `knowledge_base_rag`
   - [ ] `knowledge_base + session overlay`
-- [ ] Не смешивать этот слой с UI migration в Open WebUI.
+- [ ] Не смешивать этот слой с UI rewrite, но проектировать его как canonical backend для `Open WebUI Knowledge`.
+- [ ] Зафиксировать, что production parsing/ingestion идёт через внешний parser-service, а не только через встроенный UI path.
 
 **Ключевая идея:**  
-`QdrantKnowledgeBaseStore` должен стать не параллельной альтернативной логикой, а backend implementation за уже выделенным `KnowledgeBaseStoreProtocol`, с сохранением текущего retrieval/execution контракта для вызывающего кода.
+`QdrantKnowledgeBaseStore` должен стать не параллельной альтернативной логикой, а backend implementation за уже выделенным `KnowledgeBaseStoreProtocol`, с сохранением текущего retrieval/execution контракта для вызывающего кода. При этом он рассматривается как canonical vector backend для `Open WebUI Knowledge` и backend knowledge-base paths, а не как изолированный backend-only эксперимент.
 
 ---
 
@@ -37,6 +38,7 @@
   - [ ] persisted vector index;
   - [ ] query-time filtering по payload;
   - [ ] retrieval как backend service boundary, а не как rebuild локального индекса.
+- [ ] Обеспечить один canonical retrieval source-of-truth для `Open WebUI Knowledge` и backend workflows, даже если UX-path у них различается.
 
 ### 2.2 Что должно остаться
 
@@ -48,6 +50,16 @@
   - [ ] rerank hook;
   - [ ] `source_scope_summary`.
 - [ ] UI-слой не должен знать про SQLite/Qdrant.
+
+### 2.3 Что этот план говорит про `Open WebUI`
+
+- [ ] `Open WebUI` может быть primary UI и owner user-facing Knowledge UX.
+- [ ] Но `Open WebUI` не должен становиться единственным местом, где живут canonical corpus metadata, parsing policy и ingestion lifecycle.
+- [ ] Для production contour нужно разделять:
+  - [ ] UI/Knowledge UX
+  - [ ] parser-ingestion services
+  - [ ] vector backend (`Qdrant`)
+  - [ ] corpus admin / metadata / audit surface
 
 ---
 
@@ -91,6 +103,12 @@
   -> [ ] `QdrantKnowledgeBaseStore`
   -> [ ] `Qdrant collection + payload filters`
 
+Практическое уточнение:
+
+- [ ] `Open WebUI` остаётся primary shell;
+- [ ] `Chainlit` в этом контуре считается compatibility/debug client до sunset;
+- [ ] external parser-service (`Docling` first, `Tika` fallback) подготавливает documents/chunks для последующей индексации в `Qdrant`.
+
 ### 4.2 Разделение ответственности
 
 - [ ] `QdrantKnowledgeBaseStore`
@@ -107,6 +125,17 @@
   - [ ] optionally rerank top-N.
 - [ ] `execution_runtime.py`
   - [ ] остаётся вызывающей orchestration boundary и не знает внутренностей vector DB.
+
+### 4.3 V1 / V2 граница для session docs
+
+- [ ] V1:
+  - [ ] persistent knowledge base хранится в `Qdrant`;
+  - [ ] session overlay может оставаться вне `Qdrant`;
+  - [ ] merge policy остаётся в `knowledge_base_retrieval.py`.
+- [ ] V2:
+  - [ ] short-lived session docs можно хранить в `Qdrant`;
+  - [ ] filtering идёт по `thread_id` / `workspace_id` / `source_scope`;
+  - [ ] TTL/cleanup и visibility policy остаются отдельным backend/infra contract.
 
 ---
 

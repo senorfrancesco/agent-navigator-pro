@@ -2,7 +2,7 @@
 
 **Дата:** 2026-04-09
 **Статус:** canonical migration plan / 2-day execution target
-**Назначение:** жёстко развести `plain model`, `explicit tools` и `agent mode`, чтобы `Open WebUI` стал целевым primary UI contour без скрытого backend-owned tool routing в обычном чате.
+**Назначение:** жёстко развести `plain model`, `native knowledge`, `explicit tools` и `agent mode`, чтобы `Open WebUI` стал целевым primary UI contour без скрытого backend-owned tool routing в обычном чате.
 
 ## 1. Goal
 
@@ -17,6 +17,7 @@
 - `Open WebUI` — target primary UI;
 - `Chainlit` — временный compatibility/debug shell до sunset slice;
 - backend больше не смешивает product-wrapper orchestration с default `Open WebUI` chat path.
+- native `Knowledge` path и explicit backend tools разведены как разные product contours.
 
 ## 2. Canonical Runtime Modes
 
@@ -34,7 +35,22 @@
 - backend не выбирает инструмент за пользователя;
 - classifier / route decision / forced tool selection здесь запрещены.
 
-### 2.2 Explicit tools
+### 2.2 Native knowledge chat
+
+Контур:
+
+- `Open WebUI`
+- Knowledge / files / collections
+- external parser-ingestion service
+- `Qdrant`
+
+Правило:
+
+- обычный question-answer по документам и KB идёт через native `Open WebUI Knowledge` contour;
+- backend hidden tool routing здесь не обязателен;
+- source-of-truth для корпуса и retrieval не должен жить только в chat-state UI.
+
+### 2.3 Explicit tools
 
 Контур:
 
@@ -48,9 +64,10 @@
 - tool already selected by UI/model inside Open WebUI tool-calling contract;
 - модель может выбирать инструмент только из набора, который уже явно передан ей `Open WebUI`;
 - backend только исполняет уже выбранный tool;
-- `/tool-server/tools/*` не должен включать semantic guesswork.
+- `/tool-server/tools/*` не должен включать semantic guesswork;
+- этот контур нужен для structured analysis/compare/equipment workflows, а не как единственный способ поговорить с документом.
 
-### 2.3 Agent mode
+### 2.4 Agent mode
 
 Контур:
 
@@ -99,16 +116,26 @@
 Должен стать primary operator/user shell для:
 
 - выбора raw/live model;
+- native Knowledge / files / collections;
 - подключения named tools;
 - follow-up actions;
 - admin-managed prompts/tools/functions configuration.
 
+Не должен считаться единственным production backend для:
+
+- parsing / OCR / table extraction;
+- corpus versioning / dedup / audit;
+- long-running ingestion lifecycle.
+
+Для этого нужен внешний ingestion/admin contour.
+
 ## 4. Config Model
 
-### 4.1 Что остаётся в backend
+### 4.1 Что остаётся в backend / infra
 
 - backend secrets;
 - tool server auth source-of-truth;
+- secrets и infra-config для `Qdrant`, parser-service (`Docling` / `Tika`) и embeddings path;
 - export/control-plane metadata;
 - runtime URLs и backend-owned capabilities;
 - policy/feature flags, которые влияют на backend execution contract;
@@ -123,6 +150,7 @@
 - workspace tools;
 - action functions;
 - prompts;
+- Knowledge collections / file bindings / user-facing retrieval controls, если это управляется самим `Open WebUI`;
 - tool/action runtime valves, где это поддерживает сам `Open WebUI`;
 - enable/disable state, display metadata и non-secret runtime defaults для user-facing tool UX.
 
@@ -155,6 +183,7 @@ Bootstrap должен:
 - примерный allowlist: `temperature`, `max_tokens`, `top_p`, `seed`, `stop`;
 - backend всё равно остаётся final authority для default/clamp/allowlist policy;
 - low-level runtime knobs и backend prompts не становятся частью `Open WebUI` config даже если provider технически умеет принимать эти поля.
+- retrieval/admin secrets для `Qdrant` и parser-service не становятся user-editable settings imported tools/functions.
 
 ## 5. 2-Day Execution Slices
 
@@ -162,10 +191,10 @@ Bootstrap должен:
 
 Нужно сделать:
 
-- зафиксировать три режима в docs/backlog;
+- зафиксировать четыре режима в docs/backlog;
 - прекратить implicit backend tool routing для `plain model`;
 - оставить `agent-navigator` только как explicit agent/compatibility profile;
-- подтвердить, что canonical `Open WebUI` contour = `raw provider + explicit tools`.
+- подтвердить, что canonical `Open WebUI` contour = `raw provider + native knowledge + explicit tools`.
 
 Acceptance:
 
@@ -200,8 +229,7 @@ Acceptance:
 - убрать ручной drift между bootstrap script, imported code и `.env`-driven placeholder workflow;
 - расширить export bundle так, чтобы он описывал не только code templates, но и ownership/runtime-config blocks;
 - добавить drift-check между backend export bundle и materialized `Open WebUI` state;
-- повторить smoke на internal tools и затем на минимум одном community tool.
-- отдельно прогнать community-tool smoke в `Native Function Calling` режиме минимум на двух model families: `Qwen2.5` и `Qwen3`, и зафиксировать сравнительный результат.
+- повторить smoke на internal tools и затем на одном community tool как secondary compatibility check.
 - не переносить в этот slice backend-owned runtime/prompt config.
 
 Acceptance:
@@ -211,8 +239,8 @@ Acceptance:
 - ownership граница `backend secrets` vs `Open WebUI native config` зафиксирована и проверяема;
 - есть drift-check path для повторной синхронизации bootstrap state;
 - `M3.7` не захватывает `UMS` runtime knobs, generation/RAG source-of-truth и `LangGraph`/tool prompts;
-- есть зафиксированный compatibility result для `community tools + Native Function Calling` как минимум на `Qwen2.5` и `Qwen3`;
-- есть plan/smoke path для community tool compatibility.
+- есть plan/smoke path для одного community-tool compatibility check после стабилизации internal contour;
+- `Qwen3` не считается частью acceptance текущего slice.
 
 Нормативные slices:
 
@@ -223,8 +251,7 @@ Acceptance:
    - targeted tests
 2. `Open WebUI` runtime verification slice:
    - live browser smoke
-   - one community-tool compatibility check как proof, что contour не завязан только на наши wrappers
-   - comparative smoke matrix для `Qwen2.5` vs `Qwen3` в native tool-calling contour
+   - one community-tool compatibility check как secondary proof, что contour не завязан только на наши wrappers
    - docs/backlog update by fact, not by intent
 
 ## 6. Dependency Order
@@ -232,9 +259,11 @@ Acceptance:
 Нормативный порядок:
 
 1. `M3.5` — named tools + live bootstrap smoke stabilization
-2. `M3.6` — responsibility split (`plain model` / `explicit tools` / `agent mode`)
+2. `M3.6` — responsibility split (`plain model` / `native knowledge` / `explicit tools` / `agent mode`)
 3. `M3.7` — `Open WebUI`-native config + bootstrap-managed settings
-4. `Unified Model Catalog / Gateway`
+4. `M3.8` — `Open WebUI Knowledge + external ingestion + Qdrant` baseline
+5. `M3.9` — финальное решение по роли `ask_document` (thin adapter vs compatibility-only)
+6. `Unified Model Catalog / Gateway`
 
 `M4.2` coexistence/sunset slice для `Chainlit` можно готовить параллельно как policy/doc task, но не использовать его как причину откладывать `M3.6/M3.7`.
 
@@ -254,8 +283,10 @@ Acceptance:
 Переход считается архитектурно успешным, если одновременно верны все пункты:
 
 - `Open WebUI` может работать как понятный `model + tools` shell без backend-hidden routing;
+- `Open WebUI` может работать как понятный `model + knowledge + tools` shell;
 - `agent-navigator` существует только как explicit agent mode;
 - tool config materialize’ится через bootstrap/native `Open WebUI` surfaces, а не через ручной post-import patching;
 - backend secrets остаются backend-owned и не мигрируют в user-facing `Open WebUI` config;
+- native Knowledge path не путается с explicit domain tools;
 - community-tool smoke подтверждает, что native config contour не завязан только на наши imported wrappers;
 - следующий cleanup slice по `UMS` model catalog делает только inventory/provider cleanup, а не исправляет responsibility split задним числом.

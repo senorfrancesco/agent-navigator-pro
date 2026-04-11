@@ -2,9 +2,9 @@
 
 **Дата:** 2026-04-02
 **Статус:** рабочий черновик / живой документ
-**Назначение:** единый отчёт-план по controlled migration/evaluation contour `Chainlit -> Open WebUI`, переводу инструментов в явный контракт инструментов (`tools`) и серверов инструментов (`OpenAPI` / `MCP`), внедрению `Qdrant`, разбору незавершённых веток и порядку выполнения работ.
+**Назначение:** единый отчёт-план по migration на `Open WebUI` как primary UI, переводу инструментов в явный контракт инструментов (`tools`) и серверов инструментов (`OpenAPI` / `MCP`), внедрению `Qdrant`, внешнего ingestion/parsing contour и порядку выполнения работ.
 
-> **Current truth / target direction:** на момент этого документа canonical UI проекта остаётся `Chainlit`, а `Open WebUI` рассматривается как `candidate shell` и controlled evaluation contour до functional parity. Этот документ не объявляет migration завершённой и не отменяет текущий `Chainlit-first` runtime contract в `AGENTS.md` и `README.md`.
+> **Current truth / target direction:** текущий migration policy фиксируется как `Open WebUI-first`. `Open WebUI` является целевым primary UI и canonical shell для чата, Knowledge и explicit tools; `Chainlit` сохраняется только как временный compatibility/debug shell до отдельного sunset slice. Этот документ не объявляет migration полностью завершённой, но больше не использует framing `Chainlit-first`.
 
 ## 1. Связанные документы
 
@@ -20,6 +20,7 @@
 - [docs/plans/2026-04-01-migration-readiness-pr-decision-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-01-migration-readiness-pr-decision-plan.md)
 - [conversation_about_rag.pdf](/home/seral/HDD/proj/agent-navigator-pro/conversation_about_rag.pdf)
 - [conversation_about_tools.pdf](/home/seral/HDD/proj/agent-navigator-pro/conversation_about_tools.pdf)
+- [docs/plans/migration/2026-04-10-openwebui-first-rag-architecture-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-10-openwebui-first-rag-architecture-plan.md)
 
 ---
 
@@ -27,34 +28,36 @@
 
 ### 2.1 Главные решения
 
-- [ ] Ближайшая цель — не немедленный `main UI switch`, а controlled re-entry `Open WebUI` как candidate shell поверх существующего backend.
-- [ ] До достижения functional parity `Chainlit` остаётся canonical UI и не считается уже снятым с основной роли.
-- [ ] После достижения parity `Chainlit` переводим в роль отладочной и переходной оболочки.
-- [ ] `Chainlit`-профили не считаются стратегическим направлением; новые вложения в перегруженный профилями UX не делаем.
+- [ ] `Open WebUI` — целевой primary UI и верхний user/operator shell для chat, history, Knowledge и подключения tools.
+- [ ] `Chainlit` переводим в временный compatibility/debug shell и готовим к отдельному sunset slice; новые product-first вложения в него не делаем.
 - [ ] Основной backend остаётся нашим `FastAPI`-слоем, а не переносится в Open WebUI.
 - [ ] Основной путь интеграции с Open WebUI делаем через **сервер инструментов OpenAPI** (`OpenAPI Tool Server`).
 - [ ] `MCP` поддерживаем как второй, совместимый слой, но не как основной производственный путь интеграции.
+- [ ] Для обычного question-answer по документам canonical path = `Open WebUI Knowledge` + `Qdrant`, а не обязательный backend tool call.
+- [ ] Для production parsing/ingestion `Open WebUI` не считается единственным backend: parsing/OCR/tables выносятся во внешний ingestion contour.
+- [ ] Канонический parser path: `Docling` first; `Apache Tika` допустим как fallback/compatibility parser.
 - [ ] В `Open WebUI` жёстко разводим `model provider surface` и `tool server surface`:
   - [ ] raw `OpenAI-compatible` model provider подключается отдельно через connections/providers;
   - [ ] backend tools подключаются отдельно через `OpenAPI Tool Server`;
   - [ ] `agent-navigator` wrapper не используем как default chat model для native tool-calling path.
 - [ ] `backend/open_webui_uploads` считаем текущим shared storage contract; ранний rename откладываем до отдельного approved slice после стабилизации upload/document binding.
 - [ ] Не переносим бизнес-логику, orchestration policy и document lifecycle внутрь `Open WebUI`.
+- [ ] `Qdrant` принимаем как canonical vector backend для `Open WebUI Knowledge` и backend knowledge-base path.
+- [ ] `KnowledgeBaseStoreProtocol` и retrieval/policy boundary сохраняются даже при `Open WebUI-first`, чтобы `Qdrant` оставался заменой backend implementation, а не новой параллельной логикой.
 - [ ] На baseline-этапе оркестратором остаётся сам пользователь: он явно выбирает tool и режим работы, а UI не принимает скрытые backend-решения вместо него.
 - [ ] Инструменты становятся **явными** и вызываются по именованным контрактам:
-  - [ ] `ask_document`
   - [ ] `analyze_document_fast`
   - [ ] `analyze_document_deep`
   - [ ] `compare_documents_fast`
   - [ ] `compare_documents_deep`
   - [ ] `analyze_equipment_fast`
   - [ ] `analyze_equipment_deep`
-- [ ] `document_question` остаётся доказательным путём ответа по документу (`grounded RAG`), а не смешивается с полным анализом документа.
+- [ ] `ask_document` не считаем безусловным primary UX-path; он либо становится thin adapter над тем же retrieval source-of-truth, что и `Open WebUI Knowledge`, либо уходит в compatibility layer.
+- [ ] `document_question` как backend capability остаётся доказательным путём ответа по документу (`grounded RAG`), но не должен подменять собой native Knowledge chat.
 - [ ] `document_analysis` и `compare_documents` разделяем на `fast/deep` как режимы инструмента, а не как профили интерфейса.
-- [ ] `Qdrant` принимаем как целевой production-ready vector backend.
-- [ ] До `Qdrant` обязательно вводим `KnowledgeBaseStoreProtocol`.
 - [ ] Session RAG и Knowledge Base RAG разводим как разные слои, но даём им общий merge/policy layer.
-- [ ] Файлы, документы, привязки к базе знаний (`knowledge bindings`) и состояние поиска (`retrieval state`) должны жить в backend-контракте, а не в памяти сеанса интерфейса.
+- [ ] До `Qdrant` обязательно вводим `KnowledgeBaseStoreProtocol`.
+- [ ] Файлы, документы, привязки к базе знаний (`knowledge bindings`) и состояние поиска (`retrieval state`) не должны жить только в памяти сеанса интерфейса; нужен backend/infra-owned corpus contract.
 - [ ] Для operator UI заранее закладываем отдельную панель под:
   - [ ] upload/indexing в `Qdrant`
   - [ ] статус ingestion
@@ -81,14 +84,14 @@
 
 ### 2.3 Главный порядок работ
 
-- [ ] Этап 0: зафиксировать controlled evaluation contour, единый контракт запуска (`single-runtime contract`), контракт явных инструментов (`tool-first`) и снять наследованный долг, мешающий миграции.
+- [ ] Этап 0: зафиксировать `Open WebUI-first` ownership model и развести `native Knowledge chat` vs `explicit backend tools`.
 - [ ] Этап 1: внедрить `KnowledgeBaseStoreProtocol`.
-- [ ] Этап 2: внедрить `QdrantKnowledgeBaseStore`.
-- [ ] Этап 3: перевести документные инструменты на явные backend-endpoint'ы.
-- [ ] Этап 4: сделать backend-модель загрузки файлов и привязки документов (`file upload` + `document binding`).
-- [ ] Этап 5: подключить Open WebUI как основной интерфейс через сервер инструментов OpenAPI.
-- [ ] Этап 6: добавить совместимый слой `MCP`, шаблоны команд (`slash`) и операционное укрепление.
-- [ ] Этап 7: перевести `Chainlit` в наследуемый отладочный путь (`legacy/debug path`).
+- [ ] Этап 2: внедрить `QdrantKnowledgeBaseStore` как canonical vector backend.
+- [ ] Этап 3: вынести document parsing / OCR / tables во внешний ingestion contour (`Docling` first, `Tika` fallback).
+- [ ] Этап 4: подключить `Open WebUI Knowledge` к canonical ingestion + `Qdrant` path.
+- [ ] Этап 5: оставить explicit backend tools только для specialized workflows (`analyze_*`, `compare_*`, `equipment_*`) и довести их OpenAPI contract.
+- [ ] Этап 6: добавить совместимый слой `MCP`, prompts / workflows и операционное укрепление.
+- [ ] Этап 7: перевести `Chainlit` в наследуемый debug-only путь и выполнить sunset slice.
 
 ---
 
@@ -126,8 +129,8 @@
 
 ### Слой A. Интерфейс и оболочка
 
-- [ ] `Open WebUI` как основной chat shell.
-- [ ] `Chainlit` только как отладочная и разработческая оболочка.
+- [ ] `Open WebUI` как основной chat/knowledge/tool shell.
+- [ ] `Chainlit` только как временная compatibility/debug оболочка до sunset.
 - [ ] operator UI остаётся отдельной рабочей панелью управления.
 
 ### Слой B. Слой контрактов инструментов
@@ -153,16 +156,22 @@
 
 - [ ] upload handling
 - [ ] document registration
-- [ ] parsing
+- [ ] внешний parsing/OCR/table extraction service
 - [ ] chunking
 - [ ] embedding
 - [ ] indexing
+
+Нормативное уточнение:
+
+- [ ] `Open WebUI` может оставаться точкой входа для загрузки и управления Knowledge UX;
+- [ ] но parsing/ingestion не должен считаться обязанностью самого UI-процесса;
+- [ ] production contour предполагает внешний parser-service (`Docling` first, `Tika` fallback) и отдельный corpus/index lifecycle.
 
 ### Слой E. Слой хранения и поиска
 
 - [ ] `KnowledgeBaseStoreProtocol`
 - [ ] `SQLiteKnowledgeBaseStore` как текущая реализация
-- [ ] `QdrantKnowledgeBaseStore` как целевая реализация
+- [ ] `QdrantKnowledgeBaseStore` как canonical реализация
 
 ### Слой F. Слой метаданных
 
@@ -251,6 +260,19 @@
 - [ ] Open WebUI лучше работает с явно описанными tools.
 - [ ] Это полностью бьётся с manual-first подходом из [MIGRATION_TOOLS.md](/home/seral/HDD/proj/agent-navigator-pro/MIGRATION_TOOLS.md).
 - [ ] Это не заставляет прогонять каждый запрос через intent-классификатор.
+
+### Уточнение по границе между Knowledge и tools
+
+- [ ] Обычный question-answer по документам не должен по умолчанию требовать explicit backend tool call.
+- [ ] `Open WebUI Knowledge` считается canonical UX для:
+  - [ ] document chat
+  - [ ] retrieval по knowledge base
+  - [ ] follow-up вопросы по уже загруженному корпусу
+- [ ] explicit backend tools считаются canonical UX для:
+  - [ ] structured document analysis
+  - [ ] compare/report flows
+  - [ ] equipment-specific analysis
+- [ ] `ask_document` остаётся только как compatibility/thin-adapter decision до окончательной унификации retrieval source-of-truth.
 
 ## 5.3 Как будут работать slash-команды
 

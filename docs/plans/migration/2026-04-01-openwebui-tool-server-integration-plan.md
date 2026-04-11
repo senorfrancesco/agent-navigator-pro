@@ -13,25 +13,31 @@
 ## 1. Цель
 
 - [ ] Перевести систему к модели `Open WebUI -> FastAPI tool server -> backend workflows`.
-- [ ] Сохранить текущие сценарии:
-  - [ ] `ask_document`
+- [ ] Сохранить текущие specialized tool-сценарии:
   - [ ] `analyze_document_fast/deep`
   - [ ] `compare_documents_fast/deep`
   - [ ] `analyze_equipment_fast/deep`
 - [ ] Подготовить backend к knowledge-base migration:
   - [ ] `KnowledgeBaseStoreProtocol`
   - [ ] `QdrantKnowledgeBaseStore`
-- [ ] Сохранить `Chainlit` как transitional UI, а не ломать систему одним большим переносом.
+- [ ] Оставить `Chainlit` только как transitional compatibility/debug shell до sunset slice.
+- [ ] Не дублировать через tool server обычный `Knowledge` chat path, который должен жить нативно в `Open WebUI`.
 
 **Ключевое правило:**
 Никакого `big-bang rewrite`.  
-Переход идёт слоями: сначала tool contracts и backend boundaries, потом storage/retrieval, потом upload/document binding, и только потом primary UI shift в `Open WebUI`.
+Переход идёт слоями: сначала ownership/docs freeze, потом storage/retrieval и ingestion boundaries, затем `Open WebUI Knowledge + Qdrant`, и только после этого фиксируется окончательная роль explicit backend tools.
 
 ---
 
 ## 2. Каноническая целевая схема
 
-- [ ] `Open WebUI`
+- [ ] Native knowledge path:
+  - [ ] `Open WebUI`
+  - [ ] `Knowledge / files / collections`
+  - [ ] external parser-ingestion service
+  - [ ] `Qdrant`
+- [ ] Explicit tools path:
+  - [ ] `Open WebUI`
   -> [ ] `Tool / OpenAPI client layer`
   -> [ ] `FastAPI backend tool server`
   -> [ ] `execution_runtime / orchestration_runtime`
@@ -47,6 +53,7 @@
 - [ ] `agent_api.py` становится главным внешним tool-server entrypoint.
 - [ ] Workflow execution не зависит от конкретного UI.
 - [ ] Retrieval/storage boundaries оформляются до смены основного UI.
+- [ ] Обычный question-answer по документу не должен насильно маршрутизироваться через tool server, если его должен закрывать native `Open WebUI Knowledge`.
 
 ---
 
@@ -60,13 +67,18 @@
 
 ### Обязательный минимальный набор tools
 
-- [ ] `ask_document`
 - [ ] `analyze_document_fast`
 - [ ] `analyze_document_deep`
 - [ ] `compare_documents_fast`
 - [ ] `compare_documents_deep`
 - [ ] `analyze_equipment_fast`
 - [ ] `analyze_equipment_deep`
+
+Уточнение:
+
+- [ ] `ask_document` не считаем безусловным permanent baseline tool.
+- [ ] Он допустим как compatibility bridge или thin adapter над тем же retrieval source-of-truth, что и native `Open WebUI Knowledge`.
+- [ ] Основной UX для “задать вопрос по документу” должен определяться отдельно и не смешиваться с structured analysis tools.
 
 ### Что должно быть в contract каждого tool
 
@@ -83,6 +95,7 @@
 - [ ] `Open WebUI` выбирает tool явно или через свою tool layer.
 - [ ] Наш backend исполняет tool напрямую.
 - [ ] Mandatory classifier/orchestrator не должен оставаться критическим шагом для manual-first сценария.
+- [ ] Tool server path покрывает specialized workflows, а не обязан дублировать весь native Knowledge UX.
 
 ---
 
@@ -113,6 +126,7 @@
 
 - [ ] `Chainlit` и `Open WebUI` должны вызывать один и тот же backend execution слой.
 - [ ] UI migration не должна менять доменную логику workflow.
+- [ ] Но `Open WebUI Knowledge` может оставаться отдельным native chat/retrieval contour без обязательного backend tool call на каждый вопрос по документу.
 
 ---
 
@@ -134,6 +148,7 @@
 - [ ] SQLite остаётся working backend
 - [ ] Qdrant можно добавить позже без переписывания call sites
 - [ ] Open WebUI migration не зависит от knowledge store implementation details
+- [ ] Native `Open WebUI Knowledge` и backend workflows могут опираться на один и тот же corpus/vector source-of-truth
 
 ### Нормативное решение
 
@@ -182,6 +197,7 @@
 
 - [ ] Сделать совместимую модель загрузки файлов и привязки документов к chat/thread.
 - [ ] Подготовить backend как tool server для `Open WebUI`, который отправляет файлы не как локальные пути, а через upload flow.
+- [ ] Не считать built-in parsing inside `Open WebUI` production source-of-truth для сложных PDF/OCR/table extraction.
 
 ### Что должно быть
 
@@ -199,11 +215,13 @@
 - [ ] session overlay
 - [ ] later KB ingestion
 - [ ] long-lived knowledge base bindings
+- [ ] handoff во внешний parser-ingestion contour
 
 ### Нормативное решение
 
 - [ ] Upload не должен зависеть от `Chainlit` file handling.
 - [ ] Open WebUI path должен работать через backend-owned document binding model.
+- [ ] Для production parsing нужен отдельный contour (`Docling` first, `Tika` fallback), даже если `Open WebUI` умеет basic file processing.
 
 ---
 
@@ -231,6 +249,18 @@
 ### Нормативное решение
 
 - [ ] Scope policy живёт в backend, а не в Open WebUI prompt hacks.
+
+### Практическое UX-разделение
+
+- [ ] Native `Open WebUI Knowledge`:
+  - [ ] обычный document chat;
+  - [ ] retrieval по KB;
+  - [ ] follow-up вопросы по уже загруженному корпусу.
+- [ ] Explicit backend tools:
+  - [ ] structured analysis;
+  - [ ] compare/report;
+  - [ ] equipment-specific flows;
+  - [ ] async jobs / artifacts / operator-visible lifecycle.
 
 ---
 

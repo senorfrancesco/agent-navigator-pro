@@ -2009,6 +2009,11 @@
   - unit-тесты уже покрывают `429 busy`, cancel semantics и часть saturation policy;
   - но нет одного black-box regression gate, который проверяет пользовательский path целиком:
     `long request -> second request busy -> cancel first -> retry second`.
+  Progress 2026-04-11:
+  - live smoke в legacy `Open WebUI` (чат `🌞 City Sunrise Rhythm`) подтвердил, что дефект воспроизводится и на OpenAI-compat/raw path, а не только в Chainlit/runtime layer;
+  - browser-facing `POST /api/chat/completions` и `POST /api/chat/completed` у `Open WebUI` остаются `200`, но downstream `agent_api` в тот же период реально возвращает `429 Too Many Requests` на `/raw/v1/chat/completions`;
+  - после такого run `POST /api/tasks/stop/{task_id}` в `Open WebUI` отвечает `{\"status\":false,\"message\":\"Task with ID ... not found.\"}`, то есть legacy UI теряет синхронность с task-state и маскирует busy/failure как подвисший ответ;
+  - regression gate для этого пункта должен отдельно покрыть raw/OpenAI-compat contour и проверять не только `busy`, но и корректную sync semantics для `task_id` после cancel/retry.
   Что нужно сделать:
   - создать `backend/tests/test_runtime_busy_e2e.py`;
   - покрыть минимум 4 сценария:
@@ -2400,6 +2405,33 @@ DOCUMENT_ANALYSIS_SUMMARIZE_MAX_TOKENS=512
   - `pytest backend/tests/test_unified_model_server_startup.py backend/tests/test_runtime_launcher.py -q`
   - `bash -n scripts/run_all.sh scripts/run_native.sh`
   - `python -m py_compile backend/services/model_manager/unified_model_server.py`
+
+- [ ] **B3.51 — Сделать `UMS` честным после CUDA fault / CPU-only relaunch heavy LLM**
+  Контекст:
+  - live raw/Open WebUI smoke `2026-04-11` показал составной дефект в heavy LLM path:
+    - первый `llama-server` падает на реальном infer с `CUDA error: unspecified launch failure`;
+    - следующий startup логирует `ggml_cuda_init: failed to initialize CUDA: unknown error`, предупреждает что `--gpu-layers` будут проигнорированы, и фактически поднимает модель на CPU;
+    - при этом `UMS /status` и `UMS /models` продолжают публиковать для `qwen-14b-llm` planned metadata `placement_mode=multi-gpu`, `gpu_indices=[0,1]`, `tensor_split`, `effective_gpu_layers=32`, хотя data-plane уже CPU-only;
+    - одновременно `qwen3-embedding-0.6b` остаётся активным на `cuda:1`, то есть runtime truth и control-plane placement расходятся.
+  Что нужно сделать:
+  - после startup heavy LLM не ограничиваться `/health`, а проверять фактический backend device/offload state;
+  - если `llama-server` пишет `ggml_cuda_init failed`, `--gpu-layers option will be ignored` или equivalent CPU-only markers, не сохранять planned `multi-gpu` placement как runtime truth;
+  - обновлять `placements/admission/last_fallback_event` до фактического состояния (`cpu`, `degraded`, `failed_start`) либо жёстко проваливать startup вместо silent CPU relaunch после CUDA fault;
+  - отдельно определить policy для recovery после CUDA fault: когда допустим controlled CPU degrade, а когда нужен hard failure/restart;
+  - покрыть это unit/regression tests для `UMS /status` и cold-start/retry path после GPU fault.
+  Acceptance:
+  - `UMS /status` и `UMS /models` отражают фактический placement heavy LLM, а не только расчётный `tensor-split`;
+  - после CUDA fault нет состояния `running=true + multi-gpu`, если child runtime уже CPU-only;
+  - `agent_api` retry path больше не маскирует silent GPU-loss как обычный успешный heavy startup.
+  Progress 2026-04-11:
+  - в `UMS` добавлен runtime-state layer (`available`, `loading`, `unavailable`, `degraded_cpu`, `error_gpu`) и startup reconciliation по реальным `llama-server` markers вместо слепого доверия `/health`;
+  - heavy local startup теперь делает один GPU retry после runtime GPU-failure markers и по умолчанию уходит в `error_gpu`; controlled CPU degrade разрешается только через `UMS_ALLOW_HEAVY_CPU_DEGRADE_AFTER_GPU_FAILURE=true`;
+  - `placements` больше не пишутся как runtime truth при `requires_degraded`, а `status/models/models-running` начали публиковать `runtime_states`;
+  - raw provider `agent_api` больше не использует retrying `ums_client` для `raw/v1/chat/completions` non-stream path и пробрасывает `503/409` availability errors как explicit upstream state вместо silent `502`;
+  - targeted regression verification: `pytest backend/tests/test_unified_model_server_startup.py backend/tests/test_agent_api_openai_compat.py -q` -> `98 passed`;
+  - live verification на user-managed `./scripts/run_native.sh` подтвердила healthy runtime path: `nvidia-smi` показывает `llama-server` на GPU0/GPU1, `UMS /status` отдаёт `runtime_state=available` для `qwen-14b-llm`, а хвост `tmux` фиксирует успешные `POST /infer -> 200` без silent CPU relaunch.
+  Remaining:
+  - отдельно снять `tmux`/`nvidia-smi` после следующего induced CUDA fault и убедиться, что `qwen-14b-llm` больше не остаётся в ложном `multi-gpu` state.
 
 ### 2026-03-18 — B3.41: SQLite autoCollapse — причина и диагноз
 
