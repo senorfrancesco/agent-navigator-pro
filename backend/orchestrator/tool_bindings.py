@@ -9,6 +9,8 @@ from orchestrator.tool_catalog import ToolName
 
 BindingEntrypointType = Literal["direct_action", "prompt_shortcut", "followup_action"]
 BindingResultMode = Literal["inline", "accepted_job", "rich_card"]
+OPENWEBUI_DEFAULT_MODEL = "raw.qwen-14b-llm"
+OPENWEBUI_DEFAULT_FUNCTION_CALLING = "native"
 
 
 @dataclass(frozen=True)
@@ -234,6 +236,43 @@ def build_openwebui_binding_export(*, backend_base_url: str) -> Dict[str, Any]:
             "browserReachableBaseUrl": f"{normalized_base_url}/tool-server",
             "containerReachableBaseUrl": f"{container_base_url}/tool-server",
             "manualEnableRequired": True,
+        },
+        "runtimeConfig": {
+            "defaultModel": OPENWEBUI_DEFAULT_MODEL,
+            "defaultFunctionCalling": OPENWEBUI_DEFAULT_FUNCTION_CALLING,
+            "toolServerAuthSource": "backend_env:OPENAPI_TOOL_SERVER_TOKEN",
+            "toolServerTokenPlaceholder": "SET_OPENAPI_TOOL_SERVER_TOKEN",
+        },
+        "ownership": {
+            "backendOwned": {
+                "toolServerConnection": [
+                    "url",
+                    "path",
+                    "type",
+                    "auth_type",
+                    "headers",
+                    "key",
+                    "config.bootstrap_id",
+                    "config.name",
+                ],
+                "workspaceToolFields": ["id", "content", "meta.manifest.target_models"],
+                "actionFunctionFields": ["id", "content", "meta.manifest.target_models"],
+                "promptFields": ["command", "content", "meta.binding_id"],
+                "modelConfigFields": ["DEFAULT_MODELS", "DEFAULT_MODEL_PARAMS.function_calling"],
+            },
+            "openWebUIOwned": {
+                "toolServerConnection": ["config.enable"],
+                "workspaceToolFields": ["name", "meta.description"],
+                "actionFunctionFields": ["name", "meta.description", "is_active", "is_global"],
+                "promptFields": ["name", "meta.description", "tags", "access_grants", "is_production"],
+            },
+            "deferred": [
+                "knowledge",
+                "qdrant",
+                "external_ingestion",
+                "corpus_admin",
+                "ask_document_role_decision",
+            ],
         },
         "workspaceTools": _build_openwebui_workspace_tools(container_tool_server_base_url=f"{container_base_url}/tool-server"),
         "directActions": direct_actions,
@@ -554,7 +593,7 @@ def _build_equipment_action_code(
                 if not user_text:
                     return {{"content": "Не удалось определить последний пользовательский запрос для `{action_label}`."}}
 
-                if __event_emitter__:
+                if __event_emitter__ and not {force_async}:
                     await __event_emitter__({{
                         "type": "status",
                         "data": {{"description": "Запускаю `{tool_name}` через Agent Navigator Tools..."}},
@@ -575,6 +614,21 @@ def _build_equipment_action_code(
                 if response.get("status") == "accepted":
                     status_url = response.get("status_url", "")
                     job_id = response.get("job_id", "unknown")
+                    if __event_emitter__:
+                        await __event_emitter__({{
+                            "type": "status",
+                            "data": {{
+                                "description": (
+                                    f"`{action_label}` принят как deep-job.\\n"
+                                    f"job_id: {{job_id}}\\n"
+                                    f"status_url: {{status_url}}"
+                                ),
+                                "status": "accepted",
+                                "job_id": job_id,
+                                "status_url": status_url,
+                                "tool_name": "{tool_name}",
+                            }},
+                        }})
                     return {{
                         "content": (
                             f"`{action_label}` принят как deep-job.\\n"
@@ -633,6 +687,11 @@ def _build_tool_job_refresh_action_code(*, container_tool_server_base_url: str) 
                         "status_url": payload.get("status_url"),
                         "job_id": payload.get("job_id"),
                     }}
+                status_history = payload.get("statusHistory")
+                if isinstance(status_history, list):
+                    nested = _extract_tool_job_context(status_history)
+                    if nested:
+                        return nested
                 tool_job = payload.get("tool_job")
                 if isinstance(tool_job, dict):
                     nested = _extract_tool_job_context(tool_job)
@@ -643,14 +702,64 @@ def _build_tool_job_refresh_action_code(*, container_tool_server_base_url: str) 
                     if nested:
                         return nested
             elif isinstance(payload, list):
-                for item in payload:
+                for item in reversed(payload):
                     nested = _extract_tool_job_context(item)
                     if nested:
                         return nested
             return None
 
+        def _extract_tool_job_context_from_chat(body):
+            if not isinstance(body, dict):
+                return None
+            chat_id = str(body.get("chat_id") or "").strip()
+            message_id = str(body.get("id") or "").strip()
+            if not chat_id:
+                return None
+            try:
+                from open_webui.models.chats import Chats
+            except Exception:
+                return None
+            try:
+                chat_item = Chats.get_chat_by_id(chat_id)
+            except Exception:
+                return None
+            if chat_item is None:
+                return None
+            chat_payload = getattr(chat_item, "chat", None) or {{}}
+            history = chat_payload.get("history", {{}}) if isinstance(chat_payload, dict) else {{}}
+            messages = history.get("messages", {{}}) if isinstance(history, dict) else {{}}
+            if not isinstance(messages, dict):
+                return None
+
+            if message_id:
+                direct_message = messages.get(message_id)
+                if isinstance(direct_message, dict):
+                    nested = _extract_tool_job_context(direct_message)
+                    if nested:
+                        return nested
+
+            for message in messages.values():
+                if not isinstance(message, dict):
+                    continue
+                if message_id and str(message.get("id") or "").strip() != message_id:
+                    continue
+                nested = _extract_tool_job_context(message)
+                if nested:
+                    return nested
+
+            if message_id:
+                return None
+
+            for message in messages.values():
+                if not isinstance(message, dict):
+                    continue
+                nested = _extract_tool_job_context(message)
+                if nested:
+                    return nested
+            return None
+
         def _extract_status_url(body, tool_server_base_url):
-            context = _extract_tool_job_context(body)
+            context = _extract_tool_job_context(body) or _extract_tool_job_context_from_chat(body)
             if context:
                 status_url = _normalize_status_url(context.get("status_url"), tool_server_base_url)
                 if status_url:
@@ -749,6 +858,11 @@ def _build_tool_job_cancel_action_code(*, container_tool_server_base_url: str) -
                         "status_url": payload.get("status_url"),
                         "job_id": payload.get("job_id"),
                     }}
+                status_history = payload.get("statusHistory")
+                if isinstance(status_history, list):
+                    nested = _extract_tool_job_context(status_history)
+                    if nested:
+                        return nested
                 tool_job = payload.get("tool_job")
                 if isinstance(tool_job, dict):
                     nested = _extract_tool_job_context(tool_job)
@@ -759,14 +873,64 @@ def _build_tool_job_cancel_action_code(*, container_tool_server_base_url: str) -
                     if nested:
                         return nested
             elif isinstance(payload, list):
-                for item in payload:
+                for item in reversed(payload):
                     nested = _extract_tool_job_context(item)
                     if nested:
                         return nested
             return None
 
+        def _extract_tool_job_context_from_chat(body):
+            if not isinstance(body, dict):
+                return None
+            chat_id = str(body.get("chat_id") or "").strip()
+            message_id = str(body.get("id") or "").strip()
+            if not chat_id:
+                return None
+            try:
+                from open_webui.models.chats import Chats
+            except Exception:
+                return None
+            try:
+                chat_item = Chats.get_chat_by_id(chat_id)
+            except Exception:
+                return None
+            if chat_item is None:
+                return None
+            chat_payload = getattr(chat_item, "chat", None) or {{}}
+            history = chat_payload.get("history", {{}}) if isinstance(chat_payload, dict) else {{}}
+            messages = history.get("messages", {{}}) if isinstance(history, dict) else {{}}
+            if not isinstance(messages, dict):
+                return None
+
+            if message_id:
+                direct_message = messages.get(message_id)
+                if isinstance(direct_message, dict):
+                    nested = _extract_tool_job_context(direct_message)
+                    if nested:
+                        return nested
+
+            for message in messages.values():
+                if not isinstance(message, dict):
+                    continue
+                if message_id and str(message.get("id") or "").strip() != message_id:
+                    continue
+                nested = _extract_tool_job_context(message)
+                if nested:
+                    return nested
+
+            if message_id:
+                return None
+
+            for message in messages.values():
+                if not isinstance(message, dict):
+                    continue
+                nested = _extract_tool_job_context(message)
+                if nested:
+                    return nested
+            return None
+
         def _extract_status_url(body, tool_server_base_url):
-            context = _extract_tool_job_context(body)
+            context = _extract_tool_job_context(body) or _extract_tool_job_context_from_chat(body)
             if context:
                 status_url = _normalize_status_url(context.get("status_url"), tool_server_base_url)
                 if status_url:
@@ -811,17 +975,6 @@ def _build_tool_job_cancel_action_code(*, container_tool_server_base_url: str) -
                 status_url = _extract_status_url(body, self.valves.tool_server_base_url)
                 if not status_url:
                     return {{"content": "Не удалось определить `status_url` для отмены deep-job."}}
-
-                if __event_call__:
-                    decision = await __event_call__({{
-                        "type": "confirm",
-                        "data": {{
-                            "title": "Отменить deep-job?",
-                            "content": "Будет вызван backend cancel route для активной tool job.",
-                        }},
-                    }})
-                    if decision is False:
-                        return {{"content": "Отмена deep-job прервана пользователем."}}
 
                 cancel_payload = await _request_json("POST", f"{{status_url}}/cancel", self.valves.tool_server_token)
                 return {{
