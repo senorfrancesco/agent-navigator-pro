@@ -55,7 +55,7 @@ agent_nav_fallback_events_total{component="document_analysis",fallback="llm_extr
     assert summary["overview"][0]["noteEn"]
     assert any(card["label"] == "Запросов в работе" and card["value"] == "3" for card in summary["services"])
     assert any(card["labelEn"] == "Requests In Flight" and card["valueEn"] == "3" for card in summary["services"])
-    assert any(card["label"] == "Активная heavy-модель" and card["value"] == "да" for card in summary["services"])
+    assert any(card["label"] == "Активная тяжёлая модель" and card["value"] == "да" for card in summary["services"])
     assert any(card["label"] == "Насыщение UMS" and card["value"] == "3" for card in summary["deploy"])
 
 
@@ -73,10 +73,10 @@ def test_operator_observability_service_exposes_grafana_links(tmp_path: Path):
     payload = service.get_grafana_links()
 
     assert payload["base_url"] == "http://127.0.0.1:3002"
-    assert any(link["title"] == "Общий dashboard" for link in payload["links"])
+    assert any(link["title"] == "Общая панель" for link in payload["links"])
     assert any(link["titleEn"] == "Overview Dashboard" for link in payload["links"])
-    assert any(link["title"] == "Grafana Explore" for link in payload["links"])
-    assert any(link["title"] == "Dashboard деплоя" for link in payload["links"])
+    assert any(link["title"] == "Раздел Explore" for link in payload["links"])
+    assert any(link["title"] == "Панель деплоя" for link in payload["links"])
     assert any("agent-navigator-overview" in link["url"] for link in payload["links"])
 
 
@@ -94,5 +94,5 @@ def test_operator_observability_service_handles_empty_metrics_and_missing_dashbo
 
     assert any(card["label"] == "HTTP-событий всего" and card["value"] == "0" for card in summary["overview"])
     assert any(card["labelEn"] == "Prometheus Scrape" and card["valueEn"] == "not found" for card in summary["deploy"])
-    assert any(card["label"] == "Prometheus scrape" and card["value"] == "не найден" for card in summary["deploy"])
+    assert any(card["label"] == "Статус опроса Prometheus" and card["value"] == "не найден" for card in summary["deploy"])
     assert links["dashboard_uid"] == "agent-navigator-overview"

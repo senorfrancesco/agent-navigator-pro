@@ -40,7 +40,7 @@ def test_deploy_service_exposes_build_and_import_stage_catalog(tmp_path):
     assert any(stage["title"] == "Wheelhouse" for stage in surface["build"]["stages"])
     assert any(stage["titleEn"] == "Archive Intake" for stage in surface["import"]["stages"])
     assert any(item["labelEn"] == "Canonical Entrypoint" and item["value"] == "deploy.sh" for item in surface["import"]["summary"])
-    assert any(artifact["title"] == "Manifest" and artifact["badge"] == "ready" for artifact in surface["build"]["artifacts"])
+    assert any(artifact["titleEn"] == "Manifest" and artifact["badge"] == "ready" for artifact in surface["build"]["artifacts"])
 
 
 def test_deploy_service_exposes_stage_scoped_log_lines(tmp_path):

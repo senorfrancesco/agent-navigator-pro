@@ -167,15 +167,16 @@ class TestChainlitControlPlaneSettings:
 
     def test_chainlit_ui_test_hooks_are_wired_via_custom_assets(self):
         contract = self._module.get_chainlit_ui_test_hook_contract()
-        config_path = Path("backend/orchestrator/.chainlit/config.toml")
+        backend_root = Path(__file__).resolve().parents[1]
+        config_path = backend_root / "orchestrator" / ".chainlit" / "config.toml"
         config = tomllib.loads(config_path.read_text(encoding="utf-8"))
         ui_config = config["UI"]
 
         assert ui_config["custom_js"] == contract["assets"]["custom_js"]
         assert ui_config["custom_css"] == contract["assets"]["custom_css"]
 
-        js_asset = Path("backend/orchestrator/public/test-hooks.js")
-        css_asset = Path("backend/orchestrator/public/test-hooks.css")
+        js_asset = backend_root / "orchestrator" / "public" / "test-hooks.js"
+        css_asset = backend_root / "orchestrator" / "public" / "test-hooks.css"
         assert js_asset.exists()
         assert css_asset.exists()
 
