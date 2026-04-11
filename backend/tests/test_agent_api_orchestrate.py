@@ -358,6 +358,8 @@ async def test_execute_orchestration_api_routes_equipment_fast_without_documents
 
 @pytest.mark.asyncio
 async def test_tool_job_polling_returns_completed_result(monkeypatch):
+    monkeypatch.setenv("OPENWEBUI_EXPLICIT_TOOL_JOB_START_DELAY_S", "0")
+
     async def fake_execute_orchestration(payload, deps=None):
         await asyncio.sleep(0)
         return {
@@ -416,6 +418,8 @@ async def test_tool_job_result_returns_409_before_completion():
 
 @pytest.mark.asyncio
 async def test_tool_job_failed_status_and_result_contract(monkeypatch):
+    monkeypatch.setenv("OPENWEBUI_EXPLICIT_TOOL_JOB_START_DELAY_S", "0")
+
     async def fake_execute_orchestration(payload, deps=None):
         await asyncio.sleep(0)
         raise RuntimeError("deep-failure")
@@ -484,6 +488,75 @@ async def test_cancel_tool_job_route_cancels_running_job(monkeypatch):
     assert final_status is not None
     assert final_status["status"] == "cancelled"
     assert final_status["error_summary"] == "cancelled-by-request"
+
+
+@pytest.mark.asyncio
+async def test_execute_orchestration_api_defers_explicit_async_tool_job_start(monkeypatch):
+    monkeypatch.setenv("OPENWEBUI_EXPLICIT_TOOL_JOB_START_DELAY_S", "30")
+    started = {"count": 0}
+
+    async def fake_execute_orchestration(payload, deps=None):
+        started["count"] += 1
+        return {"assistant_message": "should-not-run-yet"}
+
+    monkeypatch.setattr("orchestrator.agent_api.execute_orchestration", fake_execute_orchestration)
+
+    request = OrchestrationRequest(
+        message="Сделай глубокий анализ документа",
+        requested_tool="analyze_document_deep",
+        routing_mode="explicit",
+        file_count=1,
+        has_session_docs=True,
+        session_docs={"contract.pdf": {"text": "Штраф 10 процентов"}},
+        active_doc_ids=["contract.pdf"],
+    )
+
+    accepted = await execute_orchestration_api(request)
+    await asyncio.sleep(0)
+    status = await get_tool_job_status_route(accepted["job_id"])
+
+    assert status["status"] == "queued"
+    assert started["count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_cancel_tool_job_route_cancels_queued_job_before_runner_starts(monkeypatch):
+    monkeypatch.setenv("OPENWEBUI_EXPLICIT_TOOL_JOB_START_DELAY_S", "30")
+    started = {"count": 0}
+
+    async def fake_execute_orchestration(payload, deps=None):
+        started["count"] += 1
+        await asyncio.sleep(10)
+        return {"assistant_message": "should-not-complete"}
+
+    monkeypatch.setattr("orchestrator.agent_api.execute_orchestration", fake_execute_orchestration)
+
+    request = OrchestrationRequest(
+        message="Сделай глубокий анализ документа",
+        requested_tool="analyze_document_deep",
+        routing_mode="explicit",
+        file_count=1,
+        has_session_docs=True,
+        session_docs={"contract.pdf": {"text": "Штраф 10 процентов"}},
+        active_doc_ids=["contract.pdf"],
+    )
+
+    accepted = await execute_orchestration_api(request)
+    await asyncio.sleep(0)
+    cancel_response = await cancel_tool_job_route(accepted["job_id"])
+    assert cancel_response["status"] == "cancelling"
+
+    final_status = None
+    for _ in range(10):
+        await asyncio.sleep(0)
+        final_status = await get_tool_job_status_route(accepted["job_id"])
+        if final_status["status"] == "cancelled":
+            break
+
+    assert final_status is not None
+    assert final_status["status"] == "cancelled"
+    assert final_status["error_summary"] == "cancelled-by-request"
+    assert started["count"] == 0
 
 
 @pytest.mark.asyncio

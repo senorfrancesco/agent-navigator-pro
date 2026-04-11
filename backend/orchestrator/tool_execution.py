@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import os
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 from orchestrator.tool_catalog import ToolDefinition, get_tool_definition, is_known_tool
@@ -11,6 +12,7 @@ from orchestrator.tool_schemas import AcceptedToolResult, ExecutionMetadata, Too
 
 
 _ACTIVE_TOOL_JOB_TASKS: Dict[str, asyncio.Task[Any]] = {}
+_EXPLICIT_TOOL_JOB_START_DELAY_ENV = "OPENWEBUI_EXPLICIT_TOOL_JOB_START_DELAY_S"
 
 
 def apply_tool_contract_to_payload(request_payload: Dict[str, Any]) -> Optional[ToolDefinition]:
@@ -56,6 +58,21 @@ def should_start_async_tool_job(request_payload: Dict[str, Any]) -> bool:
     if str(request_payload.get("tool_execution_mode") or "") == "async":
         return True
     return str(request_payload.get("job_mode") or "") == "force_async"
+
+
+def _resolve_async_tool_job_start_delay_s(request_payload: Dict[str, Any]) -> float:
+    if str(request_payload.get("execution_surface") or "") != "explicit_tool":
+        return 0.0
+    if (
+        str(request_payload.get("tool_execution_mode") or "") != "async"
+        and str(request_payload.get("job_mode") or "") != "force_async"
+    ):
+        return 0.0
+    raw_value = str(os.getenv(_EXPLICIT_TOOL_JOB_START_DELAY_ENV, "0")).strip()
+    try:
+        return max(0.0, float(raw_value))
+    except ValueError:
+        return 0.0
 
 
 def _build_execution_metadata_payload(request_payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -152,6 +169,7 @@ def submit_async_tool_job(
 ) -> ToolJobRecord:
     store = get_tool_job_store()
     payload_copy = copy.deepcopy(request_payload)
+    start_delay_s = _resolve_async_tool_job_start_delay_s(payload_copy)
     execution_metadata = _build_execution_metadata_payload(payload_copy)
     job = store.create_job(
         tool_name=str(payload_copy.get("requested_tool") or payload_copy.get("tool_name") or ""),
@@ -162,8 +180,10 @@ def submit_async_tool_job(
     payload_copy.setdefault("idempotency_key", f"tool-job:{job.job_id}")
 
     async def _runner() -> None:
-        store.mark_running(job.job_id)
         try:
+            if start_delay_s > 0:
+                await asyncio.sleep(start_delay_s)
+            store.mark_running(job.job_id)
             response = await execute_fn(payload_copy, deps=deps)
         except asyncio.CancelledError:
             current_job = store.get(job.job_id)
