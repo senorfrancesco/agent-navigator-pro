@@ -1,14 +1,11 @@
 from __future__ import annotations
 
 import os
-import sys
 from types import SimpleNamespace
 
 import pytest
 
-sys.path.insert(0, os.path.dirname(__file__))
-
-from utils.full_stack import (
+from full_stack_utils import (
     ComposeSmokeHarness,
     ProbeOutcome,
     ProbeSpec,
