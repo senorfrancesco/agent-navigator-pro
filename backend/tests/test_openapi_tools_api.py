@@ -16,13 +16,15 @@ def _auth_headers(token: str = "tool-secret", origin: str | None = "http://local
     return headers
 
 
-def test_tool_server_openapi_requires_bearer_token(monkeypatch):
+def test_tool_server_openapi_allows_unauthenticated_schema_probe(monkeypatch):
     monkeypatch.setenv("OPENAPI_TOOL_SERVER_TOKEN", "tool-secret")
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_ALLOWED_ORIGINS", "http://localhost:3001")
 
     client = TestClient(agent_api.app)
-    response = client.get("/tool-server/openapi.json")
+    response = client.get("/tool-server/openapi.json", headers={"Origin": "http://localhost:3001"})
 
-    assert response.status_code == 401
+    assert response.status_code == 200
+    assert "/tools/analyze_equipment_fast" in response.json()["paths"]
 
 
 def test_tool_server_config_allows_unauthenticated_probe(monkeypatch):

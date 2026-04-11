@@ -75,6 +75,16 @@ def _require_tool_server_access(
         raise HTTPException(status_code=403, detail="tool-server-origin-denied")
 
 
+def _require_tool_server_schema_access(request: Request) -> None:
+    if not _tool_server_enabled():
+        raise HTTPException(status_code=404, detail="tool-server-disabled")
+
+    allowed_origins = _allowed_origins()
+    origin = str(request.headers.get("Origin") or "").strip()
+    if allowed_origins and origin and origin not in allowed_origins:
+        raise HTTPException(status_code=403, detail="tool-server-origin-denied")
+
+
 def _extract_ref_identity(document_ref: DocumentRef) -> Optional[str]:
     for candidate in (
         document_ref.document_id,
@@ -293,7 +303,7 @@ def create_openapi_tools_router(
 
     @router.get(
         "/tool-server/openapi.json",
-        dependencies=[Depends(_require_tool_server_access)],
+        dependencies=[Depends(_require_tool_server_schema_access)],
         include_in_schema=False,
     )
     async def tool_server_openapi_schema() -> Dict[str, Any]:
