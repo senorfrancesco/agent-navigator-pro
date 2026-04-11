@@ -320,6 +320,131 @@ def test_start_server_keeps_cpu_path_for_gguf_when_cpu_requested():
     assert ums_server.state["placements"]["qwen-14b-llm"]["placement_mode"] == "cpu"
 
 
+def test_start_server_marks_error_gpu_when_heavy_runtime_falls_back_to_cpu_only():
+    fake_processes = [_FakeProcess(pid=301), _FakeProcess(pid=302)]
+    launch_calls = []
+    runtime_failures = iter(["ggml_cuda_init: failed", "ggml_cuda_init: failed"])
+
+    def fake_launch(cmd, port, health_timeout_s=120.0, env=None):
+        launch_calls.append({"cmd": list(cmd), "port": port, "env": env})
+        return fake_processes[len(launch_calls) - 1]
+
+    with patch.object(
+        ums_server,
+        "get_model_config",
+        return_value={"type": "gguf", "path": "./models/gguf/qwen.gguf", "ctx_size": 8192, "gpu_layers": -1, "port": 8091},
+    ), patch.object(
+        ums_server,
+        "_get_gpu_info",
+        return_value=[{"index": 0, "free_gb": 24.0, "total_gb": 24.0}],
+    ), patch.object(
+        ums_server,
+        "_launch_server_process",
+        side_effect=fake_launch,
+    ), patch.object(
+        ums_server,
+        "_detect_heavy_runtime_gpu_failure_reason",
+        side_effect=lambda **_: next(runtime_failures),
+    ):
+        with pytest.raises(ums_server.HTTPException) as exc_info:
+            ums_server._start_server_once("qwen-14b-llm", ums_server.DeviceMode.HYBRID)
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail["status"] == "error_gpu"
+    assert exc_info.value.detail["runtime_state"] == "error_gpu"
+    assert len(launch_calls) == 2
+    assert "qwen-14b-llm" not in ums_server.state["placements"]
+    assert "qwen-14b-llm" not in ums_server.state["processes"]
+    assert ums_server.state["runtime_states"]["qwen-14b-llm"]["runtime_state"] == "error_gpu"
+
+
+def test_start_server_can_explicitly_degrade_heavy_runtime_to_cpu(monkeypatch):
+    monkeypatch.setenv("UMS_ALLOW_HEAVY_CPU_DEGRADE_AFTER_GPU_FAILURE", "true")
+    fake_processes = [_FakeProcess(pid=401), _FakeProcess(pid=402), _FakeProcess(pid=403)]
+    launch_calls = []
+    runtime_failures = iter(["ggml_cuda_init: failed", "ggml_cuda_init: failed", None])
+
+    def fake_launch(cmd, port, health_timeout_s=120.0, env=None):
+        launch_calls.append({"cmd": list(cmd), "port": port, "env": env})
+        return fake_processes[len(launch_calls) - 1]
+
+    with patch.object(
+        ums_server,
+        "get_model_config",
+        return_value={"type": "gguf", "path": "./models/gguf/qwen.gguf", "ctx_size": 8192, "gpu_layers": -1, "port": 8091},
+    ), patch.object(
+        ums_server,
+        "_get_gpu_info",
+        return_value=[{"index": 0, "free_gb": 24.0, "total_gb": 24.0}],
+    ), patch.object(
+        ums_server,
+        "_launch_server_process",
+        side_effect=fake_launch,
+    ), patch.object(
+        ums_server,
+        "_detect_heavy_runtime_gpu_failure_reason",
+        side_effect=lambda **_: next(runtime_failures),
+    ):
+        started_model_id = ums_server._start_server_once("qwen-14b-llm", ums_server.DeviceMode.HYBRID)
+
+    assert started_model_id == "qwen-14b-llm"
+    assert len(launch_calls) == 3
+    cpu_cmd = launch_calls[-1]["cmd"]
+    assert cpu_cmd[cpu_cmd.index("-ngl") + 1] == "0"
+    assert launch_calls[-1]["env"]["CUDA_VISIBLE_DEVICES"] == ""
+    assert ums_server.state["placements"]["qwen-14b-llm"]["placement_mode"] == "cpu"
+    assert ums_server.state["placements"]["qwen-14b-llm"]["gpu_indices"] == []
+    assert ums_server.state["runtime_states"]["qwen-14b-llm"]["runtime_state"] == "degraded_cpu"
+    assert ums_server.state["admission"]["qwen-14b-llm"]["resolved_device"] == "cpu"
+
+
+def test_start_server_avoids_embedding_occupied_gpu_for_heavy_llm():
+    fake_process = _FakeProcess(pid=404)
+    launch_calls = []
+
+    def fake_launch(cmd, port, health_timeout_s=120.0, env=None):
+        launch_calls.append(cmd)
+        return fake_process
+
+    def fake_get_model_config(model_id):
+        if model_id == "qwen3-embedding-0.6b":
+            return {"type": "st", "path": "./models/st/qwen3-embedding", "port": 8094}
+        return {"type": "gguf", "path": "./models/gguf/qwen.gguf", "ctx_size": 8192, "gpu_layers": -1, "port": 8091}
+
+    with patch.object(
+        ums_server,
+        "get_model_config",
+        side_effect=fake_get_model_config,
+    ), patch.object(
+        ums_server,
+        "_get_gpu_info",
+        return_value=[
+            {"index": 0, "free_gb": 24.0, "total_gb": 24.0},
+            {"index": 1, "free_gb": 24.0, "total_gb": 24.0},
+        ],
+    ), patch.object(
+        ums_server,
+        "_launch_server_process",
+        side_effect=fake_launch,
+    ), patch.object(
+        ums_server,
+        "_detect_heavy_runtime_gpu_failure_reason",
+        return_value=None,
+    ):
+        ums_server.state["placements"]["qwen3-embedding-0.6b"] = {
+            "placement_mode": "single-gpu",
+            "gpu_indices": [1],
+            "device_arg": "cuda:1",
+        }
+        started_model_id = ums_server._start_server_once("qwen-14b-llm", ums_server.DeviceMode.HYBRID)
+
+    assert started_model_id == "qwen-14b-llm"
+    assert len(launch_calls) == 1
+    assert "--tensor-split" not in launch_calls[0]
+    assert ums_server.state["placements"]["qwen-14b-llm"]["placement_mode"] == "single-gpu"
+    assert ums_server.state["placements"]["qwen-14b-llm"]["gpu_indices"] == [0]
+
+
 def test_start_server_honors_tier_cpu_preference_for_embeddings():
     fake_process = _FakeProcess()
     launch_calls = []
@@ -558,6 +683,7 @@ def test_status_exposes_current_placements():
     previous_active = ums_server.state.get("active_model")
     previous_processes = dict(ums_server.state.get("processes") or {})
     previous_placements = dict(ums_server.state.get("placements") or {})
+    previous_runtime_states = dict(ums_server.state.get("runtime_states") or {})
     ums_server.state["active_model"] = "qwen-14b-llm"
     ums_server.state["processes"] = {
         "qwen-14b-llm": _FakeProcess(pid=111),
@@ -575,15 +701,21 @@ def test_status_exposes_current_placements():
             "device_arg": "cuda:2",
         },
     }
+    ums_server.state["runtime_states"] = {
+        "qwen-14b-llm": {"runtime_state": "available", "reason": "ok"},
+        "labse-embedding": {"runtime_state": "available", "reason": "ok"},
+    }
     try:
         payload = asyncio.run(ums_server.get_status())
     finally:
         ums_server.state["active_model"] = previous_active
         ums_server.state["processes"] = previous_processes
         ums_server.state["placements"] = previous_placements
+        ums_server.state["runtime_states"] = previous_runtime_states
 
     assert payload["placements"]["qwen-14b-llm"]["tensor_split"] == [0.6667, 0.3333]
     assert payload["placements"]["labse-embedding"]["device_arg"] == "cuda:2"
+    assert payload["runtime_states"]["qwen-14b-llm"]["runtime_state"] == "available"
 
 
 def test_status_exposes_admission_contract_for_llm_and_embeddings(monkeypatch):
@@ -916,6 +1048,7 @@ def test_ready_infer_reports_ready_for_default_heavy_model():
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "ready"
+    assert payload["runtime_state"] == "available"
     assert payload["infer_ready"] is True
     assert payload["requested_model_id"] == "qwen-14b-llm"
     assert payload["ready_model_id"] == "qwen-14b-llm"
@@ -930,6 +1063,7 @@ def test_ready_infer_reports_fallback_when_server_switches_model():
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "ready"
+    assert payload["runtime_state"] == "available"
     assert payload["infer_ready"] is True
     assert payload["requested_model_id"] == "qwen-14b-llm"
     assert payload["ready_model_id"] == "qwen-7b-llm"
@@ -943,7 +1077,8 @@ def test_ready_infer_returns_503_when_startup_is_not_ready():
 
     assert response.status_code == 503
     payload = response.json()
-    assert payload["status"] == "starting"
+    assert payload["status"] == "loading"
+    assert payload["runtime_state"] == "loading"
     assert payload["infer_ready"] is False
     assert payload["requested_model_id"] == "qwen-14b-llm"
     assert payload["ready_model_id"] is None
@@ -956,8 +1091,30 @@ def test_ready_infer_returns_404_for_unknown_model():
     assert response.status_code == 404
     payload = response.json()
     assert payload["detail"]["status"] == "unavailable"
+    assert payload["detail"]["runtime_state"] == "unavailable"
     assert payload["detail"]["infer_ready"] is False
     assert payload["detail"]["requested_model_id"] == "missing-model"
+
+
+def test_ready_infer_returns_error_gpu_payload_when_startup_failed():
+    detail = {
+        "status": "error_gpu",
+        "infer_ready": False,
+        "requested_model_id": "qwen-14b-llm",
+        "ready_model_id": None,
+        "backend_mode": "llama-cpp-python",
+        "fallback_used": False,
+        "reason": "ggml_cuda_init: failed",
+        "runtime_state": "error_gpu",
+    }
+    with patch.object(ums_server, "_start_server", side_effect=ums_server.HTTPException(status_code=503, detail=detail)):
+        response = asyncio.run(_api_request("GET", "/ready/infer"))
+
+    assert response.status_code == 503
+    payload = response.json()
+    assert payload["detail"]["status"] == "error_gpu"
+    assert payload["detail"]["runtime_state"] == "error_gpu"
+    assert payload["detail"]["reason"] == "ggml_cuda_init: failed"
 
 
 def test_status_exposes_prompt_cache_policy_for_local_llama():
@@ -1101,6 +1258,10 @@ def test_models_running_api_lists_running_models_and_placements():
             "device_arg": "cuda:2",
         },
     }
+    ums_server.state["runtime_states"] = {
+        "qwen-14b-llm": {"runtime_state": "available", "reason": "ok"},
+        "labse-embedding": {"runtime_state": "available", "reason": "ok"},
+    }
 
     response = asyncio.run(_api_request("GET", "/models/running"))
 
@@ -1112,6 +1273,8 @@ def test_models_running_api_lists_running_models_and_placements():
     assert set(running_models) == {"qwen-14b-llm", "labse-embedding"}
     assert payload["placements"]["qwen-14b-llm"]["tensor_split"] == [0.6667, 0.3333]
     assert payload["placements"]["labse-embedding"]["device_arg"] == "cuda:2"
+    assert payload["runtime_states"]["qwen-14b-llm"]["runtime_state"] == "available"
+    assert running_models["qwen-14b-llm"]["runtime_state"]["runtime_state"] == "available"
 
 
 def test_models_running_omits_dead_local_processes():
@@ -1648,6 +1811,40 @@ def test_start_server_does_not_failover_on_http_429():
 
     assert exc_info.value.status_code == 429
     assert exc_info.value.detail == "busy"
+    assert ums_server.state["last_fallback_event"] is None
+
+
+def test_start_server_does_not_failover_on_same_model_gpu_runtime_error():
+    plan = {
+        "requested_model_id": "qwen-14b-llm",
+        "role_key": "llm.default_chat",
+        "role_label": "default chat llm",
+        "primary_model_id": "qwen-14b-llm",
+        "fallback_model_id": "qwen-7b-llm",
+        "fallback_available": True,
+        "source": "registry_primary",
+        "warning": None,
+    }
+    runtime_failure = {
+        "status": "error_gpu",
+        "runtime_state": "error_gpu",
+        "infer_ready": False,
+        "requested_model_id": "qwen-14b-llm",
+        "reason": "ggml_cuda_init: failed",
+    }
+
+    ums_server.state["last_fallback_event"] = None
+    with patch.object(ums_server, "_resolve_server_model_failover_plan", return_value=plan), patch.object(
+        ums_server,
+        "_start_server_once",
+        side_effect=ums_server.HTTPException(status_code=503, detail=runtime_failure),
+    ) as mock_start_once:
+        with pytest.raises(ums_server.HTTPException) as exc_info:
+            ums_server._start_server("qwen-14b-llm", ums_server.DeviceMode.HYBRID)
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail["runtime_state"] == "error_gpu"
+    assert mock_start_once.call_count == 1
     assert ums_server.state["last_fallback_event"] is None
 
 

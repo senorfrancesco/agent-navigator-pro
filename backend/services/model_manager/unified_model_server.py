@@ -15,6 +15,7 @@ import logging
 import psutil
 import warnings
 import threading
+from collections import deque
 from contextlib import suppress
 from contextlib import asynccontextmanager as async_cm
 from enum import Enum
@@ -160,6 +161,7 @@ state = {
     "processes": {},      # model_id -> process
     "placements": {},     # model_id -> placement metadata
     "admission": {},      # model_id -> admission metadata
+    "runtime_states": {}, # model_id -> effective runtime state metadata
     "last_fallback_event": None,
     "device_mode": DeviceMode.HYBRID,
     "runtime_budget": {},
@@ -174,6 +176,7 @@ state = {
 _model_start_locks: Dict[str, threading.Lock] = {}
 _model_start_locks_guard = threading.Lock()
 _heavy_model_lifecycle_lock = threading.RLock()
+_process_log_buffers: Dict[int, deque[str]] = {}
 
 _LLM_LAYER_GUESSES = {
     "qwen-7b-llm": 28,
@@ -188,6 +191,75 @@ _LLM_BASE_VRAM_GB = {
     ("qwen-32b-llm", "Q4_K_M"): 20.0,
     ("qwen-72b-llm", "Q4_K_M"): 42.0,
 }
+
+_RUNTIME_STATE_AVAILABLE = "available"
+_RUNTIME_STATE_LOADING = "loading"
+_RUNTIME_STATE_UNAVAILABLE = "unavailable"
+_RUNTIME_STATE_DEGRADED_CPU = "degraded_cpu"
+_RUNTIME_STATE_ERROR_GPU = "error_gpu"
+_HEAVY_GPU_RUNTIME_FAILURE_MARKERS = (
+    "ggml_cuda_init: failed",
+    "failed to initialize cuda",
+    "no usable gpu found",
+    "--gpu-layers option will be ignored",
+    "tensor split has no effect",
+)
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = str(os.getenv(name, str(default))).strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _allow_heavy_cpu_degrade_after_gpu_failure() -> bool:
+    return _env_flag("UMS_ALLOW_HEAVY_CPU_DEGRADE_AFTER_GPU_FAILURE", False)
+
+
+def _set_runtime_state(
+    model_id: str,
+    runtime_state: str,
+    *,
+    reason: str = "ok",
+    placement: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "runtime_state": runtime_state,
+        "reason": reason,
+        "updated_at": int(time.time()),
+    }
+    effective_placement = dict(placement or {})
+    if effective_placement:
+        payload["placement"] = effective_placement
+        payload["placement_mode"] = effective_placement.get("placement_mode")
+        payload["gpu_indices"] = list(effective_placement.get("gpu_indices") or [])
+        payload["port"] = effective_placement.get("port")
+        if effective_placement.get("requested_device") is not None:
+            payload["requested_device"] = effective_placement.get("requested_device")
+        if effective_placement.get("resolved_device") is not None:
+            payload["resolved_device"] = effective_placement.get("resolved_device")
+    state.setdefault("runtime_states", {})[model_id] = payload
+    return payload
+
+
+def _get_runtime_state(model_id: str) -> Optional[Dict[str, Any]]:
+    payload = (state.get("runtime_states") or {}).get(model_id)
+    return copy.deepcopy(payload) if payload is not None else None
+
+
+def _build_runtime_unavailable_payload(
+    *,
+    requested_model_id: str,
+    runtime_state: str,
+    reason: str,
+    ready_model_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    return _build_infer_readiness_payload(
+        requested_model_id=requested_model_id,
+        infer_ready=(runtime_state == _RUNTIME_STATE_DEGRADED_CPU),
+        ready_model_id=ready_model_id,
+        reason=reason,
+        runtime_state=runtime_state,
+    )
 
 # === Resource Helpers ===
 
@@ -268,10 +340,11 @@ def _resolve_llm_admission(
     quant = str(config.get("quant") or config.get("llm_quant") or "Q4_K_M")
     ctx_size = int(config.get("ctx_size") or _get_runtime_ctx_size())
     estimated_vram_gb = _estimate_llm_vram_gb(model_id, quant, ctx_size)
-    available_vram_gb = sum(float(gpu.get("free_gb", 0.0)) for gpu in available_gpus)
+    candidate_gpus = _select_llm_gpus(available_gpus)
+    available_vram_gb = sum(float(gpu.get("free_gb", 0.0)) for gpu in candidate_gpus)
     warnings_list: List[str] = []
 
-    if requested_device == DeviceMode.CPU or not available_gpus:
+    if requested_device == DeviceMode.CPU or not candidate_gpus:
         return {
             "component": component,
             "requested_device": requested_device.value,
@@ -397,10 +470,15 @@ def _normalize_tensor_split(weights: List[float]) -> List[float]:
 
 
 def _select_llm_gpus(available_gpus: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    occupied_embedding_gpu_indices = _get_embedding_occupied_gpu_indices()
     selected_gpu_indices = _parse_gpu_indices_env("UMS_LLM_GPU_INDICES", available_gpus)
     selected = [
         gpu for gpu in available_gpus
         if selected_gpu_indices is None or int(gpu["index"]) in set(selected_gpu_indices)
+    ]
+    selected = [
+        gpu for gpu in selected
+        if int(gpu["index"]) not in occupied_embedding_gpu_indices
     ]
     min_free_gb = _read_runtime_float("UMS_LLM_MIN_FREE_VRAM_GB", 0.0)
     selected = [gpu for gpu in selected if float(gpu.get("free_gb", 0.0)) >= min_free_gb]
@@ -1069,8 +1147,10 @@ def _prune_dead_processes() -> List[str]:
             continue
         logger.warning(f"Pruning dead managed process for {model_id}")
         processes.pop(model_id, None)
+        _drop_process_log_buffer(getattr(proc, "pid", None))
         state.setdefault("placements", {}).pop(model_id, None)
         state.setdefault("admission", {}).pop(model_id, None)
+        _set_runtime_state(model_id, _RUNTIME_STATE_UNAVAILABLE, reason="process_exited")
         if state.get("active_model") == model_id:
             state["active_model"] = None
         removed.append(model_id)
@@ -1078,7 +1158,8 @@ def _prune_dead_processes() -> List[str]:
 
 
 def _cleanup_failed_start_state(model_id: str) -> None:
-    state.setdefault("processes", {}).pop(model_id, None)
+    proc = state.setdefault("processes", {}).pop(model_id, None)
+    _drop_process_log_buffer(getattr(proc, "pid", None) if proc is not None else None)
     state.setdefault("placements", {}).pop(model_id, None)
     state.setdefault("admission", {}).pop(model_id, None)
     if state.get("active_model") == model_id:
@@ -1172,8 +1253,13 @@ def _record_model_fallback_event(
 
 
 def _should_attempt_model_failover(exc: Exception) -> bool:
-    if isinstance(exc, HTTPException) and exc.status_code == 429:
-        return False
+    if isinstance(exc, HTTPException):
+        if exc.status_code == 429:
+            return False
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        runtime_state = str(detail.get("runtime_state") or "").strip().lower()
+        if runtime_state in {_RUNTIME_STATE_ERROR_GPU, _RUNTIME_STATE_DEGRADED_CPU, _RUNTIME_STATE_UNAVAILABLE}:
+            return False
     return True
 
 
@@ -1257,6 +1343,7 @@ def _stop_model(model_id: str):
     if model_id in state["processes"]:
         with _heavy_model_lifecycle_lock:
             proc = state["processes"].pop(model_id)
+            _drop_process_log_buffer(getattr(proc, "pid", None))
             state["placements"].pop(model_id, None)
             state.setdefault("admission", {}).pop(model_id, None)
             logger.info(f"Stopping server for {model_id}...")
@@ -1273,6 +1360,7 @@ def _stop_model(model_id: str):
                         pass
             if state["active_model"] == model_id:
                 state["active_model"] = None
+    _set_runtime_state(model_id, _RUNTIME_STATE_UNAVAILABLE, reason="stopped")
     if model_id in (state.get("discovered_model_ports") or {}):
         state.get("discovered_model_ports", {}).pop(model_id, None)
         _release_port(model_id, reusable=True)
@@ -1293,6 +1381,63 @@ def _terminate_process(proc: subprocess.Popen) -> None:
             pass
 
 
+def _register_process_log_reader(process: subprocess.Popen) -> None:
+    stream = getattr(process, "stdout", None)
+    if stream is None:
+        return
+    buffer = deque(maxlen=400)
+    _process_log_buffers[int(process.pid)] = buffer
+
+    def _reader() -> None:
+        try:
+            for line in iter(stream.readline, ""):
+                if not line:
+                    break
+                buffer.append(str(line).rstrip("\n"))
+                try:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                except Exception:
+                    pass
+        except Exception:
+            return
+
+    threading.Thread(target=_reader, name=f"ums-log-reader:{process.pid}", daemon=True).start()
+
+
+def _drop_process_log_buffer(pid: Optional[int]) -> None:
+    if pid is None:
+        return
+    with suppress(Exception):
+        _process_log_buffers.pop(int(pid), None)
+
+
+def _get_recent_process_log_lines(proc: Any, *, limit: int = 120) -> List[str]:
+    pid = int(getattr(proc, "pid", 0) or 0)
+    if pid <= 0:
+        return []
+    lines = list(_process_log_buffers.get(pid) or [])
+    if limit <= 0:
+        return lines
+    return lines[-limit:]
+
+
+def _detect_heavy_runtime_gpu_failure_reason(
+    *,
+    process: Any,
+    placement: Dict[str, Any],
+) -> Optional[str]:
+    if str((placement or {}).get("placement_mode") or "") == "cpu":
+        return None
+    log_blob = "\n".join(_get_recent_process_log_lines(process)).lower()
+    if not log_blob:
+        return None
+    for marker in _HEAVY_GPU_RUNTIME_FAILURE_MARKERS:
+        if marker in log_blob:
+            return marker
+    return None
+
+
 def _build_cpu_isolated_env() -> Dict[str, str]:
     env = os.environ.copy()
     # Ensure CPU-only child processes do not initialize CUDA contexts.
@@ -1308,7 +1453,16 @@ def _launch_server_process(
     env: Optional[Dict[str, str]] = None,
 ) -> subprocess.Popen:
     """Запускает сервер и ждет его readiness по /health."""
-    process = subprocess.Popen(cmd, preexec_fn=os.setsid, env=env)
+    process = subprocess.Popen(
+        cmd,
+        preexec_fn=os.setsid,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    _register_process_log_reader(process)
     try:
         start_time = time.time()
         while time.time() - start_time < health_timeout_s:
@@ -1324,7 +1478,200 @@ def _launch_server_process(
         raise TimeoutError("Server start timeout")
     except Exception:
         _terminate_process(process)
+        _drop_process_log_buffer(getattr(process, "pid", None))
         raise
+
+
+def _build_heavy_llama_command(
+    *,
+    model_path: str,
+    config: Dict[str, Any],
+    placement: Dict[str, Any],
+    device_mode: DeviceMode,
+) -> List[str]:
+    cmd = [
+        "llama-server",
+        "-m",
+        model_path,
+        "--port",
+        str(config["port"]),
+        "--host",
+        "0.0.0.0",
+        "-c",
+        str(config["ctx_size"]),
+        "-ngl",
+        str(config["gpu_layers"] if device_mode != DeviceMode.CPU else 0),
+    ]
+    if placement.get("placement_mode") == "multi-gpu":
+        tensor_split = placement.get("tensor_split") or []
+        cmd.extend(["--tensor-split", ",".join(str(weight) for weight in tensor_split)])
+    if config["type"] == "gguf-vl":
+        mmproj_path = str(config.get("mmproj") or "").strip()
+        if not mmproj_path:
+            raise HTTPException(
+                status_code=422,
+                detail="Model path is not configured for qwen-vl-8b. Set MODEL_MMPROJ_PATH_VLM or MMPROJ_PATH.",
+            )
+        cmd.extend(["--mmproj", resolve_model_path(mmproj_path)])
+    return cmd
+
+
+def _launch_heavy_process_with_port_retry(
+    *,
+    model_id: str,
+    config: Dict[str, Any],
+    placement: Dict[str, Any],
+    model_path: str,
+    device_mode: DeviceMode,
+) -> tuple[subprocess.Popen, Dict[str, Any]]:
+    child_env = _build_cpu_isolated_env() if device_mode == DeviceMode.CPU else None
+    cmd = _build_heavy_llama_command(
+        model_path=model_path,
+        config=config,
+        placement=placement,
+        device_mode=device_mode,
+    )
+    logger.info(f"Executing: {' '.join(cmd)}")
+    try:
+        process = _launch_server_process(cmd, config["port"], env=child_env)
+        return process, dict(placement)
+    except Exception as exc:
+        detail = str(exc)
+        fallback_port = _reassign_model_port(model_id, int(config["port"]))
+        config["port"] = fallback_port
+        retry_placement = dict(placement)
+        retry_placement["port"] = fallback_port
+        retry_cmd = list(cmd)
+        retry_cmd[retry_cmd.index("--port") + 1] = str(fallback_port)
+        logger.warning(
+            "Retrying %s on fallback port %s after startup failure on %s",
+            model_id,
+            fallback_port,
+            detail,
+        )
+        process = _launch_server_process(retry_cmd, fallback_port, env=child_env)
+        return process, retry_placement
+
+
+def _build_cpu_degraded_heavy_placement(
+    placement: Dict[str, Any],
+    *,
+    requested_device: str,
+) -> Dict[str, Any]:
+    degraded = dict(placement)
+    degraded["placement_mode"] = "cpu"
+    degraded["gpu_indices"] = []
+    degraded.pop("tensor_split", None)
+    degraded["requested_device"] = requested_device
+    degraded["resolved_device"] = DeviceMode.CPU.value
+    degraded["admission"] = "degraded_candidate"
+    return degraded
+
+
+def _start_heavy_local_model(
+    *,
+    model_id: str,
+    config: Dict[str, Any],
+    placement: Dict[str, Any],
+    model_path: str,
+    device_mode: DeviceMode,
+) -> str:
+    requested_device = str(placement.get("requested_device") or device_mode.value)
+    runtime_issue: Optional[str] = None
+    attempt_count = 2 if device_mode != DeviceMode.CPU else 1
+
+    for attempt_index in range(attempt_count):
+        process, effective_placement = _launch_heavy_process_with_port_retry(
+            model_id=model_id,
+            config=config,
+            placement=placement,
+            model_path=model_path,
+            device_mode=device_mode,
+        )
+        runtime_issue = _detect_heavy_runtime_gpu_failure_reason(
+            process=process,
+            placement=effective_placement,
+        )
+        if runtime_issue is None:
+            state["processes"][model_id] = process
+            state["placements"][model_id] = effective_placement
+            state["active_model"] = model_id
+            _set_runtime_state(
+                model_id,
+                _RUNTIME_STATE_AVAILABLE,
+                reason="ok",
+                placement=effective_placement,
+            )
+            return model_id
+
+        logger.warning(
+            "Heavy model %s reported GPU runtime failure during startup: %s",
+            model_id,
+            runtime_issue,
+        )
+        _terminate_process(process)
+        _drop_process_log_buffer(getattr(process, "pid", None))
+        _cleanup_failed_start_state(model_id)
+        inc_metric_counter(
+            "agent_nav_fallback_events_total",
+            labels={
+                "component": "ums",
+                "fallback": "heavy_gpu_retry",
+                "source": "unified_model_server",
+            },
+        )
+        if attempt_index + 1 < attempt_count:
+            continue
+
+    if device_mode != DeviceMode.CPU and _allow_heavy_cpu_degrade_after_gpu_failure():
+        degraded_placement = _build_cpu_degraded_heavy_placement(
+            placement,
+            requested_device=requested_device,
+        )
+        degraded_admission = dict((state.get("admission") or {}).get(model_id) or {})
+        degraded_admission["requested_device"] = requested_device
+        degraded_admission["resolved_device"] = DeviceMode.CPU.value
+        degraded_admission["admission"] = "degraded_candidate"
+        degraded_admission["effective_gpu_layers"] = 0
+        degraded_warnings = list(degraded_admission.get("warnings") or [])
+        degraded_warnings.append("heavy llm degraded to cpu after gpu startup failure")
+        degraded_admission["warnings"] = degraded_warnings
+        state.setdefault("admission", {})[model_id] = degraded_admission
+        degraded_config = dict(config)
+        degraded_config["gpu_layers"] = 0
+        process, effective_placement = _launch_heavy_process_with_port_retry(
+            model_id=model_id,
+            config=degraded_config,
+            placement=degraded_placement,
+            model_path=model_path,
+            device_mode=DeviceMode.CPU,
+        )
+        state["processes"][model_id] = process
+        state["placements"][model_id] = effective_placement
+        state["active_model"] = model_id
+        _set_runtime_state(
+            model_id,
+            _RUNTIME_STATE_DEGRADED_CPU,
+            reason=runtime_issue or "gpu_start_failed",
+            placement=effective_placement,
+        )
+        return model_id
+
+    _set_runtime_state(
+        model_id,
+        _RUNTIME_STATE_ERROR_GPU,
+        reason=runtime_issue or "gpu_start_failed",
+        placement=placement,
+    )
+    _cleanup_failed_start_state(model_id)
+    raise HTTPException(
+        status_code=503,
+        detail=_build_runtime_unavailable_payload(
+            requested_model_id=model_id,
+            runtime_state=_RUNTIME_STATE_ERROR_GPU,
+            reason=runtime_issue or "gpu_start_failed",
+        ),
+    )
 
 
 def _start_server_once(model_id: str, device_mode: DeviceMode):
@@ -1343,6 +1690,13 @@ def _start_server_once(model_id: str, device_mode: DeviceMode):
         existing_proc = state["processes"].get(model_id)
         if existing_proc is not None:
             if existing_proc.poll() is None:
+                if (state.get("runtime_states") or {}).get(model_id) is None:
+                    _set_runtime_state(
+                        model_id,
+                        _RUNTIME_STATE_AVAILABLE,
+                        reason="already_running",
+                        placement=(state.get("placements") or {}).get(model_id),
+                    )
                 return model_id  # Уже работает
             state["processes"].pop(model_id, None)
             state["placements"].pop(model_id, None)
@@ -1384,6 +1738,7 @@ def _start_server_once(model_id: str, device_mode: DeviceMode):
                 vllm_placement["port"] = assigned_port
                 state["placements"][model_id] = vllm_placement
                 state["active_model"] = model_id
+                _set_runtime_state(model_id, _RUNTIME_STATE_AVAILABLE, reason="ok", placement=vllm_placement)
                 return model_id
 
         if is_heavy:
@@ -1408,9 +1763,19 @@ def _start_server_once(model_id: str, device_mode: DeviceMode):
                 }
             )
             if llm_admission["admission"] == "requires_degraded":
-                state["placements"][model_id] = placement
-                raise RuntimeError(
-                    f"LLM admission requires_degraded for {model_id}: requested_device={llm_admission['requested_device']}"
+                _set_runtime_state(
+                    model_id,
+                    _RUNTIME_STATE_UNAVAILABLE,
+                    reason=f"llm_admission_requires_degraded:{llm_admission['requested_device']}",
+                    placement=placement,
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail=_build_runtime_unavailable_payload(
+                        requested_model_id=model_id,
+                        runtime_state=_RUNTIME_STATE_UNAVAILABLE,
+                        reason=f"llm_admission_requires_degraded:{llm_admission['requested_device']}",
+                    ),
                 )
             config["gpu_layers"] = int(llm_admission.get("effective_gpu_layers", config.get("gpu_layers", -1)))
             device_mode = DeviceMode(llm_admission["resolved_device"])
@@ -1444,52 +1809,14 @@ def _start_server_once(model_id: str, device_mode: DeviceMode):
                     logger.info(f"Stopping {active_heavy} to free memory for {model_id}")
                     _stop_model(active_heavy)
                 _reap_stale_listener_on_port(config["port"], tracked_proc=existing_proc)
-
-                cmd = ["llama-server", "-m", model_path, "--port", str(config["port"]),
-                       "--host", "0.0.0.0", "-c", str(config["ctx_size"]),
-                       "-ngl", str(config["gpu_layers"] if device_mode != DeviceMode.CPU else 0)]
-                if placement.get("placement_mode") == "multi-gpu":
-                    tensor_split = placement.get("tensor_split") or []
-                    cmd.extend(["--tensor-split", ",".join(str(weight) for weight in tensor_split)])
-                if config["type"] == "gguf-vl":
-                    mmproj_path = str(config.get("mmproj") or "").strip()
-                    if not mmproj_path:
-                        raise HTTPException(
-                            status_code=422,
-                            detail="Model path is not configured for qwen-vl-8b. Set MODEL_MMPROJ_PATH_VLM or MMPROJ_PATH.",
-                        )
-                    cmd.extend(["--mmproj", resolve_model_path(mmproj_path)])
-
-                child_env = _build_cpu_isolated_env() if device_mode == DeviceMode.CPU else None
-                logger.info(f"Executing: {' '.join(cmd)}")
-                try:
-                    process = _launch_server_process(cmd, config["port"], env=child_env)
-                    state["processes"][model_id] = process
-                    state["placements"][model_id] = placement
-                    state["active_model"] = model_id
-                    return model_id
-                except Exception as e:
-                    detail = str(e)
-                    fallback_port = _reassign_model_port(model_id, int(config["port"]))
-                    config["port"] = fallback_port
-                    placement["port"] = fallback_port
-                    retry_cmd = list(cmd)
-                    retry_cmd[retry_cmd.index("--port") + 1] = str(fallback_port)
-                    logger.warning(
-                        "Retrying %s on fallback port %s after startup failure on %s",
-                        model_id,
-                        fallback_port,
-                        detail,
-                    )
-                    try:
-                        process = _launch_server_process(retry_cmd, fallback_port, env=child_env)
-                        state["processes"][model_id] = process
-                        state["placements"][model_id] = placement
-                        state["active_model"] = model_id
-                        return model_id
-                    except Exception:
-                        logger.error(f"Start failed: {e}")
-                        raise
+                _set_runtime_state(model_id, _RUNTIME_STATE_LOADING, reason="startup", placement=placement)
+                return _start_heavy_local_model(
+                    model_id=model_id,
+                    config=config,
+                    placement=placement,
+                    model_path=model_path,
+                    device_mode=device_mode,
+                )
 
         _reap_stale_listener_on_port(config["port"], tracked_proc=existing_proc)
         preferred_device = str(placement.get("device_arg") or "cpu")
@@ -1519,6 +1846,12 @@ def _start_server_once(model_id: str, device_mode: DeviceMode):
                     available_gpus=available_gpus,
                     fallback_applied=(idx > 0 and str(device_arg) == "cpu"),
                 )
+                _set_runtime_state(
+                    model_id,
+                    _RUNTIME_STATE_AVAILABLE,
+                    reason="ok",
+                    placement=state["placements"][model_id],
+                )
                 return model_id
             except Exception as e:
                 detail = str(e)
@@ -1543,6 +1876,12 @@ def _start_server_once(model_id: str, device_mode: DeviceMode):
                             resolved_device="gpu" if str(device_arg).startswith("cuda") else "cpu",
                             available_gpus=available_gpus,
                             fallback_applied=(idx > 0 and str(device_arg) == "cpu"),
+                        )
+                        _set_runtime_state(
+                            model_id,
+                            _RUNTIME_STATE_AVAILABLE,
+                            reason="ok",
+                            placement=state["placements"][model_id],
                         )
                         return model_id
                     except Exception:
@@ -1576,15 +1915,22 @@ def _build_infer_readiness_payload(
     infer_ready: bool,
     ready_model_id: Optional[str] = None,
     reason: str = "ok",
+    runtime_state: Optional[str] = None,
 ) -> Dict[str, Any]:
+    effective_runtime_state = runtime_state or (
+        _RUNTIME_STATE_AVAILABLE
+        if infer_ready
+        else (_RUNTIME_STATE_UNAVAILABLE if reason == "model_not_found" else _RUNTIME_STATE_LOADING)
+    )
     return {
-        "status": "ready" if infer_ready else ("unavailable" if reason == "model_not_found" else "starting"),
+        "status": "ready" if infer_ready and effective_runtime_state == _RUNTIME_STATE_AVAILABLE else effective_runtime_state,
         "infer_ready": infer_ready,
         "requested_model_id": requested_model_id,
         "ready_model_id": ready_model_id,
         "backend_mode": _resolve_backend_mode(),
         "fallback_used": bool(ready_model_id and ready_model_id != requested_model_id),
         "reason": reason,
+        "runtime_state": effective_runtime_state,
     }
 
 # === API ===
@@ -1898,6 +2244,7 @@ def _build_model_view(model_id: str) -> Dict[str, Any]:
         "active": state.get("active_model") == model_id,
         "placement": copy.deepcopy((state.get("placements") or {}).get(model_id)),
         "admission": copy.deepcopy((state.get("admission") or {}).get(model_id)),
+        "runtime_state": _get_runtime_state(model_id),
     }
 
 
@@ -2130,6 +2477,7 @@ async def list_running_models():
         "running_model_ids": running_ids,
         "running_models": [_build_model_view(model_id) for model_id in running_ids],
         "placements": copy.deepcopy(state.get("placements") or {}),
+        "runtime_states": copy.deepcopy(state.get("runtime_states") or {}),
     }
 
 
@@ -2229,6 +2577,7 @@ async def get_status():
         "running": list(state["processes"].keys()),
         "placements": dict(state.get("placements") or {}),
         "admission": copy.deepcopy(state.get("admission") or {}),
+        "runtime_states": copy.deepcopy(state.get("runtime_states") or {}),
         "last_fallback_event": copy.deepcopy(state.get("last_fallback_event")),
         "backend_mode": _resolve_backend_mode(),
         "prompt_cache_policy": _resolve_prompt_cache_policy(
