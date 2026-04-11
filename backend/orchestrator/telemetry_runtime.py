@@ -75,8 +75,10 @@ class ExecutionTelemetryCollector:
         meta: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         completed_monotonic = time.monotonic()
+        name = str(span.get("name") or "")
         payload = {
-            "name": str(span.get("name") or ""),
+            "name": name,
+            "nameEn": name,
             "kind": str(span.get("kind") or "stage"),
             "category": str(span.get("category") or ""),
             "status": status,
@@ -100,6 +102,7 @@ class ExecutionTelemetryCollector:
     ) -> Dict[str, Any]:
         payload = {
             "name": name,
+            "nameEn": name,
             "kind": kind,
             "category": category or "",
             "status": status,
@@ -314,7 +317,12 @@ def record_telemetry_summary(telemetry: Dict[str, Any]) -> None:
 
 def get_timing_summary() -> Dict[str, Any]:
     with _SUMMARY_LOCK:
+        latest = copy.deepcopy(_LATEST_TELEMETRY)
+        for timing_key in ("stage_timings", "tool_timings"):
+            for item in latest.get(timing_key, []) or []:
+                if isinstance(item, dict) and "name" in item and "nameEn" not in item:
+                    item["nameEn"] = item["name"]
         return {
-            "latest": copy.deepcopy(_LATEST_TELEMETRY),
+            "latest": latest,
             "by_executor": [copy.deepcopy(_SUMMARY_BY_EXECUTOR[key]) for key in sorted(_SUMMARY_BY_EXECUTOR.keys())],
         }

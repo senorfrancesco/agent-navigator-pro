@@ -2,6 +2,7 @@ import os
 import sys
 from typing import Any, Dict
 
+import httpx
 import pytest
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
@@ -290,15 +291,14 @@ def test_raw_models_lists_chat_capable_models_without_agent_wrapper(monkeypatch)
 async def test_raw_chat_completions_non_streaming_proxies_to_ums(monkeypatch):
     captured: Dict[str, Any] = {}
 
-    async def fake_async_infer(model_id: str, payload: Dict[str, Any], device_mode: str = "hybrid"):
-        captured["model_id"] = model_id
+    async def fake_request_raw_openai_infer(*, target_model: str, payload: Dict[str, Any]):
+        captured["model_id"] = target_model
         captured["payload"] = payload
-        captured["device_mode"] = device_mode
         return {
             "id": "chatcmpl-raw",
             "object": "chat.completion",
             "created": 123,
-            "model": model_id,
+            "model": target_model,
             "choices": [{"index": 0, "message": {"role": "assistant", "content": "raw answer"}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         }
@@ -309,7 +309,7 @@ async def test_raw_chat_completions_non_streaming_proxies_to_ums(monkeypatch):
         "resolve_model_selection",
         lambda role_key: type("Selection", (), {"resolved_model_id": "qwen-14b-llm"})(),
     )
-    monkeypatch.setattr(agent_api.ums_client, "async_infer", fake_async_infer)
+    monkeypatch.setattr(agent_api, "_request_raw_openai_infer", fake_request_raw_openai_infer)
 
     response = await agent_api.raw_openai_completions(
         _FakeRequest(
@@ -326,12 +326,50 @@ async def test_raw_chat_completions_non_streaming_proxies_to_ums(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_raw_chat_completions_non_streaming_surfaces_runtime_unavailable(monkeypatch):
+    async def fake_request_raw_openai_infer(*, target_model: str, payload: Dict[str, Any]):
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "error_gpu",
+                "runtime_state": "error_gpu",
+                "requested_model_id": target_model,
+                "reason": "ggml_cuda_init: failed",
+            },
+        )
+
+    monkeypatch.setattr(agent_api, "get_all_models", lambda: {"qwen-14b-llm": {"kind": "llm"}})
+    monkeypatch.setattr(
+        agent_api,
+        "resolve_model_selection",
+        lambda role_key: type("Selection", (), {"resolved_model_id": "qwen-14b-llm"})(),
+    )
+    monkeypatch.setattr(agent_api, "_request_raw_openai_infer", fake_request_raw_openai_infer)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await agent_api.raw_openai_completions(
+            _FakeRequest(
+                {
+                    "messages": [{"role": "user", "content": "Привет"}],
+                    "stream": False,
+                }
+            )
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail["runtime_state"] == "error_gpu"
+
+
+@pytest.mark.asyncio
 async def test_raw_chat_completions_streaming_proxies_to_ums(monkeypatch):
     captured: Dict[str, Any] = {}
 
-    async def fake_stream(*, target_model: str, payload: Dict[str, Any]):
+    async def fake_open_stream(*, target_model: str, payload: Dict[str, Any]):
         captured["model_id"] = target_model
         captured["payload"] = payload
+        return object()
+
+    async def fake_stream(_response):
         yield "data: {\"choices\":[{\"delta\":{\"content\":\"Пр\"},\"finish_reason\":null}]}\n\n".encode("utf-8")
         yield "data: {\"choices\":[{\"delta\":{\"content\":\"ивет\"},\"finish_reason\":null}]}\n\n".encode("utf-8")
         yield b"data: [DONE]\n\n"
@@ -342,6 +380,7 @@ async def test_raw_chat_completions_streaming_proxies_to_ums(monkeypatch):
         "resolve_model_selection",
         lambda role_key: type("Selection", (), {"resolved_model_id": "qwen-14b-llm"})(),
     )
+    monkeypatch.setattr(agent_api, "_open_raw_openai_stream", fake_open_stream)
     monkeypatch.setattr(agent_api, "_proxy_raw_openai_stream", fake_stream)
 
     response = await agent_api.raw_openai_completions(
@@ -358,6 +397,109 @@ async def test_raw_chat_completions_streaming_proxies_to_ums(monkeypatch):
     assert "\"content\":\"Пр\"" in body
     assert "\"content\":\"ивет\"" in body
     assert "data: [DONE]" in body
+
+
+@pytest.mark.asyncio
+async def test_raw_chat_completions_returns_429_before_stream_starts(monkeypatch):
+    class _FakeStreamResponse:
+        def __init__(self):
+            self.request = httpx.Request("POST", "http://localhost:8090/infer")
+            self.status_code = 429
+
+        def raise_for_status(self):
+            response = httpx.Response(status_code=429, request=self.request)
+            raise httpx.HTTPStatusError("429 Too Many Requests", request=self.request, response=response)
+
+        async def aclose(self):
+            return None
+
+    class _FakeClient:
+        def build_request(self, method: str, url: str, json: Dict[str, Any]):
+            return httpx.Request(method, url)
+
+        async def send(self, request: httpx.Request, stream: bool = False):
+            return _FakeStreamResponse()
+
+    async def fake_get_shared_client():
+        return _FakeClient()
+
+    monkeypatch.setattr(agent_api, "get_all_models", lambda: {"qwen-14b-llm": {"kind": "llm"}})
+    monkeypatch.setattr(
+        agent_api,
+        "resolve_model_selection",
+        lambda role_key: type("Selection", (), {"resolved_model_id": "qwen-14b-llm"})(),
+    )
+    monkeypatch.setattr(agent_api, "get_shared_client", fake_get_shared_client)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await agent_api.raw_openai_completions(
+            _FakeRequest(
+                {
+                    "messages": [{"role": "user", "content": "Привет"}],
+                    "stream": True,
+                }
+            )
+        )
+
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.detail == "raw-model-stream-saturated"
+
+
+@pytest.mark.asyncio
+async def test_raw_chat_completions_returns_runtime_unavailable_before_stream_starts(monkeypatch):
+    runtime_detail = {
+        "status": "error_gpu",
+        "runtime_state": "error_gpu",
+        "requested_model_id": "qwen-14b-llm",
+        "reason": "ggml_cuda_init: failed",
+    }
+
+    class _FakeStreamResponse:
+        def __init__(self):
+            self.request = httpx.Request("POST", "http://localhost:8090/infer")
+            self.status_code = 503
+
+        def raise_for_status(self):
+            response = httpx.Response(
+                status_code=503,
+                request=self.request,
+                json={"detail": runtime_detail},
+            )
+            raise httpx.HTTPStatusError("503 Service Unavailable", request=self.request, response=response)
+
+        async def aclose(self):
+            return None
+
+    class _FakeClient:
+        def build_request(self, method: str, url: str, json: Dict[str, Any]):
+            return httpx.Request(method, url)
+
+        async def send(self, request: httpx.Request, stream: bool = False):
+            return _FakeStreamResponse()
+
+    async def fake_get_shared_client():
+        return _FakeClient()
+
+    monkeypatch.setattr(agent_api, "get_all_models", lambda: {"qwen-14b-llm": {"kind": "llm"}})
+    monkeypatch.setattr(
+        agent_api,
+        "resolve_model_selection",
+        lambda role_key: type("Selection", (), {"resolved_model_id": "qwen-14b-llm"})(),
+    )
+    monkeypatch.setattr(agent_api, "get_shared_client", fake_get_shared_client)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await agent_api.raw_openai_completions(
+            _FakeRequest(
+                {
+                    "messages": [{"role": "user", "content": "Привет"}],
+                    "stream": True,
+                }
+            )
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail["runtime_state"] == "error_gpu"
 
 
 @pytest.mark.asyncio

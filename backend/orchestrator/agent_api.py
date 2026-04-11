@@ -14,10 +14,11 @@ import uuid
 import logging
 import warnings
 from pathlib import Path
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Dict, Any, Optional, List, AsyncGenerator, Literal
 from dotenv import load_dotenv
 import numpy as np
+import httpx
 
 # Подавление предупреждений pynvml
 warnings.filterwarnings("ignore", category=FutureWarning, module="pynvml")
@@ -866,7 +867,69 @@ def _sanitize_raw_openai_response(response: Dict[str, Any], *, target_model: str
     return sanitized
 
 
-async def _proxy_raw_openai_stream(*, target_model: str, payload: Dict[str, Any]) -> AsyncGenerator[bytes, None]:
+def _extract_raw_ums_error_detail(response: Optional[httpx.Response]) -> Any:
+    if response is None:
+        return None
+    with suppress(Exception):
+        payload = response.json()
+        if isinstance(payload, dict) and "detail" in payload:
+            return payload["detail"]
+        return payload
+    with suppress(Exception):
+        text = response.text
+        if text:
+            return text
+    return None
+
+
+def _raise_raw_ums_http_error(
+    *,
+    response: Optional[httpx.Response],
+    exc: Exception,
+    stream: bool,
+) -> None:
+    status_code = getattr(response, "status_code", None)
+    if status_code == 429:
+        raise HTTPException(
+            status_code=429,
+            detail="raw-model-stream-saturated" if stream else "raw-model-infer-saturated",
+        ) from exc
+    if status_code in {409, 503}:
+        detail = _extract_raw_ums_error_detail(response)
+        raise HTTPException(status_code=int(status_code), detail=detail or f"raw-model-unavailable:{status_code}") from exc
+    raise HTTPException(
+        status_code=502,
+        detail=f"{'raw-model-stream-failed' if stream else 'raw-model-infer-failed'}:{exc}",
+    ) from exc
+
+
+async def _request_raw_openai_infer(
+    *,
+    target_model: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    client = await get_shared_client()
+    request_body = {
+        "model_id": target_model,
+        "payload": payload,
+        "device_mode": "hybrid",
+        "priority": "normal",
+    }
+    try:
+        response = await client.post(f"{ums_client.base_url}/infer", json=request_body)
+        response.raise_for_status()
+        response_payload = response.json()
+    except httpx.HTTPStatusError as exc:
+        _raise_raw_ums_http_error(response=exc.response, exc=exc, stream=False)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"raw-model-infer-failed:{exc}") from exc
+    if response_payload.get("status") == "success":
+        result = response_payload.get("result", {})
+        return result if isinstance(result, dict) else {"value": result}
+    raise HTTPException(status_code=502, detail=f"raw-model-infer-failed:unexpected-payload:{response_payload}")
+
+
+async def _open_raw_openai_stream(*, target_model: str, payload: Dict[str, Any]) -> httpx.Response:
     client = await get_shared_client()
     request_body = {
         "model_id": target_model,
@@ -875,14 +938,35 @@ async def _proxy_raw_openai_stream(*, target_model: str, payload: Dict[str, Any]
         "priority": "normal",
         "stream": True,
     }
-    async with client.stream("POST", f"{ums_client.base_url}/infer", json=request_body) as response:
-        try:
-            response.raise_for_status()
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"raw-model-stream-failed:{exc}") from exc
+    response: httpx.Response | None = None
+    try:
+        request = client.build_request("POST", f"{ums_client.base_url}/infer", json=request_body)
+        response = await client.send(request, stream=True)
+        response.raise_for_status()
+        return response
+    except httpx.HTTPStatusError as exc:
+        response_obj = exc.response if exc.response is not None else response
+        if response_obj is not None:
+            with suppress(Exception):
+                await response_obj.aclose()
+        _raise_raw_ums_http_error(response=exc.response, exc=exc, stream=True)
+    except Exception as exc:
+        if response is not None:
+            with suppress(Exception):
+                await response.aclose()
+        raise HTTPException(status_code=502, detail=f"raw-model-stream-failed:{exc}") from exc
+
+
+async def _proxy_raw_openai_stream(response: httpx.Response) -> AsyncGenerator[bytes, None]:
+    try:
         async for chunk in response.aiter_raw():
             if chunk:
                 yield chunk
+    except Exception as exc:
+        logger.warning("Raw model stream interrupted: %s", exc)
+    finally:
+        with suppress(Exception):
+            await response.aclose()
 
 # === Health ===
 
@@ -1022,18 +1106,11 @@ async def raw_openai_completions(request: Request):
     stream_mode = bool(data.get("stream", True))
 
     if not stream_mode:
-        try:
-            response = await ums_client.async_infer(target_model, payload, device_mode="hybrid")
-        except HTTPException:
-            raise
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"raw-model-infer-failed:{exc}") from exc
+        response = await _request_raw_openai_infer(target_model=target_model, payload=payload)
         return _sanitize_raw_openai_response(response, target_model=target_model)
 
-    return StreamingResponse(
-        _proxy_raw_openai_stream(target_model=target_model, payload=payload),
-        media_type="text/event-stream",
-    )
+    stream_response = await _open_raw_openai_stream(target_model=target_model, payload=payload)
+    return StreamingResponse(_proxy_raw_openai_stream(stream_response), media_type="text/event-stream")
 
 @app.get("/v1/models")
 def list_models():
