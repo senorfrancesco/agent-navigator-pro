@@ -24,6 +24,18 @@
 - `ask_document` не должен оставаться обязательным user-facing путём для обычного document chat:
   - либо становится thin adapter поверх того же retrieval source-of-truth, что и `Open WebUI Knowledge`;
   - либо понижается до compatibility tool и уходит из основного UX.
+- ВАЖНО: document QA не должен строиться вокруг одного "канонического deep-ответа" на документ.
+  Архитектурно нужно разделять:
+  - состояние документа:
+    - `document_id` / `version_id`;
+    - извлечённый текст;
+    - corpus metadata;
+    - retrieval scope и индексацию в `Qdrant`;
+  - состояние конкретного запуска анализа:
+    - `question` или `analysis_goal`;
+    - `job_id`;
+    - статус и артефакты ответа.
+  Это критично для follow-up вопросов по тому же документу и является обязательным правилом для `M3.8` / `M3.9`.
 
 ## Runtime Contours
 
@@ -42,6 +54,7 @@
 - UI может нативно отвечать по документам через свой Knowledge contour;
 - backend tool routing здесь не должен быть обязательным скрытым шагом;
 - retrieval source-of-truth должен быть общим и проверяемым на уровне corpus/collections, а не только chat-session памяти UI.
+- follow-up вопрос по документу должен заново опираться на `document_ref` и retrieval, а не на один старый deep-ответ в истории чата.
 
 ### Contour B — Explicit Domain Tools
 
@@ -58,6 +71,10 @@
 - backend исполняет уже явно выбранный tool;
 - domain prompts, async lifecycle, artifacts, telemetry и status polling живут в backend;
 - `Open WebUI` показывает компактный result, follow-up actions и ссылки на job/report, а не сырой внутренний pipeline.
+- `ask_document(document_ref, question=...)` и `analyze_document_deep(document_ref, analysis_goal=...)` — это разные контракты:
+  - первый отвечает на точечный вопрос;
+  - второй запускает новый анализ под конкретную цель;
+  - новый `analysis_goal` должен иметь право дать новый результат по тому же документу.
 
 ## V1 / V2 Boundary for Qdrant
 
@@ -110,6 +127,7 @@
 - `Qdrant` — canonical backend для Knowledge;
 - retrieval policy/merge layer остаётся у проекта;
 - tool server не дублирует обычный knowledge chat, а покрывает explicit domain workflows.
+- retrieval по документу должен идти через `document_ref` и общий source-of-truth, а не через повторное использование одного ранее подготовленного deep-результата.
 
 ### Task 4: Tool Catalog Re-Segmentation
 
@@ -121,6 +139,7 @@
 - `analyze_*`, `compare_*`, `equipment_*` остаются explicit tools;
 - `ask_document` становится compatibility/thin-adapter decision, а не бесспорным baseline;
 - acceptance для `Open WebUI` smoke должна различать native Knowledge path и backend tool path.
+- document state и tool-run state фиксируются как разные сущности; это обязательное архитектурное требование, а не необязательное уточнение.
 
 ## Acceptance Criteria
 
@@ -128,4 +147,5 @@
 - `Qdrant` описан как canonical Knowledge backend, а не как побочный UI эксперимент;
 - внешний ingestion contour формально введён в архитектуру;
 - explicit tools и native Knowledge chat разведены по назначению и ownership;
+- follow-up по документу проектируется от `document_ref + question/analysis_goal`, а не от одного ранее сохранённого анализа;
 - для implementer больше нет двусмысленности, зачем нужен backend tool path после включения `Open WebUI Knowledge`.

@@ -8,13 +8,13 @@
 - `cd backend && pytest tests/ -v -m "not integration"`: run the default unit test suite.
 - `cd backend && pytest tests/test_e2e_equipment.py -v -m integration`: run integration coverage against live services.
 - `cd backend && uvicorn orchestrator.agent_api:app --reload --port 8000`: start the API locally for workflow work.
-- `./scripts/run_all.sh`: start the recommended local stack (`tmux` + backend services + Chainlit).
-- `docker compose up -d chainlit`: start the main Chainlit UI on port `3000`.
+- `./scripts/run_all.sh`: start the recommended local stack (`tmux` + backend services + Chainlit as a compatibility UI).
+- `docker compose up -d chainlit`: start the compatibility Chainlit UI on port `3000`.
 - `docker compose logs --tail=200 chainlit`: inspect Chainlit runtime logs.
 - `docker compose up -d --build --force-recreate chainlit`: rebuild Chainlit when `.chainlit`, `public/`, `Dockerfile.chainlit`, or `chainlit_app.py` changed.
-- `docker compose --profile legacy up open-webui`: start the legacy Open WebUI path when needed.
-- `docker compose --profile legacy up -d --force-recreate open-webui`: recreate legacy Open WebUI after `backend/.env` / `WEBUI_*` changes so container env is re-read.
-- `bash ~/.codex/skills/playwright/scripts/playwright_cli.sh open http://127.0.0.1:3001/ --browser firefox --headed`: open legacy Open WebUI in visible Firefox for live manual observation.
+- `docker compose --profile legacy up open-webui`: start the primary Open WebUI path on port `3001` using the current historical compose profile name.
+- `docker compose --profile legacy up -d --force-recreate open-webui`: recreate Open WebUI after `backend/.env` / `WEBUI_*` changes so container env is re-read.
+- `bash ~/.codex/skills/playwright/scripts/playwright_cli.sh open http://127.0.0.1:3001/ --browser firefox --headed`: open Open WebUI in visible Firefox for live manual observation.
 - `bash ~/.codex/skills/playwright/scripts/playwright_cli.sh snapshot`: refresh refs before interactions; then use `fill` / `click` for fast checks or `run-code "async (page) => { await page.keyboard.type(..., { delay: 120 }); }"` when the user should see live typing.
 
 ## Coding Style & Naming Conventions
@@ -34,7 +34,7 @@ Do not commit local bootstrap artifacts such as `test_logs/`, temporary uploaded
 
 ## Agent-Specific Instructions
 Respond to repository collaborators in Russian unless a task explicitly requires another language.
-- Считать `Chainlit` основным UI, а `Open WebUI` — legacy-путём. Не откатывать документацию и инструкции обратно к `Open WebUI-first`.
+- Считать `Open WebUI` основным UI, а `Chainlit` — совместимым и отладочным путём. Не откатывать документацию и инструкции обратно к `Chainlit-first`.
 - Все важные решения, спорные места, временные обходы, архитектурные компромиссы и найденный техдолг
   фиксировать в `TASKS.md` по ходу работы, если речь идёт об общем проектном backlog, а не о ночном журнале выполнения.
 - Если в ходе сессии появляется временный workaround, его нужно не только озвучить пользователю,

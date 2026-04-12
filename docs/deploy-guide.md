@@ -117,7 +117,7 @@ rsync -avz --progress \
 │   │       └── Qwen3-Embedding-0.6B/ # sentence-transformers
 │   ├── orchestrator/
 │   │   ├── agent_api.py              # FastAPI orchestrator (порт 8000)
-│   │   ├── chainlit_app.py           # Chainlit UI app
+│   │   ├── chainlit_app.py           # Chainlit compatibility UI app
 │   │   ├── execution_runtime.py      # Execution layer
 │   │   ├── orchestration_runtime.py  # Decision layer
 │   │   ├── ui_control_plane.py       # Config resolution
@@ -218,12 +218,18 @@ Legacy aliases для rollout и старых инсталляций всё ещ
 
 ### 5.3. Модель env-файлов
 
-Для server/operator path важно не смешивать user-owned env и generated applied env:
+Для server/operator path важно различать постоянный `env` и generated applied runtime:
 
 | Файл | Назначение | Редактировать руками |
 | --- | --- | --- |
-| `backend/.env` | основной shared config: пути моделей, auth, URLs, backend mode, timeouts и runtime intent | да |
-| `backend/.env.runtime` | generated applied env для текущего запуска | нет |
+| `backend/.env` | основной shared config: пути моделей, auth, URLs, backend mode, placement, timeouts и runtime intent | да |
+| `backend/.env.runtime` | generated applied env для `container` path и legacy-совместимости | нет |
+
+Для текущего native path:
+
+- `backend/.env` — единственный user-owned конфиг
+- `./scripts/evaluate_runtime.sh recommend` — рекомендатель для ручного подбора параметров
+- `backend/.env.runtime` не нужен для обычного `run_native.sh`
 
 `backend/.env.native` и `backend/.env.hardware.override` считаются deprecated для native/operator path и не должны использоваться как canonical source of truth.
 
@@ -238,9 +244,17 @@ mkdir -p backend/.data
 
 ---
 
-## 6. Сборка Docker-образа Chainlit
+## 6. UI-контуры
 
-Chainlit UI работает в Docker-контейнере. Backend-сервисы (UMS, Document Server, Legal Server, Agent API) работают на хосте.
+Основной пользовательский shell сейчас — `Open WebUI`, он поднимается отдельной командой:
+
+```bash
+docker compose --profile legacy up -d open-webui
+```
+
+Текущее имя compose profile `legacy` историческое и не означает вторичную роль `Open WebUI`.
+
+`Chainlit` остаётся совместимым и отладочным UI. Его Docker-образ по-прежнему собирается отдельно. Backend-сервисы (UMS, Document Server, Legal Server, Agent API) работают на хосте.
 
 ```bash
 cd /opt/agent-navigator-pro
@@ -278,10 +292,10 @@ cd /opt/agent-navigator-pro
 
 Канонический control plane теперь `launcher.sh`:
 1. делает bootstrap/preflight;
-2. пишет applied plan в `backend/.env.runtime`;
+2. для `native` path читает `backend/.env`, а для `container` path при необходимости пишет `backend/.env.runtime`;
 3. поднимает infrastructure phase;
 4. ждёт `UMS /ready/infer`;
-5. только после этого поднимает `agent-api` и `chainlit`.
+5. только после этого поднимает `agent-api` и совместимый `chainlit`.
 
 ### Вариант B: Direct compatibility runner
 
@@ -303,7 +317,12 @@ cd /opt/agent-navigator-pro
 ./scripts/launcher.sh --target native --profile adaptive --no-attach
 ```
 
-Chainlit в этом варианте запускается напрямую на хосте. Полезно для отладки.
+Chainlit в этом варианте запускается напрямую на хосте. Полезно для отладки и compatibility-smoke.
+Если нужно сначала подобрать параметры размещения, используйте:
+
+```bash
+./scripts/evaluate_runtime.sh recommend
+```
 
 ### Вариант D: Monitoring stack
 

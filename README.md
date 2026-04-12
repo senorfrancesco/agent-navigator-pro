@@ -1,6 +1,6 @@
 # Agent Navigator Pro
 
-**Agent Navigator Pro** — агентная система для анализа документов, RAG-поиска, сравнения юридических актов и проверки соответствия ТЗ/КП. Основной пользовательский интерфейс проекта сейчас — **Chainlit** на порту `3000`. **Open WebUI** оставлен как legacy-вариант и запускается отдельным docker profile на порту `3001`.
+**Agent Navigator Pro** — агентная система для анализа документов, RAG-поиска, сравнения юридических актов и проверки соответствия ТЗ/КП. Основной пользовательский интерфейс проекта сейчас — **Open WebUI** на порту `3001`. **Chainlit** сохранён как совместимый и отладочный UI на порту `3000`.
 
 Каноническая основная ветка репозитория: `v3.0`.
 
@@ -8,7 +8,7 @@
 
 Система разделена на два слоя:
 
-- Docker UI: `chainlit-ui`
+- Docker UI: `open-webui` + `chainlit-ui`
 - Host backend: `agent_api`, `document_server`, `legal_server`, `unified_model_server`
 
 ```mermaid
@@ -18,7 +18,7 @@ graph TD
     classDef service  fill:#c2410c,color:#fff,stroke:#9a3412,stroke-width:2px
     classDef data     fill:#64748b,color:#fff,stroke:#475569,stroke-width:2px
     classDef bridge   fill:#1f2937,color:#e5e7eb,stroke:#475569,stroke-width:1.5px,stroke-dasharray:4 3
-    classDef legacy   fill:#f3f4f6,color:#111827,stroke:#94a3b8,stroke-width:2px,stroke-dasharray:6 4
+    classDef compat   fill:#f3f4f6,color:#111827,stroke:#94a3b8,stroke-width:2px,stroke-dasharray:6 4
     classDef label    fill:none,stroke:none,color:#94a3b8,font-size:12px
 
     %% ── Entry point ───────────────────────────────────────────
@@ -27,8 +27,8 @@ graph TD
     %% ── UI layer ──────────────────────────────────────────────
     subgraph UI ["  UI Layer  "]
         direction LR
-        CL["Chainlit :3000\nосновной UI"]
-        OW["Open WebUI :3001\nlegacy UI"]
+        OW["Open WebUI :3001\nосновной UI"]
+        CL["Chainlit :3000\nсовместимый и отладочный UI"]
     end
 
     %% ── Orchestration ─────────────────────────────────────────
@@ -71,11 +71,11 @@ graph TD
     end
 
     %% ══ Runtime flow ══════════════════════════════════════════
-    USER        --> CL
-    USER       -. optional .-> OW
+    USER        --> OW
+    USER       -. optional .-> CL
 
-    CL          --> AG
-    OW         -. legacy path .-> AG
+    OW          --> AG
+    CL         -. compat/dev path .-> AG
 
     AG          --> CORE
 
@@ -87,8 +87,8 @@ graph TD
     UMS        -. BACKEND_MODE=vllm .-> VLLM
 
     %% ══ Data flow ════════════════════════════════════════════
-    CL          --> CHDB & FILES
-    OW         -. legacy uploads .-> FILES
+    OW          --> FILES
+    CL         -. compat/dev state .-> CHDB & FILES
     CORE        --> FILES & STATE & RAG
 
     FILES       --> UP
@@ -96,20 +96,20 @@ graph TD
     RAG         --> KB
 
     %% ══ Classes ══════════════════════════════════════════════
-    class USER,CL ui
+    class USER,OW ui
     class AG,CORE,UMS,LLM,EMB,VLLM runtime
     class DS,LS service
     class UP,CHDB,STDB,KB data
     class FILES,STATE,RAG bridge
-    class OW legacy
+    class CL compat
 ```
 
 ## Основные компоненты
 
 | Компонент | Технология | Порт | Роль |
 | --- | --- | --- | --- |
-| `chainlit-ui` | Docker + Chainlit | `3000` | Основной интерфейс чата, history, шаги workflow, загрузка файлов |
-| `open-webui` | Docker + Open WebUI | `3001` | Legacy UI, запускается только через `--profile legacy` |
+| `open-webui` | Docker + Open WebUI | `3001` | Основной пользовательский shell, сейчас поднимается через compose profile `legacy` |
+| `chainlit-ui` | Docker + Chainlit | `3000` | Совместимый и отладочный интерфейс чата, history, шаги workflow, загрузка файлов |
 | `agent_api` | FastAPI | `8000` | OpenAI-compatible entrypoint, маршрутизация в workflow |
 | `document_server` | FastAPI | `8001` | Парсинг PDF/DOCX, OCR, таблицы, чанки |
 | `legal_server` | FastAPI | `8002` | Batch matching и сравнение юридических документов |
@@ -360,7 +360,8 @@ Launcher:
 
 - запускает controlled bootstrap/preflight слой
 - перед запуском делает `ensure-present` для обязательных моделей через `scripts/models/install_models.sh`
-- строит и применяет `backend/.env.runtime`
+- для `native` path использует `backend/.env` как единственный постоянный конфиг
+- для `container` path при необходимости строит `backend/.env.runtime`
 - запускает нужный target (`native` или `container`)
 - печатает runtime summary через `UMS /status`
 
@@ -391,102 +392,45 @@ HF_HOME=/mnt/d/hf-cache ./scripts/models/install_models.sh --ensure-present --as
 
 `--models-root` в `launcher.sh` и `install_models.sh` строит канонический layout внутри указанного root. Для постоянной конфигурации native/runtime path лучше фиксировать абсолютные пути прямо в `backend/.env`.
 
-Runtime preflight теперь прозрачно показывает placement plan:
+Для native-пути рекомендации по железу теперь вынесены отдельно:
 
 ```bash
-python scripts/runtime_preflight.py detect
-python scripts/runtime_preflight.py plan --profile adaptive
-python scripts/runtime_preflight.py apply --profile adaptive --report-only
+./scripts/evaluate_runtime.sh recommend
+./scripts/evaluate_runtime.sh plan --profile adaptive
+./scripts/evaluate_runtime.sh detect
 ```
 
-В `plan/report` теперь видны:
-- `llm_model_id`
-- `llm_quant`
-- `llm_ctx_size`
-- `llm_gpu_layers`
-- `embedding_backend`
-- `embedding_device`
-- `admission` по компонентам: `ok | degraded_candidate | requires_degraded | blocked`
-- `placements.llm`
-- `placements.vlm`
-- `placements.intent_embedder`
-- `placements.retrieval_embedder`
-- `warnings`, если auto выбрал CPU-only path при наличии GPU или если manual GPU request требует `hybrid` / `requires_degraded`
+Этот сценарий:
 
-Важно: общий `device_mode` не означает, что все компоненты обязательно идут одинаково. Сейчас plan отдельно показывает, куда размещаются:
-- большая LLM
-- VLM
-- classifier intent embedder
-- retrieval embedder
+- читает только `backend/.env`
+- показывает placement plan и рекомендуемые значения
+- не пишет `backend/.env.runtime`
+- не меняет `backend/.env` автоматически
 
-Для LLM `hybrid` считается отдельным execution mode, а не fallback. Если full GPU placement невозможен, preflight/launcher теперь явно показывают:
-- `requested_device`
-- `resolved_device`
-- `admission`
+Для native runtime важный контракт такой:
 
-Это нужно, чтобы до старта было видно, пойдёт ли runtime по normal path, по `hybrid`, или потребует `reduced-context` / degraded execution.
+- `backend/.env` — единственный user-owned конфиг
+- `backend/.env.runtime` не нужен для обычного `run_native.sh`
+- `backend/.env.native` и `backend/.env.hardware.override` считаются deprecated и больше не являются canonical source of truth
 
-Для GPU layers используется канонический public contract:
+Если нужно жёстко разделить нагрузку между GPU, задавайте это в `backend/.env` через:
 
 ```bash
-GPU_LAYERS_MODE=auto|max|manual
-N_GPU_LAYERS_OVERRIDE=24
-LLM_DEVICE_MODE=cpu|gpu|hybrid
-VLM_DEVICE_MODE=cpu|gpu|hybrid
-INTENT_EMBEDDER_DEVICE_MODE=cpu|gpu|hybrid
-RETRIEVAL_EMBEDDER_DEVICE_MODE=cpu|gpu|hybrid
+LLM_DEVICE_MODE=gpu
+VLM_DEVICE_MODE=gpu
+INTENT_EMBEDDER_DEVICE_MODE=cpu
+RETRIEVAL_EMBEDDER_DEVICE_MODE=cpu
+UMS_LLM_GPU_INDICES=0,1
+UMS_EMBEDDING_GPU_INDEX=1
+UMS_LLM_MIN_FREE_VRAM_GB=0
+UMS_LLM_MIN_BALANCE_RATIO=0.5
 ```
 
-Через launcher:
+`GPU_LAYERS_MODE` и `N_GPU_LAYERS_OVERRIDE` остаются частью preflight/evaluator surface, но реальный per-model offload по `gguf`-моделям по-прежнему задаётся через `N_GPU_LAYERS_QWEN14B`, `N_GPU_LAYERS_QWENVL` и связанные `N_GPU_LAYERS_*`.
 
-```bash
-./scripts/launcher.sh --target native --gpu-layers-mode max
-./scripts/launcher.sh --target native --gpu-layers-mode manual --gpu-layers 24
-./scripts/launcher.sh --target native --device-mode gpu
-```
+Для container path generated `backend/.env.runtime` всё ещё используется как applied current-run файл.
 
-Persistent runtime intent теперь должен жить в `backend/.env`, а не в отдельных override-файлах.
-`DEVICE_MODE` остаётся общим fallback для heavy runtime path, а component-specific переменные позволяют явно задать placement для LLM, VLM, intent embedder и retrieval embedder.
-
-Launcher review теперь работает как current-run preview:
-- показывает план только для текущего запуска;
-- пишет applied values только в `backend/.env.runtime`;
-- не сохраняет overrides в отдельный persistent runtime-файл.
-
-Это важный контракт:
-- `backend/.env` — единственный user-owned native/runtime config;
-- `backend/.env.runtime` — generated applied env только для текущего запуска.
-
-Если нужно оставить LLM/VLM на GPU, а embeddings на CPU, это теперь лучше задавать явно:
-
-```bash
-./scripts/launcher.sh --target native \
-  --llm-device-mode gpu \
-  --vlm-device-mode gpu \
-  --intent-embedder-device-mode cpu \
-  --retrieval-embedder-device-mode cpu \
-  --gpu-layers-mode max
-```
-
-Для интерактивной настройки того же профиля:
-
-```bash
-./scripts/launcher.sh --target native --review-runtime
-```
-
-После review launcher покажет, что уйдёт в `.env.runtime`, но не будет сохранять эти значения в отдельный persistent override-файл.
-
-Можно работать двумя способами:
-- через `backend/.env`
-- через current-run флаги `launcher.sh`
-
-Примеры:
-
-```bash
-./scripts/launcher.sh --target native --llm-device-mode gpu --gpu-layers-mode max
-```
-
-`backend/.env.native` и `backend/.env.hardware.override` считаются deprecated для native/operator path и больше не являются canonical source of truth.
+Полный справочник флагов и `env`-контракта находится в [docs/flags-reference.md](docs/flags-reference.md).
 
 Если проект обновлялся поверх старого окружения или раньше ставился неполный набор пакетов, безопасно повторно выполнить:
 
@@ -580,9 +524,21 @@ Windows host path подготавливает WSL/Docker Desktop, а сам р�
 - вместо этого выводит явную причину и спрашивает, пропустить ли Docker step или остановиться.
 - repo-managed `tmux` конфиги тоже ставятся аккуратно: если файл уже совпадает с шаблоном, он не трогается; если отличается, installer спрашивает перед overwrite.
 
-### 5. Отдельный запуск Chainlit
+### 5. Отдельный запуск UI
 
-Если backend уже работает:
+Основной пользовательский shell:
+
+```bash
+docker compose --profile legacy up -d open-webui
+```
+
+Он будет доступен на:
+
+- `http://localhost:3001`
+
+Текущий compose profile называется `legacy` только по историческим причинам и не означает вторичную продуктовую роль `Open WebUI`.
+
+Совместимый `Chainlit`-контур при необходимости:
 
 ```bash
 docker compose up -d chainlit
@@ -592,18 +548,6 @@ docker compose logs --tail=200 -f chainlit
 UI будет доступен на:
 
 - `http://localhost:3000`
-
-Open WebUI evaluation contour при необходимости:
-
-```bash
-docker compose --profile legacy up -d open-webui
-```
-
-Этот путь не меняет текущий product truth: основным UI проекта остаётся `Chainlit`, а `Open WebUI` поднимается только как отдельный `legacy/eval` profile для controlled migration contour.
-
-Он будет доступен на:
-
-- `http://localhost:3001`
 
 Monitoring stack:
 
@@ -820,9 +764,9 @@ tmux attach -t agent-navigator
 
 ## Текущее состояние UI и runtime
 
-- основной UI: `Chainlit`
+- основной UI: `Open WebUI`
 - direct chat сейчас работает в **non-stream** режиме как production-safe default
-- `Open WebUI` сохранён как legacy path
+- `Chainlit` сохранён как совместимый и отладочный путь
 - локализация `ru-RU`, `chainlit.md`, логотип и аватар теперь обслуживаются из repo-side ресурсов
 - отчёты сохраняются в [`backend/open_webui_uploads`](backend/open_webui_uploads)
 

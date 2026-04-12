@@ -17,6 +17,8 @@
 
 ## Supporting Migration Plans
 
+- [2026-04-12-single-env-runtime-convergence-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-12-single-env-runtime-convergence-plan.md)
+  План по сведению runtime-контракта к одному `backend/.env` и выводу `backend/.env.runtime` из активного product/operator path.
 - [2026-04-01-knowledge-base-store-protocol-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-01-knowledge-base-store-protocol-plan.md)
   Подготовка storage contract перед заменой backend.
 - [2026-04-01-qdrant-knowledge-base-store-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-01-qdrant-knowledge-base-store-plan.md)

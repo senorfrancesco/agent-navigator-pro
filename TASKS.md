@@ -120,6 +120,7 @@
   Progress: для `Native Runtime` добавлен отдельный variant `Secrets / Access`, который выводит и позволяет редактировать `CHAINLIT_ADMIN_USER`, `CHAINLIT_ADMIN_PASSWORD`, `CHAINLIT_AUTH_SECRET`, `GF_SECURITY_ADMIN_USER`, `GF_SECURITY_ADMIN_PASSWORD` прямо из `backend/.env`, чтобы локальный admin/operator path не оставался вне operator UI.
   Progress: тот же `Secrets / Access` теперь покрывает и `Open WebUI` bootstrap/access knobs (`WEBUI_SECRET_KEY`, `WEBUI_ADMIN_EMAIL`, `WEBUI_ADMIN_PASSWORD`, `WEBUI_ADMIN_NAME`, `ENABLE_SIGNUP`, `DEFAULT_USER_ROLE`) плюс `OPERATOR_UI_LOCALHOST_ONLY`, чтобы dev/eval auth policy не жила отдельно от operator surface.
   Progress: operator apply path для secret-полей теперь пишет quoted values через `python-dotenv`, `operator_runtime_service` читает `.env`/`env.bundle` тем же parser'ом, а canonical runtime scripts (`launcher.sh`, `run_native.sh`, `run_all.sh`, `bootstrap_env.sh`, `stop_native.sh`, `stop_all.sh`) используют общий helper `scripts/utils/env_loader.sh` вместо `source` env-файлов как shell-кода. Это закрывает случай, когда пароль/secret со спецсимволами или `$()` ломал launcher/stop path и operator edits.
+  Progress: native startup contract упрощён: `run_native.sh` теперь является прямым host entrypoint, по умолчанию использует только `backend/.env`, а on-demand hardware/runtime evaluation вынесен в отдельный `scripts/evaluate_runtime.sh`. Follow-up: вычистить operator UI и документацию от исторических ссылок на `backend/.env.hardware.override`.
   Workaround: до отдельной фазы auth/ACL весь backend-served operator surface (`/operator`, `/operator-ui`, `/operator-assets`) принудительно закрыт для non-loopback клиентов через `OPERATOR_UI_LOCALHOST_ONLY=true` по умолчанию. Это intentional localhost-only guard, а не полноценный внешний auth layer.
   Done: `Native Runtime` теперь покрывает practically-used operator knobs из `backend/.env`, `backend/.env.runtime` и `backend/.env.hardware.override`: runtime/backend profile, device placement, GPU-layer strategy, context budget, generation controls (`TEMPERATURE`, `TOP_P`, `REPETITION_PENALTY`, `MAX_TOKENS`), `MMPROJ_PATH`, native ports/URLs (`AGENT_API_PORT`, `UMS_PORT`, `UMS_URL`, `DOC_SERVER_URL`, `LEGAL_SERVER_URL`) и admin secrets. Осознанно вне UI оставлены только non-operator/internal ключи (`ACTIVE_MODEL_ID`, `AGENT_API_HOST`, `CHAINLIT_DB_URL`, `MODEL_PATH_E5_LEGAL`, `MODEL_PATH_RUBERT`, `UMS_HOST`, `UMS_SELECTED_GPU_LAYERS`).
 - [x] R1.0.9p — Расширить Offline Bundle Config для secrets, profiles, GPU placement и Chainlit knobs
@@ -1401,10 +1402,10 @@
 
 ### H9 — Full-Stack Test Contour (T6.x)
 
-- [ ] **T6.1 P0 — Browser E2E для основного Chainlit path**
-  Контекст: backend unit/integration слой уже сильный, но основной пользовательский путь через `Chainlit` почти не закрыт настоящими browser tests. Сейчас главный риск — регрессии в upload/UI/session/history, которые не ловятся pure pytest-моками.
+- [ ] **T6.1 P0 — Browser E2E для основного Open WebUI path**
+  Контекст: backend unit/integration слой уже сильный, но основной пользовательский путь через `Open WebUI` почти не закрыт настоящими browser tests. Сейчас главный риск — регрессии в upload/UI/session/history, которые не ловятся pure pytest-моками.
   Что сделать:
-  - Поднять `Playwright`-контур для `Chainlit` как основного UI
+  - Поднять `Playwright`-контур для `Open WebUI` как основного UI
   - Добавить canonical browser flows:
     - login / basic chat smoke
     - single upload + `doc_question`
@@ -2004,24 +2005,25 @@
   Verification:
   - `pytest backend/tests/test_chainlit_persistence_e2e.py -q`
 
-- [ ] **T6.4 P1 — Concurrency / cancel / busy black-box tests**
+- [x] **T6.4 P1 — Concurrency / cancel / busy black-box tests**
   Контекст:
   - unit-тесты уже покрывают `429 busy`, cancel semantics и часть saturation policy;
   - но нет одного black-box regression gate, который проверяет пользовательский path целиком:
     `long request -> second request busy -> cancel first -> retry second`.
   Progress 2026-04-11:
-  - live smoke в legacy `Open WebUI` (чат `🌞 City Sunrise Rhythm`) подтвердил, что дефект воспроизводится и на OpenAI-compat/raw path, а не только в Chainlit/runtime layer;
+  - live smoke в текущем `Open WebUI` (чат `🌞 City Sunrise Rhythm`) подтвердил, что дефект воспроизводится и на OpenAI-compat/raw path, а не только в Chainlit/runtime layer;
   - browser-facing `POST /api/chat/completions` и `POST /api/chat/completed` у `Open WebUI` остаются `200`, но downstream `agent_api` в тот же период реально возвращает `429 Too Many Requests` на `/raw/v1/chat/completions`;
-  - после такого run `POST /api/tasks/stop/{task_id}` в `Open WebUI` отвечает `{\"status\":false,\"message\":\"Task with ID ... not found.\"}`, то есть legacy UI теряет синхронность с task-state и маскирует busy/failure как подвисший ответ;
+  - после такого run `POST /api/tasks/stop/{task_id}` в `Open WebUI` отвечает `{\"status\":false,\"message\":\"Task with ID ... not found.\"}`, то есть текущий UI теряет синхронность с task-state и маскирует busy/failure как подвисший ответ;
   - regression gate для этого пункта должен отдельно покрыть raw/OpenAI-compat contour и проверять не только `busy`, но и корректную sync semantics для `task_id` после cancel/retry.
-  Что нужно сделать:
-  - создать `backend/tests/test_runtime_busy_e2e.py`;
-  - покрыть минимум 4 сценария:
-    - длинный run действительно занимает runtime slot;
-    - второй запрос получает ожидаемый `busy`/degraded ответ, а не произвольную ошибку;
-    - cancel первого run действительно освобождает slot;
-    - повторный запрос после cancel проходит без долгого stuck-state и без бесконечной серии `429`.
-  Что проверять:
+  Выполнено 2026-04-11:
+  - добавлен `backend/tests/test_runtime_busy_e2e.py` с black-box сценарием `long stream -> busy -> cancel -> retry` через raw/OpenAI-compat contour;
+  - targeted verification зелёная: `pytest backend/tests/test_runtime_busy_e2e.py -q`.
+  Что покрыто:
+  - длинный run действительно занимает runtime slot;
+  - второй запрос получает ожидаемый `busy` ответ, а не произвольную ошибку;
+  - cancel первого run освобождает slot;
+  - повторный запрос после cancel проходит без долгого stuck-state и без бесконечной серии `429`.
+  Что дополнительно контролировать:
   - не только HTTP status, но и `execution_metadata` / `model_execution` / `UMS /status`, если соответствующая ветка их публикует;
   - bounded latency после cancel, а не только факт eventual success.
   Acceptance:
@@ -2030,6 +2032,70 @@
   - regression suite ловит stuck busy-state после cancel.
   Verification:
   - `pytest backend/tests/test_runtime_busy_e2e.py -q`
+
+- [ ] **T6.4 P2 — Legacy Open WebUI: unknown native tool-call must not look executed**
+  Контекст:
+  - live smoke `2026-04-11` по свежему чату `577cfa8e-d5f7-4fd3-964c-592f586daa16` показал отдельный дефект вне `busy/cancel`: browser request на `POST /api/chat/completions` ушёл без `tool_ids` и с пустым `tool_servers`, то есть `community_sum_tool.sum_two_numbers` в этот ход реально не был прикреплён;
+  - при этом внутри контейнера legacy `Open WebUI` глобальный `DEFAULT_MODEL_PARAMS` сейчас равен `{'function_calling': 'native'}`, поэтому server-side path всё равно держит native function-calling активным;
+  - модель/compat-layer сгенерировала `function_call name=\"sum\"`, а middleware legacy `Open WebUI` сохранил его в `output` и дорисовал пустой `function_call_output`, из-за чего UI показывает `Просмотр результата от sum` / `Tool Executed`, хотя реального исполнимого tool с именем `sum` в доступном каталоге нет.
+  Что сделать:
+  - определить policy для legacy/raw contour: либо отключать global native function-calling по умолчанию, либо жёстко фильтровать tool-calls, которых нет в реально разрешённом `metadata['tools']`;
+  - не сохранять unknown tool-call как выполненный и не рендерить ему `Tool Executed` / empty result card;
+  - отдельно покрыть regression: fresh chat без attached tool -> модель генерирует неизвестный tool name -> UI остаётся в текстовом fallback без ложной tool-card.
+  Acceptance:
+  - unknown/hallucinated tool-call не попадает в persisted `output` как выполненный вызов;
+  - legacy chat history не показывает empty `sum`/`Tool Executed` для несуществующего инструмента;
+  - есть targeted regression test на fresh-chat native function-calling path.
+
+- [x] **T6.4 P3 — Legacy Open WebUI: auto-follow-up tail must not block next prompt**
+  Контекст:
+  - live repro `2026-04-11` показал, что `429` сразу после видимого завершения ответа часто приходит не из-за второго полноценного user turn, а из-за post-response tail в самом legacy `Open WebUI`;
+  - frontend на каждый send кладёт `background_tasks.follow_up_generation = settings.autoFollowUps`, а server-side `process_chat()` вызывает `background_tasks_handler(ctx)` уже после `done=True` основного ответа;
+  - `background_tasks_handler()` синхронно запускает `generate_follow_ups()` через тот же `generate_chat_completion()`, причём при текущем config `ENABLE_FOLLOW_UP_GENERATION=True`, `TASK_MODEL_EXTERNAL=''` и `TASK_MODEL=''` этот follow-up идёт на ту же heavy raw model;
+  - в результате пользователь уже видит готовый answer bubble, но chat task ещё не завершён, `chat:active=false` ещё не emitted, а новый prompt может уйти раньше конца follow-up generation и словить `429`.
+  Выполнено 2026-04-12:
+  - legacy contour переведён на более простой product policy: repo-owned bootstrap теперь принудительно ставит `ENABLE_FOLLOW_UP_GENERATION=False`, а `docker-compose` задаёт тот же default для чистого старта;
+  - решение принято осознанно вместо отдельного preemption/follow-up runtime path, потому что при текущем shared UMS lane отдельная task model всё равно конкурировала бы с основным heavy raw запросом, если идёт через тот же backend;
+  - возврат auto follow-ups возможен только отдельным slice с отдельным backend/runtime path, а не поверх текущего shared raw contour.
+  Verification:
+  - `pytest backend/tests/test_openwebui_bootstrap.py -q`
+
+- [ ] **T6.4 P4 — Legacy Open WebUI: автоматический опрос `deep-job` и сохранение состояния `tool_job`**
+  Контекст:
+  - live smoke `2026-04-12` после исправления backend-контракта подтвердил, что `tool_job_refresh_action` и `tool_job_cancel_action` уже возвращают корректный структурированный payload (`content`, `job_id`, `status_url`, `job_status`, `tool_job`) и больше не провоцируют `409 Conflict` для завершённого deep-job;
+  - при этом `POST /api/v1/chats/{chat_id}` со стороны legacy `Open WebUI` по-прежнему сохраняет в историю только исходное сообщение ассистента и его `statusHistory` со статусом `accepted`; обновлённый ответ `Action Function` не записывается как новое сохранённое состояние `tool_job`;
+  - текущий UX требует от пользователя вручную догадываться, что пора нажать `Обновить deep-job`, хотя после `accepted` интерфейс уже знает `job_id` и `status_url`;
+  - для долгих задач правильный контракт другой: после `accepted` UI сам опрашивает `status_url`, при переходе в `completed` сам добавляет результат в чат, а `cancel` остаётся ручным действием.
+  Progress `2026-04-12`:
+  - backend-срез частично закрыт: `equipment_deep_tool` и `equipment_deep_action` уже запускают автоопрос, сохраняют `job_status` / `tool_job`, создают дочерний итоговый bubble для терминального `deep-job` и повторно закрепляют ветку результата в истории, чтобы переживать поздний `chat_completed`;
+  - живой API чата уже показывает терминальное сообщение и отдельный `result_message_id`, но legacy DOM всё ещё не перестраивается автоматически по этой сохранённой ветке; оставшийся объём задачи сосредоточен в клиентском восстановлении/отрисовке чата, а не в backend job lifecycle.
+  Что сделать:
+  - определить, где именно legacy `Open WebUI` хранит и обновляет состояние результата для `deep-job`, и добавить автоматический опрос `status_url` после `accepted`;
+  - при переходе задания в терминальное состояние (`completed` / `failed` / `cancelled`) автоматически записывать в историю чата актуальный `job_status` и `tool_job`, а для `completed` ещё и автоматически добавлять итоговый результат в чат;
+  - оставить `cancel` ручным действием и обеспечить, чтобы он корректно останавливал автоопрос и не допускал поздней дорисовки уже отменённого результата;
+  - добавить целевую регрессионную проверку на автоопрос, автозапись терминального состояния и `reload` страницы после завершения задания.
+  Acceptance:
+  - после `accepted` legacy `Open WebUI` сам опрашивает `status_url` без ручного `refresh` как основного пути;
+  - при переходе в `completed` итог deep-job автоматически появляется в чате и сохраняется вместе с актуальным `job_status` / `tool_job`;
+  - `cancel` остаётся ручным, останавливает автоопрос и не допускает позднего появления результата отменённого задания;
+  - reload страницы не возвращает deep-job визуально к исходному `accepted`, если терминальное состояние уже известно;
+  - повторные действия после `reload` используют последнее сохранённое состояние, а не только исходный `accepted`.
+
+- [ ] **T6.4 P5 — Legacy Open WebUI: целостность запуска `deep-job` для native tool call**
+  Контекст:
+  - живой прогон `2026-04-12` показал два разных режима для одного и того же `analyze_equipment_deep` в legacy `Open WebUI`;
+  - в корректных ходах `function_call_output` содержит строку `Глубокий анализ принят как deep-job...`, в `tool_jobs` появляется новый `job_id`, а backend фиксирует `POST /tool-server/tools/analyze_equipment_deep -> 202 Accepted`;
+  - в сбойных ходах `function_call_output` сохраняется как пустая строка, новая запись в `tool_jobs` не появляется, в `agent-api` нет `POST /tool-server/tools/analyze_equipment_deep`, но модель всё равно пишет пользователю, что анализ принят и выполняется;
+  - из-за этого интерфейс может имитировать long-running анализ без реального запуска backend-задачи, что делает `refresh/cancel` и весь `deep-job` UX недостоверными.
+  Что сделать:
+  - определить, почему legacy `Open WebUI` иногда завершает `function_call` с пустым `function_call_output` вместо реального результата `Workspace Tool`;
+  - зафиксировать строгий контракт запуска: если backend `deep-job` не создан и `job_id/status_url` не получены, ассистент не должен писать, что анализ принят в работу;
+  - добавить регрессионную проверку на оба слоя: `agent-api` должен фиксировать новый `tool_job`, а persisted `output` в чате должен содержать непустой `function_call_output` с `job_id/status_url`;
+  - отдельно проверить, не теряется ли привязка инструмента в конкретном ходе из-за рассинхронизации `tool_ids` / native function-calling state в legacy чате.
+  Acceptance:
+  - каждый успешный `analyze_equipment_deep` в legacy `Open WebUI` создаёт запись в `tool_jobs` и оставляет непустой `function_call_output` с `job_id/status_url`;
+  - если запуск backend-задачи не состоялся, чат показывает явную ошибку запуска, а не ложный текст `анализ принят`;
+  - `refresh/cancel` работают только по реально созданному `job_id`, без привязки к выдуманному или пустому состоянию.
 
 - [ ] **T6.5 P1 — Cross-backend parity tests (`llama-server` vs `vllm`)**
   Контекст: система уже поддерживает минимум два backend mode (`llama-server`, `vllm`), но нет единого contract test, который гарантирует что ключевые пользовательские сценарии не ломаются асимметрично.
@@ -2450,13 +2516,13 @@ DOCUMENT_ANALYSIS_SUMMARIZE_MAX_TOKENS=512
 
 - `scripts/start_system_test.sh` фактически сломан как executable orchestration wrapper: ключевые `tmux` команды отсутствуют в исполняемом коде и остались только внутри comment-строк с `mux ...`; текущий файл печатает, что tmux session поднята, но сам её не создаёт.
 - `scripts/run_all.sh` содержит хрупкий `curl -sf` внутри command substitution под `set -e` в `wait_for_model()`. Если `/status` временно недоступен, shell завершится раньше retry-loop. В `run_native.sh` этот же путь уже защищён через `|| true`, значит поведение между native/container paths сейчас расходится.
-- Canonical runtime/operator scripts (`launcher.sh`, `run_native.sh`, `run_all.sh`, `stop_native.sh`, `stop_all.sh`, `bootstrap_env.sh`) и canonical model provisioning wrapper (`scripts/models/install_models.sh`) уже переведены на общий `scripts/utils/env_loader.sh` с `python-dotenv` parsing. `run_openwebui.sh` удалён как лишний legacy entrypoint; legacy/eval contour для `Open WebUI` теперь поднимается только прямой `docker compose --profile legacy up -d open-webui` командой.
+- Canonical runtime/operator scripts (`launcher.sh`, `run_native.sh`, `run_all.sh`, `stop_native.sh`, `stop_all.sh`, `bootstrap_env.sh`) и canonical model provisioning wrapper (`scripts/models/install_models.sh`) уже переведены на общий `scripts/utils/env_loader.sh` с `python-dotenv` parsing. `run_openwebui.sh` удалён как лишний entrypoint; `Open WebUI` теперь поднимается прямой `docker compose --profile legacy up -d open-webui` командой, где `legacy` остаётся только техническим именем profile.
 - `backend/tests/test_runtime_launcher.py::test_launcher_sources_native_overrides_before_runtime_preflight` не hermetic: результат зависит от содержимого реального `backend/.env.hardware.override`. При текущем локальном `DEVICE_MODE="cpu"` тест падает, хотя launcher детерминированно применяет приоритет `.env -> .env.native -> .env.hardware.override`.
 - launcher/preflight contract уже разделён на `current-run -> backend/.env.runtime` и `persistent save -> backend/.env.hardware.override`, а `run_all.sh --from-launcher` больше не подмешивает `hardware.override` второй раз. Отдельный startup follow-up вынесен в `B3.50` (`UMS infer-ready` readiness gate).
 - `scripts/setup_ubuntu.sh` скачивает CUDA keyring/Miniconda installer и Docker GPG material по сети без отдельной checksum/integrity verification в самом скрипте. Для interactive installer это workable path, но как supply-chain baseline слабое место.
 - permission-path всё ещё несимметричен: `scripts/run_native.sh` делает реальный writable preflight для `UPLOADS_DIR` и `backend/.data`, но container/runtime Python path в `chainlit_app.py`, `report_utils.py`, `knowledge_base_store.py`, `state_store.py` в основном ограничен `os.makedirs(..., exist_ok=True)` без отдельной ранней диагностики permission-denied/root-owned state. Нужен единый writable-dir preflight и более явные ошибки для compose/container path.
 - `scripts/setup_ubuntu.sh` до сих пор выставляет `chmod 777 backend/open_webui_uploads`; это помогает “чтобы работало”, но слишком грубая модель прав. Нужен более узкий ownership/permission contract вместо world-writable uploads dir.
-- legacy/eval contour `Open WebUI` в native-first smoke всё ещё имеет split-brain URL contract: browser на хосте может ходить в `http://127.0.0.1:8000/tool-server`, но server-side refresh/import внутри контейнера `open-webui` видит нативный backend только через `host.docker.internal` / bridge IP. Нужен один явный policy/proxy path для legacy smoke, иначе `Settings -> Integrations` даёт разные результаты для browser-side verify и container-side `set_tool_servers()`.
+- текущий `Open WebUI` contour в native-first smoke всё ещё имеет split-brain URL contract: browser на хосте может ходить в `http://127.0.0.1:8000/tool-server`, но server-side refresh/import внутри контейнера `open-webui` видит нативный backend только через `host.docker.internal` / bridge IP. Нужен один явный policy/proxy path для этого smoke-контура, иначе `Settings -> Integrations` даёт разные результаты для browser-side verify и container-side `set_tool_servers()`.
 
 ### Future Task — B3.46: Честный multi-GPU runtime contract для 4+ GPU
 
@@ -2512,5 +2578,6 @@ DOCUMENT_ANALYSIS_SUMMARIZE_MAX_TOKENS=512
 
 ## Session Log
 
+- [x] **[2026-04-12 13:22]** Task #123: Demo task — ✅ completed
 - [x] **[2026-03-18 13:54]** Task #1: (без названия) — ✅ completed
 - [x] **[2026-03-12 22:09]** Task #1: (без названия) — ✅ completed

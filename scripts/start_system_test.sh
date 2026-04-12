@@ -23,7 +23,7 @@ EOF
   exit 0
 fi
 
-# 1. Start compose services for the current Chainlit-first stack
+# 1. Start compose services for the current stack with compatibility Chainlit
 echo "Starting compose services via Docker..."
 cd "$PROJECT_ROOT" && docker compose up -d
 

@@ -49,6 +49,7 @@
 - обычный question-answer по документам и KB идёт через native `Open WebUI Knowledge` contour;
 - backend hidden tool routing здесь не обязателен;
 - source-of-truth для корпуса и retrieval не должен жить только в chat-state UI.
+- ВАЖНО: follow-up по документу должен повторно использовать `document_ref` и retrieval source-of-truth, а не один ранее сгенерированный deep-ответ.
 
 ### 2.3 Explicit tools
 
@@ -66,6 +67,14 @@
 - backend только исполняет уже выбранный tool;
 - `/tool-server/tools/*` не должен включать semantic guesswork;
 - этот контур нужен для structured analysis/compare/equipment workflows, а не как единственный способ поговорить с документом.
+- ВАЖНО: explicit document tools не становятся "состоянием документа".
+  Нужно разделять:
+  - состояние документа: `document_id` / `version_id`, извлечённый текст, corpus metadata, retrieval scope в `Qdrant`;
+  - состояние запуска инструмента: `question` или `analysis_goal`, `job_id`, статус, отчёт и другие артефакты конкретного запуска.
+- Нормативная семантика:
+  - `ask_document(document_ref, question=...)` — точечный вопрос по документу;
+  - `analyze_document_deep(document_ref, analysis_goal=...)` — новый запуск анализа под конкретную цель;
+  - новый `analysis_goal` по тому же документу имеет право дать новый результат и не должен быть связан одним старым deep-отчётом.
 
 ### 2.4 Agent mode
 
@@ -288,5 +297,6 @@ Acceptance:
 - tool config materialize’ится через bootstrap/native `Open WebUI` surfaces, а не через ручной post-import patching;
 - backend secrets остаются backend-owned и не мигрируют в user-facing `Open WebUI` config;
 - native Knowledge path не путается с explicit domain tools;
+- состояние документа и состояние запуска анализа разведены архитектурно и одинаково понимаются в `Knowledge`, explicit tools и будущем `Qdrant` retrieval;
 - community-tool smoke подтверждает, что native config contour не завязан только на наши imported wrappers;
 - следующий cleanup slice по `UMS` model catalog делает только inventory/provider cleanup, а не исправляет responsibility split задним числом.

@@ -1,6 +1,6 @@
 # Script Runtime Map
 
-Этот документ фиксирует каноническую карту runtime-скриптов проекта и разделяет user-facing entrypoints, compatibility aliases, legacy path и internal helpers.
+Этот документ фиксирует каноническую карту runtime-скриптов проекта и разделяет user-facing entrypoints, основной путь `Open WebUI`, совместимый и отладочный shell `Chainlit` и internal helpers.
 
 Канонический справочник флагов и env-переменных находится в [docs/flags-reference.md](../flags-reference.md). Здесь остаётся карта entrypoints, script roles и launcher/runtime semantics.
 
@@ -14,7 +14,7 @@
 - Основной entrypoint для Windows host bootstrap: `powershell -ExecutionPolicy Bypass -File scripts/install/install_windows.ps1 -CheckOnly`
 - Основной stop-path для native runtime: `./scripts/stop_native.sh`
 - Основной stop-path для compose/container runtime: `./scripts/stop_all.sh`
-- `Open WebUI` не является основным UI; если нужен legacy/eval contour, его поднимают напрямую через `docker compose --profile legacy up -d open-webui`.
+- Основной пользовательский UI сейчас — `Open WebUI`; поднимается напрямую через `docker compose --profile legacy up -d open-webui`, где `legacy` пока остаётся только историческим именем compose profile.
 
 ## Platform Install Quick Start
 
@@ -52,15 +52,21 @@ MODEL_PATH_EMBEDDING_RETRIEVAL="/mnt/d/agent-models/st/LaBSE"
 
 `--models-root` применяет derived `MODEL_PATH_*` к текущему runtime-запуску. Для постоянной конфигурации зафиксируйте эти же absolute paths в `backend/.env`.
 
-Runtime preflight/launcher теперь показывают placement decision, а не только budget:
+Runtime placement для native path теперь проверяется отдельным рекомендателем:
 
 ```bash
-python scripts/runtime_preflight.py detect
-python scripts/runtime_preflight.py plan --profile adaptive
-python scripts/runtime_preflight.py apply --profile adaptive --report-only
+./scripts/evaluate_runtime.sh recommend
+./scripts/evaluate_runtime.sh plan --profile adaptive
+./scripts/evaluate_runtime.sh detect
 ```
 
-Launcher поддерживает override без правки кода:
+Этот путь:
+
+- читает только `backend/.env`
+- показывает placement decision и рекомендуемые значения
+- ничего не записывает автоматически
+
+Launcher поддерживает текущие override без правки кода:
 
 ```bash
 ./scripts/launcher.sh --target native --gpu-layers-mode max
@@ -70,60 +76,34 @@ Launcher поддерживает override без правки кода:
 ```
 
 Если нужен только backend native runtime без окна `Chainlit`, используйте `--skip-chainlit`.
-Флаг работает для `launcher.sh --target native` и для прямого compatibility alias `./scripts/run_native.sh --skip-chainlit`.
+Флаг работает для `launcher.sh --target native` и для прямого `./scripts/run_native.sh --skip-chainlit`.
 
 Persistent user-owned runtime intent:
 - `backend/.env`
 
-Ключи:
-- `GPU_LAYERS_MODE=auto|max|manual`
-- `N_GPU_LAYERS_OVERRIDE=<int>`
+Generated current-run файл:
+- `backend/.env.runtime`
+  Используется только для `container` path и legacy-совместимости. Для обычного native запуска он не нужен.
+
+Ключи placement/split:
 - `DEVICE_MODE=cpu|gpu|hybrid`
 - `LLM_DEVICE_MODE=cpu|gpu|hybrid`
 - `VLM_DEVICE_MODE=cpu|gpu|hybrid`
 - `INTENT_EMBEDDER_DEVICE_MODE=cpu|gpu|hybrid`
 - `RETRIEVAL_EMBEDDER_DEVICE_MODE=cpu|gpu|hybrid`
+- `UMS_LLM_GPU_INDICES=<csv>`
+- `UMS_EMBEDDING_GPU_INDEX=<int>`
+- `UMS_LLM_MIN_FREE_VRAM_GB=<float>`
+- `UMS_LLM_MIN_BALANCE_RATIO=<float>`
 
-`plan/report` теперь показывают placement по компонентам:
-- `placements.llm`
-- `placements.vlm`
-- `placements.intent_embedder`
-- `placements.retrieval_embedder`
-
-`DEVICE_MODE` остаётся fallback для heavy runtime path. Если нужно задать placement точечно, используйте component-specific переменные выше.
-
-Практически это означает два равноправных пути:
-- `backend/.env`
-- current-run флаги launcher: `--llm-device-mode`, `--intent-embedder-device-mode`, `--gpu-layers-mode`, `--gpu-layers`
-
-Это важно, потому что общий `DEVICE_MODE` влияет прежде всего на heavy LLM/VLM path, а embeddings могут жить по отдельной tier policy.
-
-Interactive review в `launcher.sh` теперь показывает план только для текущего запуска и затем пишет applied значения в `backend/.env.runtime`.
-
-Это означает:
-- `backend/.env.runtime` всегда считается applied current-run файлом;
-- `backend/.env` остаётся единственным user-owned native/runtime config файлом.
-
-Практический mixed-profile для 2x8GB класса машин:
-
-```bash
-./scripts/launcher.sh --target native --review-runtime
-```
-
-В review оставляйте:
-- `LLM_DEVICE_MODE=gpu`
-- `VLM_DEVICE_MODE=gpu`
-- `INTENT_EMBEDDER_DEVICE_MODE=cpu`
-- `RETRIEVAL_EMBEDDER_DEVICE_MODE=cpu`
-
-Такой профиль обычно стабильнее, чем полный GPU для embeddings, потому что избегает `CUDA OOM` на preloading embedder'ов.
+`GPU_LAYERS_MODE` и `N_GPU_LAYERS_OVERRIDE` остаются частью evaluator/preflight surface, но реальный per-model offload по `gguf`-моделям задаётся через `N_GPU_LAYERS_*`.
 
 ## Env Files
 
 | Файл | Роль | Кто редактирует | Комментарий |
 | --- | --- | --- | --- |
 | `backend/.env` | основной shared config | пользователь | базовые пути моделей, UI/auth, backend mode, classifier/retrieval policy |
-| `backend/.env.runtime` | applied output for current run | launcher/preflight | generated file; руками не редактировать; launcher перегенерирует его на каждом запуске |
+| `backend/.env.runtime` | applied output for current run | launcher/preflight | generated file; руками не редактировать; для native path не нужен по умолчанию |
 
 Шаблоны:
 - `backend/.env.example`
@@ -163,8 +143,8 @@ cd backend && pip install -r requirements.txt
 
 | Script | Classification | Mode | Когда использовать | Риски / side effects | Текущий статус |
 | --- | --- | --- | --- | --- | --- |
-| `scripts/launcher.sh` | `canonical` | `native`, `container` | Основной запуск runtime с bootstrap/preflight слоем | Пишет `backend/.env.runtime`, запускает bootstrap checks, затем делегирует в target runner | Canonical entrypoint |
-| `scripts/run_native.sh` | `compatibility` | `native` | Для обратной совместимости или прямого native запуска | При прямом вызове уходит в `launcher.sh`; при запуске из launcher создаёт tmux-сессию, поднимает host-сервисы, вызывает `stop_native.sh`; поддерживает `--skip-chainlit` для backend-only native запуска | Compatibility alias + native runner behind launcher |
+| `scripts/launcher.sh` | `canonical` | `native`, `container` | Основной запуск runtime с bootstrap/preflight слоем | Для `native` использует `backend/.env`; для `container` может писать `backend/.env.runtime`; затем делегирует в target runner | Canonical entrypoint |
+| `scripts/run_native.sh` | `native-runner` | `native` | Прямой host-only запуск и совместимость со старыми командами | Поднимает tmux-сессию, host-сервисы и вызывает `stop_native.sh`; по умолчанию читает только `backend/.env` | Direct native runner |
 | `scripts/run_all.sh` | `compatibility` | `container-compose` | Для обратной совместимости container path | При прямом вызове уходит в `launcher.sh`; при запуске из launcher вызывает `stop_all.sh`, поднимает compose stack и tmux monitoring | Compatibility alias + container runner behind launcher |
 | `scripts/run_container.sh` | `compatibility` | `container` | Тонкий alias для старых вызовов container path | Немедленно делегирует в `launcher.sh --target container` | Thin compatibility alias |
 | `scripts/bootstrap_env.sh` | `internal` | `check`, `install` | В основном используется через `launcher.sh`; вручную полезен только для диагностики bootstrap слоя | Создаёт `backend/.env` из шаблона при отсутствии, автогенерирует/ротирует `CHAINLIT_AUTH_SECRET`, валидирует команды и остальные critical secrets; `--install` делегирует в `scripts/install/install.sh` | Internal helper for launcher/bootstrap |
@@ -186,7 +166,8 @@ cd backend && pip install -r requirements.txt
 - bootstrap checks через `bootstrap_env.sh`
 - preflight/profile application через `runtime_preflight.py`
 - выбор target `native|container`
-- генерацию `backend/.env.runtime` перед запуском runtime
+- работу с `backend/.env` для native path
+- генерацию `backend/.env.runtime` только там, где она действительно нужна для container/legacy path
 
 Что именно делает bootstrap с persistent env:
 - создаёт `backend/.env` из `backend/.env.example`, если файла ещё нет;
@@ -216,7 +197,7 @@ cd backend && pip install -r requirements.txt
 
 - `run_native.sh`, `run_all.sh`, `run_container.sh` не должны описываться как отдельные конкурирующие entrypoints.
 - Их роль: compatibility aliases и target-specific runners за `launcher.sh`.
-- Отдельного `run_openwebui.sh` больше нет; legacy/eval contour поднимается прямой `docker compose --profile legacy up -d open-webui` командой.
+- Отдельного `run_openwebui.sh` больше нет; `Open WebUI` поднимается прямой `docker compose --profile legacy up -d open-webui` командой.
 
 ## Script Notes
 
@@ -247,32 +228,36 @@ cd backend && pip install -r requirements.txt
   - `--vlm-device-mode cpu|gpu|hybrid`: override placement для VLM.
   - `--intent-embedder-device-mode cpu|gpu|hybrid`: override placement для classifier embedder.
   - `--retrieval-embedder-device-mode cpu|gpu|hybrid`: override placement для retrieval embedder.
-  - `--non-interactive`: без interactive review prompt.
-  - `--review-runtime`: форсировать interactive review.
+  - `--non-interactive`: container-only режим без interactive runtime review.
+  - `--review-runtime`: container-only interactive runtime review.
+  - `--apply-runtime`: container-only запись `backend/.env.runtime`.
+  - `--skip-runtime-apply`: container-only запуск без записи `backend/.env.runtime`.
   - `--skip-model-download`: не запускать model downloader.
   - `--no-attach`: не attach’иться к tmux runner.
   - `--report-only`: только вывести plan/apply report без запуска.
   - `--install`: перейти в installer path.
 - Важные env vars: `UMS_RUNTIME_PROFILE`, `AGENT_NAVIGATOR_RUNTIME_ENV_FILE`, `AGENT_NAVIGATOR_TEST_MODE`.
 - Ограничения: не заменяет legacy heavy installer path; для `--install` ведёт в unified installer coordinator `scripts/install/install.sh`, который затем выбирает platform wrapper.
+  Для native path review нужно делать через `./scripts/evaluate_runtime.sh recommend`, а не через `launcher.sh --review-runtime`.
 
 ### `scripts/runtime_preflight.py`
 
-- Назначение: source of truth для `detect|plan|report|apply`.
-- Кто использует: `launcher.sh`, operators при диагностике runtime placement.
+- Назначение: Python-ядро для `detect|plan|report|recommend|apply`.
+- Кто использует: `launcher.sh`, `evaluate_runtime.sh`, operators при диагностике runtime placement.
 - Пример:
 
 ```bash
 python scripts/runtime_preflight.py detect
 python scripts/runtime_preflight.py plan --profile adaptive
-python scripts/runtime_preflight.py apply --profile adaptive --gpu-layers-mode max --report-only
+python scripts/runtime_preflight.py recommend --profile adaptive
 ```
 
 - Команды:
   - `detect`: вывести hardware snapshot.
   - `plan`: построить runtime plan без записи `.env.runtime`.
+  - `recommend`: показать рекомендации для ручного редактирования `backend/.env`.
   - `report`: alias для печати runtime plan.
-  - `apply`: применить plan и при необходимости записать `backend/.env.runtime`.
+  - `apply`: legacy/container path; записать `backend/.env.runtime`.
 - Общие флаги:
   - `--profile default|adaptive|manual`
   - `--manual-effective-context-tokens <int>`
@@ -291,8 +276,8 @@ python scripts/runtime_preflight.py apply --profile adaptive --gpu-layers-mode m
 
 ### `scripts/run_native.sh`
 
-- Назначение: native host runner для Chainlit + backend сервисов; user-facing только как back-compat alias.
-- Кто использует: старые локальные сценарии запуска и launcher после preflight.
+- Назначение: прямой native host runner для Chainlit + backend сервисов.
+- Кто использует: локальные native-сценарии и launcher после preflight.
 - Пример:
 
 ```bash
@@ -300,14 +285,14 @@ python scripts/runtime_preflight.py apply --profile adaptive --gpu-layers-mode m
 ./scripts/run_native.sh --no-attach
 ```
 
-- Основные флаги: `--no-attach`; внутренний `--from-launcher` только для launcher.
+- Основные флаги: `--no-attach`, `--skip-chainlit`; внутренний `--from-launcher` только для launcher.
 - Важные env vars: `CONDA_ENV`, `AGENT_NAVIGATOR_RUNTIME_ENV_FILE`, `AGENT_API_PORT`, `DOC_PORT`, `LEGAL_PORT`, `UMS_PORT`, `CHAINLIT_PORT`, `UPLOADS_DIR`, `CHAINLIT_DB_URL`.
 - Side effects: создаёт tmux session `agent-navigator-native`, вызывает `stop_native.sh`, поднимает host-side `document_server`, `legal_server`, `UMS`, `agent_api`, `Chainlit`.
-- Ограничения: напрямую не должен позиционироваться как canonical путь; runtime profile применяет не он, а launcher/preflight слой.
+- Ограничения: по умолчанию читает `backend/.env`; `backend/.env.runtime` применяется только при явном `--apply-runtime`.
 
 ### `scripts/run_all.sh`
 
-- Назначение: container/compose runner для Chainlit-first stack; user-facing только как back-compat alias.
+- Назначение: container/compose runner для текущего compose stack; user-facing только как back-compat alias.
 - Кто использует: старые compose-based сценарии и launcher после preflight.
 - Пример:
 
@@ -441,7 +426,7 @@ powershell -ExecutionPolicy Bypass -File scripts/install/install_windows.ps1 -Ap
 ```
 
 - Основные флаги: нет.
-- Важные env vars: `AGENT_NAVIGATOR_BACKEND_ENV_FILE`, `AGENT_NAVIGATOR_RUNTIME_ENV_FILE`; по умолчанию читает `backend/.env` и `backend/.env.runtime` через `scripts/utils/env_loader.sh`.
+- Важные env vars: `AGENT_NAVIGATOR_BACKEND_ENV_FILE`; по умолчанию читает `backend/.env` через `scripts/utils/env_loader.sh`.
 - Side effects: убивает tmux session `agent-navigator-native`, завершает связанные runtime-процессы и процессы на service ports.
 - Ограничения: Docker intentionally не останавливает.
 

@@ -1,7 +1,7 @@
 """
-Chainlit App — замена Open WebUI для Agent Navigator Pro.
+Chainlit App — совместимый и отладочный UI для Agent Navigator Pro.
 
-Преимущества:
+Особенности:
 - cl.Step → каждая LangGraph нода видна как шаг с прогрессом
 - Нет встроенного RAG → нет конфликтов
 - Файлы не дублируются при follow-up

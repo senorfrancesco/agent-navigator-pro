@@ -1,161 +1,227 @@
 # Flags Reference
 
-Канонический справочник operator-facing флагов, env-переменных и runtime override-файлов проекта.
+Отдельный справочник по CLI-флагам и `env`-параметрам runtime-пути.
 
-Этот документ отвечает на три вопроса:
+Главное различие:
 
-1. Куда писать конкретный флаг.
-2. Что влияет на текущий запуск, а что сохраняется постоянно.
-3. Какие флаги влияют на скорость, качество, VRAM и стабильность старта.
+- `native` path живёт от одного `backend/.env`
+- `container` path всё ещё может материализовать `backend/.env.runtime`
+- `scripts/evaluate_runtime.sh` ничего не применяет и только рекомендует значения для ручного переноса в `backend/.env`
 
-## Source Of Truth
+## Источники Правды
 
-| Где хранится | За что отвечает | Кто редактирует |
+| Где хранится | Для чего | Кто редактирует |
 | --- | --- | --- |
-| `backend/config/models.yaml` | registry моделей, role bindings `primary/fallback`, preload policy, canonical env names для model artifacts | разработчик / оператор только если осознанно меняется registry |
-| `backend/.env` | основной shared config: model paths, URLs, auth, backend mode, classifier/RAG defaults, timeout/concurrency defaults | пользователь / оператор |
-| `backend/.env.runtime` | applied runtime plan для текущего запуска | пишет `launcher.sh` / `runtime_preflight.py`; руками не редактировать |
-| `./scripts/launcher.sh ...` | current-run overrides и выбор target/install path | пользователь / оператор |
+| `backend/config/models.yaml` | registry моделей, role bindings, runtime defaults по моделям | разработчик |
+| `backend/.env` | единственный user-owned конфиг для native path: пути, порты, URL, placement, budget, timeout, concurrency | пользователь / оператор |
+| `backend/.env.runtime` | generated applied env для `container` path и legacy-совместимости | автоматически, руками не редактировать |
+| `backend/.env.native` | deprecated | не использовать |
+| `backend/.env.hardware.override` | deprecated | не использовать |
 
 Короткое правило:
 
-- registry и role bindings: `models.yaml`
-- постоянные пути, URL, auth, backend mode и runtime intent: `backend/.env`
-- разовый override на один запуск: флаги `launcher.sh`
-- generated applied file: `backend/.env.runtime`
+- если нужен постоянный native-конфиг, писать в `backend/.env`
+- если нужно посмотреть рекомендации по железу, запускать `./scripts/evaluate_runtime.sh recommend`
+- если нужен compose/container runtime, `launcher.sh` может дополнительно собрать `backend/.env.runtime`
 
-Legacy note:
+## Скрипты И Флаги
 
-- `backend/.env.native` и `backend/.env.hardware.override` считаются deprecated для native/operator path
-- новый код и operator UI не должны использовать их как canonical source of truth
+### `./scripts/launcher.sh`
 
-## Куда Писать Что
+Канонический entrypoint для CLI-запуска.
 
-### Постоянные настройки проекта
+Основные команды:
 
-Писать в `backend/.env`:
+```bash
+./scripts/launcher.sh --target native --profile adaptive
+./scripts/launcher.sh --target native --profile adaptive --skip-chainlit
+./scripts/launcher.sh --target native --profile adaptive --report-only
+./scripts/launcher.sh --target container --profile default --no-attach
+./scripts/launcher.sh --install --platform ubuntu
+```
 
-- `MODEL_REGISTRY_CONFIG_PATH`
+Ключевые флаги:
+
+| Флаг | Для чего | Где работает |
+| --- | --- | --- |
+| `--target native|container` | выбор runtime path | оба |
+| `--profile default|adaptive|manual` | профиль preflight | оба |
+| `--asset-set core|all` | набор моделей для `ensure-present` | оба |
+| `--models-root <path>` | корень layout моделей | оба |
+| `--huggingface-cache <path>` | путь к кэшу Hugging Face | оба |
+| `--gpu-layers-mode auto|max|manual` | стратегия GPU layers для preflight/evaluator | оба |
+| `--gpu-layers <int>` | число GPU layers для `manual` | оба |
+| `--device-mode cpu|gpu|hybrid` | общий fallback placement | оба |
+| `--llm-device-mode ...` | placement только для LLM | оба |
+| `--vlm-device-mode ...` | placement только для VLM | оба |
+| `--intent-embedder-device-mode ...` | placement только для intent embedder | оба |
+| `--retrieval-embedder-device-mode ...` | placement только для retrieval embedder | оба |
+| `--skip-model-download` | пропустить model provisioning | оба |
+| `--ensure-model-download` | явно включить model provisioning | оба |
+| `--no-attach` | не подключаться к `tmux` | оба |
+| `--skip-chainlit` | не запускать окно `Chainlit` | только `native` |
+| `--report-only` | только вывести report/recommendation без запуска | оба |
+| `--install` | guided install path | отдельно |
+| `--platform auto|ubuntu|ubuntu-server|wsl|windows` | платформа installer path | c `--install` |
+
+Важно для native path:
+
+- `--review-runtime` больше не используется
+- `--non-interactive` для native не нужен
+- `--apply-runtime` и `--skip-runtime-apply` для native считаются ошибкой
+- `--report-only` на native печатает рекомендации для `backend/.env`, а не пишет `backend/.env.runtime`
+
+Важно для container path:
+
+- `--review-runtime`, `--non-interactive`, `--apply-runtime`, `--skip-runtime-apply` относятся именно к generated `backend/.env.runtime`
+
+### `./scripts/evaluate_runtime.sh`
+
+User-facing рекомендатель для native path.
+
+Примеры:
+
+```bash
+./scripts/evaluate_runtime.sh
+./scripts/evaluate_runtime.sh recommend
+./scripts/evaluate_runtime.sh plan --profile adaptive
+./scripts/evaluate_runtime.sh detect
+./scripts/evaluate_runtime.sh report
+```
+
+Что делает:
+
+- читает только `backend/.env`
+- показывает hardware snapshot и placement plan
+- печатает рекомендуемый блок для ручного переноса в `backend/.env`
+- ничего не записывает автоматически
+
+Что не делает:
+
+- не запускает сервисы
+- не пишет `backend/.env.runtime`
+- не меняет `backend/.env`
+
+### `./scripts/run_native.sh`
+
+Прямой native runner.
+
+Примеры:
+
+```bash
+./scripts/run_native.sh
+./scripts/run_native.sh --no-attach
+./scripts/run_native.sh --skip-chainlit --no-attach
+```
+
+Поведение по умолчанию:
+
+- читает `backend/.env`
+- не применяет `backend/.env.runtime`
+- поднимает `tmux`, `document_server`, `legal_server`, `UMS`, `agent_api`, `Chainlit`
+
+Compatibility-флаги:
+
+- `--apply-runtime`
+- `--skip-runtime-apply`
+
+Использовать их стоит только осознанно, если нужен legacy/applied runtime-файл. Для обычного native-пути они не нужны.
+
+## Что Настраивать В `backend/.env`
+
+### Базовый native/runtime контракт
+
 - `MODEL_PATH_LLM`
 - `MODEL_PATH_VLM`
 - `MMPROJ_PATH`
 - `MODEL_PATH_EMBEDDING_INTENT`
 - `MODEL_PATH_EMBEDDING_RETRIEVAL`
-- `BACKEND_MODE`
-- `UMS_URL`, `DOC_SERVER_URL`, `LEGAL_SERVER_URL`
-- `CHAINLIT_*`, `GF_SECURITY_*`
-- `INTENT_CLASSIFIER_*`
-- `LEGAL_EMBEDDER_MODEL`
-- `RAG_MODE_OVERRIDE`
-- `UMS_LLM_MAX_CONCURRENCY`, `UMS_EMBED_MAX_CONCURRENCY`
-- `UMS_CONCURRENCY_ACQUIRE_TIMEOUT_S`
-- `UMS_FAIL_FAST_ON_SATURATION`
-- `UMS_INFER_TIMEOUT_S`
-- `UMS_CLIENT_TIMEOUT_S`
-- `VLLM_*`
 - `CONDA_ENV`
 - `UPLOADS_DIR`
+- `HOST_UPLOADS_DIR`
+- `AGENT_API_PORT`
+- `DOC_PORT`
+- `LEGAL_PORT`
+- `UMS_PORT`
+- `CHAINLIT_PORT`
+- `UMS_URL`
+- `MCP_DOCUMENT_SERVER_URL`
+- `MCP_LEGAL_SERVER_URL`
+- `CHAINLIT_DB_URL`
+- `CHAINLIT_ENABLE_DATA_LAYER`
+
+### Placement и multi-GPU split
+
+Это реальные рабочие параметры для `UMS`:
+
 - `UMS_RUNTIME_PROFILE`
 - `DEVICE_MODE`
 - `LLM_DEVICE_MODE`
 - `VLM_DEVICE_MODE`
 - `INTENT_EMBEDDER_DEVICE_MODE`
 - `RETRIEVAL_EMBEDDER_DEVICE_MODE`
-- `GPU_LAYERS_MODE`
-- `N_GPU_LAYERS_OVERRIDE`
+- `UMS_LLM_GPU_INDICES`
+- `UMS_EMBEDDING_GPU_INDEX`
+- `UMS_LLM_MIN_FREE_VRAM_GB`
+- `UMS_LLM_MIN_BALANCE_RATIO`
+- `UMS_ALLOW_HEAVY_CPU_DEGRADE_AFTER_GPU_FAILURE`
 
-### Разовый override только на текущий запуск
+Короткая логика:
 
-Задавать через `launcher.sh`:
+- `UMS_LLM_GPU_INDICES` ограничивает список GPU для LLM
+- `UMS_LLM_MIN_FREE_VRAM_GB` отбрасывает карты с недостатком свободной VRAM
+- `UMS_LLM_MIN_BALANCE_RATIO` убирает слишком несбалансированные карты из multi-GPU split
+- `UMS_EMBEDDING_GPU_INDEX` позволяет закрепить embedding-модели на конкретной карте
 
-```bash
-./scripts/launcher.sh --target native --profile adaptive
-./scripts/launcher.sh --target native --llm-device-mode gpu --intent-embedder-device-mode cpu
-./scripts/launcher.sh --target native --gpu-layers-mode manual --gpu-layers 24
-./scripts/launcher.sh --target native --skip-chainlit --no-attach
-./scripts/launcher.sh --target container --profile default --no-attach
+### Budget и runtime knobs
+
+- `UMS_MANUAL_EFFECTIVE_CONTEXT_TOKENS`
+- `UMS_RETRIEVED_CONTEXT_RATIO`
+- `UMS_GENERATION_TOKENS_RESERVE`
+- `UMS_LLM_MAX_CONCURRENCY`
+- `UMS_EMBED_MAX_CONCURRENCY`
+- `UMS_CONCURRENCY_ACQUIRE_TIMEOUT_S`
+- `UMS_FAIL_FAST_ON_SATURATION`
+- `UMS_INFER_TIMEOUT_S`
+- `UMS_CLIENT_TIMEOUT_S`
+
+### GPU layers и per-model offload
+
+Нужно разделять два уровня:
+
+- `GPU_LAYERS_MODE` и `N_GPU_LAYERS_OVERRIDE` нужны для preflight/evaluator и launcher-совместимости
+- реальный per-model offload для `gguf`-моделей по-прежнему задаётся через:
+  - `N_GPU_LAYERS_QWEN14B`
+  - `N_GPU_LAYERS_QWENVL`
+  - `N_GPU_LAYERS_LABSE`
+  - `N_GPU_LAYERS_QWEN3_EMBEDDING_06B`
+
+Если нужно просто управлять размещением и split-ом, обычно достаточно `*_DEVICE_MODE` и `UMS_*GPU*` параметров.
+
+## Практические Профили
+
+### Стабильный профиль для 2x8GB
+
+```env
+UMS_RUNTIME_PROFILE="adaptive"
+DEVICE_MODE="hybrid"
+LLM_DEVICE_MODE="gpu"
+VLM_DEVICE_MODE="gpu"
+INTENT_EMBEDDER_DEVICE_MODE="cpu"
+RETRIEVAL_EMBEDDER_DEVICE_MODE="cpu"
+UMS_LLM_GPU_INDICES=0,1
+UMS_EMBEDDING_GPU_INDEX=1
+UMS_LLM_MIN_FREE_VRAM_GB=0
+UMS_LLM_MIN_BALANCE_RATIO=0.5
 ```
 
-Такие флаги влияют только на текущий запуск и материализуются в `backend/.env.runtime`.
+Идея простая:
 
-### Что не редактировать руками
+- LLM/VLM идут на GPU
+- embeddings не конкурируют с ними за VRAM
+- split для LLM разрешён только на нужных картах
 
-Не использовать как user-owned source of truth:
-
-- `backend/.env.runtime`
-
-Это generated applied file. Launcher перегенерирует его на каждом запуске.
-
-## Launcher Flags
-
-Основной entrypoint:
-
-```bash
-./scripts/launcher.sh --target native --profile adaptive
-```
-
-Ключевые флаги:
-
-| Флаг | Значение |
-| --- | --- |
-| `--target native|container` | выбор runtime path |
-| `--profile default|adaptive|manual` | runtime profile для preflight |
-| `--models-root <path>` | корень для auto-derived model paths |
-| `--asset-set core|all` | какие модели проверять/докачивать |
-| `--gpu-layers-mode auto|max|manual` | стратегия GPU layers |
-| `--gpu-layers <int>` | число GPU layers для `manual` |
-| `--device-mode cpu|gpu|hybrid` | общий fallback device mode |
-| `--llm-device-mode ...` | placement для LLM |
-| `--vlm-device-mode ...` | placement для VLM |
-| `--intent-embedder-device-mode ...` | placement для intent/classifier embedder |
-| `--retrieval-embedder-device-mode ...` | placement для retrieval/legal embedder |
-| `--review-runtime` | interactive review current-run plan |
-| `--non-interactive` | без interactive review |
-| `--skip-model-download` | не запускать downloader |
-| `--skip-chainlit` | только для `--target native`: не запускать окно Chainlit |
-| `--report-only` | только plan/report без запуска |
-| `--install --platform <platform>` | guided install path |
-
-## Backend Mode И vLLM
-
-Писать в `backend/.env`:
-
-- `BACKEND_MODE=llama-cpp-python|llama-server|vllm`
-- `UMS_LLAMA_CACHE_PROMPT=true|false`
-- `VLLM_BASE_URL`
-- `VLLM_API_KEY`
-- `VLLM_PORT`
-- `VLLM_MODEL_ID_QWEN_14B_LLM`
-- `VLLM_MODEL_SOURCE_QWEN_14B_LLM`
-- `VLLM_TENSOR_PARALLEL_SIZE`
-- `VLLM_GPU_MEMORY_UTILIZATION`
-- `VLLM_MAX_MODEL_LEN`
-
-Практика:
-
-- shared deploy/server config: `backend/.env`
-- native runtime intent: `backend/.env`
-
-## Placement И GPU Layers
-
-Канонический public contract:
-
-- `DEVICE_MODE=cpu|gpu|hybrid`
-- `LLM_DEVICE_MODE=cpu|gpu|hybrid`
-- `VLM_DEVICE_MODE=cpu|gpu|hybrid`
-- `INTENT_EMBEDDER_DEVICE_MODE=cpu|gpu|hybrid`
-- `RETRIEVAL_EMBEDDER_DEVICE_MODE=cpu|gpu|hybrid`
-- `GPU_LAYERS_MODE=auto|max|manual`
-- `N_GPU_LAYERS_OVERRIDE=<int>`
-
-Где писать:
-
-- постоянно: `backend/.env`
-- разово: `launcher.sh` flags
-
-Рекомендации:
-
-### CPU-only safe mode
+### Полный CPU-safe режим
 
 ```env
 DEVICE_MODE="cpu"
@@ -163,130 +229,20 @@ LLM_DEVICE_MODE="cpu"
 VLM_DEVICE_MODE="cpu"
 INTENT_EMBEDDER_DEVICE_MODE="cpu"
 RETRIEVAL_EMBEDDER_DEVICE_MODE="cpu"
-GPU_LAYERS_MODE="manual"
-N_GPU_LAYERS_OVERRIDE="0"
 ```
 
-### Mixed mode для 2x8GB / слабых GPU
+### Как безопасно подобрать параметры
 
-```env
-DEVICE_MODE="gpu"
-LLM_DEVICE_MODE="gpu"
-VLM_DEVICE_MODE="gpu"
-INTENT_EMBEDDER_DEVICE_MODE="cpu"
-RETRIEVAL_EMBEDDER_DEVICE_MODE="cpu"
-GPU_LAYERS_MODE="max"
-N_GPU_LAYERS_OVERRIDE="-1"
-```
+1. Запустить `./scripts/evaluate_runtime.sh recommend`
+2. Перенести только нужные значения в `backend/.env`
+3. Запустить `./scripts/run_native.sh`
+4. Если нужен только backend без UI, добавить `--skip-chainlit`
 
-### Full GPU
+## Что Считать Устаревшим
 
-```env
-DEVICE_MODE="gpu"
-LLM_DEVICE_MODE="gpu"
-VLM_DEVICE_MODE="gpu"
-INTENT_EMBEDDER_DEVICE_MODE="gpu"
-RETRIEVAL_EMBEDDER_DEVICE_MODE="gpu"
-GPU_LAYERS_MODE="max"
-N_GPU_LAYERS_OVERRIDE="-1"
-```
+- `backend/.env.native`
+- `backend/.env.hardware.override`
+- попытки настраивать native path через `launcher.sh --review-runtime`
+- ручное редактирование `backend/.env.runtime` для обычного native запуска
 
-Использовать только если VRAM реально хватает и startup стабилен.
-
-## Timeout И Concurrency
-
-Эти флаги обычно писать в `backend/.env`.
-
-### Inference timeouts
-
-- `UMS_INFER_TIMEOUT_S`
-  - timeout для upstream inference внутри `UMS`
-- `UMS_CLIENT_TIMEOUT_S`
-  - timeout для `ums_client`
-
-Практика:
-
-- если пользователь хочет дольше ждать тяжёлый ответ, увеличивать оба значения вместе
-- для разовых экспериментов лучше сначала менять `.env`, а не код
-
-### Concurrency / saturation
-
-- `UMS_LLM_MAX_CONCURRENCY`
-- `UMS_EMBED_MAX_CONCURRENCY`
-- `UMS_CONCURRENCY_ACQUIRE_TIMEOUT_S`
-- `UMS_FAIL_FAST_ON_SATURATION`
-
-Практика:
-
-- low-VRAM / single heavy model: держать `UMS_LLM_MAX_CONCURRENCY=1`
-- embeddings обычно можно держать выше, чем LLM
-- если нужна предсказуемая деградация вместо длинного ожидания, включать `UMS_FAIL_FAST_ON_SATURATION=true`
-
-## Registry, Roles И Model Paths
-
-Канонические пути к артефактам:
-
-- `MODEL_PATH_LLM`
-- `MODEL_PATH_VLM`
-- `MMPROJ_PATH`
-- `MODEL_PATH_EMBEDDING_INTENT`
-- `MODEL_PATH_EMBEDDING_RETRIEVAL`
-
-Role bindings `primary/fallback` задаются не в env, а в:
-
-- `backend/config/models.yaml`
-
-Env нужен для:
-
-- путей к артефактам моделей
-- override пути к registry через `MODEL_REGISTRY_CONFIG_PATH`
-- secrets / URLs / runtime knobs
-
-## Practical Recipes
-
-### Если нужно ускорить систему
-
-1. Начать с `UMS_RUNTIME_PROFILE=adaptive`
-2. Перевести LLM на GPU или `hybrid`
-3. Поднять `GPU_LAYERS_MODE=max`
-4. Не уводить embeddings на GPU, если это вызывает OOM
-5. При необходимости уменьшить `MAX_TOKENS`/пользовательские generation defaults, а не ломать registry
-
-### Если нужен более стабильный старт
-
-1. Оставить `LLM_DEVICE_MODE=gpu|hybrid`
-2. Увести `INTENT_EMBEDDER_DEVICE_MODE` и `RETRIEVAL_EMBEDDER_DEVICE_MODE` на `cpu`
-3. Проверить `GET /ready/infer` после запуска
-4. Не считать `UMS /health` достаточным признаком готовности heavy path
-
-### Если `UMS` долго отвечает
-
-Проверить и при необходимости поднять:
-
-- `UMS_INFER_TIMEOUT_S`
-- `UMS_CLIENT_TIMEOUT_S`
-
-Если проблема не в timeout, а в перегрузке:
-
-- `UMS_LLM_MAX_CONCURRENCY`
-- `UMS_CONCURRENCY_ACQUIRE_TIMEOUT_S`
-- `UMS_FAIL_FAST_ON_SATURATION`
-
-### Если нужен только временный override
-
-Использовать `launcher.sh` flags или `--review-runtime`, а не править persistent `.env.hardware.override`.
-
-## Antipatterns
-
-- не редактировать `backend/.env.runtime` руками
-- не писать role bindings в workflow-код вместо `models.yaml`
-- не использовать legacy `N_GPU_LAYERS_QWEN14B` как основной public contract
-- не смешивать shared `.env` и host-only `.env.native` без причины
-- не считать `run_native.sh` и `run_all.sh` основными entrypoints для новых сценариев
-
-## Related Docs
-
-- [README.md](../README.md)
-- [docs/scripts/README.md](./scripts/README.md)
-- [docs/runtime_profiles.md](./runtime_profiles.md)
-- [docs/deploy-guide.md](./deploy-guide.md)
+Термин `deprecated` здесь означает: файл или сценарий оставлен только ради совместимости и не должен использоваться как новый канонический контракт.

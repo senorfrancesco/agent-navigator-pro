@@ -1,10 +1,10 @@
-# Open WebUI Eval Contour
+# Open WebUI Runtime Contour
 
-Этот документ описывает текущий supported путь для `Open WebUI` в проекте: отдельный `legacy/eval` contour поверх уже работающего backend. Он не меняет product truth: canonical UI проекта сейчас — `Chainlit`.
+Этот документ описывает текущий supported путь для `Open WebUI` в проекте как для основного пользовательского shell поверх уже работающего backend.
 
 ## Что это такое
 
-- `Open WebUI` здесь используется как candidate shell для controlled migration/evaluation.
+- `Open WebUI` здесь рассматривается как основной пользовательский shell.
 - Основной backend остаётся внешним `FastAPI`-контуром проекта.
 - Текущий compatibility `/v1/chat/completions` — это legacy/product wrapper surface, а не финальный model-provider contract для `Open WebUI`.
 - Для native tool-calling `Open WebUI` теперь должен использовать отдельный raw provider surface: `/raw/v1/models` и `/raw/v1/chat/completions`.
@@ -16,7 +16,7 @@
    - `./scripts/launcher.sh --target native --profile adaptive`
    - `./scripts/run_native.sh`
    - либо уже работающий host backend (`agent_api`, `document_server`, `legal_server`, `UMS`)
-2. Поднять `Open WebUI` как отдельный profile:
+2. Поднять `Open WebUI` через текущий compose profile:
 
 ```bash
 docker compose --profile legacy up -d open-webui
@@ -30,7 +30,8 @@ docker compose --profile legacy up -d open-webui
 
 - `run_native` поднимает только backend/UMS/Chainlit на host и публикует их на `0.0.0.0`;
 - самого supported native-launch path для `Open WebUI` в репозитории сейчас нет;
-- поэтому практический `M3.3` smoke path сегодня это `native backend + dockerized Open WebUI`, а не “всё полностью без Docker”.
+- поэтому практический runtime path сегодня это `native backend + dockerized Open WebUI`, а не “всё полностью без Docker”.
+- имя profile `legacy` здесь историческое и не описывает продуктовую роль `Open WebUI`.
 
 ## Что сейчас считается supported
 
@@ -43,11 +44,10 @@ docker compose --profile legacy up -d open-webui
   - `/operator/tool-actions/catalog`
   - `/operator/tool-bindings/export/openwebui`
 - shared uploads volume через `backend/open_webui_uploads`;
-- manual eval пользовательского shell, history/admin и будущего tool-calling UX.
+- user-facing shell, history/admin и будущий tool-calling UX.
 
 ## Что сейчас намеренно не делаем
 
-- не считаем `Open WebUI` уже переключённым основным UI;
 - не переносим orchestration policy, document lifecycle или retrieval truth внутрь `Open WebUI`;
 - не включаем native `Open WebUI` RAG как source-of-truth для продукта;
 - не делаем `MCP-first` integration path;
@@ -55,7 +55,7 @@ docker compose --profile legacy up -d open-webui
 
 ## Current Provider + Tool Setup
 
-Текущий целевой eval contour для `Open WebUI`:
+Текущий provider + tool contour для `Open WebUI`:
 
 - model provider подключается отдельно как raw `OpenAI-compatible` connection:
   - `GET /raw/v1/models`
@@ -97,9 +97,9 @@ docker compose --profile legacy up -d open-webui
 
 Важно:
 
-- после успешного connection check `User Tool Server` ещё не считается автоматически включённым в каждом новом чате;
-- в compose-bar текущего разговора нужно открыть integration/tools menu и включить switch `Agent Navigator OpenAPI Tool Server`;
-- если этот switch выключен, raw-модель корректно отвечает, что не имеет доступа к tool, а backend не получает `POST /tool-server/tools/*`.
+- этот `User Tool Server` path теперь считается debug-only contour для ручной диагностики transport layer;
+- default bootstrap-managed contour больше не materialize’ит `Agent Navigator OpenAPI Tool Server` как chat-visible entry в picker;
+- в обычном supported contour пользователь видит только named tools (`equipment_*`), а вызовы в backend tool server идут из thin wrappers/action functions.
 
 ## Current Raw Model Provider Setup
 
@@ -128,7 +128,7 @@ docker compose --profile legacy up -d open-webui
 - из-за этого один и тот же `User Tool Server` сейчас может вести себя по-разному на этапе browser-side check и на этапе server-side refresh/import;
 - `GET /tool-server/api/config` добавлен как terminal/Open WebUI-compatible config probe для prefixed surface;
 - до отдельного proxy/policy slice текущий supported smoke path остаётся `native backend + dockerized Open WebUI` с явным учётом host/container split;
-- для host/native backend используйте browser-reachable адрес (`127.0.0.1` / `localhost`) при локальных backend probes и отдельно проверяйте container-reachable адрес для legacy Open WebUI smoke;
+- для host/native backend используйте browser-reachable адрес (`127.0.0.1` / `localhost`) при локальных backend probes и отдельно проверяйте container-reachable адрес для dockerized `Open WebUI`;
 - для container smoke через `run_all.sh` / `launcher.sh --target container` backend должен быть не только описан в `docker-compose.yaml`, но и уже иметь собранные локальные образы, потому что container runtime path теперь intentionally использует `docker compose up --no-build`.
 
 ## Current Tool UX Control Plane
@@ -156,7 +156,7 @@ docker compose --profile legacy up -d open-webui
     - `equipment_deep_action`
     - `tool_job_refresh_action`
     - `tool_job_cancel_action`
-  - `importChecklist` с ручными шагами для admin setup в `Open WebUI`
+  - `importChecklist` с ручными шагами для admin setup named tools в `Open WebUI`
 
 Чего ещё нет:
 
@@ -168,7 +168,7 @@ docker compose --profile legacy up -d open-webui
 ## Known Limits
 
 - backend нужно поднимать отдельно через canonical runtime path; отдельного `run_openwebui.sh` больше нет;
-- текущий `legacy Open WebUI` smoke остаётся зависимым от host/container split между browser-side URL и container-side URL;
+- текущий `Open WebUI` runtime path остаётся зависимым от host/container split между browser-side URL и container-side URL;
 - file handoff и document binding пока не переведены на backend-owned upload contract;
 - legacy `/v1/chat/completions` не подходит как primary provider для native tool-calling, потому что это product wrapper path;
 - raw `/raw/v1/chat/completions` уже отделён от wrapper-layer, а базовый smoke на topology `raw provider + enabled tool server` подтверждён;

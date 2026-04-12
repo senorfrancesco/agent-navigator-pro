@@ -72,6 +72,24 @@
 - роль `ask_document` остаётся отдельным decision point:
   - либо thin adapter над тем же retrieval source-of-truth, что и `Open WebUI Knowledge`;
   - либо compatibility-only tool вне основного UX
+- ВАЖНО: document QA и document analysis не проектируются как "один канонический deep-отчёт на документ".
+  Нужно жёстко разделять:
+  - состояние документа:
+    - `document_id` / `version_id`;
+    - извлечённый текст;
+    - corpus metadata;
+    - индекс и фильтры retrieval в `Qdrant`;
+  - состояние конкретного запуска анализа:
+    - `question` или `analysis_goal`;
+    - `job_id`;
+    - артефакт ответа / отчёт;
+    - статус и история конкретного запуска.
+- ВАЖНО: follow-up по тому же документу должен переиспользовать не "старый готовый deep-ответ", а тот же `document_ref` и retrieval source-of-truth.
+  Нормативная семантика:
+  - `ask_document(document_ref, question=...)` — точечный вопрос по документу;
+  - `analyze_document_deep(document_ref, analysis_goal=...)` — новый целевой запуск анализа под конкретную задачу.
+- ВАЖНО: `Qdrant` — retrieval-слой и source-of-truth для knowledge/document search, а не подмена состояния инструментов.
+  История чата может помогать модели, но не должна быть единственным источником follow-up ответа по документу.
 - `backend/open_webui_uploads` сохраняется как текущее shared storage имя до отдельного approved rename slice
 - Migration идёт фазами; один implementation slice по умолчанию затрагивает не более `5` файлов
 - Long-running jobs, ingestion и reindex не проектируются как “магический streaming tool call”; backend остаётся source-of-truth для job state
@@ -359,6 +377,11 @@
       - `GET /tool-server/tool-jobs/870d81dd-80b0-4714-82ed-993d85d127b4 -> 200 OK`;
       - `GET /tool-server/tool-jobs/870d81dd-80b0-4714-82ed-993d85d127b4/result -> 200 OK`;
       - fresh deep run дал `POST /tool-server/tools/analyze_equipment_deep -> 202 Accepted`, а follow-up cancel дал `POST /tool-server/tool-jobs/4166a156-ffc9-41ae-8951-6f4717549214/cancel -> 200 OK`.
+  - 2026-04-12 tool-catalog hardening:
+    - backend tool catalog расширен до user/model-facing contract (`label`, `when to use`, `input/output summary`, `enabled/deferred`);
+    - export bundle и `/tool-server/api/config` теперь явно публикуют enabled subset (`analyze_equipment_fast/deep`) и deferred subset (`ask_document`, document/compare tools);
+    - OpenAPI descriptions для `/tools/*` синхронизированы с canonical catalog, чтобы в `Open WebUI` и schema probe не торчали transport-level формулировки вместо product intent.
+    - default bootstrap contour переведён на `named-tools-only`: `bootstrap_openwebui.py` удаляет canonical `Agent Navigator OpenAPI Tool Server` из live picker state и чистит `community_sum_tool` как verification fixture, оставляя bootstrap-managed `equipment_*` named tools.
   Blockers:
   - [x] backend bug в `analyze_equipment_fast` исправлен как обязательный `P0` gate перед rollout named tools;
   - [x] deep-job context materialize’ится в persisted `Open WebUI` message state так, чтобы `refresh/cancel` actions могли восстанавливать `status_url` / `job_id` без ручного ввода.
@@ -462,10 +485,12 @@
   - определить production-ready handoff от user-facing `Open WebUI` uploads/Knowledge UX к внешнему ingestion pipeline;
   - подключить `Qdrant` как canonical vector backend для Knowledge;
   - определить, какие части corpus metadata и collection lifecycle принадлежат `Open WebUI`, а какие backend/admin contour;
+  - зафиксировать retrieval contract так, чтобы follow-up по документу опирался на `document_ref` и `Qdrant`, а не на один сохранённый deep-отчёт;
   - зафиксировать smoke path для native Knowledge chat на реальных документах без подмены explicit tools.
   Acceptance:
   - обычный вопрос по документу закрывается native Knowledge contour без hidden backend tool routing;
   - retrieval source-of-truth понятен и проверяем;
+  - состояние документа и состояние конкретного запуска анализа разведены явно и не смешиваются;
   - parsing/OCR/tables не живут только внутри UI-процесса;
   - `Qdrant` используется как canonical vector backend, а не side experiment.
   Plan:
@@ -475,11 +500,13 @@
 - [ ] M3.9 — Принять финальное решение по роли `ask_document`
   Нужно сделать:
   - выбрать между `thin adapter over canonical Knowledge retrieval` и `compatibility-only tool`;
+  - закрепить, что `ask_document` работает от `document_ref + question`, а `analyze_document_deep` — от `document_ref + analysis_goal`, и это разные состояния;
   - не оставлять параллельно два независимых document-QA контура без общего source-of-truth;
   - обновить tool catalog, docs и smoke matrix по факту принятого решения.
   Acceptance:
   - implementer и пользователь понимают, когда использовать native Knowledge chat, а когда explicit tool;
   - `ask_document` больше не висит в ambiguous middle state;
+  - новый запрос с другим `question` или `analysis_goal` может дать новый результат по тому же документу, не будучи привязанным к одному старому deep-ответу;
   - document QA и explicit analysis/compare не дублируют друг друга.
   Plan:
   - [Open WebUI-First RAG Architecture Alignment Implementation Plan](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-10-openwebui-first-rag-architecture-plan.md)
@@ -594,6 +621,7 @@
 - Решение: ordinary document QA относится к native `Open WebUI Knowledge`, а explicit backend tools — к structured analysis/compare/equipment workflows.
 - Решение: `Qdrant` фиксируется как canonical vector backend, а `Docling` first / `Tika` fallback — как canonical external ingestion path.
 - Решение: роль `ask_document` переносится в отдельный decision slice `M3.9`; не считаем его автоматически primary UX-path.
+- Решение: архитектурно критично разделять состояние документа и состояние конкретного запуска анализа; follow-up по документу должен идти через `document_ref` и retrieval source-of-truth, а не через один ранее сохранённый deep-отчёт.
 - Progress: `TASKS_MIGRATION.md` синхронизирован с [2026-04-10-openwebui-first-rag-architecture-plan.md](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-10-openwebui-first-rag-architecture-plan.md), master-plan и обновлёнными `Qdrant` / `tool-server` / responsibility docs.
 
 ### 2026-04-07 — Initial migration ledger seeding
