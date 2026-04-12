@@ -49,6 +49,8 @@ def test_tool_server_config_returns_terminal_compatible_payload(monkeypatch):
     payload = response.json()
     assert payload["features"]["system"] is False
     assert payload["server"]["name"] == "Agent Navigator OpenAPI Tool Server"
+    assert payload["toolUx"]["enabledToolNames"] == ["analyze_equipment_fast", "analyze_equipment_deep"]
+    assert "ask_document" in payload["toolUx"]["deferredToolNames"]
 
 
 def test_tool_server_openapi_filters_non_tool_routes(monkeypatch):
@@ -67,6 +69,9 @@ def test_tool_server_openapi_filters_non_tool_routes(monkeypatch):
     assert "/health" not in payload["paths"]
     assert "/v1/chat/completions" not in payload["paths"]
     assert "/execute_orchestration" not in payload["paths"]
+    assert payload["paths"]["/tools/analyze_equipment_fast"]["post"]["summary"] == "Быстрый анализ оборудования"
+    assert "когда использовать" in payload["paths"]["/tools/analyze_equipment_fast"]["post"]["description"].lower()
+    assert "deferred" in payload["paths"]["/tools/compare_documents_fast"]["post"]["description"].lower()
 
 
 def test_tool_server_openapi_rejects_disallowed_origin(monkeypatch):
@@ -256,7 +261,7 @@ def test_tool_job_result_returns_409_before_completion(monkeypatch):
     assert response.json()["detail"] == f"job-not-ready:{job.job_id}"
 
 
-def test_tool_job_cancel_route_returns_conflict_for_terminal_job(monkeypatch):
+def test_tool_job_cancel_route_returns_terminal_job_status(monkeypatch):
     monkeypatch.setenv("OPENAPI_TOOL_SERVER_TOKEN", "tool-secret")
     monkeypatch.setenv("OPENAPI_TOOL_SERVER_ALLOWED_ORIGINS", "http://localhost:3001")
 
@@ -272,8 +277,9 @@ def test_tool_job_cancel_route_returns_conflict_for_terminal_job(monkeypatch):
     client = TestClient(agent_api.app)
     response = client.post(f"/tool-server/tool-jobs/{job.job_id}/cancel", headers=_auth_headers())
 
-    assert response.status_code == 409
-    assert response.json()["detail"] == f"job-already-terminal:{job.job_id}:completed"
+    assert response.status_code == 200
+    assert response.json()["job_id"] == job.job_id
+    assert response.json()["status"] == "completed"
 
 
 def test_tool_route_accepts_eval_only_session_file_ref(monkeypatch):

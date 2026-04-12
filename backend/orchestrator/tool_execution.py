@@ -86,6 +86,28 @@ def _build_execution_metadata_payload(request_payload: Dict[str, Any]) -> Dict[s
     ).model_dump()
 
 
+def _resolve_async_terminal_status(response: Dict[str, Any]) -> str:
+    execution_metadata = response.get("execution_metadata") if isinstance(response, dict) else None
+    if isinstance(execution_metadata, dict):
+        status = str(execution_metadata.get("status") or "").strip().lower()
+        if status:
+            return status
+    status = str(response.get("status") or "").strip().lower() if isinstance(response, dict) else ""
+    return status or "completed"
+
+
+def _resolve_async_terminal_error_summary(response: Dict[str, Any], *, fallback: str) -> str:
+    execution_metadata = response.get("execution_metadata") if isinstance(response, dict) else None
+    if isinstance(execution_metadata, dict):
+        reason = str(execution_metadata.get("reason") or "").strip()
+        if reason:
+            return reason
+    assistant_message = str(response.get("assistant_message") or "").strip() if isinstance(response, dict) else ""
+    if assistant_message:
+        return assistant_message
+    return fallback
+
+
 def build_accepted_tool_job_response(job: ToolJobRecord, request_payload: Dict[str, Any]) -> Dict[str, Any]:
     execution_metadata = job.execution_metadata or _build_execution_metadata_payload(request_payload)
     tool_name = str(request_payload.get("requested_tool") or request_payload.get("tool_name") or "")
@@ -138,13 +160,15 @@ def cancel_tool_job(job_id: str) -> ToolJobRecord:
     if job is None:
         raise KeyError(job_id)
     if job.status in {"completed", "failed", "cancelled"}:
-        raise RuntimeError(f"job-already-terminal:{job_id}:{job.status}")
+        return job
 
     task = _ACTIVE_TOOL_JOB_TASKS.get(job_id)
+    if job.status == "cancelling":
+        if task is None or task.done():
+            return store.finish_cancelled(job_id, error_summary="cancelled-by-request")
+        return job
     if task is None or task.done():
-        if job.status == "queued":
-            return store.finish_cancelled(job_id)
-        raise RuntimeError(f"job-runner-missing:{job_id}:{job.status}")
+        return store.finish_cancelled(job_id, error_summary="cancelled-by-request")
 
     updated_job = store.mark_cancelling(job_id)
     task.cancel()
@@ -194,6 +218,20 @@ def submit_async_tool_job(
             raise
         except Exception as exc:
             store.finish_failed(job.job_id, str(exc))
+            return
+        terminal_status = _resolve_async_terminal_status(response)
+        if terminal_status in {"busy", "failed"}:
+            store.finish_failed(
+                job.job_id,
+                _resolve_async_terminal_error_summary(response, fallback=terminal_status),
+                current_stage="busy" if terminal_status == "busy" else "failed",
+            )
+            return
+        if terminal_status == "cancelled":
+            store.finish_cancelled(
+                job.job_id,
+                error_summary=_resolve_async_terminal_error_summary(response, fallback="cancelled-by-request"),
+            )
             return
         store.finish_completed(job.job_id, response)
 

@@ -5,7 +5,13 @@ from textwrap import dedent
 from typing import Any, Dict, Iterable, Literal, Optional, Tuple
 from urllib.parse import urlsplit, urlunsplit
 
-from orchestrator.tool_catalog import ToolName
+from orchestrator.tool_catalog import (
+    ToolDefinition,
+    ToolName,
+    get_tool_definition,
+    list_openwebui_deferred_tool_definitions,
+    list_openwebui_enabled_tool_definitions,
+)
 
 BindingEntrypointType = Literal["direct_action", "prompt_shortcut", "followup_action"]
 BindingResultMode = Literal["inline", "accepted_job", "rich_card"]
@@ -45,24 +51,47 @@ class ToolBinding:
         }
 
 
+def _tool(tool_name: ToolName) -> ToolDefinition:
+    return get_tool_definition(tool_name)
+
+
+def _direct_binding_description(tool_name: ToolName) -> str:
+    tool = _tool(tool_name)
+    return f"{tool.summary} Использовать, когда: {tool.use_when}"
+
+
+def _deferred_binding_description(tool_name: ToolName) -> str:
+    tool = _tool(tool_name)
+    return tool.availability_note or f"{tool.label} пока остаётся deferred."
+
+
+def _prompt_binding_description(tool_name: ToolName) -> str:
+    tool = _tool(tool_name)
+    return f"Shortcut для explicit вызова `{tool.name}`. Использовать, когда: {tool.use_when}"
+
+
+def _tool_catalog_entries(definitions: Iterable[ToolDefinition]) -> list[dict[str, Any]]:
+    return [definition.to_catalog_entry() for definition in definitions]
+
+
 TOOL_BINDINGS: Tuple[ToolBinding, ...] = (
     ToolBinding(
         binding_id="equipment.fast.direct",
-        label="Быстрый анализ оборудования",
+        label=_tool("analyze_equipment_fast").label,
         tool_name="analyze_equipment_fast",
         entrypoint_type="direct_action",
         result_mode="inline",
         default_args={"equipment_query": "{{chat_input}}"},
-        description="Детерминированный one-shot запуск быстрого анализа оборудования.",
+        description=_direct_binding_description("analyze_equipment_fast"),
     ),
     ToolBinding(
         binding_id="equipment.deep.direct",
-        label="Глубокий анализ оборудования",
+        label=_tool("analyze_equipment_deep").label,
         tool_name="analyze_equipment_deep",
         entrypoint_type="direct_action",
         result_mode="accepted_job",
         default_args={"equipment_query": "{{chat_input}}", "job_mode": "force_async"},
-        description="Детерминированный long-running запуск глубокого анализа оборудования.",
+        description=_direct_binding_description("analyze_equipment_deep"),
     ),
     ToolBinding(
         binding_id="equipment.fast.prompt",
@@ -73,7 +102,7 @@ TOOL_BINDINGS: Tuple[ToolBinding, ...] = (
         slash_command="/hw_fast",
         default_args={"equipment_query": "{{chat_input}}"},
         visibility_scope="operator_only",
-        description="Convenience shortcut поверх backend-owned equipment fast tool.",
+        description=_prompt_binding_description("analyze_equipment_fast"),
     ),
     ToolBinding(
         binding_id="equipment.deep.prompt",
@@ -84,44 +113,44 @@ TOOL_BINDINGS: Tuple[ToolBinding, ...] = (
         slash_command="/hw_deep",
         default_args={"equipment_query": "{{chat_input}}", "job_mode": "force_async"},
         visibility_scope="operator_only",
-        description="Convenience shortcut поверх backend-owned equipment deep tool.",
+        description=_prompt_binding_description("analyze_equipment_deep"),
     ),
     ToolBinding(
         binding_id="document.ask.direct",
-        label="Спросить по документу",
+        label=_tool("ask_document").label,
         tool_name="ask_document",
         entrypoint_type="direct_action",
         result_mode="inline",
         enabled=False,
         requires_document_context=True,
         default_args={"question": "{{chat_input}}"},
-        description="Будет включён после backend-owned document binding (`M2.1/M2.2`).",
+        description=_deferred_binding_description("ask_document"),
     ),
     ToolBinding(
         binding_id="document.fast.direct",
-        label="Быстрый анализ документа",
+        label=_tool("analyze_document_fast").label,
         tool_name="analyze_document_fast",
         entrypoint_type="direct_action",
         result_mode="inline",
         enabled=False,
         requires_document_context=True,
         default_args={"analysis_goal": "{{chat_input}}"},
-        description="Будет включён после backend-owned document binding (`M2.1/M2.2`).",
+        description=_deferred_binding_description("analyze_document_fast"),
     ),
     ToolBinding(
         binding_id="document.deep.direct",
-        label="Глубокий анализ документа",
+        label=_tool("analyze_document_deep").label,
         tool_name="analyze_document_deep",
         entrypoint_type="direct_action",
         result_mode="accepted_job",
         enabled=False,
         requires_document_context=True,
         default_args={"analysis_goal": "{{chat_input}}", "job_mode": "force_async"},
-        description="Будет включён после backend-owned document binding (`M2.1/M2.2`).",
+        description=_deferred_binding_description("analyze_document_deep"),
     ),
     ToolBinding(
         binding_id="compare.fast.direct",
-        label="Сравнить документы",
+        label=_tool("compare_documents_fast").label,
         tool_name="compare_documents_fast",
         entrypoint_type="direct_action",
         result_mode="inline",
@@ -129,11 +158,11 @@ TOOL_BINDINGS: Tuple[ToolBinding, ...] = (
         requires_document_context=True,
         requires_min_documents=2,
         default_args={"comparison_goal": "{{chat_input}}"},
-        description="Будет включён после multi-document binding (`M2.2`).",
+        description=_deferred_binding_description("compare_documents_fast"),
     ),
     ToolBinding(
         binding_id="compare.deep.direct",
-        label="Глубокое сравнение документов",
+        label=_tool("compare_documents_deep").label,
         tool_name="compare_documents_deep",
         entrypoint_type="direct_action",
         result_mode="accepted_job",
@@ -141,7 +170,7 @@ TOOL_BINDINGS: Tuple[ToolBinding, ...] = (
         requires_document_context=True,
         requires_min_documents=2,
         default_args={"comparison_goal": "{{chat_input}}", "job_mode": "force_async"},
-        description="Будет включён после multi-document binding (`M2.2`).",
+        description=_deferred_binding_description("compare_documents_deep"),
     ),
 )
 
@@ -229,13 +258,17 @@ def build_openwebui_binding_export(*, backend_base_url: str) -> Dict[str, Any]:
     container_base_url = _derive_container_base_url(normalized_base_url)
     direct_actions = [binding.to_dict() for binding in list_enabled_tool_bindings("direct_action")]
     prompts = [binding.to_dict() for binding in list_enabled_tool_bindings("prompt_shortcut")]
+    enabled_tools = _tool_catalog_entries(list_openwebui_enabled_tool_definitions())
+    deferred_tools = _tool_catalog_entries(list_openwebui_deferred_tool_definitions())
     return {
         "toolServer": {
             "name": "Agent Navigator OpenAPI Tool Server",
             "baseUrl": f"{normalized_base_url}/tool-server",
             "browserReachableBaseUrl": f"{normalized_base_url}/tool-server",
             "containerReachableBaseUrl": f"{container_base_url}/tool-server",
-            "manualEnableRequired": True,
+            "manualEnableRequired": False,
+            "pickerVisible": False,
+            "defaultBootstrapManaged": False,
         },
         "runtimeConfig": {
             "defaultModel": OPENWEBUI_DEFAULT_MODEL,
@@ -245,25 +278,16 @@ def build_openwebui_binding_export(*, backend_base_url: str) -> Dict[str, Any]:
         },
         "ownership": {
             "backendOwned": {
-                "toolServerConnection": [
-                    "url",
-                    "path",
-                    "type",
-                    "auth_type",
-                    "headers",
-                    "key",
-                    "config.bootstrap_id",
-                    "config.name",
-                ],
-                "workspaceToolFields": ["id", "content", "meta.manifest.target_models"],
-                "actionFunctionFields": ["id", "content", "meta.manifest.target_models"],
+                "toolServerConnection": [],
+                "workspaceToolFields": ["id", "name", "content", "meta.description", "meta.manifest.target_models"],
+                "actionFunctionFields": ["id", "name", "content", "meta.description", "meta.manifest.target_models"],
                 "promptFields": ["command", "content", "meta.binding_id"],
                 "modelConfigFields": ["DEFAULT_MODELS", "DEFAULT_MODEL_PARAMS.function_calling"],
             },
             "openWebUIOwned": {
-                "toolServerConnection": ["config.enable"],
-                "workspaceToolFields": ["name", "meta.description"],
-                "actionFunctionFields": ["name", "meta.description", "is_active", "is_global"],
+                "toolServerConnection": [],
+                "workspaceToolFields": [],
+                "actionFunctionFields": ["is_active", "is_global"],
                 "promptFields": ["name", "meta.description", "tags", "access_grants", "is_production"],
             },
             "deferred": [
@@ -273,6 +297,10 @@ def build_openwebui_binding_export(*, backend_base_url: str) -> Dict[str, Any]:
                 "corpus_admin",
                 "ask_document_role_decision",
             ],
+        },
+        "toolCatalog": {
+            "enabled": enabled_tools,
+            "deferred": deferred_tools,
         },
         "workspaceTools": _build_openwebui_workspace_tools(container_tool_server_base_url=f"{container_base_url}/tool-server"),
         "directActions": direct_actions,
@@ -291,17 +319,18 @@ def build_openwebui_binding_export(*, backend_base_url: str) -> Dict[str, Any]:
         ],
         "actionFunctions": _build_openwebui_action_functions(container_tool_server_base_url=f"{container_base_url}/tool-server"),
         "importChecklist": [
-            "1. Импортируйте `Agent Navigator OpenAPI Tool Server` как OpenAPI connection и включайте его в каждом целевом чате вручную.",
-            "2. Добавьте `Workspace > Tools` для equipment fast/deep из export bundle как thin Python wrappers без доменной логики в Open WebUI.",
-            "3. Добавьте `Workspace Prompts` `/hw_fast` и `/hw_deep` из export bundle без изменения команд.",
-            "4. Импортируйте `Action Functions` и привяжите их только к raw-model provider (`raw.*`).",
-            "5. В `Valves` каждого local tool и Action Function вставьте актуальный `OPENAPI_TOOL_SERVER_TOKEN` из backend `.env`.",
-            "6. Для deep job flow проверьте `equipment_deep_action`, затем `tool_job_refresh_action` и `tool_job_cancel_action`.",
+            "1. Материализуйте только named tools `equipment_fast_tool` и `equipment_deep_tool` из export bundle как thin Python wrappers без доменной логики в Open WebUI.",
+            "2. Добавьте `Workspace Prompts` `/hw_fast` и `/hw_deep` из export bundle без изменения команд.",
+            "3. Импортируйте `Action Functions` и привяжите их только к raw-model provider (`raw.*`).",
+            "4. В `Valves` каждого local tool и Action Function вставьте актуальный `OPENAPI_TOOL_SERVER_TOKEN` из backend `.env`.",
+            "5. Для deep job flow проверьте `equipment_deep_action`, затем `tool_job_refresh_action` и `tool_job_cancel_action`.",
+            "6. Не materialize’ьте `Agent Navigator OpenAPI Tool Server` в chat picker для default contour; transport layer уже вызывается из wrappers/actions.",
         ],
         "notes": [
             "Action Functions в Open WebUI остаются admin-managed glue layer поверх backend-owned tool server.",
-            "Workspace > Tools остаётся primary explicit picker для equipment tools; prompts и actions являются secondary UX layers.",
-            "Bindings для документов и compare intentionally disabled до завершения backend-owned document binding.",
+            "Workspace > Tools остаётся primary explicit picker только для enabled product tools; prompts и actions являются secondary UX layers.",
+            "Transport-level `Agent Navigator OpenAPI Tool Server` остаётся debug/reference entry, а не default chat-visible инструмент.",
+            "Document/compare tools остаются deferred до завершения backend-owned upload/document binding и multi-document context.",
         ],
     }
 
@@ -309,11 +338,17 @@ def build_openwebui_binding_export(*, backend_base_url: str) -> Dict[str, Any]:
 def summarize_tool_binding_catalog() -> Dict[str, Any]:
     bindings = list_tool_bindings()
     enabled = [binding for binding in bindings if binding.enabled]
+    enabled_tool_names = [definition.name for definition in list_openwebui_enabled_tool_definitions()]
+    deferred_tool_names = [definition.name for definition in list_openwebui_deferred_tool_definitions()]
     return {
         "total": len(bindings),
         "enabled": len(enabled),
         "directActionCount": len([binding for binding in enabled if binding.entrypoint_type == "direct_action"]),
         "promptShortcutCount": len([binding for binding in enabled if binding.entrypoint_type == "prompt_shortcut"]),
+        "enabledToolNames": enabled_tool_names,
+        "deferredToolNames": deferred_tool_names,
+        "enabledTools": _tool_catalog_entries(list_openwebui_enabled_tool_definitions()),
+        "deferredTools": _tool_catalog_entries(list_openwebui_deferred_tool_definitions()),
         "disabledDocumentDependentCount": len(
             [
                 binding
@@ -344,11 +379,13 @@ def _derive_container_base_url(browser_base_url: str) -> str:
 
 
 def _build_openwebui_action_functions(*, container_tool_server_base_url: str) -> list[dict[str, Any]]:
+    equipment_fast = _tool("analyze_equipment_fast")
+    equipment_deep = _tool("analyze_equipment_deep")
     return [
         {
             "action_id": "equipment_fast_action",
-            "title": "Быстрый анализ оборудования",
-            "description": "Запускает analyze_equipment_fast по последнему пользовательскому запросу без prompt-угадывания модели.",
+            "title": equipment_fast.label,
+            "description": f"{equipment_fast.summary} Использовать, когда: {equipment_fast.use_when}",
             "targetModels": ["raw.*"],
             "manualImportRequired": True,
             "isActive": True,
@@ -356,15 +393,15 @@ def _build_openwebui_action_functions(*, container_tool_server_base_url: str) ->
             "pythonCode": _build_equipment_action_code(
                 container_tool_server_base_url=container_tool_server_base_url,
                 tool_name="analyze_equipment_fast",
-                action_label="Быстрый анализ оборудования",
+                action_label=equipment_fast.label,
                 force_async=False,
                 priority=10,
             ),
         },
         {
             "action_id": "equipment_deep_action",
-            "title": "Глубокий анализ оборудования",
-            "description": "Запускает analyze_equipment_deep и возвращает accepted job contract с понятным status URL.",
+            "title": equipment_deep.label,
+            "description": f"{equipment_deep.summary} Использовать, когда: {equipment_deep.use_when}",
             "targetModels": ["raw.*"],
             "manualImportRequired": True,
             "isActive": True,
@@ -372,7 +409,7 @@ def _build_openwebui_action_functions(*, container_tool_server_base_url: str) ->
             "pythonCode": _build_equipment_action_code(
                 container_tool_server_base_url=container_tool_server_base_url,
                 tool_name="analyze_equipment_deep",
-                action_label="Глубокий анализ оборудования",
+                action_label=equipment_deep.label,
                 force_async=True,
                 priority=20,
             ),
@@ -405,33 +442,35 @@ def _build_openwebui_action_functions(*, container_tool_server_base_url: str) ->
 
 
 def _build_openwebui_workspace_tools(*, container_tool_server_base_url: str) -> list[dict[str, Any]]:
+    equipment_fast = _tool("analyze_equipment_fast")
+    equipment_deep = _tool("analyze_equipment_deep")
     return [
         {
             "tool_id": "equipment_fast_tool",
-            "title": "Быстрый анализ оборудования",
-            "description": "Явный local tool wrapper над backend endpoint /tool-server/tools/analyze_equipment_fast.",
+            "title": equipment_fast.label,
+            "description": f"{equipment_fast.summary} Использовать, когда: {equipment_fast.use_when}",
             "targetModels": ["raw.*"],
             "manualImportRequired": True,
             "pythonCode": _build_openwebui_workspace_tool_code(
                 container_tool_server_base_url=container_tool_server_base_url,
                 tool_name="analyze_equipment_fast",
                 method_name="analyze_equipment_fast",
-                action_label="Быстрый анализ оборудования",
+                action_label=equipment_fast.label,
                 result_mode="inline",
                 priority=10,
             ),
         },
         {
             "tool_id": "equipment_deep_tool",
-            "title": "Глубокий анализ оборудования",
-            "description": "Явный local tool wrapper над backend endpoint /tool-server/tools/analyze_equipment_deep.",
+            "title": equipment_deep.label,
+            "description": f"{equipment_deep.summary} Использовать, когда: {equipment_deep.use_when}",
             "targetModels": ["raw.*"],
             "manualImportRequired": True,
             "pythonCode": _build_openwebui_workspace_tool_code(
                 container_tool_server_base_url=container_tool_server_base_url,
                 tool_name="analyze_equipment_deep",
                 method_name="analyze_equipment_deep",
-                action_label="Глубокий анализ оборудования",
+                action_label=equipment_deep.label,
                 result_mode="accepted_job",
                 priority=20,
             ),
@@ -442,7 +481,7 @@ def _build_openwebui_workspace_tools(*, container_tool_server_base_url: str) -> 
 def _build_openwebui_workspace_tool_code(
     *,
     container_tool_server_base_url: str,
-    tool_name: str,
+    tool_name: ToolName,
     method_name: str,
     action_label: str,
     result_mode: BindingResultMode,
@@ -450,10 +489,76 @@ def _build_openwebui_workspace_tool_code(
 ) -> str:
     is_async = result_mode == "accepted_job"
     payload_line = '"job_mode": "force_async",' if is_async else ""
-    return dedent(
-        f'''
+    tool = _tool(tool_name)
+    if not is_async:
+        return dedent(
+            f'''
+            """
+            title: {action_label}
+            author: Agent Navigator
+            version: 1.0.0
+            requirements:
+            """
+
+            import asyncio
+            import json
+            import urllib.request
+            from pydantic import BaseModel
+
+            async def _request_json(method, url, token, payload=None):
+                def _do_request():
+                    data = None if payload is None else json.dumps(payload).encode("utf-8")
+                    request = urllib.request.Request(
+                        url,
+                        data=data,
+                        method=method,
+                        headers={{
+                            "Authorization": f"Bearer {{token}}",
+                            "Content-Type": "application/json",
+                        }},
+                    )
+                    with urllib.request.urlopen(request, timeout=45) as response:
+                        return json.loads(response.read().decode("utf-8"))
+
+                return await asyncio.to_thread(_do_request)
+
+            class Tools:
+                class Valves(BaseModel):
+                    tool_server_base_url: str = "{container_tool_server_base_url}"
+                    tool_server_token: str = "SET_OPENAPI_TOOL_SERVER_TOKEN"
+                    priority: int = {priority}
+
+                def __init__(self):
+                    self.valves = self.Valves()
+
+                async def {method_name}(self, query: str) -> str:
+                    """
+                    {tool.summary}
+
+                    Использовать, когда: {tool.use_when}
+
+                    :param query: {tool.input_summary}
+                    :return: {tool.output_summary}
+                    """
+                    payload = {{
+                        "equipment_query": query,
+                        {payload_line}
+                    }}
+                    payload = {{key: value for key, value in payload.items() if value is not None and value != ""}}
+                    response = await _request_json(
+                        "POST",
+                        f"{{self.valves.tool_server_base_url}}/tools/{tool_name}",
+                        self.valves.tool_server_token,
+                        payload,
+                    )
+                    return response.get("assistant_message") or json.dumps(response, ensure_ascii=False, indent=2)
+            '''
+        ).strip()
+
+    template = dedent(
+        '''
         """
-        title: {action_label}
+        title: __ACTION_LABEL__
         author: Agent Navigator
         version: 1.0.0
         requirements:
@@ -461,8 +566,18 @@ def _build_openwebui_workspace_tool_code(
 
         import asyncio
         import json
+        import time
         import urllib.request
         from pydantic import BaseModel
+        from uuid import uuid4
+
+        AUTO_POLL_INTERVAL_SECONDS = 2
+        AUTO_POLL_MAX_SECONDS = 900
+        AUTO_POLL_MAX_ERRORS = 3
+        MESSAGE_SETTLE_TIMEOUT_SECONDS = 5
+        MESSAGE_SETTLE_POLL_SECONDS = 0.1
+        TERMINAL_REAPPLY_DELAY_SECONDS = 0.5
+        TERMINAL_REAPPLY_ATTEMPTS = 5
 
         async def _request_json(method, url, token, payload=None):
             def _do_request():
@@ -471,72 +586,810 @@ def _build_openwebui_workspace_tool_code(
                     url,
                     data=data,
                     method=method,
-                    headers={{
-                        "Authorization": f"Bearer {{token}}",
+                    headers={
+                        "Authorization": f"Bearer {token}",
                         "Content-Type": "application/json",
-                    }},
+                    },
                 )
                 with urllib.request.urlopen(request, timeout=45) as response:
                     return json.loads(response.read().decode("utf-8"))
 
             return await asyncio.to_thread(_do_request)
 
+        def _tool_server_origin(tool_server_base_url):
+            return str(tool_server_base_url).split("/tool-server", 1)[0].rstrip("/")
+
+        def _absolute_status_url(tool_server_base_url, candidate):
+            candidate = str(candidate or "").strip()
+            if not candidate:
+                return candidate
+            if candidate.startswith("http://") or candidate.startswith("https://"):
+                return candidate
+            if candidate.startswith("/"):
+                return f"{_tool_server_origin(tool_server_base_url)}{candidate}"
+            return f"{_tool_server_origin(tool_server_base_url)}/{candidate.lstrip('/')}"
+
+        def _load_message(chat_id, message_id):
+            try:
+                from open_webui.models.chats import Chats
+            except Exception:
+                return {}
+            try:
+                return Chats.get_message_by_id_and_message_id(chat_id, message_id) or {}
+            except Exception:
+                return {}
+
+        def _load_chat_messages(chat_id):
+            try:
+                from open_webui.models.chats import Chats
+            except Exception:
+                return {}
+            try:
+                chat_record = Chats.get_chat_by_id(chat_id)
+            except Exception:
+                return {}
+
+            payload = getattr(chat_record, "chat", None)
+            if not isinstance(payload, dict):
+                return {}
+            history = payload.get("history")
+            if not isinstance(history, dict):
+                return {}
+            messages = history.get("messages")
+            if not isinstance(messages, dict):
+                return {}
+            return messages
+
+        def _persist_message(chat_id, message_id, patch):
+            try:
+                from open_webui.models.chats import Chats
+            except Exception:
+                return None
+            try:
+                return Chats.upsert_message_to_chat_by_id_and_message_id(chat_id, message_id, patch)
+            except Exception:
+                return None
+
+        def _append_status(chat_id, message_id, status):
+            try:
+                from open_webui.models.chats import Chats
+            except Exception:
+                return None
+            try:
+                return Chats.add_message_status_to_chat_by_id_and_message_id(chat_id, message_id, status)
+            except Exception:
+                return None
+
+        def _build_tool_job(job_id, status_url, status):
+            return {
+                "job_id": job_id,
+                "status_url": status_url,
+                "tool_name": "__TOOL_NAME__",
+                "status": status,
+            }
+
+        def _status_url_candidates(status_url):
+            normalized = str(status_url or "").strip()
+            if not normalized:
+                return []
+            candidates = [normalized]
+            if "/tool-server/" in normalized:
+                suffix = normalized.split("/tool-server", 1)[1]
+                candidates.append(f"/tool-server{suffix}")
+            seen = set()
+            unique = []
+            for candidate in candidates:
+                if candidate and candidate not in seen:
+                    seen.add(candidate)
+                    unique.append(candidate)
+            return unique
+
+        def _message_matches_job(message, *, job_id, status_url):
+            if not isinstance(message, dict):
+                return False
+            if str(message.get("tool_job_result_for") or "").strip():
+                return False
+            if str(message.get("role") or "").strip() not in {"", "assistant"}:
+                return False
+            if str(message.get("job_id") or "").strip() == job_id:
+                return True
+
+            tool_job = message.get("tool_job") or {}
+            if str(tool_job.get("job_id") or "").strip() == job_id:
+                return True
+
+            status_candidates = _status_url_candidates(status_url)
+            content = str(message.get("content") or "")
+            if job_id and f"job_id: {job_id}" in content:
+                return True
+            if any(candidate and candidate in content for candidate in status_candidates):
+                return True
+
+            tool_job_status_url = str(tool_job.get("status_url") or "").strip()
+            if tool_job_status_url and tool_job_status_url in status_candidates:
+                return True
+
+            for status_entry in message.get("statusHistory") or []:
+                if not isinstance(status_entry, dict):
+                    continue
+                if str(status_entry.get("job_id") or "").strip() == job_id:
+                    return True
+                status_entry_url = str(status_entry.get("status_url") or "").strip()
+                if status_entry_url and status_entry_url in status_candidates:
+                    return True
+
+            return False
+
+        def _resolve_job_message_id(chat_id, fallback_message_id, job_id, status_url):
+            fallback_id = str(fallback_message_id or "").strip()
+            messages = _load_chat_messages(chat_id)
+            if not messages:
+                return fallback_id
+
+            best_id = fallback_id
+            best_score = -1
+            status_candidates = _status_url_candidates(status_url)
+
+            for candidate_id, message in messages.items():
+                if not _message_matches_job(message, job_id=job_id, status_url=status_url):
+                    continue
+
+                score = 0
+                content = str(message.get("content") or "")
+                if str(message.get("role") or "").strip() == "assistant":
+                    score += 5
+                if str(message.get("job_status") or "").strip() in {"accepted", "queued", "running", "cancelling"}:
+                    score += 3
+                if message.get("output") is not None:
+                    score += 1
+                if job_id and f"job_id: {job_id}" in content:
+                    score += 4
+                if any(candidate and f"status_url: {candidate}" in content for candidate in status_candidates):
+                    score += 4
+                if str(candidate_id) == fallback_id:
+                    score += 1
+
+                if score >= best_score:
+                    best_score = score
+                    best_id = str(candidate_id)
+
+            return best_id or fallback_id
+
+        def _persist_terminal_message(chat_id, message_id, *, content, job_id, status_url, status, result_message_id=None, actions_disabled=True):
+            existing = _load_message(chat_id, message_id)
+            children_ids = list(existing.get("childrenIds") or [])
+            patch = {
+                "id": message_id,
+                "role": existing.get("role", "assistant"),
+                "content": content,
+                "done": True,
+                "childrenIds": children_ids,
+                "tool_job": _build_tool_job(job_id, status_url, status),
+                "job_status": status,
+                "actions_disabled": actions_disabled,
+            }
+            if result_message_id:
+                patch["result_message_id"] = result_message_id
+            _persist_message(chat_id, message_id, patch)
+            return patch
+
+        def _create_result_message(chat_id, accepted_message_id, *, model_name, job_id, result_payload):
+            accepted = _load_message(chat_id, accepted_message_id)
+            existing_result_id = str(accepted.get("result_message_id") or "").strip()
+            if existing_result_id:
+                return existing_result_id
+
+            result_message_id = str(uuid4())
+            result_message = {
+                "id": result_message_id,
+                "parentId": accepted_message_id,
+                "childrenIds": [],
+                "role": "assistant",
+                "content": result_payload.get("assistant_message") or json.dumps(result_payload, ensure_ascii=False, indent=2),
+                "model": model_name or accepted.get("model") or "__DEFAULT_MODEL__",
+                "timestamp": int(time.time()),
+                "done": True,
+                "job_id": job_id,
+                "tool_job_result_for": accepted_message_id,
+            }
+            if result_payload.get("sources") is not None:
+                result_message["sources"] = result_payload.get("sources")
+            if result_payload.get("embeds") is not None:
+                result_message["embeds"] = result_payload.get("embeds")
+            if result_payload.get("output") is not None:
+                result_message["output"] = result_payload.get("output")
+            if result_payload.get("files") is not None:
+                result_message["files"] = result_payload.get("files")
+
+            children_ids = list(accepted.get("childrenIds") or [])
+            if result_message_id not in children_ids:
+                children_ids.append(result_message_id)
+
+            _persist_message(
+                chat_id,
+                accepted_message_id,
+                {
+                    "id": accepted_message_id,
+                    "childrenIds": children_ids,
+                    "result_message_id": result_message_id,
+                },
+            )
+            _persist_message(chat_id, result_message_id, result_message)
+            return result_message_id
+
+        async def _emit_custom_event(__event_emitter__, event_type, data):
+            if __event_emitter__ is None:
+                return
+            await __event_emitter__({"type": event_type, "data": data})
+
+        def _poller_registry(app_state):
+            registry = getattr(app_state, "agent_nav_deep_job_pollers", None)
+            if not isinstance(registry, dict):
+                registry = {}
+                setattr(app_state, "agent_nav_deep_job_pollers", registry)
+            return registry
+
+        def _poller_key(chat_id, message_id, job_id):
+            return f"{chat_id}:{message_id}:{job_id}"
+
+        async def _wait_for_message_settle(chat_id, message_id):
+            deadline = time.time() + MESSAGE_SETTLE_TIMEOUT_SECONDS
+            last_seen = {}
+            while time.time() < deadline:
+                current = _load_message(chat_id, message_id) or {}
+                if current:
+                    last_seen = current
+                    if current.get("done") and current.get("output") is not None:
+                        return current
+                await asyncio.sleep(MESSAGE_SETTLE_POLL_SECONDS)
+            return last_seen
+
+        async def _reapply_terminal_branch(
+            chat_id,
+            message_id,
+            *,
+            content,
+            job_id,
+            status_url,
+            status,
+            result_message_id=None,
+            actions_disabled=True,
+        ):
+            for _ in range(max(int(TERMINAL_REAPPLY_ATTEMPTS), 1)):
+                await asyncio.sleep(TERMINAL_REAPPLY_DELAY_SECONDS)
+                _persist_terminal_message(
+                    chat_id,
+                    message_id,
+                    content=content,
+                    job_id=job_id,
+                    status_url=status_url,
+                    status=status,
+                    result_message_id=result_message_id,
+                    actions_disabled=actions_disabled,
+                )
+                if result_message_id:
+                    _persist_message(chat_id, result_message_id, {"id": result_message_id})
+
+        async def _run_auto_poll(
+            *,
+            app_state,
+            chat_id,
+            message_id,
+            model_name,
+            job_id,
+            status_url,
+            token,
+            __event_emitter__,
+        ):
+            registry = _poller_registry(app_state)
+            key = _poller_key(chat_id, message_id, job_id)
+            deadline = time.time() + AUTO_POLL_MAX_SECONDS
+            consecutive_errors = 0
+            await asyncio.sleep(AUTO_POLL_INTERVAL_SECONDS)
+
+            try:
+                while time.time() < deadline:
+                    entry = registry.get(key) or {}
+                    if entry.get("stop_requested"):
+                        return
+                    target_message_id = _resolve_job_message_id(chat_id, message_id, job_id, status_url)
+                    entry["resolved_message_id"] = target_message_id
+                    registry[key] = entry
+
+                    try:
+                        status_payload = await _request_json("GET", status_url, token)
+                    except Exception:
+                        consecutive_errors += 1
+                        if consecutive_errors >= AUTO_POLL_MAX_ERRORS:
+                            _persist_terminal_message(
+                                chat_id,
+                                target_message_id,
+                                content="Автообновление остановлено, используйте refresh.",
+                                job_id=job_id,
+                                status_url=status_url,
+                                status=str(entry.get("job_status") or "accepted"),
+                                result_message_id=entry.get("result_message_id"),
+                                actions_disabled=False,
+                            )
+                            await _emit_custom_event(
+                                __event_emitter__,
+                                "replace",
+                                {"content": "Автообновление остановлено, используйте refresh."},
+                            )
+                            return
+                        await asyncio.sleep(AUTO_POLL_INTERVAL_SECONDS)
+                        continue
+
+                    consecutive_errors = 0
+                    job_status = str(status_payload.get("status") or "unknown")
+                    current_message = _load_message(chat_id, target_message_id)
+                    if current_message:
+                        _persist_message(
+                            chat_id,
+                            target_message_id,
+                            {
+                                "id": target_message_id,
+                                "tool_job": _build_tool_job(job_id, status_url, job_status),
+                                "job_status": job_status,
+                                "actions_disabled": job_status in {"completed", "failed", "cancelled"},
+                            },
+                        )
+
+                    if job_status in {"accepted", "queued", "running", "cancelling", "unknown"}:
+                        current_status = str(entry.get("job_status") or "accepted")
+                        if job_status != current_status:
+                            entry["job_status"] = job_status
+                            registry[key] = entry
+                            _append_status(
+                                chat_id,
+                                target_message_id,
+                                {
+                                    "description": f"Статус deep-job изменился: {job_status}",
+                                    "status": job_status,
+                                    "job_id": job_id,
+                                    "status_url": status_url,
+                                    "tool_name": "__TOOL_NAME__",
+                                },
+                            )
+                        await asyncio.sleep(AUTO_POLL_INTERVAL_SECONDS)
+                        continue
+
+                    if job_status == "completed":
+                        await _wait_for_message_settle(chat_id, target_message_id)
+                        result_payload = await _request_json("GET", f"{status_url}/result", token)
+                        result_message_id = _create_result_message(
+                            chat_id,
+                            target_message_id,
+                            model_name=model_name,
+                            job_id=job_id,
+                            result_payload=result_payload,
+                        )
+                        entry["result_message_id"] = result_message_id
+                        entry["job_status"] = "completed"
+                        registry[key] = entry
+                        _persist_terminal_message(
+                            chat_id,
+                            target_message_id,
+                            content="Завершено — результат добавлен ниже.",
+                            job_id=job_id,
+                            status_url=status_url,
+                            status="completed",
+                            result_message_id=result_message_id,
+                            actions_disabled=True,
+                        )
+                        await _reapply_terminal_branch(
+                            chat_id,
+                            target_message_id,
+                            content="Завершено — результат добавлен ниже.",
+                            job_id=job_id,
+                            status_url=status_url,
+                            status="completed",
+                            result_message_id=result_message_id,
+                            actions_disabled=True,
+                        )
+                        await _emit_custom_event(
+                            __event_emitter__,
+                            "replace",
+                            {"content": "Завершено — результат добавлен ниже."},
+                        )
+                        await _emit_custom_event(
+                            __event_emitter__,
+                            "chat:message:new",
+                            {
+                                "message_id": result_message_id,
+                                "parent_message_id": target_message_id,
+                                "job_id": job_id,
+                                "reload": True,
+                            },
+                        )
+                        await _emit_custom_event(
+                            __event_emitter__,
+                            "chat:message:meta",
+                            {
+                                "job_status": "completed",
+                                "job_id": job_id,
+                                "status_url": status_url,
+                                "result_message_id": result_message_id,
+                                "actions_disabled": True,
+                                "reload": True,
+                            },
+                        )
+                        return
+
+                    terminal_content = (
+                        f"deep-job завершён со статусом {job_status}."
+                        if job_status != "cancelled"
+                        else "deep-job отменён."
+                    )
+                    error_summary = str(status_payload.get("error_summary") or "").strip()
+                    if error_summary:
+                        terminal_content = terminal_content + f"\\nerror: {error_summary}"
+                    await _wait_for_message_settle(chat_id, target_message_id)
+                    result_message_id = _create_result_message(
+                        chat_id,
+                        target_message_id,
+                        model_name=model_name,
+                        job_id=job_id,
+                        result_payload={"assistant_message": terminal_content},
+                    )
+                    entry["result_message_id"] = result_message_id
+                    entry["job_status"] = job_status
+                    registry[key] = entry
+                    _persist_terminal_message(
+                        chat_id,
+                        target_message_id,
+                        content=terminal_content,
+                        job_id=job_id,
+                        status_url=status_url,
+                        status=job_status,
+                        result_message_id=result_message_id,
+                        actions_disabled=True,
+                    )
+                    await _reapply_terminal_branch(
+                        chat_id,
+                        target_message_id,
+                        content=terminal_content,
+                        job_id=job_id,
+                        status_url=status_url,
+                        status=job_status,
+                        result_message_id=result_message_id,
+                        actions_disabled=True,
+                    )
+                    await _emit_custom_event(__event_emitter__, "replace", {"content": terminal_content})
+                    await _emit_custom_event(
+                        __event_emitter__,
+                        "chat:message:new",
+                        {
+                            "message_id": result_message_id,
+                            "parent_message_id": target_message_id,
+                            "job_id": job_id,
+                            "reload": True,
+                        },
+                    )
+                    await _emit_custom_event(
+                        __event_emitter__,
+                        "chat:message:meta",
+                        {
+                            "job_status": job_status,
+                            "job_id": job_id,
+                            "status_url": status_url,
+                            "result_message_id": result_message_id,
+                            "actions_disabled": True,
+                            "reload": True,
+                        },
+                    )
+                    return
+
+                _persist_terminal_message(
+                    chat_id,
+                    entry.get("resolved_message_id") or message_id,
+                    content="Автообновление остановлено, используйте refresh.",
+                    job_id=job_id,
+                    status_url=status_url,
+                    status="accepted",
+                    actions_disabled=False,
+                )
+                await _emit_custom_event(
+                    __event_emitter__,
+                    "replace",
+                    {"content": "Автообновление остановлено, используйте refresh."},
+                )
+                await _emit_custom_event(
+                    __event_emitter__,
+                    "chat:message:meta",
+                    {
+                        "job_status": "accepted",
+                        "job_id": job_id,
+                        "status_url": status_url,
+                        "result_message_id": None,
+                        "actions_disabled": False,
+                        "reload": True,
+                    },
+                )
+            finally:
+                registry.pop(key, None)
+
         class Tools:
             class Valves(BaseModel):
-                tool_server_base_url: str = "{container_tool_server_base_url}"
+                tool_server_base_url: str = "__TOOL_SERVER_BASE_URL__"
                 tool_server_token: str = "SET_OPENAPI_TOOL_SERVER_TOKEN"
-                priority: int = {priority}
+                priority: int = __PRIORITY__
 
             def __init__(self):
                 self.valves = self.Valves()
 
-            async def {method_name}(self, query: str) -> str:
+            async def __METHOD_NAME__(
+                self,
+                query: str,
+                __request__=None,
+                __event_emitter__=None,
+                __chat_id__=None,
+                __message_id__=None,
+                __model__=None,
+            ) -> str:
                 """
-                {action_label}.
+                __TOOL_SUMMARY__
 
-                :param query: Текстовый запрос пользователя для анализа оборудования.
-                :return: Готовый ответ backend tool server или accepted job summary.
+                Использовать, когда: __TOOL_USE_WHEN__
+
+                :param query: __TOOL_INPUT_SUMMARY__
+                :return: __TOOL_OUTPUT_SUMMARY__
                 """
-                payload = {{
+                payload = {
                     "equipment_query": query,
-                    {payload_line}
-                }}
-                payload = {{key: value for key, value in payload.items() if value is not None and value != ""}}
-                response = await _request_json(
-                    "POST",
-                    f"{{self.valves.tool_server_base_url}}/tools/{tool_name}",
-                    self.valves.tool_server_token,
-                    payload,
-                )
-
-                if response.get("status") == "accepted":
+                    "job_mode": "force_async",
+                }
+                payload = {key: value for key, value in payload.items() if value is not None and value != ""}
+                try:
+                    response = await _request_json(
+                        "POST",
+                        f"{self.valves.tool_server_base_url}/tools/__TOOL_NAME__",
+                        self.valves.tool_server_token,
+                        payload,
+                    )
+                except Exception as exc:
                     return (
-                        "Глубокий анализ принят как deep-job.\\n"
-                        f"job_id: {{response.get('job_id', 'unknown')}}\\n"
-                        f"status_url: {{response.get('status_url', '')}}"
+                        "Не удалось запустить deep-job.\\n"
+                        f"error: {exc}"
                     )
 
-                return response.get("assistant_message") or json.dumps(response, ensure_ascii=False, indent=2)
+                if response.get("status") == "accepted":
+                    status_url = str(response.get("status_url", ""))
+                    job_id = str(response.get("job_id", "unknown"))
+                    if not status_url or not job_id or job_id == "unknown":
+                        return (
+                            "Не удалось запустить deep-job.\\n"
+                            "Инструмент не вернул подтверждение запуска (`job_id` и `status_url`)."
+                        )
+                    if __request__ is not None and __chat_id__ and __message_id__:
+                        normalized_status_url = _absolute_status_url(self.valves.tool_server_base_url, status_url)
+                        registry = _poller_registry(__request__.app.state)
+                        key = _poller_key(str(__chat_id__), str(__message_id__), job_id)
+                        existing = registry.get(key)
+                        existing_task = existing.get("task") if isinstance(existing, dict) else None
+                        if existing_task is None or existing_task.done():
+                            model_name = getattr(__model__, "id", None) or getattr(__model__, "model", None) or str(__model__ or "__DEFAULT_MODEL__")
+                            entry = {
+                                "job_status": "accepted",
+                                "result_message_id": None,
+                                "stop_requested": False,
+                            }
+                            task = asyncio.create_task(
+                                _run_auto_poll(
+                                    app_state=__request__.app.state,
+                                    chat_id=str(__chat_id__),
+                                    message_id=str(__message_id__),
+                                    model_name=model_name,
+                                    job_id=job_id,
+                                    status_url=normalized_status_url,
+                                    token=self.valves.tool_server_token,
+                                    __event_emitter__=__event_emitter__,
+                                )
+                            )
+                            entry["task"] = task
+                            registry[key] = entry
+
+                    return (
+                        "Глубокий анализ принят как deep-job.\\n"
+                        f"job_id: {job_id}\\n"
+                        f"status_url: {status_url}"
+                    )
+
+                assistant_message = str(response.get("assistant_message") or "").strip()
+                if assistant_message:
+                    return assistant_message
+                return (
+                    "Не удалось запустить deep-job.\\n"
+                    "Инструмент не вернул подтверждение запуска (`job_id` и `status_url`)."
+                )
         '''
     ).strip()
+    return (
+        template.replace("__TOOL_SERVER_BASE_URL__", container_tool_server_base_url)
+        .replace("__PRIORITY__", str(priority))
+        .replace("__ACTION_LABEL__", action_label)
+        .replace("__TOOL_NAME__", tool_name)
+        .replace("__DEFAULT_MODEL__", OPENWEBUI_DEFAULT_MODEL)
+        .replace("__METHOD_NAME__", method_name)
+        .replace("__TOOL_SUMMARY__", tool.summary)
+        .replace("__TOOL_USE_WHEN__", tool.use_when)
+        .replace("__TOOL_INPUT_SUMMARY__", tool.input_summary)
+        .replace("__TOOL_OUTPUT_SUMMARY__", tool.output_summary)
+    )
 
 
 def _build_equipment_action_code(
     *,
     container_tool_server_base_url: str,
-    tool_name: str,
+    tool_name: ToolName,
     action_label: str,
     force_async: bool,
     priority: int,
 ) -> str:
-    payload_line = '"job_mode": "force_async",' if force_async else ""
-    return dedent(
-        f"""
+    if not force_async:
+        payload_line = '"job_mode": "force_async",' if force_async else ""
+        template = dedent(
+            """
+            import asyncio
+            import json
+            import urllib.error
+            import urllib.request
+            from pydantic import BaseModel
+
+            def _content_to_text(content):
+                if isinstance(content, str):
+                    return content.strip()
+                if isinstance(content, list):
+                    chunks = []
+                    for item in content:
+                        if isinstance(item, dict) and item.get("type") == "text":
+                            value = str(item.get("text", "")).strip()
+                            if value:
+                                chunks.append(value)
+                    return "\\n".join(chunks).strip()
+                if isinstance(content, dict):
+                    return str(content.get("content", "")).strip()
+                return ""
+
+            def _extract_last_user_text(body):
+                messages = body.get("messages") or []
+                for message in reversed(messages):
+                    if message.get("role") == "user":
+                        text = _content_to_text(message.get("content"))
+                        if text:
+                            return text
+                return _content_to_text(body.get("content")) or _content_to_text(body.get("message", {}).get("content"))
+
+            async def _request_json(method, url, token, payload=None):
+                def _do_request():
+                    data = None if payload is None else json.dumps(payload).encode("utf-8")
+                    request = urllib.request.Request(
+                        url,
+                        data=data,
+                        method=method,
+                        headers={
+                            "Authorization": f"Bearer {token}",
+                            "Content-Type": "application/json",
+                        },
+                    )
+                    with urllib.request.urlopen(request, timeout=45) as response:
+                        return json.loads(response.read().decode("utf-8"))
+
+                return await asyncio.to_thread(_do_request)
+
+            class Action:
+                class Valves(BaseModel):
+                    tool_server_base_url: str = "__TOOL_SERVER_BASE_URL__"
+                    tool_server_token: str = "SET_OPENAPI_TOOL_SERVER_TOKEN"
+                    priority: int = __PRIORITY__
+
+                def __init__(self):
+                    self.valves = self.Valves()
+
+                async def action(self, body: dict, __event_emitter__=None, __event_call__=None, __id__=None):
+                    user_text = _extract_last_user_text(body)
+                    if not user_text:
+                        return {"content": "Не удалось определить последний пользовательский запрос для `__ACTION_LABEL__`."}
+
+                    if __event_emitter__:
+                        await __event_emitter__(
+                            {
+                                "type": "status",
+                                "data": {"description": "Запускаю `__TOOL_NAME__` через Agent Navigator Tools..."},
+                            }
+                        )
+
+                    payload = {
+                        "equipment_query": user_text,
+                        __PAYLOAD_LINE__
+                    }
+                    payload = {key: value for key, value in payload.items() if value is not None and value != ""}
+                    response = await _request_json(
+                        "POST",
+                        f"{self.valves.tool_server_base_url}/tools/__TOOL_NAME__",
+                        self.valves.tool_server_token,
+                        payload,
+                    )
+
+                    if response.get("status") == "accepted":
+                        status_url = response.get("status_url", "")
+                        job_id = response.get("job_id", "unknown")
+                        if __event_emitter__:
+                            await __event_emitter__(
+                                {
+                                    "type": "status",
+                                    "data": {
+                                        "description": (
+                                            f"`__ACTION_LABEL__` принят как deep-job.\\n"
+                                            f"job_id: {job_id}\\n"
+                                            f"status_url: {status_url}"
+                                        ),
+                                        "status": "accepted",
+                                        "job_id": job_id,
+                                        "status_url": status_url,
+                                        "tool_name": "__TOOL_NAME__",
+                                    },
+                                }
+                            )
+                        return {
+                            "content": (
+                                f"`__ACTION_LABEL__` принят как deep-job.\\n"
+                                f"job_id: {job_id}\\n"
+                                f"status_url: {status_url}"
+                            ),
+                            "job_id": job_id,
+                            "status_url": status_url,
+                            "tool_job": {
+                                "job_id": job_id,
+                                "status_url": status_url,
+                                "tool_name": "__TOOL_NAME__",
+                                "status": "accepted",
+                            },
+                        }
+
+                    return {
+                        "content": response.get("assistant_message") or json.dumps(response, ensure_ascii=False, indent=2)
+                    }
+            """
+        ).strip()
+        return (
+            template.replace("__TOOL_SERVER_BASE_URL__", container_tool_server_base_url)
+            .replace("__PRIORITY__", str(priority))
+            .replace("__ACTION_LABEL__", action_label)
+            .replace("__TOOL_NAME__", tool_name)
+            .replace("__PAYLOAD_LINE__", payload_line)
+        )
+
+    template = dedent(
+        """
         import asyncio
         import json
+        import time
         import urllib.error
         import urllib.request
+        from uuid import uuid4
         from pydantic import BaseModel
+
+        AUTO_POLL_INTERVAL_SECONDS = 2
+        AUTO_POLL_MAX_SECONDS = 900
+        AUTO_POLL_MAX_ERRORS = 3
+        MESSAGE_SETTLE_TIMEOUT_SECONDS = 5
+        MESSAGE_SETTLE_POLL_SECONDS = 0.1
+        TERMINAL_REAPPLY_DELAY_SECONDS = 0.5
+        TERMINAL_REAPPLY_ATTEMPTS = 5
+
+        def _tool_server_origin(tool_server_base_url):
+            return str(tool_server_base_url).split("/tool-server", 1)[0].rstrip("/")
+
+        def _absolute_status_url(tool_server_base_url, candidate):
+            candidate = str(candidate or "").strip()
+            if not candidate:
+                return candidate
+            if candidate.startswith("http://") or candidate.startswith("https://"):
+                return candidate
+            if candidate.startswith("/"):
+                return f"{_tool_server_origin(tool_server_base_url)}{candidate}"
+            return f"{_tool_server_origin(tool_server_base_url)}/{candidate.lstrip('/')}"
 
         def _content_to_text(content):
             if isinstance(content, str):
@@ -560,7 +1413,7 @@ def _build_equipment_action_code(
                     text = _content_to_text(message.get("content"))
                     if text:
                         return text
-            return _content_to_text(body.get("content")) or _content_to_text(body.get("message", {{}}).get("content"))
+            return _content_to_text(body.get("content")) or _content_to_text(body.get("message", {}).get("content"))
 
         async def _request_json(method, url, token, payload=None):
             def _do_request():
@@ -569,104 +1422,548 @@ def _build_equipment_action_code(
                     url,
                     data=data,
                     method=method,
-                    headers={{
-                        "Authorization": f"Bearer {{token}}",
+                    headers={
+                        "Authorization": f"Bearer {token}",
                         "Content-Type": "application/json",
-                    }},
+                    },
                 )
                 with urllib.request.urlopen(request, timeout=45) as response:
                     return json.loads(response.read().decode("utf-8"))
 
             return await asyncio.to_thread(_do_request)
 
+        def _load_message(chat_id, message_id):
+            try:
+                from open_webui.models.chats import Chats
+            except Exception:
+                return {}
+            try:
+                return Chats.get_message_by_id_and_message_id(chat_id, message_id) or {}
+            except Exception:
+                return {}
+
+        def _persist_message(chat_id, message_id, patch):
+            try:
+                from open_webui.models.chats import Chats
+            except Exception:
+                return None
+            try:
+                return Chats.upsert_message_to_chat_by_id_and_message_id(chat_id, message_id, patch)
+            except Exception:
+                return None
+
+        def _append_status(chat_id, message_id, status):
+            try:
+                from open_webui.models.chats import Chats
+            except Exception:
+                return None
+            try:
+                return Chats.add_message_status_to_chat_by_id_and_message_id(chat_id, message_id, status)
+            except Exception:
+                return None
+
+        def _build_tool_job(job_id, status_url, status):
+            return {
+                "job_id": job_id,
+                "status_url": status_url,
+                "tool_name": "__TOOL_NAME__",
+                "status": status,
+            }
+
+        def _persist_job_state(chat_id, message_id, *, content, job_id, status_url, status, result_message_id=None, actions_disabled=False):
+            existing = _load_message(chat_id, message_id)
+            children_ids = list(existing.get("childrenIds") or [])
+            patch = {
+                "id": message_id,
+                "role": existing.get("role", "assistant"),
+                "content": content,
+                "done": True,
+                "childrenIds": children_ids,
+                "tool_job": _build_tool_job(job_id, status_url, status),
+                "job_status": status,
+                "actions_disabled": actions_disabled,
+            }
+            if result_message_id:
+                patch["result_message_id"] = result_message_id
+            _persist_message(chat_id, message_id, patch)
+            return patch
+
+        def _create_result_message(chat_id, accepted_message_id, *, model_name, job_id, result_payload):
+            accepted = _load_message(chat_id, accepted_message_id)
+            existing_result_id = str(accepted.get("result_message_id") or "").strip()
+            if existing_result_id:
+                return existing_result_id
+
+            result_message_id = str(uuid4())
+            result_message = {
+                "id": result_message_id,
+                "parentId": accepted_message_id,
+                "childrenIds": [],
+                "role": "assistant",
+                "content": result_payload.get("assistant_message") or json.dumps(result_payload, ensure_ascii=False, indent=2),
+                "model": model_name or accepted.get("model") or "__DEFAULT_MODEL__",
+                "timestamp": int(time.time()),
+                "done": True,
+                "job_id": job_id,
+                "tool_job_result_for": accepted_message_id,
+            }
+            if result_payload.get("sources") is not None:
+                result_message["sources"] = result_payload.get("sources")
+            if result_payload.get("embeds") is not None:
+                result_message["embeds"] = result_payload.get("embeds")
+            if result_payload.get("output") is not None:
+                result_message["output"] = result_payload.get("output")
+            if result_payload.get("files") is not None:
+                result_message["files"] = result_payload.get("files")
+
+            children_ids = list(accepted.get("childrenIds") or [])
+            if result_message_id not in children_ids:
+                children_ids.append(result_message_id)
+
+            _persist_message(
+                chat_id,
+                accepted_message_id,
+                {
+                    "id": accepted_message_id,
+                    "childrenIds": children_ids,
+                    "result_message_id": result_message_id,
+                },
+            )
+            _persist_message(chat_id, result_message_id, result_message)
+            return result_message_id
+
+        async def _emit_custom_event(__event_emitter__, event_type, data):
+            if __event_emitter__ is None:
+                return
+            await __event_emitter__({"type": event_type, "data": data})
+
+        def _poller_registry(app_state):
+            registry = getattr(app_state, "agent_nav_deep_job_pollers", None)
+            if not isinstance(registry, dict):
+                registry = {}
+                setattr(app_state, "agent_nav_deep_job_pollers", registry)
+            return registry
+
+        def _poller_key(chat_id, message_id, job_id):
+            return f"{chat_id}:{message_id}:{job_id}"
+
+        async def _wait_for_message_settle(chat_id, message_id):
+            deadline = time.time() + MESSAGE_SETTLE_TIMEOUT_SECONDS
+            last_seen = {}
+            while time.time() < deadline:
+                current = _load_message(chat_id, message_id) or {}
+                if current:
+                    last_seen = current
+                    if current.get("done") and current.get("output") is not None:
+                        return current
+                await asyncio.sleep(MESSAGE_SETTLE_POLL_SECONDS)
+            return last_seen
+
+        async def _reapply_terminal_branch(
+            chat_id,
+            message_id,
+            *,
+            content,
+            job_id,
+            status_url,
+            status,
+            result_message_id=None,
+            actions_disabled=True,
+        ):
+            for _ in range(max(int(TERMINAL_REAPPLY_ATTEMPTS), 1)):
+                await asyncio.sleep(TERMINAL_REAPPLY_DELAY_SECONDS)
+                _persist_job_state(
+                    chat_id,
+                    message_id,
+                    content=content,
+                    job_id=job_id,
+                    status_url=status_url,
+                    status=status,
+                    result_message_id=result_message_id,
+                    actions_disabled=actions_disabled,
+                )
+                if result_message_id:
+                    _persist_message(chat_id, result_message_id, {"id": result_message_id})
+
+        async def _run_auto_poll(
+            *,
+            app_state,
+            chat_id,
+            message_id,
+            model_name,
+            job_id,
+            status_url,
+            token,
+            __event_emitter__,
+        ):
+            registry = _poller_registry(app_state)
+            key = _poller_key(chat_id, message_id, job_id)
+            deadline = time.time() + AUTO_POLL_MAX_SECONDS
+            consecutive_errors = 0
+
+            try:
+                while time.time() < deadline:
+                    entry = registry.get(key) or {}
+                    if entry.get("stop_requested"):
+                        return
+
+                    try:
+                        status_payload = await _request_json("GET", status_url, token)
+                    except Exception:
+                        consecutive_errors += 1
+                        if consecutive_errors >= AUTO_POLL_MAX_ERRORS:
+                            _persist_job_state(
+                                chat_id,
+                                message_id,
+                                content="Автообновление остановлено, используйте refresh.",
+                                job_id=job_id,
+                                status_url=status_url,
+                                status="accepted",
+                                result_message_id=entry.get("result_message_id"),
+                                actions_disabled=False,
+                            )
+                            await _emit_custom_event(
+                                __event_emitter__,
+                                "replace",
+                                {"content": "Автообновление остановлено, используйте refresh."},
+                            )
+                            return
+                        await asyncio.sleep(AUTO_POLL_INTERVAL_SECONDS)
+                        continue
+
+                    consecutive_errors = 0
+                    job_status = str(status_payload.get("status") or "unknown")
+
+                    if job_status in {"accepted", "queued", "running", "cancelling", "unknown"}:
+                        current_status = str(entry.get("job_status") or "accepted")
+                        if job_status != current_status:
+                            entry["job_status"] = job_status
+                            registry[key] = entry
+                            _append_status(
+                                chat_id,
+                                message_id,
+                                {
+                                    "description": f"Текущий статус deep-job: {job_status}",
+                                    "status": job_status,
+                                    "job_id": job_id,
+                                    "status_url": status_url,
+                                    "tool_name": "__TOOL_NAME__",
+                                },
+                            )
+                        await asyncio.sleep(AUTO_POLL_INTERVAL_SECONDS)
+                        continue
+
+                    if job_status == "completed":
+                        await _wait_for_message_settle(chat_id, message_id)
+                        result_payload = await _request_json("GET", f"{status_url}/result", token)
+                        result_message_id = _create_result_message(
+                            chat_id,
+                            message_id,
+                            model_name=model_name,
+                            job_id=job_id,
+                            result_payload=result_payload,
+                        )
+                        entry["result_message_id"] = result_message_id
+                        entry["job_status"] = "completed"
+                        registry[key] = entry
+                        _persist_job_state(
+                            chat_id,
+                            message_id,
+                            content="Завершено — результат добавлен ниже.",
+                            job_id=job_id,
+                            status_url=status_url,
+                            status="completed",
+                            result_message_id=result_message_id,
+                            actions_disabled=True,
+                        )
+                        await _reapply_terminal_branch(
+                            chat_id,
+                            message_id,
+                            content="Завершено — результат добавлен ниже.",
+                            job_id=job_id,
+                            status_url=status_url,
+                            status="completed",
+                            result_message_id=result_message_id,
+                            actions_disabled=True,
+                        )
+                        await _emit_custom_event(
+                            __event_emitter__,
+                            "replace",
+                            {"content": "Завершено — результат добавлен ниже."},
+                        )
+                        await _emit_custom_event(
+                            __event_emitter__,
+                            "chat:message:new",
+                            {
+                                "message_id": result_message_id,
+                                "parent_message_id": message_id,
+                                "job_id": job_id,
+                                "reload": True,
+                            },
+                        )
+                        await _emit_custom_event(
+                            __event_emitter__,
+                            "chat:message:meta",
+                            {
+                                "job_status": "completed",
+                                "job_id": job_id,
+                                "status_url": status_url,
+                                "result_message_id": result_message_id,
+                                "actions_disabled": True,
+                                "reload": True,
+                            },
+                        )
+                        return
+
+                    terminal_content = (
+                        f"deep-job завершён со статусом {job_status}."
+                        if job_status != "cancelled"
+                        else "deep-job отменён."
+                    )
+                    error_summary = str(status_payload.get("error_summary") or "").strip()
+                    if error_summary:
+                        terminal_content = terminal_content + f"\\nerror: {error_summary}"
+                    await _wait_for_message_settle(chat_id, message_id)
+                    result_message_id = _create_result_message(
+                        chat_id,
+                        message_id,
+                        model_name=model_name,
+                        job_id=job_id,
+                        result_payload={"assistant_message": terminal_content},
+                    )
+                    entry["result_message_id"] = result_message_id
+                    entry["job_status"] = job_status
+                    registry[key] = entry
+                    _persist_job_state(
+                        chat_id,
+                        message_id,
+                        content=terminal_content,
+                        job_id=job_id,
+                        status_url=status_url,
+                        status=job_status,
+                        result_message_id=result_message_id,
+                        actions_disabled=True,
+                    )
+                    await _reapply_terminal_branch(
+                        chat_id,
+                        message_id,
+                        content=terminal_content,
+                        job_id=job_id,
+                        status_url=status_url,
+                        status=job_status,
+                        result_message_id=result_message_id,
+                        actions_disabled=True,
+                    )
+                    await _emit_custom_event(__event_emitter__, "replace", {"content": terminal_content})
+                    await _emit_custom_event(
+                        __event_emitter__,
+                        "chat:message:new",
+                        {
+                            "message_id": result_message_id,
+                            "parent_message_id": message_id,
+                            "job_id": job_id,
+                            "reload": True,
+                        },
+                    )
+                    await _emit_custom_event(
+                        __event_emitter__,
+                        "chat:message:meta",
+                        {
+                            "job_status": job_status,
+                            "job_id": job_id,
+                            "status_url": status_url,
+                            "result_message_id": result_message_id,
+                            "actions_disabled": True,
+                            "reload": True,
+                        },
+                    )
+                    return
+
+                _persist_job_state(
+                    chat_id,
+                    message_id,
+                    content="Автообновление остановлено, используйте refresh.",
+                    job_id=job_id,
+                    status_url=status_url,
+                    status="accepted",
+                    actions_disabled=False,
+                )
+                await _emit_custom_event(
+                    __event_emitter__,
+                    "replace",
+                    {"content": "Автообновление остановлено, используйте refresh."},
+                )
+                await _emit_custom_event(
+                    __event_emitter__,
+                    "chat:message:meta",
+                    {
+                        "job_status": "accepted",
+                        "job_id": job_id,
+                        "status_url": status_url,
+                        "result_message_id": None,
+                        "actions_disabled": False,
+                        "reload": True,
+                    },
+                )
+            finally:
+                registry.pop(key, None)
+
         class Action:
             class Valves(BaseModel):
-                tool_server_base_url: str = "{container_tool_server_base_url}"
+                tool_server_base_url: str = "__TOOL_SERVER_BASE_URL__"
                 tool_server_token: str = "SET_OPENAPI_TOOL_SERVER_TOKEN"
-                priority: int = {priority}
+                priority: int = __PRIORITY__
 
             def __init__(self):
                 self.valves = self.Valves()
 
-            async def action(self, body: dict, __event_emitter__=None, __event_call__=None, __id__=None):
+            async def action(self, body: dict, __event_emitter__=None, __event_call__=None, __id__=None, __request__=None):
                 user_text = _extract_last_user_text(body)
                 if not user_text:
-                    return {{"content": "Не удалось определить последний пользовательский запрос для `{action_label}`."}}
+                    return {"content": "Не удалось определить последний пользовательский запрос для `__ACTION_LABEL__`."}
 
-                if __event_emitter__ and not {force_async}:
-                    await __event_emitter__({{
-                        "type": "status",
-                        "data": {{"description": "Запускаю `{tool_name}` через Agent Navigator Tools..."}},
-                    }})
-
-                payload = {{
+                payload = {
                     "equipment_query": user_text,
-                    {payload_line}
-                }}
-                payload = {{key: value for key, value in payload.items() if value is not None and value != ""}}
-                response = await _request_json(
-                    "POST",
-                    f"{{self.valves.tool_server_base_url}}/tools/{tool_name}",
-                    self.valves.tool_server_token,
-                    payload,
-                )
+                    "job_mode": "force_async",
+                }
+                try:
+                    response = await _request_json(
+                        "POST",
+                        f"{self.valves.tool_server_base_url}/tools/__TOOL_NAME__",
+                        self.valves.tool_server_token,
+                        payload,
+                    )
+                except Exception as exc:
+                    return {
+                        "content": (
+                            "Не удалось запустить deep-job.\\n"
+                            f"error: {exc}"
+                        )
+                    }
 
                 if response.get("status") == "accepted":
                     status_url = response.get("status_url", "")
+                    normalized_status_url = _absolute_status_url(self.valves.tool_server_base_url, status_url)
                     job_id = response.get("job_id", "unknown")
+                    if not str(status_url or "").strip() or not str(job_id or "").strip() or str(job_id) == "unknown":
+                        return {
+                            "content": (
+                                "Не удалось запустить deep-job.\\n"
+                                "Инструмент не вернул подтверждение запуска (`job_id` и `status_url`)."
+                            )
+                        }
+                    accepted_content = (
+                        f"`__ACTION_LABEL__` принят как deep-job.\\n"
+                        f"job_id: {job_id}\\n"
+                        f"status_url: {status_url}"
+                    )
                     if __event_emitter__:
-                        await __event_emitter__({{
-                            "type": "status",
-                            "data": {{
-                                "description": (
-                                    f"`{action_label}` принят как deep-job.\\n"
-                                    f"job_id: {{job_id}}\\n"
-                                    f"status_url: {{status_url}}"
-                                ),
-                                "status": "accepted",
+                        await __event_emitter__(
+                            {
+                                "type": "status",
+                                "data": {
+                                    "description": accepted_content,
+                                    "status": "accepted",
+                                    "job_id": job_id,
+                                    "status_url": status_url,
+                                    "tool_name": "__TOOL_NAME__",
+                                },
+                            }
+                        )
+
+                    chat_id = str(body.get("chat_id") or "").strip()
+                    message_id = str(body.get("id") or "").strip()
+                    if __request__ is not None and chat_id and message_id:
+                        _persist_job_state(
+                            chat_id,
+                            message_id,
+                            content=accepted_content,
+                            job_id=job_id,
+                            status_url=status_url,
+                            status="accepted",
+                            actions_disabled=False,
+                        )
+                        await _emit_custom_event(
+                            __event_emitter__,
+                            "chat:message:meta",
+                            {
+                                "job_status": "accepted",
                                 "job_id": job_id,
                                 "status_url": status_url,
-                                "tool_name": "{tool_name}",
-                            }},
-                        }})
-                    return {{
-                        "content": (
-                            f"`{action_label}` принят как deep-job.\\n"
-                            f"job_id: {{job_id}}\\n"
-                            f"status_url: {{status_url}}"
-                        ),
+                                "result_message_id": None,
+                                "actions_disabled": False,
+                                "reload": False,
+                            },
+                        )
+                        registry = _poller_registry(__request__.app.state)
+                        key = _poller_key(chat_id, message_id, job_id)
+                        existing = registry.get(key)
+                        existing_task = existing.get("task") if isinstance(existing, dict) else None
+                        if existing_task is None or existing_task.done():
+                            entry = {
+                                "job_status": "accepted",
+                                "result_message_id": None,
+                                "stop_requested": False,
+                            }
+                            task = asyncio.create_task(
+                                _run_auto_poll(
+                                    app_state=__request__.app.state,
+                                    chat_id=chat_id,
+                                    message_id=message_id,
+                                    model_name=str(body.get("model") or "__DEFAULT_MODEL__"),
+                                    job_id=job_id,
+                                    status_url=normalized_status_url,
+                                    token=self.valves.tool_server_token,
+                                    __event_emitter__=__event_emitter__,
+                                )
+                            )
+                            entry["task"] = task
+                            registry[key] = entry
+
+                    return {
+                        "content": accepted_content,
                         "job_id": job_id,
                         "status_url": status_url,
-                        "tool_job": {{
-                            "job_id": job_id,
-                            "status_url": status_url,
-                            "tool_name": "{tool_name}",
-                            "status": "accepted",
-                        }},
-                    }}
+                        "job_status": "accepted",
+                        "tool_job": _build_tool_job(job_id, status_url, "accepted"),
+                    }
 
-                return {{
-                    "content": response.get("assistant_message")
-                    or json.dumps(response, ensure_ascii=False, indent=2)
-                }}
+                assistant_message = str(response.get("assistant_message") or "").strip()
+                if assistant_message:
+                    return {"content": assistant_message}
+                return {
+                    "content": (
+                        "Не удалось запустить deep-job.\\n"
+                        "Инструмент не вернул подтверждение запуска (`job_id` и `status_url`)."
+                    )
+                }
         """
     ).strip()
+    return (
+        template.replace("__TOOL_SERVER_BASE_URL__", container_tool_server_base_url)
+        .replace("__PRIORITY__", str(priority))
+        .replace("__ACTION_LABEL__", action_label)
+        .replace("__TOOL_NAME__", tool_name)
+        .replace("__DEFAULT_MODEL__", OPENWEBUI_DEFAULT_MODEL)
+    )
 
 
 def _build_tool_job_refresh_action_code(*, container_tool_server_base_url: str) -> str:
-    return dedent(
-        f"""
+    template = dedent(
+        """
         import asyncio
         import json
         import re
+        import time
         import urllib.error
         import urllib.request
         from urllib.parse import urlsplit
+        from uuid import uuid4
         from pydantic import BaseModel
 
         def _tool_server_origin(tool_server_base_url):
             parsed = urlsplit(tool_server_base_url)
-            return f"{{parsed.scheme}}://{{parsed.netloc}}"
+            return f"{parsed.scheme}://{parsed.netloc}"
 
         def _normalize_status_url(candidate, tool_server_base_url):
             if not candidate:
@@ -677,16 +1974,19 @@ def _build_tool_job_refresh_action_code(*, container_tool_server_base_url: str) 
             if candidate.startswith("http://") or candidate.startswith("https://"):
                 return candidate
             if candidate.startswith("/"):
-                return f"{{_tool_server_origin(tool_server_base_url)}}{{candidate}}"
-            return f"{{_tool_server_origin(tool_server_base_url)}}/{{candidate.lstrip('/')}}"
+                return f"{_tool_server_origin(tool_server_base_url)}{candidate}"
+            return f"{_tool_server_origin(tool_server_base_url)}/{candidate.lstrip('/')}"
 
         def _extract_tool_job_context(payload):
             if isinstance(payload, dict):
                 if payload.get("status_url") or payload.get("job_id"):
-                    return {{
+                    return {
                         "status_url": payload.get("status_url"),
                         "job_id": payload.get("job_id"),
-                    }}
+                        "tool_name": payload.get("tool_name"),
+                        "status": payload.get("status") or payload.get("job_status"),
+                        "result_message_id": payload.get("result_message_id"),
+                    }
                 status_history = payload.get("statusHistory")
                 if isinstance(status_history, list):
                     nested = _extract_tool_job_context(status_history)
@@ -725,9 +2025,9 @@ def _build_tool_job_refresh_action_code(*, container_tool_server_base_url: str) 
                 return None
             if chat_item is None:
                 return None
-            chat_payload = getattr(chat_item, "chat", None) or {{}}
-            history = chat_payload.get("history", {{}}) if isinstance(chat_payload, dict) else {{}}
-            messages = history.get("messages", {{}}) if isinstance(history, dict) else {{}}
+            chat_payload = getattr(chat_item, "chat", None) or {}
+            history = chat_payload.get("history", {}) if isinstance(chat_payload, dict) else {}
+            messages = history.get("messages", {}) if isinstance(history, dict) else {}
             if not isinstance(messages, dict):
                 return None
 
@@ -758,86 +2058,349 @@ def _build_tool_job_refresh_action_code(*, container_tool_server_base_url: str) 
                     return nested
             return None
 
-        def _extract_status_url(body, tool_server_base_url):
-            context = _extract_tool_job_context(body) or _extract_tool_job_context_from_chat(body)
-            if context:
-                status_url = _normalize_status_url(context.get("status_url"), tool_server_base_url)
-                if status_url:
-                    return status_url
-                job_id = str(context.get("job_id") or "").strip()
-                if job_id:
-                    return f"{{_tool_server_origin(tool_server_base_url)}}/tool-server/tool-jobs/{{job_id}}"
-            serialized = json.dumps(body, ensure_ascii=False)
-            full_match = re.search(r"https?://[^\\s\\\"]+/tool-server/tool-jobs/[A-Za-z0-9._-]+", serialized)
-            if full_match:
-                return full_match.group(0)
-            path_match = re.search(r"/tool-server/tool-jobs/[A-Za-z0-9._-]+", serialized)
-            if path_match:
-                return f"{{_tool_server_origin(tool_server_base_url)}}{{path_match.group(0)}}"
-            return None
+        def _extract_status_context(body, tool_server_base_url):
+            context = _extract_tool_job_context(body) or _extract_tool_job_context_from_chat(body) or {}
+            status_url = _normalize_status_url(context.get("status_url"), tool_server_base_url)
+            job_id = str(context.get("job_id") or "").strip()
+            if not status_url and job_id:
+                status_url = f"{_tool_server_origin(tool_server_base_url)}/tool-server/tool-jobs/{job_id}"
+            if not status_url:
+                serialized = json.dumps(body, ensure_ascii=False)
+                full_match = re.search(r"https?://[^\\s\\\"]+/tool-server/tool-jobs/[A-Za-z0-9._-]+", serialized)
+                if full_match:
+                    status_url = full_match.group(0)
+                else:
+                    path_match = re.search(r"/tool-server/tool-jobs/[A-Za-z0-9._-]+", serialized)
+                    if path_match:
+                        status_url = f"{_tool_server_origin(tool_server_base_url)}{path_match.group(0)}"
+            return {
+                "status_url": status_url,
+                "job_id": job_id or None,
+                "tool_name": context.get("tool_name"),
+                "status": context.get("status"),
+                "chat_id": str(body.get("chat_id") or "").strip(),
+                "message_id": str(body.get("id") or "").strip(),
+                "result_message_id": str(context.get("result_message_id") or "").strip() or None,
+            }
+
+        def _extract_error_text(payload, default="unknown-error"):
+            if isinstance(payload, dict):
+                detail = payload.get("detail")
+                if isinstance(detail, dict):
+                    for key in ("message", "reason", "status", "detail"):
+                        value = str(detail.get(key) or "").strip()
+                        if value:
+                            return value
+                if detail is not None:
+                    text = str(detail).strip()
+                    if text:
+                        return text
+                for key in ("message", "error_summary", "reason"):
+                    value = str(payload.get(key) or "").strip()
+                    if value:
+                        return value
+            text = str(payload or "").strip()
+            return text or default
 
         async def _request_json(method, url, token):
             def _do_request():
                 request = urllib.request.Request(
                     url,
                     method=method,
-                    headers={{
-                        "Authorization": f"Bearer {{token}}",
+                    headers={
+                        "Authorization": f"Bearer {token}",
                         "Content-Type": "application/json",
-                    }},
+                    },
                 )
-                with urllib.request.urlopen(request, timeout=45) as response:
-                    return json.loads(response.read().decode("utf-8"))
+                try:
+                    with urllib.request.urlopen(request, timeout=45) as response:
+                        return {
+                            "status_code": int(getattr(response, "status", 200) or 200),
+                            "payload": json.loads(response.read().decode("utf-8")),
+                        }
+                except urllib.error.HTTPError as exc:
+                    raw_payload = exc.read().decode("utf-8", errors="ignore")
+                    try:
+                        payload = json.loads(raw_payload) if raw_payload else {}
+                    except Exception:
+                        payload = {"detail": raw_payload or str(exc)}
+                    return {
+                        "status_code": int(exc.code or 500),
+                        "payload": payload,
+                    }
+                except urllib.error.URLError as exc:
+                    return {
+                        "status_code": 599,
+                        "payload": {"detail": str(getattr(exc, "reason", exc))},
+                    }
 
             return await asyncio.to_thread(_do_request)
 
+        def _load_message(chat_id, message_id):
+            if not chat_id or not message_id:
+                return {}
+            try:
+                from open_webui.models.chats import Chats
+            except Exception:
+                return {}
+            try:
+                return Chats.get_message_by_id_and_message_id(chat_id, message_id) or {}
+            except Exception:
+                return {}
+
+        def _persist_message(chat_id, message_id, patch):
+            if not chat_id or not message_id:
+                return None
+            try:
+                from open_webui.models.chats import Chats
+            except Exception:
+                return None
+            try:
+                return Chats.upsert_message_to_chat_by_id_and_message_id(chat_id, message_id, patch)
+            except Exception:
+                return None
+
+        def _build_tool_job(job_id, status_url, status, tool_name):
+            return {
+                "job_id": job_id,
+                "status_url": status_url,
+                "tool_name": tool_name,
+                "status": status,
+            }
+
+        def _create_result_message(chat_id, accepted_message_id, *, model_name, job_id, result_payload):
+            accepted = _load_message(chat_id, accepted_message_id)
+            existing_result_id = str(accepted.get("result_message_id") or "").strip()
+            if existing_result_id:
+                return existing_result_id
+
+            result_message_id = str(uuid4())
+            result_message = {
+                "id": result_message_id,
+                "parentId": accepted_message_id,
+                "childrenIds": [],
+                "role": "assistant",
+                "content": result_payload.get("assistant_message") or json.dumps(result_payload, ensure_ascii=False, indent=2),
+                "model": model_name or accepted.get("model") or "__DEFAULT_MODEL__",
+                "timestamp": int(time.time()),
+                "done": True,
+                "job_id": job_id,
+                "tool_job_result_for": accepted_message_id,
+            }
+            if result_payload.get("sources") is not None:
+                result_message["sources"] = result_payload.get("sources")
+            if result_payload.get("embeds") is not None:
+                result_message["embeds"] = result_payload.get("embeds")
+            if result_payload.get("output") is not None:
+                result_message["output"] = result_payload.get("output")
+            if result_payload.get("files") is not None:
+                result_message["files"] = result_payload.get("files")
+
+            children_ids = list(accepted.get("childrenIds") or [])
+            if result_message_id not in children_ids:
+                children_ids.append(result_message_id)
+            _persist_message(
+                chat_id,
+                accepted_message_id,
+                {
+                    "id": accepted_message_id,
+                    "childrenIds": children_ids,
+                    "result_message_id": result_message_id,
+                },
+            )
+            _persist_message(chat_id, result_message_id, result_message)
+            return result_message_id
+
+        async def _emit_custom_event(__event_emitter__, event_type, data):
+            if __event_emitter__ is None:
+                return
+            await __event_emitter__({"type": event_type, "data": data})
+
         class Action:
             class Valves(BaseModel):
-                tool_server_base_url: str = "{container_tool_server_base_url}"
+                tool_server_base_url: str = "__TOOL_SERVER_BASE_URL__"
                 tool_server_token: str = "SET_OPENAPI_TOOL_SERVER_TOKEN"
                 priority: int = 30
 
             def __init__(self):
                 self.valves = self.Valves()
 
-            async def action(self, body: dict, __event_emitter__=None, __event_call__=None, __id__=None):
-                status_url = _extract_status_url(body, self.valves.tool_server_base_url)
+            async def action(self, body: dict, __event_emitter__=None, __event_call__=None, __id__=None, __request__=None):
+                context = _extract_status_context(body, self.valves.tool_server_base_url)
+                status_url = context.get("status_url")
                 if not status_url:
-                    return {{"content": "Не удалось определить `status_url` для deep-job."}}
+                    return {"content": "Не удалось определить `status_url` для deep-job."}
 
-                status_payload = await _request_json("GET", status_url, self.valves.tool_server_token)
-                if status_payload.get("status") != "completed":
-                    return {{
+                status_response = await _request_json("GET", status_url, self.valves.tool_server_token)
+                status_payload = status_response.get("payload") if isinstance(status_response, dict) else {}
+                tool_name = str(context.get("tool_name") or "analyze_equipment_deep")
+
+                if status_response.get("status_code", 500) >= 400:
+                    return {
                         "content": (
-                            f"Текущий статус deep-job: {{status_payload.get('status', 'unknown')}}\\n"
-                            f"job_id: {{status_payload.get('job_id', 'unknown')}}\\n"
-                            f"status_url: {{status_url}}"
-                        )
-                    }}
+                            f"Не удалось обновить deep-job.\\n"
+                            f"job_id: {context.get('job_id') or 'unknown'}\\n"
+                            f"status_url: {status_url}\\n"
+                            f"error: {_extract_error_text(status_payload)}"
+                        ),
+                        "job_id": context.get("job_id"),
+                        "status_url": status_url,
+                        "job_status": "unknown",
+                        "tool_job": _build_tool_job(context.get("job_id"), status_url, "unknown", tool_name),
+                    }
 
-                result_payload = await _request_json("GET", f"{{status_url}}/result", self.valves.tool_server_token)
-                return {{
-                    "content": result_payload.get("assistant_message")
-                    or json.dumps(result_payload, ensure_ascii=False, indent=2)
-                }}
+                job_id = str(status_payload.get("job_id") or context.get("job_id") or "unknown")
+                job_status = str(status_payload.get("status") or context.get("status") or "unknown")
+                tool_job = _build_tool_job(job_id, status_url, job_status, tool_name)
+
+                if job_status != "completed":
+                    extra = []
+                    error_summary = str(status_payload.get("error_summary") or "").strip()
+                    result_preview = str(status_payload.get("result_preview") or "").strip()
+                    if error_summary:
+                        extra.append(f"error: {error_summary}")
+                    if result_preview:
+                        extra.append(f"preview: {result_preview}")
+                    content = (
+                        f"Текущий статус deep-job: {job_status}\\n"
+                        f"job_id: {job_id}\\n"
+                        f"status_url: {status_url}"
+                    )
+                    if extra:
+                        content = content + "\\n" + "\\n".join(extra)
+                    return {
+                        "content": content,
+                        "job_id": job_id,
+                        "status_url": status_url,
+                        "job_status": job_status,
+                        "tool_job": tool_job,
+                        "result_message_id": context.get("result_message_id"),
+                    }
+
+                if context.get("result_message_id"):
+                    return {
+                        "content": "Результат уже добавлен ниже.",
+                        "job_id": job_id,
+                        "status_url": status_url,
+                        "job_status": "completed",
+                        "tool_job": tool_job,
+                        "result_message_id": context.get("result_message_id"),
+                    }
+
+                if context.get("chat_id") and context.get("message_id"):
+                    message = _load_message(context["chat_id"], context["message_id"])
+                    persisted_result_id = str(message.get("result_message_id") or "").strip()
+                    if persisted_result_id:
+                        return {
+                            "content": "Результат уже добавлен ниже.",
+                            "job_id": job_id,
+                            "status_url": status_url,
+                            "job_status": "completed",
+                            "tool_job": tool_job,
+                            "result_message_id": persisted_result_id,
+                        }
+
+                result_response = await _request_json("GET", f"{status_url}/result", self.valves.tool_server_token)
+                result_payload = result_response.get("payload") if isinstance(result_response, dict) else {}
+                if result_response.get("status_code") == 409 and str(result_payload.get("detail") or "").startswith("job-not-ready:"):
+                    return {
+                        "content": (
+                            f"Статус deep-job: completed, но итог ещё не опубликован. Повторите обновление.\\n"
+                            f"job_id: {job_id}\\n"
+                            f"status_url: {status_url}"
+                        ),
+                        "job_id": job_id,
+                        "status_url": status_url,
+                        "job_status": "completed",
+                        "tool_job": tool_job,
+                    }
+                if result_response.get("status_code", 500) >= 400:
+                    return {
+                        "content": (
+                            f"Не удалось получить итог deep-job.\\n"
+                            f"job_id: {job_id}\\n"
+                            f"status_url: {status_url}\\n"
+                            f"error: {_extract_error_text(result_payload)}"
+                        ),
+                        "job_id": job_id,
+                        "status_url": status_url,
+                        "job_status": "completed",
+                        "tool_job": tool_job,
+                    }
+
+                if __request__ is not None and context.get("chat_id") and context.get("message_id"):
+                    result_message_id = _create_result_message(
+                        context["chat_id"],
+                        context["message_id"],
+                        model_name=str(body.get("model") or "__DEFAULT_MODEL__"),
+                        job_id=job_id,
+                        result_payload=result_payload,
+                    )
+                    _persist_message(
+                        context["chat_id"],
+                        context["message_id"],
+                        {
+                            "id": context["message_id"],
+                            "content": "Завершено — результат добавлен ниже.",
+                            "tool_job": tool_job,
+                            "job_status": "completed",
+                            "result_message_id": result_message_id,
+                            "actions_disabled": True,
+                            "done": True,
+                        },
+                    )
+                    _persist_message(context["chat_id"], result_message_id, {"id": result_message_id})
+                    await _emit_custom_event(__event_emitter__, "replace", {"content": "Завершено — результат добавлен ниже."})
+                    await _emit_custom_event(
+                        __event_emitter__,
+                        "chat:message:new",
+                        {
+                            "message_id": result_message_id,
+                            "parent_message_id": context["message_id"],
+                            "job_id": job_id,
+                            "reload": True,
+                        },
+                    )
+                    return {
+                        "content": "Результат уже добавлен ниже.",
+                        "job_id": job_id,
+                        "status_url": status_url,
+                        "job_status": "completed",
+                        "tool_job": tool_job,
+                        "result_message_id": result_message_id,
+                    }
+
+                return {
+                    "content": result_payload.get("assistant_message") or json.dumps(result_payload, ensure_ascii=False, indent=2),
+                    "job_id": job_id,
+                    "status_url": status_url,
+                    "job_status": "completed",
+                    "tool_job": tool_job,
+                }
         """
     ).strip()
+    return (
+        template.replace("__TOOL_SERVER_BASE_URL__", container_tool_server_base_url)
+        .replace("__DEFAULT_MODEL__", OPENWEBUI_DEFAULT_MODEL)
+    )
 
 
 def _build_tool_job_cancel_action_code(*, container_tool_server_base_url: str) -> str:
-    return dedent(
-        f"""
+    template = dedent(
+        """
         import asyncio
         import json
         import re
+        import time
         import urllib.error
         import urllib.request
         from urllib.parse import urlsplit
+        from uuid import uuid4
         from pydantic import BaseModel
 
         def _tool_server_origin(tool_server_base_url):
             parsed = urlsplit(tool_server_base_url)
-            return f"{{parsed.scheme}}://{{parsed.netloc}}"
+            return f"{parsed.scheme}://{parsed.netloc}"
 
         def _normalize_status_url(candidate, tool_server_base_url):
             if not candidate:
@@ -848,16 +2411,18 @@ def _build_tool_job_cancel_action_code(*, container_tool_server_base_url: str) -
             if candidate.startswith("http://") or candidate.startswith("https://"):
                 return candidate
             if candidate.startswith("/"):
-                return f"{{_tool_server_origin(tool_server_base_url)}}{{candidate}}"
-            return f"{{_tool_server_origin(tool_server_base_url)}}/{{candidate.lstrip('/')}}"
+                return f"{_tool_server_origin(tool_server_base_url)}{candidate}"
+            return f"{_tool_server_origin(tool_server_base_url)}/{candidate.lstrip('/')}"
 
         def _extract_tool_job_context(payload):
             if isinstance(payload, dict):
                 if payload.get("status_url") or payload.get("job_id"):
-                    return {{
+                    return {
                         "status_url": payload.get("status_url"),
                         "job_id": payload.get("job_id"),
-                    }}
+                        "tool_name": payload.get("tool_name"),
+                        "status": payload.get("status") or payload.get("job_status"),
+                    }
                 status_history = payload.get("statusHistory")
                 if isinstance(status_history, list):
                     nested = _extract_tool_job_context(status_history)
@@ -896,9 +2461,9 @@ def _build_tool_job_cancel_action_code(*, container_tool_server_base_url: str) -
                 return None
             if chat_item is None:
                 return None
-            chat_payload = getattr(chat_item, "chat", None) or {{}}
-            history = chat_payload.get("history", {{}}) if isinstance(chat_payload, dict) else {{}}
-            messages = history.get("messages", {{}}) if isinstance(history, dict) else {{}}
+            chat_payload = getattr(chat_item, "chat", None) or {}
+            history = chat_payload.get("history", {}) if isinstance(chat_payload, dict) else {}
+            messages = history.get("messages", {}) if isinstance(history, dict) else {}
             if not isinstance(messages, dict):
                 return None
 
@@ -929,60 +2494,311 @@ def _build_tool_job_cancel_action_code(*, container_tool_server_base_url: str) -
                     return nested
             return None
 
-        def _extract_status_url(body, tool_server_base_url):
-            context = _extract_tool_job_context(body) or _extract_tool_job_context_from_chat(body)
-            if context:
-                status_url = _normalize_status_url(context.get("status_url"), tool_server_base_url)
-                if status_url:
-                    return status_url
-                job_id = str(context.get("job_id") or "").strip()
-                if job_id:
-                    return f"{{_tool_server_origin(tool_server_base_url)}}/tool-server/tool-jobs/{{job_id}}"
-            serialized = json.dumps(body, ensure_ascii=False)
-            full_match = re.search(r"https?://[^\\s\\\"]+/tool-server/tool-jobs/[A-Za-z0-9._-]+", serialized)
-            if full_match:
-                return full_match.group(0)
-            path_match = re.search(r"/tool-server/tool-jobs/[A-Za-z0-9._-]+", serialized)
-            if path_match:
-                return f"{{_tool_server_origin(tool_server_base_url)}}{{path_match.group(0)}}"
-            return None
+        def _extract_status_context(body, tool_server_base_url):
+            context = _extract_tool_job_context(body) or _extract_tool_job_context_from_chat(body) or {}
+            status_url = _normalize_status_url(context.get("status_url"), tool_server_base_url)
+            job_id = str(context.get("job_id") or "").strip()
+            if not status_url and job_id:
+                status_url = f"{_tool_server_origin(tool_server_base_url)}/tool-server/tool-jobs/{job_id}"
+            if not status_url:
+                serialized = json.dumps(body, ensure_ascii=False)
+                full_match = re.search(r"https?://[^\\s\\\"]+/tool-server/tool-jobs/[A-Za-z0-9._-]+", serialized)
+                if full_match:
+                    status_url = full_match.group(0)
+                else:
+                    path_match = re.search(r"/tool-server/tool-jobs/[A-Za-z0-9._-]+", serialized)
+                    if path_match:
+                        status_url = f"{_tool_server_origin(tool_server_base_url)}{path_match.group(0)}"
+            return {
+                "status_url": status_url,
+                "job_id": job_id or None,
+                "tool_name": context.get("tool_name"),
+                "status": context.get("status"),
+                "chat_id": str(body.get("chat_id") or "").strip(),
+                "message_id": str(body.get("id") or "").strip(),
+            }
+
+        def _extract_error_text(payload, default="unknown-error"):
+            if isinstance(payload, dict):
+                detail = payload.get("detail")
+                if isinstance(detail, dict):
+                    for key in ("message", "reason", "status", "detail"):
+                        value = str(detail.get(key) or "").strip()
+                        if value:
+                            return value
+                if detail is not None:
+                    text = str(detail).strip()
+                    if text:
+                        return text
+                for key in ("message", "error_summary", "reason"):
+                    value = str(payload.get(key) or "").strip()
+                    if value:
+                        return value
+            text = str(payload or "").strip()
+            return text or default
 
         async def _request_json(method, url, token):
             def _do_request():
                 request = urllib.request.Request(
                     url,
                     method=method,
-                    headers={{
-                        "Authorization": f"Bearer {{token}}",
+                    headers={
+                        "Authorization": f"Bearer {token}",
                         "Content-Type": "application/json",
-                    }},
+                    },
                 )
-                with urllib.request.urlopen(request, timeout=45) as response:
-                    return json.loads(response.read().decode("utf-8"))
+                try:
+                    with urllib.request.urlopen(request, timeout=45) as response:
+                        return {
+                            "status_code": int(getattr(response, "status", 200) or 200),
+                            "payload": json.loads(response.read().decode("utf-8")),
+                        }
+                except urllib.error.HTTPError as exc:
+                    raw_payload = exc.read().decode("utf-8", errors="ignore")
+                    try:
+                        payload = json.loads(raw_payload) if raw_payload else {}
+                    except Exception:
+                        payload = {"detail": raw_payload or str(exc)}
+                    return {
+                        "status_code": int(exc.code or 500),
+                        "payload": payload,
+                    }
+                except urllib.error.URLError as exc:
+                    return {
+                        "status_code": 599,
+                        "payload": {"detail": str(getattr(exc, "reason", exc))},
+                    }
 
             return await asyncio.to_thread(_do_request)
 
+        def _load_message(chat_id, message_id):
+            if not chat_id or not message_id:
+                return {}
+            try:
+                from open_webui.models.chats import Chats
+            except Exception:
+                return {}
+            try:
+                return Chats.get_message_by_id_and_message_id(chat_id, message_id) or {}
+            except Exception:
+                return {}
+
+        def _persist_message(chat_id, message_id, patch):
+            if not chat_id or not message_id:
+                return None
+            try:
+                from open_webui.models.chats import Chats
+            except Exception:
+                return None
+            try:
+                return Chats.upsert_message_to_chat_by_id_and_message_id(chat_id, message_id, patch)
+            except Exception:
+                return None
+
+        def _poller_registry(app_state):
+            registry = getattr(app_state, "agent_nav_deep_job_pollers", None)
+            if not isinstance(registry, dict):
+                registry = {}
+                setattr(app_state, "agent_nav_deep_job_pollers", registry)
+            return registry
+
+        def _poller_key(chat_id, message_id, job_id):
+            return f"{chat_id}:{message_id}:{job_id}"
+
+        def _build_tool_job(job_id, status_url, status, tool_name):
+            return {
+                "job_id": job_id,
+                "status_url": status_url,
+                "tool_name": tool_name,
+                "status": status,
+            }
+
+        def _create_result_message(chat_id, accepted_message_id, *, model_name, job_id, result_payload):
+            accepted = _load_message(chat_id, accepted_message_id)
+            existing_result_id = str(accepted.get("result_message_id") or "").strip()
+            if existing_result_id:
+                return existing_result_id
+
+            result_message_id = str(uuid4())
+            result_message = {
+                "id": result_message_id,
+                "parentId": accepted_message_id,
+                "childrenIds": [],
+                "role": "assistant",
+                "content": result_payload.get("assistant_message") or json.dumps(result_payload, ensure_ascii=False, indent=2),
+                "model": model_name or accepted.get("model") or "__DEFAULT_MODEL__",
+                "timestamp": int(time.time()),
+                "done": True,
+                "job_id": job_id,
+                "tool_job_result_for": accepted_message_id,
+            }
+            children_ids = list(accepted.get("childrenIds") or [])
+            if result_message_id not in children_ids:
+                children_ids.append(result_message_id)
+            _persist_message(
+                chat_id,
+                accepted_message_id,
+                {
+                    "id": accepted_message_id,
+                    "childrenIds": children_ids,
+                    "result_message_id": result_message_id,
+                },
+            )
+            _persist_message(chat_id, result_message_id, result_message)
+            return result_message_id
+
+        async def _emit_custom_event(__event_emitter__, event_type, data):
+            if __event_emitter__ is None:
+                return
+            await __event_emitter__({"type": event_type, "data": data})
+
         class Action:
             class Valves(BaseModel):
-                tool_server_base_url: str = "{container_tool_server_base_url}"
+                tool_server_base_url: str = "__TOOL_SERVER_BASE_URL__"
                 tool_server_token: str = "SET_OPENAPI_TOOL_SERVER_TOKEN"
                 priority: int = 40
 
             def __init__(self):
                 self.valves = self.Valves()
 
-            async def action(self, body: dict, __event_emitter__=None, __event_call__=None, __id__=None):
-                status_url = _extract_status_url(body, self.valves.tool_server_base_url)
+            async def action(self, body: dict, __event_emitter__=None, __event_call__=None, __id__=None, __request__=None):
+                context = _extract_status_context(body, self.valves.tool_server_base_url)
+                status_url = context.get("status_url")
                 if not status_url:
-                    return {{"content": "Не удалось определить `status_url` для отмены deep-job."}}
+                    return {"content": "Не удалось определить `status_url` для отмены deep-job."}
 
-                cancel_payload = await _request_json("POST", f"{{status_url}}/cancel", self.valves.tool_server_token)
-                return {{
-                    "content": (
-                        f"Cancel request отправлен.\\n"
-                        f"job_id: {{cancel_payload.get('job_id', 'unknown')}}\\n"
-                        f"status: {{cancel_payload.get('status', 'unknown')}}"
+                if __request__ is not None and context.get("chat_id") and context.get("message_id") and context.get("job_id"):
+                    registry = _poller_registry(__request__.app.state)
+                    entry = registry.get(_poller_key(context["chat_id"], context["message_id"], context["job_id"]))
+                    if isinstance(entry, dict):
+                        entry["stop_requested"] = True
+                        registry[_poller_key(context["chat_id"], context["message_id"], context["job_id"])] = entry
+
+                cancel_response = await _request_json("POST", f"{status_url}/cancel", self.valves.tool_server_token)
+                cancel_payload = cancel_response.get("payload") if isinstance(cancel_response, dict) else {}
+                job_id = str(cancel_payload.get("job_id") or context.get("job_id") or "unknown")
+                job_status = str(cancel_payload.get("status") or context.get("status") or "unknown")
+                tool_name = str(context.get("tool_name") or "analyze_equipment_deep")
+                tool_job = _build_tool_job(job_id, status_url, job_status, tool_name)
+                if cancel_response.get("status_code", 500) >= 400:
+                    return {
+                        "content": (
+                            f"Не удалось отменить deep-job.\\n"
+                            f"job_id: {job_id}\\n"
+                            f"status_url: {status_url}\\n"
+                            f"error: {_extract_error_text(cancel_payload)}"
+                        ),
+                        "job_id": job_id,
+                        "status_url": status_url,
+                        "job_status": job_status,
+                        "tool_job": tool_job,
+                    }
+
+                if job_status == "completed" and __request__ is not None and context.get("chat_id") and context.get("message_id"):
+                    result_response = await _request_json("GET", f"{status_url}/result", self.valves.tool_server_token)
+                    result_payload = result_response.get("payload") if isinstance(result_response, dict) else {}
+                    result_message_id = _create_result_message(
+                        context["chat_id"],
+                        context["message_id"],
+                        model_name=str(body.get("model") or "__DEFAULT_MODEL__"),
+                        job_id=job_id,
+                        result_payload=result_payload,
                     )
-                }}
+                    _persist_message(
+                        context["chat_id"],
+                        context["message_id"],
+                        {
+                            "id": context["message_id"],
+                            "content": "Завершено — результат добавлен ниже.",
+                            "tool_job": tool_job,
+                            "job_status": "completed",
+                            "result_message_id": result_message_id,
+                            "actions_disabled": True,
+                            "done": True,
+                        },
+                    )
+                    _persist_message(context["chat_id"], result_message_id, {"id": result_message_id})
+                    await _emit_custom_event(__event_emitter__, "replace", {"content": "Завершено — результат добавлен ниже."})
+                    await _emit_custom_event(
+                        __event_emitter__,
+                        "chat:message:new",
+                        {
+                            "message_id": result_message_id,
+                            "parent_message_id": context["message_id"],
+                            "job_id": job_id,
+                            "reload": True,
+                        },
+                    )
+                    return {
+                        "content": "Задача уже находится в терминальном состоянии.\\njob_id: " + job_id + "\\nstatus: completed",
+                        "job_id": job_id,
+                        "status_url": status_url,
+                        "job_status": "completed",
+                        "tool_job": tool_job,
+                        "result_message_id": result_message_id,
+                    }
+
+                if job_status in {"completed", "failed", "cancelled"}:
+                    extra = str(cancel_payload.get("error_summary") or "").strip()
+                    content = (
+                        f"Задача уже находится в терминальном состоянии.\\n"
+                        f"job_id: {job_id}\\n"
+                        f"status: {job_status}"
+                    )
+                    if extra:
+                        content = content + f"\\nerror: {extra}"
+                    if context.get("chat_id") and context.get("message_id"):
+                        _persist_message(
+                            context["chat_id"],
+                            context["message_id"],
+                            {
+                                "id": context["message_id"],
+                                "content": content if job_status != "completed" else "Завершено — результат добавлен ниже.",
+                                "tool_job": tool_job,
+                                "job_status": job_status,
+                                "actions_disabled": True,
+                                "done": True,
+                            },
+                        )
+                    return {
+                        "content": content,
+                        "job_id": job_id,
+                        "status_url": status_url,
+                        "job_status": job_status,
+                        "tool_job": tool_job,
+                    }
+
+                if context.get("chat_id") and context.get("message_id"):
+                    _persist_message(
+                        context["chat_id"],
+                        context["message_id"],
+                        {
+                            "id": context["message_id"],
+                            "content": (
+                                f"Запрос на отмену deep-job отправлен.\\n"
+                                f"job_id: {job_id}\\n"
+                                f"status: {job_status}"
+                            ),
+                            "tool_job": tool_job,
+                            "job_status": job_status,
+                            "actions_disabled": False,
+                        },
+                    )
+
+                return {
+                    "content": (
+                        f"Запрос на отмену deep-job отправлен.\\n"
+                        f"job_id: {job_id}\\n"
+                        f"status: {job_status}"
+                    ),
+                    "job_id": job_id,
+                    "status_url": status_url,
+                    "job_status": job_status,
+                    "tool_job": tool_job,
+                }
         """
     ).strip()
+    return (
+        template.replace("__TOOL_SERVER_BASE_URL__", container_tool_server_base_url)
+        .replace("__DEFAULT_MODEL__", OPENWEBUI_DEFAULT_MODEL)
+    )

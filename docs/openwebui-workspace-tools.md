@@ -24,6 +24,13 @@
 - `Action Functions` = follow-up UI actions;
 - `OpenAPI Tool Server` = внешний backend tool path.
 
+Текущий product policy:
+
+- `Community Sum Tool` остаётся только verification fixture для native tool-calling smoke;
+- production-like explicit tools для `Open WebUI` живут в backend-owned `OpenAPI Tool Server`;
+- в текущем live contour как named tools materialize’ятся только `equipment` инструменты;
+- document/compare tools остаются deferred до `M2.1/M2.2`, даже если backend schemas уже существуют.
+
 ## Минимальный контракт tool-файла
 
 `Open WebUI` ожидает Python-файл с frontmatter и классом `Tools`.

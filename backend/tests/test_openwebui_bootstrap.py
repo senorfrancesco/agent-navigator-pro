@@ -220,6 +220,179 @@ def test_remove_legacy_prompts_deletes_known_command_drift(monkeypatch):
     ]
 
 
+def test_cleanup_tool_server_connections_removes_canonical_picker_entries_only(monkeypatch):
+    client = bootstrap_openwebui.OpenWebUIBootstrapClient(
+        openwebui_base_url="http://127.0.0.1:3001",
+        admin_token="secret-token",
+    )
+    updates: list[list[dict]] = []
+    existing_connections = [
+        {
+            "url": "http://host.docker.internal:8000/tool-server",
+            "path": "openapi.json",
+            "type": "openapi",
+            "auth_type": "bearer",
+            "key": "legacy-token",
+            "headers": {},
+            "config": {"enable": True, "name": "Agent Navigator OpenAPI Tool Server"},
+        },
+        {
+            "url": "http://127.0.0.1:8000",
+            "path": "/tool-server/openapi.json",
+            "type": "openapi",
+            "auth_type": "bearer",
+            "key": "browser-token",
+            "headers": {},
+            "config": {"enable": True, "bootstrap_id": bootstrap_openwebui.BOOTSTRAP_CONNECTION_ID},
+        },
+        {
+            "url": "http://keep.example",
+            "path": "/openapi.json",
+            "type": "openapi",
+            "auth_type": "bearer",
+            "key": "keep-token",
+            "headers": {},
+            "config": {"enable": True, "name": "Third Party Tools"},
+        },
+    ]
+
+    monkeypatch.setattr(client, "get_tool_server_connections", lambda: existing_connections)
+    monkeypatch.setattr(client, "set_tool_server_connections", lambda connections: updates.append(connections))
+
+    summary = bootstrap_openwebui.cleanup_tool_server_connections(
+        client,
+        tool_server_export={
+            "name": "Agent Navigator OpenAPI Tool Server",
+            "baseUrl": "http://127.0.0.1:8000/tool-server",
+            "browserReachableBaseUrl": "http://127.0.0.1:8000/tool-server",
+            "containerReachableBaseUrl": "http://host.docker.internal:8000/tool-server",
+        },
+    )
+
+    assert summary == {
+        "action": "updated",
+        "removedCount": 2,
+        "removedConnectionNames": [
+            "Agent Navigator OpenAPI Tool Server",
+            "Agent Navigator OpenAPI Tool Server",
+        ],
+    }
+    assert updates == [
+        [
+            {
+                "url": "http://keep.example",
+                "path": "/openapi.json",
+                "type": "openapi",
+                "auth_type": "bearer",
+                "key": "keep-token",
+                "headers": {},
+                "config": {"enable": True, "name": "Third Party Tools"},
+            }
+        ]
+    ]
+
+
+def test_cleanup_fixture_workspace_tools_deletes_community_sum_tool_only(monkeypatch):
+    client = bootstrap_openwebui.OpenWebUIBootstrapClient(
+        openwebui_base_url="http://127.0.0.1:3001",
+        admin_token="secret-token",
+    )
+    deleted_ids: list[str] = []
+
+    def fake_get_tool_by_id(tool_id: str):
+        if tool_id == "community_sum_tool":
+            return {"id": "community_sum_tool", "name": "Community Sum Tool"}
+        if tool_id == "equipment_fast_tool":
+            return {"id": "equipment_fast_tool", "name": "Быстрый анализ оборудования"}
+        return None
+
+    monkeypatch.setattr(client, "get_tool_by_id", fake_get_tool_by_id)
+    monkeypatch.setattr(client, "delete_tool", lambda tool_id: deleted_ids.append(tool_id))
+
+    summary = bootstrap_openwebui.cleanup_fixture_workspace_tools(client)
+
+    assert summary == {
+        "action": "updated",
+        "deletedIds": ["community_sum_tool"],
+    }
+    assert deleted_ids == ["community_sum_tool"]
+
+
+def test_cleanup_user_settings_tool_servers_removes_canonical_direct_servers_only(monkeypatch):
+    client = bootstrap_openwebui.OpenWebUIBootstrapClient(
+        openwebui_base_url="http://127.0.0.1:3001",
+        admin_token="secret-token",
+    )
+    updates: list[dict] = []
+    current_settings = {
+        "ui": {
+            "version": "0.8.12",
+            "memory": True,
+            "toolServers": [
+                {
+                    "type": "openapi",
+                    "url": "http://127.0.0.1:8000/tool-server",
+                    "spec_type": "url",
+                    "path": "openapi.json",
+                    "auth_type": "bearer",
+                    "key": "legacy-token",
+                    "config": {"enable": True},
+                    "info": {"name": "Agent Navigator Tools"},
+                },
+                {
+                    "type": "openapi",
+                    "url": "http://keep.example",
+                    "spec_type": "url",
+                    "path": "openapi.json",
+                    "auth_type": "bearer",
+                    "key": "keep-token",
+                    "config": {"enable": True},
+                    "info": {"name": "Third Party Tools"},
+                },
+            ],
+        }
+    }
+
+    monkeypatch.setattr(client, "get_user_settings", lambda: current_settings)
+    monkeypatch.setattr(client, "update_user_settings", lambda form_data: updates.append(form_data) or form_data)
+
+    summary = bootstrap_openwebui.cleanup_user_settings_tool_servers(
+        client,
+        tool_server_export={
+            "name": "Agent Navigator OpenAPI Tool Server",
+            "baseUrl": "http://127.0.0.1:8000/tool-server",
+            "browserReachableBaseUrl": "http://127.0.0.1:8000/tool-server",
+            "containerReachableBaseUrl": "http://host.docker.internal:8000/tool-server",
+        },
+    )
+
+    assert summary == {
+        "action": "updated",
+        "removedCount": 1,
+        "removedToolServerNames": ["Agent Navigator Tools"],
+    }
+    assert updates == [
+        {
+            "ui": {
+                "version": "0.8.12",
+                "memory": True,
+                "toolServers": [
+                    {
+                        "type": "openapi",
+                        "url": "http://keep.example",
+                        "spec_type": "url",
+                        "path": "openapi.json",
+                        "auth_type": "bearer",
+                        "key": "keep-token",
+                        "config": {"enable": True},
+                        "info": {"name": "Third Party Tools"},
+                    }
+                ],
+            }
+        }
+    ]
+
+
 def test_ensure_default_model_preserves_existing_model_config(monkeypatch):
     client = bootstrap_openwebui.OpenWebUIBootstrapClient(
         openwebui_base_url="http://127.0.0.1:3001",
@@ -328,12 +501,11 @@ def test_upsert_workspace_tools_preserves_ui_owned_metadata(monkeypatch):
     )
 
     assert summary["updatedIds"] == ["equipment_fast_tool"]
-    assert summary["uiOwnedDriftIgnored"] == [
-        "equipment_fast_tool.name",
-        "equipment_fast_tool.meta.description",
-    ]
+    assert summary["uiOwnedDriftIgnored"] == []
     assert summary["appliedChanges"] == [
+        "equipment_fast_tool.name",
         "equipment_fast_tool.content",
+        "equipment_fast_tool.meta.description",
         "equipment_fast_tool.meta.manifest.target_models",
     ]
     assert updates == [
@@ -341,10 +513,10 @@ def test_upsert_workspace_tools_preserves_ui_owned_metadata(monkeypatch):
             "equipment_fast_tool",
             {
                 "id": "equipment_fast_tool",
-                "name": "Переименованный tool",
+                "name": "Быстрый анализ оборудования",
                 "content": "new-content",
                 "meta": {
-                    "description": "user-edited-description",
+                    "description": "backend-description",
                     "manifest": {"target_models": ["raw.*"]},
                 },
             },
@@ -501,13 +673,13 @@ def test_upsert_functions_preserves_existing_ui_owned_flags(monkeypatch):
 
     assert summary["updatedIds"] == ["equipment_fast_action"]
     assert summary["uiOwnedDriftIgnored"] == [
-        "equipment_fast_action.name",
-        "equipment_fast_action.meta.description",
         "equipment_fast_action.is_active",
         "equipment_fast_action.is_global",
     ]
     assert summary["appliedChanges"] == [
+        "equipment_fast_action.name",
         "equipment_fast_action.content",
+        "equipment_fast_action.meta.description",
         "equipment_fast_action.meta.manifest.target_models",
     ]
     assert updates == [
@@ -515,10 +687,10 @@ def test_upsert_functions_preserves_existing_ui_owned_flags(monkeypatch):
             "equipment_fast_action",
             {
                 "id": "equipment_fast_action",
-                "name": "Переименованная action",
+                "name": "Быстрый анализ оборудования",
                 "content": "new-action-content",
                 "meta": {
-                    "description": "user-action-description",
+                    "description": "backend-description",
                     "manifest": {"target_models": ["raw.*"]},
                 },
                 "is_active": False,
@@ -618,8 +790,26 @@ def test_bootstrap_openwebui_summary_reports_native_function_calling(monkeypatch
     )
     monkeypatch.setattr(
         bootstrap_openwebui,
-        "upsert_tool_server",
-        lambda *args, **kwargs: {"action": "noop", "appliedChanges": [], "uiOwnedDriftIgnored": []},
+        "reconcile_task_config",
+        lambda client: (
+            {"ENABLE_FOLLOW_UP_GENERATION": False},
+            {"action": "noop", "appliedChanges": [], "uiOwnedDriftIgnored": []},
+        ),
+    )
+    monkeypatch.setattr(
+        bootstrap_openwebui,
+        "cleanup_tool_server_connections",
+        lambda *args, **kwargs: {"action": "noop", "removedCount": 0, "removedConnectionNames": []},
+    )
+    monkeypatch.setattr(
+        bootstrap_openwebui,
+        "cleanup_fixture_workspace_tools",
+        lambda *args, **kwargs: {"action": "noop", "deletedIds": []},
+    )
+    monkeypatch.setattr(
+        bootstrap_openwebui,
+        "cleanup_user_settings_tool_servers",
+        lambda *args, **kwargs: {"action": "noop", "removedCount": 0, "removedToolServerNames": []},
     )
     monkeypatch.setattr(
         bootstrap_openwebui,
@@ -677,3 +867,212 @@ def test_bootstrap_openwebui_summary_reports_native_function_calling(monkeypatch
     assert result["runtimeConfig"]["defaultModel"] == "raw.qwen-14b-llm"
     assert result["ownership"]["backendOwned"]["toolServerConnection"] == ["url"]
     assert result["driftSummary"]["noOp"] is True
+
+
+def test_reconcile_task_config_disables_follow_up_without_touching_other_settings(monkeypatch):
+    client = bootstrap_openwebui.OpenWebUIBootstrapClient(
+        openwebui_base_url="http://127.0.0.1:3001",
+        admin_token="secret-token",
+    )
+    calls: list[tuple[str, str, dict | None]] = []
+    current_config = {
+        "TASK_MODEL": "local.task-model",
+        "TASK_MODEL_EXTERNAL": "external.task-model",
+        "ENABLE_TITLE_GENERATION": True,
+        "TITLE_GENERATION_PROMPT_TEMPLATE": "title",
+        "IMAGE_PROMPT_GENERATION_PROMPT_TEMPLATE": "image",
+        "ENABLE_AUTOCOMPLETE_GENERATION": True,
+        "AUTOCOMPLETE_GENERATION_INPUT_MAX_LENGTH": 512,
+        "TAGS_GENERATION_PROMPT_TEMPLATE": "tags",
+        "FOLLOW_UP_GENERATION_PROMPT_TEMPLATE": "follow-up",
+        "ENABLE_FOLLOW_UP_GENERATION": True,
+        "ENABLE_TAGS_GENERATION": True,
+        "ENABLE_SEARCH_QUERY_GENERATION": False,
+        "ENABLE_RETRIEVAL_QUERY_GENERATION": False,
+        "QUERY_GENERATION_PROMPT_TEMPLATE": "query",
+        "TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE": "tools",
+        "VOICE_MODE_PROMPT_TEMPLATE": "voice",
+    }
+
+    def fake_request(method: str, path: str, payload: dict | None = None):
+        calls.append((method, path, payload))
+        if method == "GET":
+            assert path == "/api/v1/tasks/config"
+            return current_config
+        assert method == "POST"
+        return payload
+
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    result, summary = bootstrap_openwebui.reconcile_task_config(client)
+
+    assert result["ENABLE_FOLLOW_UP_GENERATION"] is False
+    assert result["TASK_MODEL"] == "local.task-model"
+    assert result["TASK_MODEL_EXTERNAL"] == "external.task-model"
+    assert summary == {
+        "action": "updated",
+        "appliedChanges": ["ENABLE_FOLLOW_UP_GENERATION"],
+        "uiOwnedDriftIgnored": [],
+    }
+    assert calls == [
+        ("GET", "/api/v1/tasks/config", None),
+        (
+            "POST",
+            "/api/v1/tasks/config/update",
+            {
+                "TASK_MODEL": "local.task-model",
+                "TASK_MODEL_EXTERNAL": "external.task-model",
+                "ENABLE_TITLE_GENERATION": True,
+                "TITLE_GENERATION_PROMPT_TEMPLATE": "title",
+                "IMAGE_PROMPT_GENERATION_PROMPT_TEMPLATE": "image",
+                "ENABLE_AUTOCOMPLETE_GENERATION": True,
+                "AUTOCOMPLETE_GENERATION_INPUT_MAX_LENGTH": 512,
+                "TAGS_GENERATION_PROMPT_TEMPLATE": "tags",
+                "FOLLOW_UP_GENERATION_PROMPT_TEMPLATE": "follow-up",
+                "ENABLE_FOLLOW_UP_GENERATION": False,
+                "ENABLE_TAGS_GENERATION": True,
+                "ENABLE_SEARCH_QUERY_GENERATION": False,
+                "ENABLE_RETRIEVAL_QUERY_GENERATION": False,
+                "QUERY_GENERATION_PROMPT_TEMPLATE": "query",
+                "TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE": "tools",
+                "VOICE_MODE_PROMPT_TEMPLATE": "voice",
+            },
+        ),
+    ]
+
+
+def test_bootstrap_openwebui_summary_reports_follow_up_disabled_task_policy(monkeypatch):
+    monkeypatch.setattr(
+        bootstrap_openwebui,
+        "fetch_binding_export",
+        lambda backend_base_url: {
+            "toolServer": {"name": "Agent Navigator OpenAPI Tool Server"},
+            "runtimeConfig": {
+                "defaultModel": "raw.qwen-14b-llm",
+                "defaultFunctionCalling": "native",
+            },
+            "ownership": {
+                "backendOwned": {"toolServerConnection": ["url"]},
+                "openWebUIOwned": {"toolServerConnection": ["config.enable"]},
+            },
+            "workspaceTools": [],
+            "actionFunctions": [],
+            "workspacePrompts": [],
+        },
+    )
+    monkeypatch.setattr(
+        bootstrap_openwebui,
+        "sign_in",
+        lambda openwebui_base_url, *, email, password: "admin-token",
+    )
+    monkeypatch.setattr(bootstrap_openwebui, "remove_legacy_prompts", lambda client: 0)
+    monkeypatch.setattr(
+        bootstrap_openwebui,
+        "reconcile_default_model",
+        lambda client, model_id: (
+            {
+                "DEFAULT_MODELS": model_id,
+                "DEFAULT_MODEL_PARAMS": {"temperature": 0.2, "function_calling": "native"},
+            },
+            {"action": "noop", "appliedChanges": [], "uiOwnedDriftIgnored": []},
+        ),
+    )
+    monkeypatch.setattr(
+        bootstrap_openwebui,
+        "reconcile_task_config",
+        lambda client: (
+            {"ENABLE_FOLLOW_UP_GENERATION": False},
+            {"action": "updated", "appliedChanges": ["ENABLE_FOLLOW_UP_GENERATION"], "uiOwnedDriftIgnored": []},
+        ),
+    )
+    monkeypatch.setattr(
+        bootstrap_openwebui,
+        "cleanup_tool_server_connections",
+        lambda *args, **kwargs: {
+            "action": "updated",
+            "removedCount": 2,
+            "removedConnectionNames": [
+                "Agent Navigator OpenAPI Tool Server",
+                "Agent Navigator OpenAPI Tool Server",
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        bootstrap_openwebui,
+        "cleanup_fixture_workspace_tools",
+        lambda *args, **kwargs: {"action": "updated", "deletedIds": ["community_sum_tool"]},
+    )
+    monkeypatch.setattr(
+        bootstrap_openwebui,
+        "cleanup_user_settings_tool_servers",
+        lambda *args, **kwargs: {"action": "updated", "removedCount": 1, "removedToolServerNames": ["Agent Navigator Tools"]},
+    )
+    monkeypatch.setattr(
+        bootstrap_openwebui,
+        "upsert_workspace_tools",
+        lambda *args, **kwargs: {
+            "createdIds": [],
+            "updatedIds": [],
+            "noopIds": [],
+            "appliedChanges": [],
+            "uiOwnedDriftIgnored": [],
+            "materializationDriftIgnored": [],
+        },
+    )
+    monkeypatch.setattr(
+        bootstrap_openwebui,
+        "upsert_functions",
+        lambda *args, **kwargs: {
+            "createdIds": [],
+            "updatedIds": [],
+            "noopIds": [],
+            "appliedChanges": [],
+            "uiOwnedDriftIgnored": [],
+            "materializationDriftIgnored": [],
+        },
+    )
+    monkeypatch.setattr(
+        bootstrap_openwebui,
+        "upsert_prompts",
+        lambda *args, **kwargs: {
+            "createdIds": [],
+            "updatedIds": [],
+            "noopIds": [],
+            "appliedChanges": [],
+            "uiOwnedDriftIgnored": [],
+            "materializationDriftIgnored": [],
+        },
+    )
+
+    result = bootstrap_openwebui.bootstrap_openwebui(
+        backend_base_url="http://127.0.0.1:8000",
+        openwebui_base_url="http://127.0.0.1:3001",
+        admin_email="admin@example.com",
+        admin_password="secret",
+        tool_server_token="tool-token",
+    )
+
+    assert result["taskConfig"]["ENABLE_FOLLOW_UP_GENERATION"] is False
+    assert result["driftSummary"]["toolServerCleanup"] == {
+        "action": "updated",
+        "removedCount": 2,
+        "removedConnectionNames": [
+            "Agent Navigator OpenAPI Tool Server",
+            "Agent Navigator OpenAPI Tool Server",
+        ],
+    }
+    assert result["driftSummary"]["workspaceToolCleanup"] == {
+        "action": "updated",
+        "deletedIds": ["community_sum_tool"],
+    }
+    assert result["driftSummary"]["userToolServerCleanup"] == {
+        "action": "updated",
+        "removedCount": 1,
+        "removedToolServerNames": ["Agent Navigator Tools"],
+    }
+    assert result["driftSummary"]["taskConfig"] == {
+        "action": "updated",
+        "appliedChanges": ["ENABLE_FOLLOW_UP_GENERATION"],
+        "uiOwnedDriftIgnored": [],
+    }
+    assert result["driftSummary"]["noOp"] is False

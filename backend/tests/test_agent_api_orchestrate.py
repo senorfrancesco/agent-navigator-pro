@@ -456,6 +456,49 @@ async def test_tool_job_failed_status_and_result_contract(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_async_tool_job_busy_response_is_persisted_as_failed(monkeypatch):
+    monkeypatch.setenv("OPENWEBUI_EXPLICIT_TOOL_JOB_START_DELAY_S", "0")
+
+    async def fake_execute_orchestration(payload, deps=None):
+        await asyncio.sleep(0)
+        return {
+            "assistant_message": "Модель занята предыдущим тяжёлым запросом. Дождитесь освобождения слота или остановите активный запуск.",
+            "execution_metadata": {"status": "busy"},
+        }
+
+    monkeypatch.setattr("orchestrator.agent_api.execute_orchestration", fake_execute_orchestration)
+
+    request = OrchestrationRequest(
+        message="Сделай глубокий анализ документа",
+        requested_tool="analyze_document_deep",
+        routing_mode="explicit",
+        file_count=1,
+        has_session_docs=True,
+        session_docs={"contract.pdf": {"text": "Штраф 10 процентов"}},
+        active_doc_ids=["contract.pdf"],
+    )
+
+    accepted = await execute_orchestration_api(request)
+    status = None
+    for _ in range(5):
+        await asyncio.sleep(0)
+        status = await get_tool_job_status_route(accepted["job_id"])
+        if status["status"] == "failed":
+            break
+
+    assert status is not None
+    assert status["status"] == "failed"
+    assert status["current_stage"] == "busy"
+    assert "Модель занята предыдущим тяжёлым запросом" in status["error_summary"]
+
+    with pytest.raises(Exception) as exc_info:
+        await get_tool_job_result_route(accepted["job_id"])
+
+    assert getattr(exc_info.value, "status_code", None) == 409
+    assert getattr(exc_info.value, "detail", "") == f"job-terminal-without-result:{accepted['job_id']}:failed"
+
+
+@pytest.mark.asyncio
 async def test_cancel_tool_job_route_cancels_running_job(monkeypatch):
     async def fake_execute_orchestration(payload, deps=None):
         await asyncio.sleep(10)
@@ -560,7 +603,7 @@ async def test_cancel_tool_job_route_cancels_queued_job_before_runner_starts(mon
 
 
 @pytest.mark.asyncio
-async def test_cancel_tool_job_route_rejects_terminal_job():
+async def test_cancel_tool_job_route_returns_terminal_job_state_without_conflict():
     job = get_tool_job_store().create_job(
         tool_name="analyze_document_deep",
         route_prefix=None,
@@ -569,11 +612,10 @@ async def test_cancel_tool_job_route_rejects_terminal_job():
     )
     get_tool_job_store().finish_completed(job.job_id, {"assistant_message": "done"})
 
-    with pytest.raises(Exception) as exc_info:
-        await cancel_tool_job_route(job.job_id)
+    response = await cancel_tool_job_route(job.job_id)
 
-    assert getattr(exc_info.value, "status_code", None) == 409
-    assert getattr(exc_info.value, "detail", "") == f"job-already-terminal:{job.job_id}:completed"
+    assert response["job_id"] == job.job_id
+    assert response["status"] == "completed"
 
 
 def test_reconcile_incomplete_tool_jobs_marks_orphaned_jobs_failed():

@@ -103,16 +103,34 @@ class AskDocumentRequest(BaseToolRequest):
     question: str
     include_citations: bool = True
 
+    @model_validator(mode="after")
+    def require_document_ref(self) -> "AskDocumentRequest":
+        if not self.document_refs:
+            raise ValueError("ask_document requires at least one document_ref")
+        return self
+
 
 class AnalyzeDocumentFastRequest(BaseToolRequest):
     tool_name: Literal["analyze_document_fast"] = "analyze_document_fast"
     analysis_goal: Optional[str] = None
+
+    @model_validator(mode="after")
+    def require_document_ref(self) -> "AnalyzeDocumentFastRequest":
+        if not self.document_refs:
+            raise ValueError("analyze_document_fast requires at least one document_ref")
+        return self
 
 
 class AnalyzeDocumentDeepRequest(BaseToolRequest):
     tool_name: Literal["analyze_document_deep"] = "analyze_document_deep"
     analysis_goal: Optional[str] = None
     include_report: bool = True
+
+    @model_validator(mode="after")
+    def require_document_ref(self) -> "AnalyzeDocumentDeepRequest":
+        if not self.document_refs:
+            raise ValueError("analyze_document_deep requires at least one document_ref")
+        return self
 
 
 class CompareDocumentsFastRequest(BaseToolRequest):

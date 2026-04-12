@@ -152,10 +152,13 @@ services:
     profiles:
       - backend
 
-  # --- Open WebUI (legacy/eval contour, отдельный от canonical Chainlit path) ---
+  # --- Open WebUI ---
   open-webui:
-    image: ghcr.io/open-webui/open-webui:latest
+    image: ghcr.io/open-webui/open-webui:0.8.12
     container_name: open-webui
+    entrypoint:
+      - /bin/bash
+      - /agent-nav-patch/entrypoint.sh
     ports:
       - "3001:8080"
     env_file:
@@ -166,13 +169,15 @@ services:
     volumes:
       - open-webui:/app/backend/data
       - ./backend/open_webui_uploads:/app/backend/data/uploads
+      - ./deploy/openwebui_legacy_patch:/agent-nav-patch:ro
     environment:
       - OPENAI_API_BASE_URL=http://host.docker.internal:8000/v1
       - OPENAI_API_KEY=sk-dummy
+      - ENABLE_FOLLOW_UP_GENERATION=False
       - HF_HUB_OFFLINE=1
       - ENABLE_RAG_WEB_SEARCH=False
       - ENABLE_RAG_LOCAL_WEB_FETCH=False
-      - WEBUI_NAME=Agent Navigator
+      #- WEBUI_NAME=Agent Navigator
       # Отключаем встроенный RAG, так как он требует загрузки моделей из интернета
       - RAG_EMBEDDING_ENGINE=
       - RAG_RERANKING_ENGINE=
@@ -180,7 +185,7 @@ services:
     profiles:
       - legacy
 
-  # --- Chainlit UI (основной фронтенд) ---
+  # --- Chainlit UI ---
   chainlit:
     build:
       context: .

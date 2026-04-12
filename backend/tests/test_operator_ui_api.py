@@ -158,7 +158,9 @@ def test_operator_tool_bindings_export_openwebui_returns_manual_import_bundle():
     assert payload["toolServer"]["baseUrl"] == "http://127.0.0.1:18000/tool-server"
     assert payload["toolServer"]["browserReachableBaseUrl"] == "http://127.0.0.1:18000/tool-server"
     assert payload["toolServer"]["containerReachableBaseUrl"] == "http://host.docker.internal:18000/tool-server"
-    assert payload["toolServer"]["manualEnableRequired"] is True
+    assert payload["toolServer"]["manualEnableRequired"] is False
+    assert payload["toolServer"]["pickerVisible"] is False
+    assert payload["toolServer"]["defaultBootstrapManaged"] is False
     assert len(payload["workspaceTools"]) == 2
     assert payload["workspaceTools"][0]["tool_id"] == "equipment_fast_tool"
     assert "class Tools" in payload["workspaceTools"][0]["pythonCode"]
@@ -167,6 +169,16 @@ def test_operator_tool_bindings_export_openwebui_returns_manual_import_bundle():
     assert payload["workspacePrompts"][0]["slash_command"] == "/hw_fast"
     assert payload["workspacePrompts"][0]["manualImportRequired"] is True
     assert payload["workspacePrompts"][0]["openwebui"]["command"] == "/hw_fast"
+    assert payload["toolCatalog"]["enabled"][0]["name"] == "analyze_equipment_fast"
+    assert payload["toolCatalog"]["enabled"][1]["name"] == "analyze_equipment_deep"
+    deferred_names = {item["name"] for item in payload["toolCatalog"]["deferred"]}
+    assert deferred_names == {
+        "ask_document",
+        "analyze_document_fast",
+        "analyze_document_deep",
+        "compare_documents_fast",
+        "compare_documents_deep",
+    }
     assert len(payload["actionFunctions"]) == 4
     action_ids = {item["action_id"] for item in payload["actionFunctions"]}
     assert action_ids == {
@@ -182,7 +194,7 @@ def test_operator_tool_bindings_export_openwebui_returns_manual_import_bundle():
     assert equipment_fast_action["isGlobal"] is True
     assert "Authorization" in equipment_fast_action["pythonCode"]
     assert "/tools/analyze_equipment_fast" in equipment_fast_action["pythonCode"]
-    assert payload["importChecklist"][0].startswith("1.")
+    assert payload["importChecklist"][0].startswith("1. Материализуйте только named tools")
 
 
 def test_operator_config_apply_rejects_unknown_path():

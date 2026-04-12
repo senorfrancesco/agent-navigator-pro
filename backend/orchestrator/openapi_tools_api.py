@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from orchestrator.tool_catalog import get_tool_definition
 from orchestrator.tool_schemas import (
     AcceptedToolResult,
     AnalyzeDocumentDeepRequest,
@@ -265,6 +266,14 @@ def _build_tool_server_config_payload() -> Dict[str, Any]:
     }
 
 
+def _tool_openapi_summary(tool_name: str) -> str:
+    return get_tool_definition(tool_name).label
+
+
+def _tool_openapi_description(tool_name: str) -> str:
+    return get_tool_definition(tool_name).openapi_description
+
+
 def create_openapi_tools_router(
     *,
     app: FastAPI,
@@ -363,6 +372,8 @@ def create_openapi_tools_router(
         response_model=CompletedToolResult,
         responses={202: {"model": AcceptedToolResult}},
         operation_id="ask_document",
+        summary=_tool_openapi_summary("ask_document"),
+        description=_tool_openapi_description("ask_document"),
         dependencies=[Depends(_require_tool_server_access)],
     )
     async def ask_document(tool_request: AskDocumentRequest, request: Request):
@@ -376,6 +387,8 @@ def create_openapi_tools_router(
         response_model=CompletedToolResult,
         responses={202: {"model": AcceptedToolResult}},
         operation_id="analyze_document_fast",
+        summary=_tool_openapi_summary("analyze_document_fast"),
+        description=_tool_openapi_description("analyze_document_fast"),
         dependencies=[Depends(_require_tool_server_access)],
     )
     async def analyze_document_fast(tool_request: AnalyzeDocumentFastRequest, request: Request):
@@ -388,6 +401,8 @@ def create_openapi_tools_router(
         "/tools/analyze_document_deep",
         response_model=AcceptedToolResult,
         operation_id="analyze_document_deep",
+        summary=_tool_openapi_summary("analyze_document_deep"),
+        description=_tool_openapi_description("analyze_document_deep"),
         dependencies=[Depends(_require_tool_server_access)],
     )
     async def analyze_document_deep(tool_request: AnalyzeDocumentDeepRequest, request: Request):
@@ -401,6 +416,8 @@ def create_openapi_tools_router(
         response_model=CompletedToolResult,
         responses={202: {"model": AcceptedToolResult}},
         operation_id="compare_documents_fast",
+        summary=_tool_openapi_summary("compare_documents_fast"),
+        description=_tool_openapi_description("compare_documents_fast"),
         dependencies=[Depends(_require_tool_server_access)],
     )
     async def compare_documents_fast(tool_request: CompareDocumentsFastRequest, request: Request):
@@ -413,6 +430,8 @@ def create_openapi_tools_router(
         "/tools/compare_documents_deep",
         response_model=AcceptedToolResult,
         operation_id="compare_documents_deep",
+        summary=_tool_openapi_summary("compare_documents_deep"),
+        description=_tool_openapi_description("compare_documents_deep"),
         dependencies=[Depends(_require_tool_server_access)],
     )
     async def compare_documents_deep(tool_request: CompareDocumentsDeepRequest, request: Request):
@@ -426,6 +445,8 @@ def create_openapi_tools_router(
         response_model=CompletedToolResult,
         responses={202: {"model": AcceptedToolResult}},
         operation_id="analyze_equipment_fast",
+        summary=_tool_openapi_summary("analyze_equipment_fast"),
+        description=_tool_openapi_description("analyze_equipment_fast"),
         dependencies=[Depends(_require_tool_server_access)],
     )
     async def analyze_equipment_fast(tool_request: AnalyzeEquipmentFastRequest, request: Request):
@@ -438,6 +459,8 @@ def create_openapi_tools_router(
         "/tools/analyze_equipment_deep",
         response_model=AcceptedToolResult,
         operation_id="analyze_equipment_deep",
+        summary=_tool_openapi_summary("analyze_equipment_deep"),
+        description=_tool_openapi_description("analyze_equipment_deep"),
         dependencies=[Depends(_require_tool_server_access)],
     )
     async def analyze_equipment_deep(tool_request: AnalyzeEquipmentDeepRequest, request: Request):

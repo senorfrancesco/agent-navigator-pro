@@ -33,9 +33,10 @@ backend/open_webui_uploads/
 .DS_Store
 Thumbs.db
 
-# Claude / Gemini configs
+
 .claude/
 .gemini/
+.codex/
 
 # Docs / non-essential
 docs/

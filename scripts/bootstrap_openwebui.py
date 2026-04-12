@@ -23,6 +23,7 @@ DEFAULT_TOOL_SERVER_TOKEN = "agent-navigator-tool-server-dev-token"
 BOOTSTRAP_CONNECTION_ID = "agent_navigator_openapi_tool_server"
 TOOL_SERVER_TOKEN_PLACEHOLDER = "SET_OPENAPI_TOOL_SERVER_TOKEN"
 LEGACY_PROMPT_COMMANDS = {"/hw-fast", "/hw-deep", "hw-fast", "hw-deep"}
+FIXTURE_WORKSPACE_TOOL_IDS = ("community_sum_tool",)
 MISSING = object()
 TOOL_SERVER_MANAGED_PATHS = (
     "url",
@@ -35,12 +36,13 @@ TOOL_SERVER_MANAGED_PATHS = (
     "config.name",
 )
 TOOL_SERVER_UI_OWNED_PATHS = ("config.enable",)
-WORKSPACE_TOOL_MANAGED_PATHS = ("id", "content", "meta.manifest.target_models")
-WORKSPACE_TOOL_UI_OWNED_PATHS = ("name", "meta.description")
-ACTION_FUNCTION_MANAGED_PATHS = ("id", "content", "meta.manifest.target_models")
-ACTION_FUNCTION_UI_OWNED_PATHS = ("name", "meta.description", "is_active", "is_global")
+WORKSPACE_TOOL_MANAGED_PATHS = ("id", "name", "content", "meta.description", "meta.manifest.target_models")
+WORKSPACE_TOOL_UI_OWNED_PATHS = ()
+ACTION_FUNCTION_MANAGED_PATHS = ("id", "name", "content", "meta.description", "meta.manifest.target_models")
+ACTION_FUNCTION_UI_OWNED_PATHS = ("is_active", "is_global")
 PROMPT_MANAGED_PATHS = ("command", "content", "meta.binding_id")
 PROMPT_UI_OWNED_PATHS = ("name", "meta.description", "tags", "access_grants", "is_production")
+TASK_CONFIG_MANAGED_PATHS = ("ENABLE_FOLLOW_UP_GENERATION",)
 
 
 def parse_env_file(env_path: Path) -> Dict[str, str]:
@@ -353,6 +355,90 @@ def summarize_tool_server_reconcile(
     }
 
 
+def _tool_server_expected_spec_urls(tool_server_export: Dict[str, Any]) -> set[str]:
+    expected_urls: set[str] = set()
+    for key in ("baseUrl", "browserReachableBaseUrl", "containerReachableBaseUrl"):
+        base_url = str(tool_server_export.get(key) or "").strip()
+        if not base_url:
+            continue
+        origin, spec_path = split_tool_server_spec_url(base_url)
+        expected_urls.add(f"{origin}{spec_path}")
+    return expected_urls
+
+
+def cleanup_tool_server_connections(
+    client: "OpenWebUIBootstrapClient",
+    *,
+    tool_server_export: Dict[str, Any],
+) -> Dict[str, Any]:
+    existing_connections = client.get_tool_server_connections()
+    expected_urls = _tool_server_expected_spec_urls(tool_server_export)
+    expected_name = str(tool_server_export.get("name") or "").strip()
+    kept_connections: list[Dict[str, Any]] = []
+    removed_connection_names: list[str] = []
+
+    for connection in existing_connections:
+        config = connection.get("config", {}) or {}
+        connection_name = str(config.get("name") or "").strip()
+        connection_url = normalized_connection_spec_url(connection)
+        if (
+            config.get("bootstrap_id") == BOOTSTRAP_CONNECTION_ID
+            or connection_url in expected_urls
+            or (expected_name and connection_name == expected_name)
+        ):
+            removed_connection_names.append(connection_name or expected_name or connection_url)
+            continue
+        kept_connections.append(connection)
+
+    if kept_connections != list(existing_connections):
+        client.set_tool_server_connections(kept_connections)
+
+    return {
+        "action": "updated" if removed_connection_names else "noop",
+        "removedCount": len(removed_connection_names),
+        "removedConnectionNames": removed_connection_names,
+    }
+
+
+def cleanup_user_settings_tool_servers(
+    client: "OpenWebUIBootstrapClient",
+    *,
+    tool_server_export: Dict[str, Any],
+) -> Dict[str, Any]:
+    current_settings = client.get_user_settings()
+    current_ui_settings = dict(current_settings.get("ui") or {})
+    current_tool_servers = list(current_ui_settings.get("toolServers") or [])
+    expected_urls = _tool_server_expected_spec_urls(tool_server_export)
+
+    kept_tool_servers: list[Dict[str, Any]] = []
+    removed_tool_server_names: list[str] = []
+    for tool_server in current_tool_servers:
+        tool_server_url = normalized_connection_spec_url(tool_server)
+        if tool_server_url in expected_urls:
+            info = tool_server.get("info", {}) or {}
+            removed_tool_server_names.append(str(info.get("name") or tool_server_url))
+            continue
+        kept_tool_servers.append(tool_server)
+
+    if kept_tool_servers == current_tool_servers:
+        return {
+            "action": "noop",
+            "removedCount": 0,
+            "removedToolServerNames": [],
+        }
+
+    updated_settings = copy.deepcopy(current_settings)
+    updated_ui_settings = dict(updated_settings.get("ui") or {})
+    updated_ui_settings["toolServers"] = kept_tool_servers
+    updated_settings["ui"] = updated_ui_settings
+    client.update_user_settings(updated_settings)
+    return {
+        "action": "updated",
+        "removedCount": len(removed_tool_server_names),
+        "removedToolServerNames": removed_tool_server_names,
+    }
+
+
 def _reconcile_existing_resource(
     *,
     resource_id: str,
@@ -411,6 +497,27 @@ def reconcile_default_model(
     return client.set_models_config(desired), summary
 
 
+def reconcile_task_config(
+    client: "OpenWebUIBootstrapClient",
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    current = client.get_task_config()
+    desired = dict(current)
+    desired["ENABLE_FOLLOW_UP_GENERATION"] = False
+    applied_changes = _diff_paths(
+        current,
+        desired,
+        TASK_CONFIG_MANAGED_PATHS,
+    )
+    summary = {
+        "action": "updated" if applied_changes else "noop",
+        "appliedChanges": applied_changes,
+        "uiOwnedDriftIgnored": [],
+    }
+    if not applied_changes:
+        return current, summary
+    return client.set_task_config(desired), summary
+
+
 class OpenWebUIBootstrapClient:
     def __init__(self, *, openwebui_base_url: str, admin_token: str):
         self.openwebui_base_url = openwebui_base_url.rstrip("/")
@@ -441,6 +548,18 @@ class OpenWebUIBootstrapClient:
     def set_models_config(self, form_data: Dict[str, Any]) -> Dict[str, Any]:
         return dict(self._request("POST", "/api/v1/configs/models", payload=form_data))
 
+    def get_task_config(self) -> Dict[str, Any]:
+        return dict(self._request("GET", "/api/v1/tasks/config"))
+
+    def set_task_config(self, form_data: Dict[str, Any]) -> Dict[str, Any]:
+        return dict(self._request("POST", "/api/v1/tasks/config/update", payload=form_data))
+
+    def get_user_settings(self) -> Dict[str, Any]:
+        return dict(self._request("GET", "/api/v1/users/user/settings") or {})
+
+    def update_user_settings(self, form_data: Dict[str, Any]) -> Dict[str, Any]:
+        return dict(self._request("POST", "/api/v1/users/user/settings/update", payload=form_data))
+
     def get_tool_by_id(self, tool_id: str) -> Dict[str, Any] | None:
         try:
             return self._request("GET", f"/api/v1/tools/id/{tool_id}")
@@ -454,6 +573,9 @@ class OpenWebUIBootstrapClient:
 
     def update_tool(self, tool_id: str, form_data: Dict[str, Any]) -> Any:
         return self._request("POST", f"/api/v1/tools/id/{tool_id}/update", payload=form_data)
+
+    def delete_tool(self, tool_id: str) -> Any:
+        return self._request("DELETE", f"/api/v1/tools/id/{tool_id}/delete")
 
     def get_function_by_id(self, function_id: str) -> Dict[str, Any] | None:
         try:
@@ -557,6 +679,20 @@ def upsert_workspace_tools(
     return summary
 
 
+def cleanup_fixture_workspace_tools(client: OpenWebUIBootstrapClient) -> Dict[str, Any]:
+    deleted_ids: list[str] = []
+    for tool_id in FIXTURE_WORKSPACE_TOOL_IDS:
+        existing = client.get_tool_by_id(tool_id)
+        if not existing:
+            continue
+        client.delete_tool(tool_id)
+        deleted_ids.append(tool_id)
+    return {
+        "action": "updated" if deleted_ids else "noop",
+        "deletedIds": deleted_ids,
+    }
+
+
 def upsert_functions(
     client: OpenWebUIBootstrapClient,
     action_functions: Iterable[Dict[str, Any]],
@@ -655,11 +791,15 @@ def bootstrap_openwebui(
     ownership = dict(export_bundle.get("ownership") or {})
     effective_default_model = str(runtime_config.get("defaultModel") or default_model)
 
-    tool_server_summary = upsert_tool_server(
+    tool_server_cleanup_summary = cleanup_tool_server_connections(
         client,
         tool_server_export=export_bundle["toolServer"],
-        tool_server_token=tool_server_token,
     )
+    user_tool_server_cleanup_summary = cleanup_user_settings_tool_servers(
+        client,
+        tool_server_export=export_bundle["toolServer"],
+    )
+    workspace_tool_cleanup_summary = cleanup_fixture_workspace_tools(client)
     workspace_tools_summary = upsert_workspace_tools(
         client,
         export_bundle.get("workspaceTools", []),
@@ -673,20 +813,27 @@ def bootstrap_openwebui(
     workspace_prompts_summary = upsert_prompts(client, export_bundle.get("workspacePrompts", []))
     legacy_prompt_cleanup_count = remove_legacy_prompts(client)
     models_config, default_model_summary = reconcile_default_model(client, effective_default_model)
+    task_config, task_config_summary = reconcile_task_config(client)
     drift_summary = {
-        "toolServer": tool_server_summary,
+        "toolServerCleanup": tool_server_cleanup_summary,
+        "userToolServerCleanup": user_tool_server_cleanup_summary,
+        "workspaceToolCleanup": workspace_tool_cleanup_summary,
         "workspaceTools": workspace_tools_summary,
         "actionFunctions": action_functions_summary,
         "workspacePrompts": workspace_prompts_summary,
         "defaultModelConfig": default_model_summary,
+        "taskConfig": task_config_summary,
         "legacyPromptCleanupCount": legacy_prompt_cleanup_count,
     }
     drift_summary["noOp"] = (
-        tool_server_summary.get("action") == "noop"
+        tool_server_cleanup_summary.get("action") == "noop"
+        and user_tool_server_cleanup_summary.get("action") == "noop"
+        and workspace_tool_cleanup_summary.get("action") == "noop"
         and not _collection_has_changes(workspace_tools_summary)
         and not _collection_has_changes(action_functions_summary)
         and not _collection_has_changes(workspace_prompts_summary)
         and default_model_summary.get("action") == "noop"
+        and task_config_summary.get("action") == "noop"
         and legacy_prompt_cleanup_count == 0
     )
 
@@ -699,6 +846,7 @@ def bootstrap_openwebui(
         "legacyPromptCleanupCount": legacy_prompt_cleanup_count,
         "defaultModel": models_config.get("DEFAULT_MODELS"),
         "defaultFunctionCalling": (models_config.get("DEFAULT_MODEL_PARAMS") or {}).get("function_calling"),
+        "taskConfig": task_config,
         "driftSummary": drift_summary,
         "ownership": ownership,
         "runtimeConfig": runtime_config,
