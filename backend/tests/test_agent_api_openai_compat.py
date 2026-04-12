@@ -400,14 +400,25 @@ async def test_raw_chat_completions_streaming_proxies_to_ums(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_raw_chat_completions_returns_429_before_stream_starts(monkeypatch):
+async def test_raw_chat_completions_returns_busy_stream_response_before_stream_starts(monkeypatch):
     class _FakeStreamResponse:
         def __init__(self):
             self.request = httpx.Request("POST", "http://localhost:8090/infer")
             self.status_code = 429
 
         def raise_for_status(self):
-            response = httpx.Response(status_code=429, request=self.request)
+            response = httpx.Response(
+                status_code=429,
+                request=self.request,
+                json={
+                    "detail": {
+                        "status": "busy",
+                        "kind": "stream",
+                        "reason": "fail_fast_saturated",
+                        "message": "busy message",
+                    }
+                },
+            )
             raise httpx.HTTPStatusError("429 Too Many Requests", request=self.request, response=response)
 
         async def aclose(self):
@@ -431,18 +442,72 @@ async def test_raw_chat_completions_returns_429_before_stream_starts(monkeypatch
     )
     monkeypatch.setattr(agent_api, "get_shared_client", fake_get_shared_client)
 
-    with pytest.raises(HTTPException) as exc_info:
-        await agent_api.raw_openai_completions(
-            _FakeRequest(
-                {
-                    "messages": [{"role": "user", "content": "Привет"}],
-                    "stream": True,
-                }
-            )
+    response = await agent_api.raw_openai_completions(
+        _FakeRequest(
+            {
+                "messages": [{"role": "user", "content": "Привет"}],
+                "stream": True,
+            }
         )
+    )
+    body = await _read_streaming_body(response)
 
-    assert exc_info.value.status_code == 429
-    assert exc_info.value.detail == "raw-model-stream-saturated"
+    assert isinstance(response, StreamingResponse)
+    assert "busy message" in body
+    assert "data: [DONE]" in body
+
+
+@pytest.mark.asyncio
+async def test_raw_chat_completions_returns_busy_non_stream_response(monkeypatch):
+    class _FakeBusyResponse:
+        def __init__(self):
+            self.request = httpx.Request("POST", "http://localhost:8090/infer")
+            self.status_code = 429
+
+        def raise_for_status(self):
+            response = httpx.Response(
+                status_code=429,
+                request=self.request,
+                json={
+                    "detail": {
+                        "status": "busy",
+                        "kind": "llm",
+                        "reason": "queue_timeout",
+                        "message": "busy message",
+                    }
+                },
+            )
+            raise httpx.HTTPStatusError("429 Too Many Requests", request=self.request, response=response)
+
+        def json(self):
+            return {"detail": {"status": "busy"}}
+
+    class _FakeClient:
+        async def post(self, url: str, json: Dict[str, Any]):
+            return _FakeBusyResponse()
+
+    async def fake_get_shared_client():
+        return _FakeClient()
+
+    monkeypatch.setattr(agent_api, "get_all_models", lambda: {"qwen-14b-llm": {"kind": "llm"}})
+    monkeypatch.setattr(
+        agent_api,
+        "resolve_model_selection",
+        lambda role_key: type("Selection", (), {"resolved_model_id": "qwen-14b-llm"})(),
+    )
+    monkeypatch.setattr(agent_api, "get_shared_client", fake_get_shared_client)
+
+    response = await agent_api.raw_openai_completions(
+        _FakeRequest(
+            {
+                "messages": [{"role": "user", "content": "Привет"}],
+                "stream": False,
+            }
+        )
+    )
+
+    assert response["choices"][0]["message"]["content"] == "busy message"
+    assert response["choices"][0]["finish_reason"] == "stop"
 
 
 @pytest.mark.asyncio

@@ -16,10 +16,26 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 RUNTIME_ENV_PATH = BACKEND_ROOT / ".env.runtime"
-HARDWARE_OVERRIDE_ENV_PATH = BACKEND_ROOT / ".env.hardware.override"
 SUPPORTED_PROFILES = {"default", "adaptive", "manual"}
 SUPPORTED_GPU_LAYERS_MODES = {"auto", "max", "manual"}
 SUPPORTED_COMPONENT_DEVICE_MODES = {"cpu", "gpu", "hybrid"}
+TUNABLE_ENV_DESCRIPTIONS = {
+    "UMS_RUNTIME_PROFILE": "Профиль расчёта runtime budget.",
+    "DEVICE_MODE": "Общий режим размещения тяжёлых моделей.",
+    "LLM_DEVICE_MODE": "Размещение LLM.",
+    "VLM_DEVICE_MODE": "Размещение VLM.",
+    "INTENT_EMBEDDER_DEVICE_MODE": "Размещение intent embedder.",
+    "RETRIEVAL_EMBEDDER_DEVICE_MODE": "Размещение retrieval embedder.",
+    "GPU_LAYERS_MODE": "Стратегия offload слоёв LLM на GPU.",
+    "N_GPU_LAYERS_OVERRIDE": "Явное число GPU layers для manual/max.",
+    "UMS_LLM_GPU_INDICES": "Какие GPU разрешено использовать для LLM.",
+    "UMS_EMBEDDING_GPU_INDEX": "На какой GPU закреплять embedding-модели.",
+    "UMS_LLM_MIN_FREE_VRAM_GB": "Минимум свободной VRAM для участия GPU в LLM placement.",
+    "UMS_LLM_MIN_BALANCE_RATIO": "Порог баланса свободной VRAM для multi-GPU split.",
+    "UMS_MANUAL_EFFECTIVE_CONTEXT_TOKENS": "Effective context budget для manual runtime profile.",
+    "UMS_RETRIEVED_CONTEXT_RATIO": "Доля effective context под retrieved context.",
+    "UMS_GENERATION_TOKENS_RESERVE": "Резерв токенов под генерацию.",
+}
 
 
 def _safe_float(value: Optional[float], default: float) -> float:
@@ -487,7 +503,6 @@ def render_env_runtime(plan: Dict[str, Any]) -> str:
         f"UMS_GENERATION_TOKENS_RESERVE={plan['generation_tokens_reserve']}",
         f"DEVICE_MODE={plan['device_mode']}",
         f"GPU_LAYERS_MODE={plan.get('gpu_layers_mode', 'auto')}",
-        f"UMS_SELECTED_GPU_LAYERS={plan.get('llm_gpu_layers', 0)}",
         f"LLM_DEVICE_MODE={component_modes.get('llm', plan['device_mode'])}",
         f"VLM_DEVICE_MODE={component_modes.get('vlm', plan['device_mode'])}",
         f"INTENT_EMBEDDER_DEVICE_MODE={component_modes.get('intent_embedder', 'cpu')}",
@@ -500,6 +515,112 @@ def render_env_runtime(plan: Dict[str, Any]) -> str:
         lines.append(f"N_GPU_LAYERS_OVERRIDE={int(plan['requested_gpu_layers'])}")
     if plan.get("rag_mode"):
         lines.append(f"RAG_MODE_OVERRIDE={plan['rag_mode']}")
+    return "\n".join(lines) + "\n"
+
+
+def build_recommended_env(plan: Dict[str, Any]) -> Dict[str, str]:
+    component_modes = plan.get("component_device_modes") or {}
+    placements = plan.get("placements") or {}
+    llm_gpu_indices = ",".join(str(idx) for idx in list((placements.get("llm") or {}).get("gpu_indices") or []))
+
+    embed_gpu_candidates: List[int] = []
+    for component in ("intent_embedder", "retrieval_embedder"):
+        for idx in list((placements.get(component) or {}).get("gpu_indices") or []):
+            normalized = int(idx)
+            if normalized not in embed_gpu_candidates:
+                embed_gpu_candidates.append(normalized)
+    embedding_gpu_index = str(embed_gpu_candidates[0]) if embed_gpu_candidates else ""
+
+    gpu_layers_mode = str(plan.get("gpu_layers_mode") or "auto").strip().lower()
+    if gpu_layers_mode == "max":
+        gpu_layers_override = "-1"
+    elif gpu_layers_mode == "manual" and plan.get("requested_gpu_layers") is not None:
+        gpu_layers_override = str(int(plan["requested_gpu_layers"]))
+    else:
+        gpu_layers_override = os.getenv("N_GPU_LAYERS_OVERRIDE", "")
+
+    recommended = {
+        "UMS_RUNTIME_PROFILE": str(plan.get("runtime_profile") or "adaptive"),
+        "DEVICE_MODE": str(plan.get("device_mode") or "hybrid"),
+        "LLM_DEVICE_MODE": str(component_modes.get("llm") or plan.get("device_mode") or "hybrid"),
+        "VLM_DEVICE_MODE": str(component_modes.get("vlm") or plan.get("device_mode") or "hybrid"),
+        "INTENT_EMBEDDER_DEVICE_MODE": str(component_modes.get("intent_embedder") or "cpu"),
+        "RETRIEVAL_EMBEDDER_DEVICE_MODE": str(component_modes.get("retrieval_embedder") or "cpu"),
+        "GPU_LAYERS_MODE": gpu_layers_mode or "auto",
+        "N_GPU_LAYERS_OVERRIDE": gpu_layers_override,
+        "UMS_LLM_GPU_INDICES": llm_gpu_indices,
+        "UMS_EMBEDDING_GPU_INDEX": embedding_gpu_index,
+        "UMS_LLM_MIN_FREE_VRAM_GB": str(os.getenv("UMS_LLM_MIN_FREE_VRAM_GB", "0")),
+        "UMS_LLM_MIN_BALANCE_RATIO": str(os.getenv("UMS_LLM_MIN_BALANCE_RATIO", "0.5")),
+        "UMS_MANUAL_EFFECTIVE_CONTEXT_TOKENS": str(int(plan.get("effective_context_tokens") or 0)),
+        "UMS_RETRIEVED_CONTEXT_RATIO": str(plan.get("context_budget_ratio") or 0.6),
+        "UMS_GENERATION_TOKENS_RESERVE": str(int(plan.get("generation_tokens_reserve") or 1024)),
+    }
+    return recommended
+
+
+def build_recommendation_report(plan: Dict[str, Any]) -> Dict[str, Any]:
+    recommended = build_recommended_env(plan)
+    tunable_fields = []
+    for key, description in TUNABLE_ENV_DESCRIPTIONS.items():
+        tunable_fields.append(
+            {
+                "key": key,
+                "description": description,
+                "current": os.getenv(key, ""),
+                "recommended": recommended.get(key, ""),
+            }
+        )
+
+    notes: List[str] = []
+    llm_placement = (plan.get("placements") or {}).get("llm") or {}
+    if llm_placement.get("placement_mode") == "multi-gpu":
+        notes.append(
+            f"LLM split рассчитан на GPU {llm_placement.get('gpu_indices')} с tensor_split={llm_placement.get('tensor_split')}"
+        )
+    if recommended.get("UMS_EMBEDDING_GPU_INDEX", "") == "":
+        notes.append("Embedding-модели не требуют явного GPU pinning по текущему плану.")
+
+    return {
+        "hardware": plan.get("hardware") or {},
+        "plan": plan,
+        "recommended_env": recommended,
+        "tunable_fields": tunable_fields,
+        "notes": notes,
+    }
+
+
+def render_recommendation_text(report: Dict[str, Any]) -> str:
+    hardware = report.get("hardware") or {}
+    best_gpu = hardware.get("best_gpu") or {}
+    lines = [
+        "Рекомендации для backend/.env",
+        "",
+        "Обнаруженное железо:",
+        f"  gpu_count={hardware.get('gpu_count')}",
+        f"  total_vram_gb={hardware.get('total_vram_gb')}",
+        f"  free_vram_gb={hardware.get('free_vram_gb')}",
+        f"  best_gpu={best_gpu.get('name', 'n/a')} index={best_gpu.get('index', 'n/a')}",
+        "",
+        "Параметры, которые имеет смысл настраивать:",
+    ]
+    for item in report.get("tunable_fields") or []:
+        current = item.get("current", "")
+        recommended = item.get("recommended", "")
+        lines.append(
+            f"  {item['key']}: current={current if current != '' else '<empty>'} recommended={recommended if recommended != '' else '<empty>'}"
+        )
+        lines.append(f"    {item['description']}")
+
+    notes = report.get("notes") or []
+    if notes:
+        lines.extend(["", "Примечания:"])
+        for note in notes:
+            lines.append(f"  - {note}")
+
+    lines.extend(["", "Рекомендуемый блок для backend/.env:"])
+    for key, value in (report.get("recommended_env") or {}).items():
+        lines.append(f"{key}={value}")
     return "\n".join(lines) + "\n"
 
 
@@ -597,6 +718,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     report_parser = subparsers.add_parser("report", help="Показать runtime plan в JSON без записи файла.")
     _add_common_args(report_parser)
 
+    recommend_parser = subparsers.add_parser(
+        "recommend",
+        help="Показать рекомендуемые значения для ручного переноса в backend/.env.",
+    )
+    _add_common_args(recommend_parser)
+    recommend_parser.add_argument("--json", action="store_true", help="Печатать рекомендацию в JSON.")
+
     apply_parser = subparsers.add_parser("apply", help="Построить runtime plan и при необходимости записать backend/.env.runtime.")
     _add_common_args(apply_parser)
     apply_parser.add_argument("--output", default=str(RUNTIME_ENV_PATH), help="Путь для записи backend/.env.runtime.")
@@ -621,6 +749,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         intent_embedder_device_mode=args.intent_embedder_device_mode,
         retrieval_embedder_device_mode=args.retrieval_embedder_device_mode,
     )
+
+    if args.command == "recommend":
+        recommendation = build_recommendation_report(plan)
+        if args.json:
+            _json_print(recommendation)
+        else:
+            print(render_recommendation_text(recommendation), end="")
+        return 0
 
     if args.command == "apply" and not args.report_only:
         output = write_env_runtime(plan, Path(args.output))

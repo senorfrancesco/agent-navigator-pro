@@ -15,6 +15,7 @@ def test_flags_reference_contains_runtime_env_matrix():
 
     assert "backend/.env" in text
     assert "backend/.env.runtime" in text
+    assert "./scripts/evaluate_runtime.sh recommend" in text
     assert "руками не редактировать" in text
     assert "deprecated" in text
 
@@ -39,15 +40,19 @@ def test_docs_distinguish_runtime_and_hardware_override_files():
     deploy = _read("docs/deploy-guide.md")
     scripts_readme = _read("docs/scripts/README.md")
 
+    assert "./scripts/evaluate_runtime.sh recommend" in readme
     assert "backend/.env.runtime" in readme
-    assert "generated applied env" in readme
+    assert "не нужен для обычного `run_native.sh`" in readme
     assert "backend/.env.native" in readme
     assert "deprecated" in readme
 
+    assert "./scripts/evaluate_runtime.sh recommend" in deploy
     assert "backend/.env.runtime" in deploy
-    assert "generated applied env" in deploy
+    assert "generated applied env для `container` path" in deploy
     assert "deprecated" in deploy
 
+    assert "./scripts/evaluate_runtime.sh recommend" in scripts_readme
     assert "backend/.env.runtime" in scripts_readme
+    assert "для native path не нужен по умолчанию" in scripts_readme
     assert "backend/.env.native" in scripts_readme
     assert "deprecated" in scripts_readme

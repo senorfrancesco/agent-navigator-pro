@@ -114,11 +114,22 @@ def _reset_ums_state(monkeypatch, tmp_path):
         "MODEL_PATH_EMBEDDING_INTENT",
         "MODEL_PATH_EMBEDDING_RETRIEVAL",
         "BACKEND_MODE",
+        "DEVICE_MODE",
+        "LLM_DEVICE_MODE",
+        "VLM_DEVICE_MODE",
+        "INTENT_EMBEDDER_DEVICE_MODE",
+        "RETRIEVAL_EMBEDDER_DEVICE_MODE",
+        "GPU_LAYERS_MODE",
+        "N_GPU_LAYERS_OVERRIDE",
         "UMS_LLAMA_CACHE_PROMPT",
+        "UMS_RUNTIME_PROFILE",
         "UMS_LLM_GPU_INDICES",
         "UMS_LLM_MIN_FREE_VRAM_GB",
         "UMS_LLM_MIN_BALANCE_RATIO",
         "UMS_EMBEDDING_GPU_INDEX",
+        "UMS_MANUAL_EFFECTIVE_CONTEXT_TOKENS",
+        "UMS_RETRIEVED_CONTEXT_RATIO",
+        "UMS_GENERATION_TOKENS_RESERVE",
         "UMS_DYNAMIC_MODELS_REGISTRY_PATH",
         "UMS_LLM_MAX_CONCURRENCY",
         "UMS_EMBED_MAX_CONCURRENCY",
@@ -858,6 +869,8 @@ def test_status_exposes_concurrency_policy(monkeypatch):
     assert payload["concurrency_policy"]["embed_max_concurrency"] == 6
     assert payload["concurrency_policy"]["acquire_timeout_s"] == 1.5
     assert payload["concurrency_policy"]["fail_fast_on_saturation"] is False
+    assert payload["concurrency_policy"]["backend_mode"] == "llama-cpp-python"
+    assert payload["concurrency_policy"]["llm_admission_mode"] == "bounded_wait"
     assert payload["concurrency_policy"]["llm_inflight"] == 0
     assert payload["concurrency_policy"]["embedding_inflight"] == 0
 
@@ -1866,7 +1879,10 @@ async def test_infer_returns_429_when_llm_concurrency_is_saturated(monkeypatch):
 
     mock_start.assert_not_called()
     assert exc_info.value.status_code == 429
-    assert exc_info.value.detail == "llm concurrency saturated"
+    assert exc_info.value.detail["status"] == "busy"
+    assert exc_info.value.detail["kind"] == "llm"
+    assert exc_info.value.detail["reason"] == "fail_fast_saturated"
+    assert exc_info.value.detail["backend_mode"] == "llama-cpp-python"
 
 
 @pytest.mark.asyncio
@@ -1886,7 +1902,9 @@ async def test_openai_embeddings_returns_429_when_embedding_concurrency_is_satur
 
     mock_start.assert_not_called()
     assert exc_info.value.status_code == 429
-    assert exc_info.value.detail == "embedding concurrency saturated"
+    assert exc_info.value.detail["status"] == "busy"
+    assert exc_info.value.detail["kind"] == "embedding"
+    assert exc_info.value.detail["reason"] == "fail_fast_saturated"
 
 
 @pytest.mark.asyncio
@@ -1903,7 +1921,9 @@ async def test_fail_fast_rejects_without_waiting(monkeypatch):
                 pytest.fail("slot acquisition should fail before entering context")
 
     assert exc_info.value.status_code == 429
-    assert exc_info.value.detail == "llm concurrency saturated"
+    assert exc_info.value.detail["status"] == "busy"
+    assert exc_info.value.detail["kind"] == "llm"
+    assert exc_info.value.detail["reason"] == "fail_fast_saturated"
 
 
 @pytest.mark.asyncio
@@ -1925,7 +1945,10 @@ async def test_stream_infer_returns_429_before_opening_stream(monkeypatch):
 
     mock_start.assert_not_called()
     assert response.status_code == 429
-    assert response.json()["detail"] == "stream concurrency saturated"
+    payload = response.json()["detail"]
+    assert payload["status"] == "busy"
+    assert payload["kind"] == "stream"
+    assert payload["reason"] == "fail_fast_saturated"
 
 
 @pytest.mark.asyncio

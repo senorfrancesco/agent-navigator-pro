@@ -2,10 +2,10 @@
 
 # ===========================================
 # Скрипт для запуска всех компонентов системы
-# Agent Navigator Pro v3.0 (Chainlit UI)
+# Agent Navigator Pro v3.0 (Chainlit as compatibility UI)
 # ===========================================
 # Использует tmux для управления несколькими процессами
-# Chainlit запускается через Docker (порт 3000)
+# Chainlit запускается через Docker как совместимый UI (порт 3000)
 
 set -e
 
@@ -20,6 +20,7 @@ source "$SCRIPT_DIR/utils/env_loader.sh"
 
 ATTACH_TMUX=true
 FROM_LAUNCHER=false
+SKIP_RUNTIME_APPLY="${AGENT_NAVIGATOR_SKIP_RUNTIME_APPLY:-true}"
 
 EXTERNAL_BACKEND_MODE="${BACKEND_MODE:-}"
 EXTERNAL_VLLM_BASE_URL="${VLLM_BASE_URL:-}"
@@ -32,8 +33,8 @@ print_help() {
   cat <<EOF
 run_all.sh
 
-Поднимает container/compose runtime для Chainlit-first стека.
-При прямом вызове считается compatibility entrypoint и делегирует в launcher.sh.
+Поднимает container/compose runtime для текущего compose-стека с совместимым `Chainlit`.
+При прямом вызове считается совместимым entrypoint и делегирует в launcher.sh.
 
 Использование:
   ./scripts/run_all.sh
@@ -45,6 +46,10 @@ run_all.sh
       чтобы скрипт сразу выполнил container runtime path.
   --no-attach
       Не подключаться к tmux monitoring session после запуска.
+  --skip-runtime-apply
+      Не загружать runtime overrides для этого запуска.
+  --apply-runtime
+      Явно загрузить runtime overrides для этого запуска.
   -h, --help
       Показать эту справку.
 
@@ -67,6 +72,12 @@ for arg in "$@"; do
         --no-attach)
             ATTACH_TMUX=false
             ;;
+        --skip-runtime-apply)
+            SKIP_RUNTIME_APPLY=true
+            ;;
+        --apply-runtime)
+            SKIP_RUNTIME_APPLY=false
+            ;;
         *)
             echo "Неизвестный аргумент: $arg" >&2
             echo "Используйте --help для списка флагов." >&2
@@ -86,7 +97,7 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-echo -e "${GREEN}=== Запуск системы Agent Navigator Pro v3.0 (Chainlit) ===${NC}"
+echo -e "${GREEN}=== Запуск системы Agent Navigator Pro v3.0 (Chainlit as compatibility UI) ===${NC}"
 
 # -------------------------------------------
 # Загрузка переменных окружения из .env
@@ -99,7 +110,7 @@ else
     echo -e "${YELLOW}Создайте .env из .env.example: cp .env.example .env${NC}"
 fi
 
-if [ -f "$RUNTIME_ENV_FILE" ]; then
+if [ "$SKIP_RUNTIME_APPLY" != true ] && [ -f "$RUNTIME_ENV_FILE" ]; then
     echo -e "${BLUE}Загрузка runtime overrides $RUNTIME_ENV_FILE${NC}"
     load_env_file "$RUNTIME_ENV_FILE" "runtime overrides" || exit 1
 fi

@@ -2091,6 +2091,8 @@ def _get_concurrency_policy_snapshot(
 
 
 def _resolve_concurrency_policy() -> Dict[str, Any]:
+    backend_mode = _resolve_backend_mode()
+    llm_admission_mode = "upstream_admission" if backend_mode == "vllm" else "bounded_wait"
     return {
         "llm_max_concurrency": _read_concurrency_limit(
             "UMS_LLM_MAX_CONCURRENCY",
@@ -2104,6 +2106,8 @@ def _resolve_concurrency_policy() -> Dict[str, Any]:
         ),
         "acquire_timeout_s": max(0.1, _read_runtime_float("UMS_CONCURRENCY_ACQUIRE_TIMEOUT_S", 5.0)),
         "fail_fast_on_saturation": _read_runtime_bool("UMS_FAIL_FAST_ON_SATURATION", False),
+        "backend_mode": backend_mode,
+        "llm_admission_mode": llm_admission_mode,
     }
 
 
@@ -2134,12 +2138,24 @@ async def _acquire_runtime_slot(sem: asyncio.Semaphore, kind: str):
 async def _reserve_runtime_slot(sem: asyncio.Semaphore, kind: str) -> Dict[str, Any]:
     policy = _refresh_concurrency_controls()
     timeout_s = float(policy["acquire_timeout_s"])
-    if bool(policy.get("fail_fast_on_saturation")) and getattr(sem, "_value", 0) <= 0:
+    queue_wait_started_at = time.perf_counter()
+    fail_fast = bool(policy.get("fail_fast_on_saturation"))
+    if kind == "llm" and str(policy.get("llm_admission_mode") or "") == "upstream_admission":
+        fail_fast = True
+    if fail_fast and getattr(sem, "_value", 0) <= 0:
         inc_metric_counter(
             "agent_nav_ums_concurrency_saturation_total",
             labels={"kind": kind, "mode": "fail_fast"},
         )
-        raise HTTPException(status_code=429, detail=f"{kind} concurrency saturated")
+        raise HTTPException(
+            status_code=429,
+            detail=_build_concurrency_saturation_detail(
+                kind=kind,
+                reason="fail_fast_saturated",
+                queue_wait_ms=0,
+                policy=policy,
+            ),
+        )
     try:
         await asyncio.wait_for(sem.acquire(), timeout=timeout_s)
     except TimeoutError as exc:
@@ -2147,9 +2163,40 @@ async def _reserve_runtime_slot(sem: asyncio.Semaphore, kind: str) -> Dict[str, 
             "agent_nav_ums_concurrency_saturation_total",
             labels={"kind": kind, "mode": "timeout"},
         )
-        raise HTTPException(status_code=429, detail=f"{kind} concurrency saturated") from exc
+        raise HTTPException(
+            status_code=429,
+            detail=_build_concurrency_saturation_detail(
+                kind=kind,
+                reason="queue_timeout",
+                queue_wait_ms=int((time.perf_counter() - queue_wait_started_at) * 1000),
+                policy=policy,
+            ),
+        ) from exc
     state["concurrency_policy"] = _get_concurrency_policy_snapshot(policy, use_live_limits=False)
-    return dict(state["concurrency_policy"])
+    acquired_policy = dict(state["concurrency_policy"])
+    acquired_policy["queue_wait_ms"] = int((time.perf_counter() - queue_wait_started_at) * 1000)
+    return acquired_policy
+
+
+def _build_concurrency_saturation_detail(
+    *,
+    kind: str,
+    reason: str,
+    queue_wait_ms: int,
+    policy: Dict[str, Any],
+) -> Dict[str, Any]:
+    return {
+        "status": "busy",
+        "kind": kind,
+        "reason": reason,
+        "message": "Модель занята предыдущим тяжёлым запросом. Дождитесь освобождения слота или остановите активный запуск.",
+        "retryable": True,
+        "queue_wait_ms": max(0, int(queue_wait_ms)),
+        "backend_mode": str(policy.get("backend_mode") or _resolve_backend_mode()),
+        "llm_admission_mode": str(policy.get("llm_admission_mode") or ""),
+        "llm_max_concurrency": int(policy.get("llm_max_concurrency") or _concurrency_controls["llm_limit"]),
+        "embed_max_concurrency": int(policy.get("embed_max_concurrency") or _concurrency_controls["embed_limit"]),
+    }
 
 
 def _release_runtime_slot(sem: asyncio.Semaphore) -> None:
@@ -2173,9 +2220,20 @@ async def _proxy_sse_stream(
     и гарантирует, что upstream stream закрывается в том же task, где был открыт.
     """
     queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+    done_chunk_forwarded = False
 
     async def producer() -> None:
         owns_slot = False
+        released_slot = False
+
+        def release_slot() -> None:
+            nonlocal released_slot
+            if released_slot:
+                return
+            if slot_pre_acquired or owns_slot:
+                _release_runtime_slot(sem)
+                released_slot = True
+
         try:
             if not slot_pre_acquired:
                 await _reserve_runtime_slot(sem, "stream")
@@ -2185,6 +2243,11 @@ async def _proxy_sse_stream(
                     resp.raise_for_status()
                     async for line in resp.aiter_lines():
                         if line:
+                            stripped = line.strip()
+                            if stripped == "data: [DONE]":
+                                release_slot()
+                                await queue.put(("chunk", b"data: [DONE]\n\n"))
+                                return
                             await queue.put(("chunk", f"{line}\n\n".encode()))
         except asyncio.CancelledError:
             raise
@@ -2192,8 +2255,7 @@ async def _proxy_sse_stream(
             logger.warning(f"Upstream SSE proxy error for {url}: {exc}")
             await queue.put(("error", exc))
         finally:
-            if slot_pre_acquired or owns_slot:
-                _release_runtime_slot(sem)
+            release_slot()
             await queue.put(("done", None))
 
     producer_task = asyncio.create_task(producer(), name=f"ums-proxy:{os.path.basename(url)}")
@@ -2201,13 +2263,15 @@ async def _proxy_sse_stream(
         while True:
             kind, value = await queue.get()
             if kind == "chunk":
+                if value == b"data: [DONE]\n\n":
+                    done_chunk_forwarded = True
                 yield value
                 continue
             if kind == "error":
                 return
             return
     finally:
-        if not producer_task.done():
+        if not producer_task.done() and not done_chunk_forwarded:
             producer_task.cancel()
         with suppress(asyncio.CancelledError):
             await producer_task

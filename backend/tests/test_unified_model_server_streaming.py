@@ -28,14 +28,17 @@ class _FakeResponse:
 
 
 class _FakeStreamContext:
-    def __init__(self, response):
+    def __init__(self, response, *, exit_delay_s: float = 0.0):
         self._response = response
         self.exited = False
+        self.exit_delay_s = exit_delay_s
 
     async def __aenter__(self):
         return self._response
 
     async def __aexit__(self, exc_type, exc, tb):
+        if self.exit_delay_s:
+            await asyncio.sleep(self.exit_delay_s)
         self.exited = True
         return False
 
@@ -139,3 +142,35 @@ async def test_proxy_sse_stream_passes_upstream_headers():
             "headers": {"Authorization": "Bearer test-token"},
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_proxy_sse_stream_releases_slot_on_done_before_upstream_exit():
+    response = _FakeResponse([
+        'data: {"choices":[{"text":"Hello"}]}',
+        "data: [DONE]",
+    ])
+    stream_context = _FakeStreamContext(response, exit_delay_s=0.2)
+    sem = asyncio.Semaphore(1)
+
+    with patch(
+        "services.model_manager.unified_model_server.httpx.AsyncClient",
+        return_value=_FakeAsyncClient(stream_context),
+    ):
+        stream = ums_server._proxy_sse_stream(
+            "http://localhost:8091/v1/completions",
+            {"prompt": "x", "stream": True},
+            sem,
+        )
+
+        first = await anext(stream)
+        assert first == b'data: {"choices":[{"text":"Hello"}]}\n\n'
+
+        done_chunk = await anext(stream)
+        assert done_chunk == b"data: [DONE]\n\n"
+        assert getattr(sem, "_value", None) == 1
+        assert stream_context.exited is False
+
+        await stream.aclose()
+
+    assert stream_context.exited is True

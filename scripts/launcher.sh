@@ -18,7 +18,9 @@ SKIP_CHAINLIT=false
 REPORT_ONLY=false
 NON_INTERACTIVE=false
 REVIEW_RUNTIME=false
+RUNTIME_ENV_FLAGS_SET=false
 INSTALL=false
+SKIP_RUNTIME_APPLY="${AGENT_NAVIGATOR_SKIP_RUNTIME_APPLY:-true}"
 INSTALL_PLATFORM="auto"
 ENSURE_MODELS=false
 MODEL_ASSET_SET="${AGENT_NAVIGATOR_MODEL_ASSET_SET:-core}"
@@ -35,7 +37,7 @@ RETRIEVAL_EMBEDDER_DEVICE_MODE_OVERRIDE="${RETRIEVAL_EMBEDDER_DEVICE_MODE:-}"
 ENV_LOADER_PYTHON="$(resolve_env_loader_python || true)"
 
 print_help() {
-  cat <<EOF
+  cat <<'EOF'
 launcher.sh
 
 Compatibility wrapper for manual/native shell usage around the Python-first operator control plane.
@@ -78,6 +80,10 @@ Operator UI and /operator/* endpoints remain the canonical product API; this scr
       Не задавать интерактивных вопросов при review/runtime guidance.
   --review-runtime
       Показать и подтвердить runtime plan перед запуском.
+  --skip-runtime-apply
+      Только для container path: не записывать backend/.env.runtime на этом запуске.
+  --apply-runtime
+      Только для container path: явно записать backend/.env.runtime на этом запуске.
   --skip-model-download
       Compatibility alias: не запускать model provisioning phase.
   --ensure-model-download
@@ -95,8 +101,8 @@ Operator UI and /operator/* endpoints remain the canonical product API; this scr
       Показать эту справку.
 
 Interactive review:
-  1. launcher показывает runtime plan только для текущего запуска
-  2. launcher записывает applied backend/.env.runtime
+  native: используйте `./scripts/evaluate_runtime.sh recommend`
+  container: launcher по-прежнему может строить и писать `backend/.env.runtime`
 EOF
 }
 
@@ -232,6 +238,16 @@ while [ $# -gt 0 ]; do
       ;;
     --review-runtime)
       REVIEW_RUNTIME=true
+      shift
+      ;;
+    --skip-runtime-apply)
+      SKIP_RUNTIME_APPLY=true
+      RUNTIME_ENV_FLAGS_SET=true
+      shift
+      ;;
+    --apply-runtime)
+      SKIP_RUNTIME_APPLY=false
+      RUNTIME_ENV_FLAGS_SET=true
       shift
       ;;
     --skip-model-download)
@@ -400,8 +416,26 @@ if [ -z "$RETRIEVAL_EMBEDDER_DEVICE_MODE_OVERRIDE" ]; then
   RETRIEVAL_EMBEDDER_DEVICE_MODE_OVERRIDE="${RETRIEVAL_EMBEDDER_DEVICE_MODE:-}"
 fi
 
+if [ "$TARGET" = "native" ]; then
+  if [ "$REVIEW_RUNTIME" = true ]; then
+    echo "launcher.sh больше не выполняет runtime review для native path." >&2
+    echo "Используйте ./scripts/evaluate_runtime.sh recommend." >&2
+    exit 1
+  fi
+  if [ "$RUNTIME_ENV_FLAGS_SET" = true ]; then
+    echo "launcher.sh больше не использует .env.runtime для native path." >&2
+    echo "Редактируйте backend/.env вручную; рекомендации смотрите через ./scripts/evaluate_runtime.sh recommend." >&2
+    exit 1
+  fi
+  if [ "$REPORT_ONLY" = true ]; then
+    PREFLIGHT_OUTPUT="$(run_preflight_json "recommend")"
+    echo "$PREFLIGHT_OUTPUT"
+    exit 0
+  fi
+fi
+
 INTERACTIVE_REVIEW=false
-if [ "$TARGET" = "native" ] && [ "$REPORT_ONLY" = false ]; then
+if [ "$TARGET" = "container" ] && [ "$REPORT_ONLY" = false ]; then
   if [ "$REVIEW_RUNTIME" = true ]; then
     INTERACTIVE_REVIEW=true
   elif [ "${AGENT_NAVIGATOR_TEST_MODE:-0}" != "1" ] && [ "$NON_INTERACTIVE" = false ] && [ -t 0 ] && [ -t 1 ]; then
@@ -449,27 +483,33 @@ if [ "$INTERACTIVE_REVIEW" = true ]; then
   render_applied_env_preview "$PLAN_PREVIEW"
 fi
 
-PREFLIGHT_OUTPUT="$(run_preflight_json "apply" "$RUNTIME_ENV_FILE")"
-echo "$PREFLIGHT_OUTPUT"
+if [ "$TARGET" = "container" ]; then
+  if [ "$SKIP_RUNTIME_APPLY" = true ]; then
+    PREFLIGHT_COMMAND="plan"
+  else
+    PREFLIGHT_COMMAND="apply"
+  fi
 
-if [ -n "$MODELS_ROOT" ]; then
-  MODELS_ROOT_ABS="$(python -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).expanduser().resolve())' "$MODELS_ROOT")"
-  MODEL_PATH_LLM="$MODELS_ROOT_ABS/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
-  MODEL_PATH_VLM="$MODELS_ROOT_ABS/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
-  MMPROJ_PATH="$MODELS_ROOT_ABS/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf"
-  MODEL_PATH_EMBEDDING_INTENT="$MODELS_ROOT_ABS/st/Qwen3-Embedding-0.6B"
-  MODEL_PATH_EMBEDDING_RETRIEVAL="$MODELS_ROOT_ABS/st/LaBSE"
-  export MODEL_PATH_LLM MODEL_PATH_VLM MMPROJ_PATH MODEL_PATH_EMBEDDING_INTENT MODEL_PATH_EMBEDDING_RETRIEVAL
-  cat >> "$RUNTIME_ENV_FILE" <<EOF
+  PREFLIGHT_OUTPUT="$(run_preflight_json "$PREFLIGHT_COMMAND" "$RUNTIME_ENV_FILE")"
+  echo "$PREFLIGHT_OUTPUT"
+
+  if [ "$SKIP_RUNTIME_APPLY" != true ] && [ -n "$MODELS_ROOT" ]; then
+    MODELS_ROOT_ABS="$(python -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).expanduser().resolve())' "$MODELS_ROOT")"
+    MODEL_PATH_LLM="$MODELS_ROOT_ABS/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
+    MODEL_PATH_VLM="$MODELS_ROOT_ABS/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
+    MMPROJ_PATH="$MODELS_ROOT_ABS/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf"
+    MODEL_PATH_EMBEDDING_INTENT="$MODELS_ROOT_ABS/st/Qwen3-Embedding-0.6B"
+    MODEL_PATH_EMBEDDING_RETRIEVAL="$MODELS_ROOT_ABS/st/LaBSE"
+    export MODEL_PATH_LLM MODEL_PATH_VLM MMPROJ_PATH MODEL_PATH_EMBEDDING_INTENT MODEL_PATH_EMBEDDING_RETRIEVAL
+    cat >> "$RUNTIME_ENV_FILE" <<EOF
 MODEL_PATH_LLM="$MODEL_PATH_LLM"
 MODEL_PATH_VLM="$MODEL_PATH_VLM"
 MMPROJ_PATH="$MMPROJ_PATH"
 MODEL_PATH_EMBEDDING_INTENT="$MODEL_PATH_EMBEDDING_INTENT"
 MODEL_PATH_EMBEDDING_RETRIEVAL="$MODEL_PATH_EMBEDDING_RETRIEVAL"
 EOF
-fi
-
-if [ "$REPORT_ONLY" = true ]; then
+  fi
+elif [ "$REPORT_ONLY" = true ]; then
   exit 0
 fi
 
@@ -502,7 +542,16 @@ if [ "$TARGET" = "native" ]; then
   fi
   exec bash "$SCRIPT_DIR/run_native.sh" "${native_args[@]}"
 elif [ "$TARGET" = "container" ]; then
-  exec bash "$SCRIPT_DIR/run_all.sh" --from-launcher $([ "$NO_ATTACH" = true ] && echo "--no-attach")
+  container_args=(--from-launcher)
+  if [ "$NO_ATTACH" = true ]; then
+    container_args+=(--no-attach)
+  fi
+  if [ "$SKIP_RUNTIME_APPLY" = true ]; then
+    container_args+=(--skip-runtime-apply)
+  else
+    container_args+=(--apply-runtime)
+  fi
+  exec bash "$SCRIPT_DIR/run_all.sh" "${container_args[@]}"
 else
   echo "Неподдерживаемый target: $TARGET" >&2
   exit 1

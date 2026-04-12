@@ -24,13 +24,21 @@ source "$SCRIPT_DIR/utils/env_loader.sh"
 ATTACH_TMUX=true
 FROM_LAUNCHER=false
 SKIP_CHAINLIT=false
+if [ -n "${AGENT_NAVIGATOR_SKIP_RUNTIME_APPLY+x}" ]; then
+  SKIP_RUNTIME_APPLY="${AGENT_NAVIGATOR_SKIP_RUNTIME_APPLY}"
+  EXPLICIT_RUNTIME_ENV_SELECTION=true
+else
+  SKIP_RUNTIME_APPLY=""
+  EXPLICIT_RUNTIME_ENV_SELECTION=false
+fi
 
 print_help() {
   cat <<EOF
 run_native.sh
 
 Поднимает native runtime без Docker: tmux-сессию, backend-сервисы, UMS и Chainlit.
-При прямом вызове считается compatibility entrypoint и делегирует в launcher.sh.
+По умолчанию использует только ручные настройки из backend/.env.
+Оценка железа и рекомендации для backend/.env выполняются отдельно через ./scripts/evaluate_runtime.sh.
 
 Использование:
   ./scripts/run_native.sh
@@ -46,6 +54,10 @@ run_native.sh
   --skip-chainlit
       Не запускать окно Chainlit в native tmux-сессии. Backend-сервисы и Agent API
       продолжают стартовать как обычно.
+  --skip-runtime-apply
+      Явно не загружать backend/.env.runtime для этого запуска.
+  --apply-runtime
+      Явно загрузить backend/.env.runtime для этого запуска.
   -h, --help
       Показать эту справку.
 
@@ -53,7 +65,9 @@ run_native.sh
   ./scripts/run_native.sh
   ./scripts/run_native.sh --no-attach
   ./scripts/run_native.sh --skip-chainlit --no-attach
-  ./scripts/launcher.sh --target native --profile adaptive
+  ./scripts/run_native.sh --apply-runtime
+  ./scripts/evaluate_runtime.sh recommend
+  ./scripts/evaluate_runtime.sh plan
 EOF
 }
 
@@ -72,6 +86,19 @@ for arg in "$@"; do
     --skip-chainlit)
       SKIP_CHAINLIT=true
       ;;
+    --skip-runtime-apply)
+      SKIP_RUNTIME_APPLY=true
+      EXPLICIT_RUNTIME_ENV_SELECTION=true
+      ;;
+    --apply-runtime)
+      SKIP_RUNTIME_APPLY=false
+      EXPLICIT_RUNTIME_ENV_SELECTION=true
+      ;;
+    --interactive|--review-runtime|--non-interactive)
+      echo "Флаг $arg больше не поддерживается в run_native.sh." >&2
+      echo "Используйте ./scripts/evaluate_runtime.sh recommend или ./scripts/evaluate_runtime.sh plan." >&2
+      exit 1
+      ;;
     *)
       echo "Неизвестный аргумент: $arg" >&2
       echo "Используйте --help для списка флагов." >&2
@@ -80,15 +107,8 @@ for arg in "$@"; do
   esac
 done
 
-if [ "$FROM_LAUNCHER" = false ]; then
-  launcher_args=(--target native)
-  if [ "$ATTACH_TMUX" = false ]; then
-    launcher_args+=(--no-attach)
-  fi
-  if [ "$SKIP_CHAINLIT" = true ]; then
-    launcher_args+=(--skip-chainlit)
-  fi
-  exec bash "$SCRIPT_DIR/launcher.sh" "${launcher_args[@]}"
+if [ "$EXPLICIT_RUNTIME_ENV_SELECTION" != true ]; then
+  SKIP_RUNTIME_APPLY=true
 fi
 
 RED='\033[0;31m'
@@ -183,8 +203,10 @@ ensure_writable_dir() {
 
 echo -e "${BLUE}Загрузка backend env $ENV_FILE${NC}"
 load_env_file "$ENV_FILE" "backend env" || die "env-load-failed:backend env:$ENV_FILE"
-echo -e "${BLUE}Загрузка runtime overrides $RUNTIME_ENV_FILE${NC}"
-load_env_file "$RUNTIME_ENV_FILE" "runtime overrides" || die "env-load-failed:runtime overrides:$RUNTIME_ENV_FILE"
+if [ "$SKIP_RUNTIME_APPLY" != true ]; then
+  echo -e "${BLUE}Загрузка runtime overrides $RUNTIME_ENV_FILE${NC}"
+  load_env_file "$RUNTIME_ENV_FILE" "runtime overrides" || die "env-load-failed:runtime overrides:$RUNTIME_ENV_FILE"
+fi
 
 CONDA_ENV="${CONDA_ENV:-base}"
 CONDA_SH_PATH=""
@@ -253,6 +275,105 @@ validate_native_runtime_env() {
 UPLOADS_DIR="${UPLOADS_DIR:-$BACKEND_DIR/open_webui_uploads}"
 validate_native_runtime_env
 
+AGENT_PORT="${AGENT_API_PORT:-8000}"
+DOC_PORT="${DOC_PORT:-8001}"
+LEGAL_PORT="${LEGAL_PORT:-8002}"
+UMS_PORT="${UMS_PORT:-8090}"
+CHAINLIT_PORT="${CHAINLIT_PORT:-3000}"
+
+MCP_DOCUMENT_SERVER_URL="${MCP_DOCUMENT_SERVER_URL:-http://localhost:8001}"
+MCP_LEGAL_SERVER_URL="${MCP_LEGAL_SERVER_URL:-http://localhost:8002}"
+UMS_URL="${UMS_URL:-http://localhost:8090}"
+HOST_UPLOADS_DIR="${HOST_UPLOADS_DIR:-}"
+CHAINLIT_DB_URL="${CHAINLIT_DB_URL:-sqlite+aiosqlite:///$BACKEND_DIR/.data/chainlit.db}"
+CHAINLIT_ENABLE_DATA_LAYER="${CHAINLIT_ENABLE_DATA_LAYER:-true}"
+
+first_non_empty() {
+  local value=""
+  for value in "$@"; do
+    if [ -n "$value" ]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+  done
+  printf 'auto\n'
+}
+
+print_startup_config_summary() {
+  local config_source="backend/.env"
+  local chainlit_mode="on"
+  local llm_device_summary=""
+  local vlm_device_summary=""
+  local intent_device_summary=""
+  local retrieval_device_summary=""
+  local llm_gpu_summary=""
+  local embed_gpu_summary=""
+
+  if [ "$SKIP_RUNTIME_APPLY" != true ]; then
+    config_source="backend/.env + backend/.env.runtime"
+  fi
+  if [ "$SKIP_CHAINLIT" = true ]; then
+    chainlit_mode="off"
+  fi
+
+  llm_device_summary="$(first_non_empty "${LLM_DEVICE_MODE:-}" "${DEVICE_MODE:-}")"
+  vlm_device_summary="$(first_non_empty "${VLM_DEVICE_MODE:-}" "${LLM_DEVICE_MODE:-}" "${DEVICE_MODE:-}")"
+  intent_device_summary="$(first_non_empty "${INTENT_EMBEDDER_DEVICE_MODE:-}")"
+  retrieval_device_summary="$(first_non_empty "${RETRIEVAL_EMBEDDER_DEVICE_MODE:-}")"
+  llm_gpu_summary="$(first_non_empty "${UMS_LLM_GPU_INDICES:-}")"
+  embed_gpu_summary="$(first_non_empty "${UMS_EMBEDDING_GPU_INDEX:-}")"
+
+  echo -e "${BLUE}Конфиг запуска:${NC}"
+  echo "  runtime: source=${config_source} conda=${CONDA_ENV} backend=${BACKEND_MODE:-llama-cpp-python} profile=${UMS_RUNTIME_PROFILE:-adaptive} chainlit=${chainlit_mode}"
+  echo "  placement: llm=${llm_device_summary} vlm=${vlm_device_summary} intent=${intent_device_summary} retrieval=${retrieval_device_summary} llm_gpus=${llm_gpu_summary} embed_gpu=${embed_gpu_summary}"
+  echo "  ports: api=${AGENT_PORT} doc=${DOC_PORT} legal=${LEGAL_PORT} ums=${UMS_PORT} chainlit=${CHAINLIT_PORT}"
+}
+
+render_ums_status_summary() {
+  local status_json="$1"
+  [ -z "$status_json" ] && return 0
+  [ -z "$ENV_LOADER_PYTHON" ] && return 0
+  "$ENV_LOADER_PYTHON" - "$status_json" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+placements = payload.get("placements") or {}
+component_models = [
+    ("llm", "qwen-14b-llm"),
+    ("vlm", "qwen-vl-8b"),
+    ("intent", "qwen3-embedding-0.6b"),
+    ("retrieval", "labse-embedding"),
+]
+parts = []
+for label, model_id in component_models:
+    placement = placements.get(model_id)
+    if not placement:
+        continue
+    placement_mode = placement.get("placement_mode") or "unknown"
+    resolved_device = (
+        placement.get("resolved_device")
+        or placement.get("device_arg")
+        or placement.get("requested_device")
+        or "unknown"
+    )
+    gpu_indices = placement.get("gpu_indices") or []
+    gpu_suffix = f"[{','.join(str(item) for item in gpu_indices)}]" if gpu_indices else ""
+    parts.append(f"{label}={placement_mode}/{resolved_device}{gpu_suffix}")
+
+if parts:
+    backend_mode = payload.get("backend_mode") or "unknown"
+    runtime_profile = payload.get("runtime_profile") or "unknown"
+    print(f"  ums: backend={backend_mode} profile={runtime_profile} " + " ".join(parts))
+PY
+}
+
+print_ums_status_summary() {
+  local status_json=""
+  status_json=$(curl -sf "http://localhost:$UMS_PORT/status" 2>/dev/null || true)
+  render_ums_status_summary "$status_json"
+}
+
 if [ "${AGENT_NAVIGATOR_SKIP_CONDA_CHECKS:-0}" != "1" ]; then
   echo -e "${YELLOW}Активация conda окружения: $CONDA_ENV${NC}"
   if ! command -v conda >/dev/null 2>&1 && [ ! -f "$HOME/miniconda3/etc/profile.d/conda.sh" ] && [ ! -f "$HOME/anaconda3/etc/profile.d/conda.sh" ]; then
@@ -266,6 +387,8 @@ if [ "${AGENT_NAVIGATOR_SKIP_CONDA_CHECKS:-0}" != "1" ]; then
     die "env-invalid:CONDA_ENV:activate-failed:$CONDA_ENV"
   fi
 fi
+
+print_startup_config_summary
 
 if [ "${AGENT_NAVIGATOR_TEST_MODE:-0}" = "1" ]; then
   echo "run_native:test-mode validated conda_env=${CONDA_ENV} uploads_dir=${UPLOADS_DIR} skip_chainlit=${SKIP_CHAINLIT}"
@@ -287,19 +410,6 @@ if [ -n "$CONDA_SH_PATH" ]; then
 else
   ACTIVATE_CMD="eval \"\$(conda shell.bash hook)\" && conda activate $CONDA_ENV"
 fi
-
-AGENT_PORT="${AGENT_API_PORT:-8000}"
-DOC_PORT="${DOC_PORT:-8001}"
-LEGAL_PORT="${LEGAL_PORT:-8002}"
-UMS_PORT="${UMS_PORT:-8090}"
-CHAINLIT_PORT="${CHAINLIT_PORT:-3000}"
-
-MCP_DOCUMENT_SERVER_URL="${MCP_DOCUMENT_SERVER_URL:-http://localhost:8001}"
-MCP_LEGAL_SERVER_URL="${MCP_LEGAL_SERVER_URL:-http://localhost:8002}"
-UMS_URL="${UMS_URL:-http://localhost:8090}"
-HOST_UPLOADS_DIR="${HOST_UPLOADS_DIR:-}"
-CHAINLIT_DB_URL="${CHAINLIT_DB_URL:-sqlite+aiosqlite:///$BACKEND_DIR/.data/chainlit.db}"
-CHAINLIT_ENABLE_DATA_LAYER="${CHAINLIT_ENABLE_DATA_LAYER:-true}"
 
 wait_for_service() {
   local name="$1"
@@ -409,6 +519,8 @@ UMS_INFER_READY=true
 wait_for_infer_ready 180 || UMS_INFER_READY=false
 if [ "$UMS_INFER_READY" = false ]; then
   SERVICES_OK=false
+else
+  print_ums_status_summary
 fi
 
 # 4) Agent API

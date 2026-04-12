@@ -7,7 +7,6 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BACKEND_ENV_FILE="${AGENT_NAVIGATOR_BACKEND_ENV_FILE:-$PROJECT_ROOT/backend/.env}"
-RUNTIME_ENV_FILE="${AGENT_NAVIGATOR_RUNTIME_ENV_FILE:-$PROJECT_ROOT/backend/.env.runtime}"
 
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/utils/env_loader.sh"
@@ -40,7 +39,6 @@ fi
 
 load_runtime_env() {
   load_env_file "$BACKEND_ENV_FILE" "backend env" || return 1
-  load_env_file "$RUNTIME_ENV_FILE" "runtime overrides" || return 1
 }
 
 kill_pid_list() {

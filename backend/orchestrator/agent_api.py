@@ -823,6 +823,37 @@ def _build_openai_chat_completion_response(*, target_model: str, text: str) -> D
     }
 
 
+_RAW_BUSY_MESSAGE = "Модель занята предыдущим тяжёлым запросом. Дождитесь освобождения слота или остановите активный запуск."
+
+
+def _is_busy_http_error(exc: HTTPException) -> bool:
+    if int(getattr(exc, "status_code", 0) or 0) != 429:
+        return False
+    detail = getattr(exc, "detail", None)
+    if isinstance(detail, dict):
+        return str(detail.get("status") or "").strip().lower() == "busy"
+    return "busy" in str(detail).lower() or "429" in str(detail).lower()
+
+
+def _extract_busy_message(detail: Any) -> str:
+    if isinstance(detail, dict):
+        message = str(detail.get("message") or "").strip()
+        if message:
+            return message
+    return _RAW_BUSY_MESSAGE
+
+
+def _build_raw_busy_non_stream_response(*, target_model: str, detail: Any) -> Dict[str, Any]:
+    return _build_openai_chat_completion_response(
+        target_model=target_model,
+        text=_extract_busy_message(detail),
+    )
+
+
+def _build_raw_busy_stream_response(*, detail: Any) -> Dict[str, Any]:
+    return {"assistant_message": _extract_busy_message(detail)}
+
+
 def _list_raw_chat_capable_models() -> List[Dict[str, Any]]:
     payload: List[Dict[str, Any]] = []
     for model_id, config in get_all_models().items():
@@ -890,9 +921,10 @@ def _raise_raw_ums_http_error(
 ) -> None:
     status_code = getattr(response, "status_code", None)
     if status_code == 429:
+        detail = _extract_raw_ums_error_detail(response)
         raise HTTPException(
             status_code=429,
-            detail="raw-model-stream-saturated" if stream else "raw-model-infer-saturated",
+            detail=detail or ("raw-model-stream-saturated" if stream else "raw-model-infer-saturated"),
         ) from exc
     if status_code in {409, 503}:
         detail = _extract_raw_ums_error_detail(response)
@@ -1106,10 +1138,23 @@ async def raw_openai_completions(request: Request):
     stream_mode = bool(data.get("stream", True))
 
     if not stream_mode:
-        response = await _request_raw_openai_infer(target_model=target_model, payload=payload)
+        try:
+            response = await _request_raw_openai_infer(target_model=target_model, payload=payload)
+        except HTTPException as exc:
+            if _is_busy_http_error(exc):
+                return _build_raw_busy_non_stream_response(target_model=target_model, detail=exc.detail)
+            raise
         return _sanitize_raw_openai_response(response, target_model=target_model)
 
-    stream_response = await _open_raw_openai_stream(target_model=target_model, payload=payload)
+    try:
+        stream_response = await _open_raw_openai_stream(target_model=target_model, payload=payload)
+    except HTTPException as exc:
+        if _is_busy_http_error(exc):
+            return StreamingResponse(
+                _stream_openai_compat_response(_build_raw_busy_stream_response(detail=exc.detail)),
+                media_type="text/event-stream",
+            )
+        raise
     return StreamingResponse(_proxy_raw_openai_stream(stream_response), media_type="text/event-stream")
 
 @app.get("/v1/models")
