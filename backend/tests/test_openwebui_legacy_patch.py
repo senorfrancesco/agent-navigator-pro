@@ -11,7 +11,7 @@ from fastapi.responses import StreamingResponse
 
 ROOT = Path(__file__).resolve().parents[2]
 PATCH_MODULE_PATH = ROOT / "deploy" / "openwebui_legacy_patch" / "patch_html.py"
-PATCH_SCRIPT_PATH = ROOT / "deploy" / "openwebui_legacy_patch" / "agent_nav_autopoll.js"
+PATCH_SCRIPT_PATH = ROOT / "deploy" / "openwebui_legacy_patch" / "llm_tools_platform_autopoll.js"
 ENTRYPOINT_PATH = ROOT / "deploy" / "openwebui_legacy_patch" / "entrypoint.sh"
 DEEP_JOB_GUARD_PATH = ROOT / "deploy" / "openwebui_legacy_patch" / "openwebui_deep_job_guard.py"
 
@@ -55,8 +55,14 @@ def test_patch_assets_pin_expected_version_and_reload_contract():
     assert module.EXPECTED_OPENWEBUI_VERSION == "0.8.12"
     assert 'EXPECTED_VERSION="0.8.12"' in entrypoint
     assert "/app/backend/start.sh" in entrypoint
-    assert "chat:message:new" in script
-    assert "scheduleReconcile()" in script
+    assert "window.io" not in script
+    assert "18000" not in script
+    assert "api/chat/actions/equipment_deep_action" in script
+    assert "message-" in script
+    assert "result_message_id" in script
+    assert "actions_disabled" in script
+    assert "__llm_tools_platform_openwebui_autopoll_v2_loaded__" in script
+    assert "window[PATCH_MARKER]" not in script
 
 
 def test_deep_job_guard_detects_empty_native_tool_result():

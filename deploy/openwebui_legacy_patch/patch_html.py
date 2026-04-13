@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 
 EXPECTED_OPENWEBUI_VERSION = "0.8.12"
-PATCH_MARKER = "agent-nav-openwebui-autopoll-v2"
+PATCH_MARKER = "llm-tools-platform-openwebui-autopoll-v2"
 
 
 def inject_script(html: str, script: str, *, marker: str = PATCH_MARKER) -> tuple[str, bool]:

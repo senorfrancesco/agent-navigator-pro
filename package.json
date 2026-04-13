@@ -1,11 +1,12 @@
 {
-  "name": "agent-navigator-pro",
+  "name": "llm-tools-platform",
   "private": true,
   "scripts": {
     "prototype:operator-ui": "python3 -m http.server 4173 -d prototype/operator-ui",
     "test:e2e": "playwright test",
     "test:e2e:list": "playwright test --list",
-    "test:e2e:headed": "playwright test --headed"
+    "test:e2e:headed": "playwright test --headed",
+    "test:e2e:openwebui:live": "OPENWEBUI_LIVE_MODE=1 playwright test --headed --workers=1 tests/e2e/openwebui/deep-job.spec.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.53.1"

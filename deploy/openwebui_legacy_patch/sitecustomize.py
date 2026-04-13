@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 
-if os.environ.get("AGENT_NAV_OPENWEBUI_DEEP_JOB_GUARD", "0") == "1":
+if os.environ.get("LLM_TOOLS_PLATFORM_OPENWEBUI_DEEP_JOB_GUARD", "0") == "1":
     backend_path = Path("/app/backend")
     if backend_path.exists():
         backend_str = str(backend_path)

@@ -16,7 +16,7 @@ DEEP_JOB_LAUNCH_ERROR = (
 )
 
 _LOG = logging.getLogger(__name__)
-_PATCH_APPLIED_ATTR = "_agent_nav_deep_job_guard_applied"
+_PATCH_APPLIED_ATTR = "_llm_tools_platform_deep_job_guard_applied"
 
 
 def _extract_tool_call_name(tool_call: dict[str, Any]) -> str:

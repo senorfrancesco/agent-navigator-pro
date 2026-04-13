@@ -16,10 +16,10 @@
    - `./scripts/launcher.sh --target native --profile adaptive`
    - `./scripts/run_native.sh`
    - либо уже работающий host backend (`agent_api`, `document_server`, `legal_server`, `UMS`)
-2. Поднять `Open WebUI` через текущий compose profile:
+2. Поднять `Open WebUI`:
 
 ```bash
-docker compose --profile legacy up -d open-webui
+docker compose up -d open-webui
 ```
 
 3. Открыть:
@@ -29,9 +29,8 @@ docker compose --profile legacy up -d open-webui
 Важно:
 
 - `run_native` поднимает только backend/UMS/Chainlit на host и публикует их на `0.0.0.0`;
-- самого supported native-launch path для `Open WebUI` в репозитории сейчас нет;
+- самого pure-native path для `Open WebUI` в репозитории сейчас нет;
 - поэтому практический runtime path сегодня это `native backend + dockerized Open WebUI`, а не “всё полностью без Docker”.
-- имя profile `legacy` здесь историческое и не описывает продуктовую роль `Open WebUI`.
 
 ## Что сейчас считается supported
 
@@ -64,7 +63,7 @@ docker compose --profile legacy up -d open-webui
   - `GET /tool-server/openapi.json`
   - `POST /tool-server/tools/*`
   - `GET|POST /tool-server/tool-jobs/*`
-- `/v1/chat/completions` остаётся только compatibility path для `agent-navigator` wrapper и не должен быть default provider для `Open WebUI` tool flows.
+- `/v1/chat/completions` остаётся только compatibility path для `llm-tools-platform` wrapper и не должен быть default provider для `Open WebUI` tool flows.
 
 ## User vs Global Tool Servers
 
@@ -90,7 +89,7 @@ docker compose --profile legacy up -d open-webui
 Минимальная конфигурация:
 
 - `Type`: `OpenAPI`
-- `Name`: `Agent Navigator Tools`
+- `Name`: `llm-tools-platform Tools`
 - `URL`: `http://127.0.0.1:8000/tool-server`
 - `Auth`: `Bearer`
 - `API Key`: значение `OPENAPI_TOOL_SERVER_TOKEN` из `backend/.env`
@@ -98,7 +97,7 @@ docker compose --profile legacy up -d open-webui
 Важно:
 
 - этот `User Tool Server` path теперь считается debug-only contour для ручной диагностики transport layer;
-- default bootstrap-managed contour больше не materialize’ит `Agent Navigator OpenAPI Tool Server` как chat-visible entry в picker;
+- default bootstrap-managed contour больше не materialize’ит `llm-tools-platform OpenAPI Tool Server` как chat-visible entry в picker;
 - в обычном supported contour пользователь видит только named tools (`equipment_*`), а вызовы в backend tool server идут из thin wrappers/action functions.
 
 ## Current Raw Model Provider Setup
@@ -112,7 +111,7 @@ docker compose --profile legacy up -d open-webui
 
 Важно:
 
-- этот raw provider не должен быть `agent-navigator` wrapper;
+- этот raw provider не должен быть `llm-tools-platform` wrapper;
 - он не делает document routing, RAG policy или tool dispatch;
 - его задача — только protocol-clean chat/model surface поверх `UMS`.
 - проверенный working contour теперь такой:
@@ -175,3 +174,47 @@ docker compose --profile legacy up -d open-webui
 - `MCP` пока не является основным путём интеграции;
 - текущий storage path `backend/open_webui_uploads` носит legacy-имя, но считается живым shared contract.
 - `Open WebUI` пока не подтверждён как автоматический poller для async tool jobs: deep tool показывает accepted/source payload с `job_id` и `status_url`, но final completed result backend пока не подтягивается в чат автоматически.
+
+## Automated Deep-Job Eval Slice
+
+Для equipment-only `deep-job` среза в репозитории есть отдельный локальный runner:
+
+```bash
+python tests/harness/openwebui/openwebui_deep_job_eval.py
+```
+
+Runner делает один и тот же deterministic pipeline:
+
+- запускает таргетные backend-regression тесты для `equipment_deep_action`, `tool_job` и legacy `Open WebUI` patch;
+- генерирует manifest по документам из `documents/`;
+- запускает репозиторный `Playwright`-контур [deep-job.spec.ts](/home/seral/HDD/proj/agent-navigator-pro/tests/e2e/openwebui/deep-job.spec.ts);
+- складывает артефакты в `output/openwebui-deep-job-eval/<timestamp>/`;
+- дочитывает фактический `request_payload` из `tool_jobs`, чтобы зафиксировать реальный `equipment_query`, а не только UI-эхо;
+- пишет:
+  - `manifest.json`
+  - `results.raw.json`
+  - `results.enriched.json`
+  - `summary.md`
+  - `pytest.log`
+  - `playwright.log`
+
+Текущий automated contour сознательно разделён на два слоя:
+
+- deterministic UI-controls:
+  - новый persisted-chat;
+  - прямой вызов `equipment_deep_action`;
+  - test-only transition `tool_job` через backend debug route;
+  - обязательная проверка, что `Обновить deep-job` materialize’ит terminal result и скрывает `refresh/cancel`.
+- full matrix:
+  - загрузка файлов через реальный `Open WebUI` file input;
+  - построение action payload на основе фактического file-processing content;
+  - вызов `equipment_deep_action` через `Open WebUI` API;
+  - poll `tool-job` в backend;
+  - refresh через `tool_job_refresh_action`;
+  - фиксация assistant/result сообщений и итогового child bubble в chat history.
+
+Важно:
+
+- для deterministic UI-controls backend должен быть поднят с `LLM_TOOLS_PLATFORM_TEST_MODE=1`, иначе этот кусок будет пропущен;
+- matrix slice не зависит от test helper и годится для реального `deep-job` запуска по документам;
+- текущий automated path намеренно обходит нестабильность native model tool-calling: source of truth здесь explicit `Action Function` contour, а не случайный follow-up второй ход модели.
