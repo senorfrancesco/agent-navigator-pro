@@ -7,14 +7,16 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Protocol, runtime_checkable
 
 import numpy as np
+
+from orchestrator.rag.retriever import HybridRetriever
 
 
 DEFAULT_KB_DB_URL = os.getenv("ORCHESTRATOR_KB_DB_URL", "sqlite:///.data/orchestrator_kb.db")
 _STORE_LOCK = threading.Lock()
-_STORE_SINGLETON: Optional["SQLiteKnowledgeBaseStore"] = None
+_STORE_SINGLETON: Optional["KnowledgeBaseStoreProtocol"] = None
 
 
 @dataclass
@@ -45,6 +47,96 @@ class KnowledgeBaseChunkRecord:
     embedding: Optional[np.ndarray] = None
     embedding_dim: Optional[int] = None
     embedding_model_id: Optional[str] = None
+
+
+@dataclass
+class KnowledgeBaseChunkMatchRecord:
+    chunk: KnowledgeBaseChunkRecord
+    raw_score: float
+    source_scope: str
+    payload: Dict[str, Any]
+
+
+@runtime_checkable
+class KnowledgeBaseStoreProtocol(Protocol):
+    def register_source_sync(
+        self,
+        *,
+        collection_id: str,
+        display_name: str,
+        content_hash: str,
+        mime_type: str,
+        index_version: str,
+        embedding_model_id: str,
+        chunking_version: str,
+        status: str = "indexed",
+    ) -> KnowledgeBaseSourceRecord: ...
+
+    def replace_chunks_sync(self, *, source_id: str, chunks: List[Dict[str, Any]]) -> None: ...
+
+    def list_sources_sync(self, collection_id: str) -> List[KnowledgeBaseSourceRecord]: ...
+
+    def list_chunks_sync(
+        self,
+        collection_id: str,
+        source_ids: Optional[List[str]] = None,
+        include_embeddings: bool = False,
+    ) -> List[KnowledgeBaseChunkRecord]: ...
+
+    def search_chunks_sync(
+        self,
+        *,
+        collection_id: str,
+        query_text: str,
+        query_embedding: np.ndarray,
+        top_k: int,
+        source_ids: Optional[List[str]] = None,
+        filters: Optional[Dict[str, Any]] = None,
+        mode: str = "hybrid",
+        embed_fn: Optional[Callable] = None,
+    ) -> List[KnowledgeBaseChunkMatchRecord]: ...
+
+    def delete_chunks_sync(
+        self,
+        *,
+        collection_id: str,
+        source_ids: Optional[List[str]] = None,
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> int: ...
+
+    async def register_source(self, **kwargs: Any) -> KnowledgeBaseSourceRecord: ...
+
+    async def replace_chunks(self, *, source_id: str, chunks: List[Dict[str, Any]]) -> None: ...
+
+    async def list_sources(self, collection_id: str) -> List[KnowledgeBaseSourceRecord]: ...
+
+    async def list_chunks(
+        self,
+        collection_id: str,
+        source_ids: Optional[List[str]] = None,
+        include_embeddings: bool = False,
+    ) -> List[KnowledgeBaseChunkRecord]: ...
+
+    async def search_chunks(
+        self,
+        *,
+        collection_id: str,
+        query_text: str,
+        query_embedding: np.ndarray,
+        top_k: int,
+        source_ids: Optional[List[str]] = None,
+        filters: Optional[Dict[str, Any]] = None,
+        mode: str = "hybrid",
+        embed_fn: Optional[Callable] = None,
+    ) -> List[KnowledgeBaseChunkMatchRecord]: ...
+
+    async def delete_chunks(
+        self,
+        *,
+        collection_id: str,
+        source_ids: Optional[List[str]] = None,
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> int: ...
 
 
 def _sqlite_db_path_from_url(db_url: str) -> str:
@@ -83,6 +175,63 @@ def _deserialize_embedding(blob: Optional[bytes], dim: Optional[int]) -> Optiona
     if array.size != dim:
         return None
     return array.copy()
+
+
+def _normalize_source_scope(value: Any, *, collection_id: Optional[str] = None) -> str:
+    scope = str(value or "").strip().lower()
+    if scope in {"knowledge", "knowledge_base"}:
+        return "knowledge"
+    if scope == "session":
+        return "session"
+    if collection_id and str(collection_id).startswith("session:"):
+        return "session"
+    return "knowledge"
+
+
+def _chunk_matches_filters(
+    chunk: KnowledgeBaseChunkRecord,
+    *,
+    collection_id: str,
+    filters: Optional[Dict[str, Any]] = None,
+) -> bool:
+    if not filters:
+        return True
+
+    metadata = dict(chunk.metadata_json or {})
+    expected_scope = _normalize_source_scope(filters.get("source_scope"), collection_id=collection_id)
+    actual_scope = _normalize_source_scope(metadata.get("source_scope"), collection_id=collection_id)
+    if expected_scope != actual_scope:
+        return False
+
+    actual_document_id = str(metadata.get("document_id") or chunk.source_id)
+    expected_document_id = filters.get("document_id")
+    if expected_document_id is not None and actual_document_id != str(expected_document_id):
+        return False
+
+    expected_document_ids = filters.get("document_ids")
+    if expected_document_ids:
+        allowed_ids = {str(item) for item in expected_document_ids if item is not None}
+        if allowed_ids and actual_document_id not in allowed_ids:
+            return False
+
+    expected_version_id = filters.get("document_version_id")
+    if expected_version_id is not None and str(metadata.get("document_version_id") or "") != str(expected_version_id):
+        return False
+
+    expected_thread_id = filters.get("thread_id")
+    if expected_thread_id is not None and str(metadata.get("thread_id") or "") != str(expected_thread_id):
+        return False
+
+    expires_at_gte = filters.get("expires_at_gte")
+    if expires_at_gte is not None:
+        try:
+            expires_at = metadata.get("expires_at")
+            if expires_at is None or float(expires_at) < float(expires_at_gte):
+                return False
+        except (TypeError, ValueError):
+            return False
+
+    return True
 
 
 class SQLiteKnowledgeBaseStore:
@@ -324,6 +473,109 @@ class SQLiteKnowledgeBaseStore:
             rows = conn.execute(query, tuple(params)).fetchall()
         return [self._row_to_chunk(row) for row in rows]
 
+    def search_chunks_sync(
+        self,
+        *,
+        collection_id: str,
+        query_text: str,
+        query_embedding: np.ndarray,
+        top_k: int,
+        source_ids: Optional[List[str]] = None,
+        filters: Optional[Dict[str, Any]] = None,
+        mode: str = "hybrid",
+        embed_fn: Optional[Callable] = None,
+    ) -> List[KnowledgeBaseChunkMatchRecord]:
+        chunks = self.list_chunks_sync(
+            collection_id=collection_id,
+            source_ids=source_ids,
+            include_embeddings=True,
+        )
+        chunks = [
+            chunk
+            for chunk in chunks
+            if _chunk_matches_filters(chunk, collection_id=collection_id, filters=filters)
+        ]
+        if not chunks:
+            return []
+
+        query_vector = np.asarray(query_embedding, dtype=np.float32)
+        if query_vector.ndim != 1:
+            raise ValueError("query_embedding must be a 1D vector")
+
+        def _search_embed_fn(texts: List[str]) -> np.ndarray:
+            if len(texts) == 1 and str(texts[0]) == query_text:
+                return np.asarray([query_vector], dtype=np.float32)
+            if embed_fn is None:
+                raise ValueError("search_chunks_sync requires embed_fn when KB chunk embeddings are unavailable")
+            return np.asarray(embed_fn(texts), dtype=np.float32)
+
+        retriever = HybridRetriever(embed_fn=_search_embed_fn, use_bm25=True)
+        documents = [chunk.text for chunk in chunks]
+        if all(chunk.embedding is not None for chunk in chunks):
+            embeddings = np.vstack([np.asarray(chunk.embedding, dtype=np.float32) for chunk in chunks])
+            retriever.index_with_embeddings(documents, embeddings)
+        else:
+            retriever.index(documents)
+
+        results = retriever.search(query_text, top_k=min(top_k, len(chunks)), mode=mode)
+        matches: List[KnowledgeBaseChunkMatchRecord] = []
+        source_scope = _normalize_source_scope((filters or {}).get("source_scope"), collection_id=collection_id)
+        for result in results:
+            chunk = chunks[result.index]
+            metadata = dict(chunk.metadata_json or {})
+            matches.append(
+                KnowledgeBaseChunkMatchRecord(
+                    chunk=chunk,
+                    raw_score=float(result.score),
+                    source_scope=source_scope,
+                    payload={
+                        "collection_id": chunk.collection_id,
+                        "document_id": metadata.get("document_id") or chunk.source_id,
+                        "document_version_id": metadata.get("document_version_id"),
+                        "thread_id": metadata.get("thread_id"),
+                        "expires_at": metadata.get("expires_at"),
+                        "source_scope": source_scope,
+                        "source_origin": chunk.source_origin,
+                        "display_name": chunk.display_name,
+                        "embedding_model_id": chunk.embedding_model_id,
+                    },
+                )
+            )
+        return matches
+
+    def delete_chunks_sync(
+        self,
+        *,
+        collection_id: str,
+        source_ids: Optional[List[str]] = None,
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        candidate_source_ids = set(str(item) for item in (source_ids or []) if item is not None)
+        if not candidate_source_ids:
+            for chunk in self.list_chunks_sync(collection_id=collection_id, include_embeddings=False):
+                if _chunk_matches_filters(chunk, collection_id=collection_id, filters=filters):
+                    candidate_source_ids.add(str(chunk.source_id))
+        if not candidate_source_ids:
+            return 0
+
+        placeholders = ",".join("?" for _ in candidate_source_ids)
+        ordered_source_ids = tuple(candidate_source_ids)
+        with self._connect() as conn:
+            conn.execute(
+                f"DELETE FROM kb_chunk_embeddings WHERE chunk_id IN (SELECT chunk_id FROM kb_chunks WHERE source_id IN ({placeholders}))",
+                ordered_source_ids,
+            )
+            conn.execute(
+                f"DELETE FROM kb_chunks WHERE source_id IN ({placeholders})",
+                ordered_source_ids,
+            )
+            conn.execute(
+                f"DELETE FROM kb_sources WHERE collection_id = ? AND source_id IN ({placeholders})",
+                (collection_id, *ordered_source_ids),
+            )
+            conn.commit()
+        return len(candidate_source_ids)
+
     async def register_source(self, **kwargs: Any) -> KnowledgeBaseSourceRecord:
         return self.register_source_sync(**kwargs)
 
@@ -341,10 +593,52 @@ class SQLiteKnowledgeBaseStore:
     ) -> List[KnowledgeBaseChunkRecord]:
         return self.list_chunks_sync(collection_id, source_ids=source_ids, include_embeddings=include_embeddings)
 
+    async def search_chunks(
+        self,
+        *,
+        collection_id: str,
+        query_text: str,
+        query_embedding: np.ndarray,
+        top_k: int,
+        source_ids: Optional[List[str]] = None,
+        filters: Optional[Dict[str, Any]] = None,
+        mode: str = "hybrid",
+        embed_fn: Optional[Callable] = None,
+    ) -> List[KnowledgeBaseChunkMatchRecord]:
+        return self.search_chunks_sync(
+            collection_id=collection_id,
+            query_text=query_text,
+            query_embedding=query_embedding,
+            top_k=top_k,
+            source_ids=source_ids,
+            filters=filters,
+            mode=mode,
+            embed_fn=embed_fn,
+        )
 
-def get_knowledge_base_store() -> SQLiteKnowledgeBaseStore:
+    async def delete_chunks(
+        self,
+        *,
+        collection_id: str,
+        source_ids: Optional[List[str]] = None,
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        return self.delete_chunks_sync(
+            collection_id=collection_id,
+            source_ids=source_ids,
+            filters=filters,
+        )
+
+
+def get_knowledge_base_store() -> KnowledgeBaseStoreProtocol:
     global _STORE_SINGLETON
     with _STORE_LOCK:
         if _STORE_SINGLETON is None:
-            _STORE_SINGLETON = SQLiteKnowledgeBaseStore()
+            backend = str(os.getenv("KB_BACKEND", "sqlite") or "sqlite").strip().lower()
+            if backend == "qdrant":
+                from orchestrator.qdrant_knowledge_base_store import QdrantKnowledgeBaseStore
+
+                _STORE_SINGLETON = QdrantKnowledgeBaseStore()
+            else:
+                _STORE_SINGLETON = SQLiteKnowledgeBaseStore()
     return _STORE_SINGLETON

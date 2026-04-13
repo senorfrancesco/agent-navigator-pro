@@ -9,7 +9,7 @@ import numpy as np
 from orchestrator.knowledge_base_store import (
     KnowledgeBaseChunkRecord,
     KnowledgeBaseSourceRecord,
-    SQLiteKnowledgeBaseStore,
+    KnowledgeBaseStoreProtocol,
     get_knowledge_base_store,
 )
 from orchestrator.rag.chunker import LegalDocumentChunker
@@ -30,20 +30,23 @@ def ingest_text_source_sync(
     collection_id: str,
     display_name: str,
     text: str,
-    store: Optional[SQLiteKnowledgeBaseStore] = None,
+    store: Optional[KnowledgeBaseStoreProtocol] = None,
     mime_type: str = "text/plain",
     index_version: str = "v1",
     embedding_model_id: str = "labse",
     chunking_version: str = "legal_v1",
     chunker: Optional[LegalDocumentChunker] = None,
     embed_fn: Optional[Callable] = None,
+    source_origin: str = "knowledge_base",
+    content_hash_override: Optional[str] = None,
+    base_metadata: Optional[dict] = None,
 ) -> IngestedKnowledgeBaseSource:
     if not text or not text.strip():
         raise ValueError("Knowledge base source text must be non-empty")
 
     kb_store = store or get_knowledge_base_store()
     chunker = chunker or LegalDocumentChunker()
-    content_hash = _sha256_text(text)
+    content_hash = str(content_hash_override or _sha256_text(text))
     source = kb_store.register_source_sync(
         collection_id=collection_id,
         display_name=display_name,
@@ -69,16 +72,19 @@ def ingest_text_source_sync(
                 "start_char": chunk.start_char,
                 "end_char": chunk.end_char,
                 "display_name": display_name,
-                "document_id": source.source_id,
+                "source_id": source.source_id,
             }
         )
+        if base_metadata:
+            metadata.update(dict(base_metadata))
+        metadata.setdefault("document_id", source.source_id)
         chunk_rows.append(
             {
                 "chunk_id": f"{source.source_id}:{chunk.index}",
                 "chunk_index": int(chunk.index),
                 "text": chunk.text,
                 "metadata_json": metadata,
-                "source_origin": "knowledge_base",
+                "source_origin": source_origin,
                 "embedding": chunk_embeddings[idx] if chunk_embeddings is not None else None,
                 "embedding_model_id": embedding_model_id if chunk_embeddings is not None else None,
             }

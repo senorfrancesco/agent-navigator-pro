@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import os
+import time
 from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 
-from orchestrator.knowledge_base_store import SQLiteKnowledgeBaseStore
+from orchestrator.knowledge_base_store import KnowledgeBaseStoreProtocol
 from orchestrator.rag.chunker import LegalDocumentChunker
 from orchestrator.rag.retriever import HybridRetriever
 
@@ -66,25 +67,54 @@ def _build_session_entries(
     return entries
 
 
-def _build_kb_entries(
-    kb_store: SQLiteKnowledgeBaseStore,
+def _resolve_session_thread_id(session_docs: Dict[str, Any]) -> Optional[str]:
+    for info in (session_docs or {}).values():
+        if not isinstance(info, dict):
+            continue
+        thread_id = info.get("thread_id")
+        if thread_id:
+            return str(thread_id)
+    return None
+
+
+def _search_store_entries(
+    kb_store: KnowledgeBaseStoreProtocol,
+    *,
     collection_id: Optional[str],
+    query: str,
+    query_embedding: np.ndarray,
+    top_k: int,
+    mode: str,
+    embed_fn: Optional[Callable],
+    filters: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     if not collection_id:
         return []
     entries: List[Dict[str, Any]] = []
-    for chunk in kb_store.list_chunks_sync(collection_id, include_embeddings=True):
+    for match in kb_store.search_chunks_sync(
+        collection_id=collection_id,
+        query_text=query,
+        query_embedding=query_embedding,
+        top_k=top_k,
+        filters=filters,
+        mode=mode,
+        embed_fn=embed_fn,
+    ):
+        chunk = match.chunk
+        payload = dict(match.payload or {})
         entries.append(
             {
                 "chunk_id": chunk.chunk_id,
-                "document_id": chunk.source_id,
-                "display_name": chunk.display_name,
-                "collection_id": chunk.collection_id,
-                "source_origin": chunk.source_origin,
+                "document_id": str(payload.get("document_id") or chunk.metadata_json.get("document_id") or chunk.source_id),
+                "display_name": str(payload.get("display_name") or chunk.display_name),
+                "collection_id": str(payload.get("collection_id") or chunk.collection_id),
+                "source_origin": str(payload.get("source_origin") or chunk.source_origin),
                 "text": chunk.text,
                 "metadata_json": dict(chunk.metadata_json or {}),
                 "embedding": chunk.embedding,
-                "embedding_model_id": chunk.embedding_model_id,
+                "embedding_model_id": payload.get("embedding_model_id") or chunk.embedding_model_id,
+                "raw_score": float(match.raw_score),
+                "scope_rank": len(entries) + 1,
             }
         )
     return entries
@@ -236,7 +266,7 @@ def retrieve_merged_chunks(
     session_docs: Dict[str, Any],
     active_doc_ids: List[str],
     embed_fn: Optional[Callable],
-    kb_store: Optional[SQLiteKnowledgeBaseStore],
+    kb_store: Optional[KnowledgeBaseStoreProtocol],
     top_k: int = KB_RETRIEVAL_DEFAULT_TOP_K,
     candidate_budget_per_scope: int = KB_RETRIEVAL_CANDIDATE_BUDGET_PER_SCOPE,
     mode: str = "hybrid",
@@ -245,8 +275,47 @@ def retrieve_merged_chunks(
     if embed_fn is None:
         return {"chunks": [], "source_scope_summary": "off"}
 
-    session_entries = _build_session_entries(session_docs, active_doc_ids)
-    kb_entries = _build_kb_entries(kb_store, knowledge_collection_id) if kb_store is not None else []
+    query_vectors = np.asarray(embed_fn([query]), dtype=np.float32)
+    if query_vectors.ndim != 2 or query_vectors.shape[0] != 1:
+        raise ValueError("Knowledge base retrieval embed_fn must return a single query vector")
+    query_embedding = np.asarray(query_vectors[0], dtype=np.float32)
+
+    session_thread_id = _resolve_session_thread_id(session_docs)
+    session_collection_id = f"session:{session_thread_id}" if session_thread_id else None
+    session_store_entries = (
+        _search_store_entries(
+            kb_store,
+            collection_id=session_collection_id,
+            query=query,
+            query_embedding=query_embedding,
+            top_k=candidate_budget_per_scope,
+            mode=mode,
+            embed_fn=embed_fn,
+            filters={
+                "source_scope": "session",
+                "thread_id": session_thread_id,
+                "document_ids": active_doc_ids,
+                "expires_at_gte": time.time(),
+            },
+        )
+        if kb_store is not None and session_collection_id
+        else []
+    )
+    session_entries = session_store_entries or _build_session_entries(session_docs, active_doc_ids)
+    kb_entries = (
+        _search_store_entries(
+            kb_store,
+            collection_id=knowledge_collection_id,
+            query=query,
+            query_embedding=query_embedding,
+            top_k=candidate_budget_per_scope,
+            mode=mode,
+            embed_fn=embed_fn,
+            filters={"source_scope": "knowledge"},
+        )
+        if kb_store is not None
+        else []
+    )
 
     if rag_scope == "session_rag":
         session_ranked = _annotate_scope_merge_scores(_search_entries(
@@ -263,13 +332,7 @@ def retrieve_merged_chunks(
         }
 
     if rag_scope == "knowledge_base_rag":
-        kb_ranked = _annotate_scope_merge_scores(_search_entries(
-            entries=kb_entries,
-            query=query,
-            embed_fn=embed_fn,
-            mode=mode,
-            top_k=candidate_budget_per_scope,
-        ))
+        kb_ranked = _annotate_scope_merge_scores(kb_entries)
         session_ranked = _annotate_scope_merge_scores(_search_entries(
             entries=session_entries,
             query=query,

@@ -112,6 +112,57 @@ def test_retrieve_merged_chunks_session_rag_only_uses_active_session_docs(tmp_pa
     assert all(chunk["source_origin"] == "session" for chunk in result["chunks"])
 
 
+def test_retrieve_merged_chunks_prefers_store_backed_session_scope_when_indexed(tmp_path):
+    store = SQLiteKnowledgeBaseStore(db_url=f"sqlite:///{tmp_path}/kb_retrieval.db")
+    ingest_text_source_sync(
+        collection_id="session:thread-42",
+        display_name="contract.txt",
+        text="Штраф составляет 10 процентов от суммы договора.",
+        store=store,
+        mime_type="text/plain",
+        index_version="session_v1",
+        embedding_model_id="labse",
+        chunking_version="session_v1",
+        embed_fn=_stub_embed_fn,
+        content_hash_override="ver-1",
+        source_origin="session_upload",
+        base_metadata={
+            "document_id": "doc-1",
+            "document_version_id": "ver-1",
+            "thread_id": "thread-42",
+            "source_scope": "session",
+            "expires_at": 4102444800.0,
+        },
+    )
+    session_docs = {
+        "contract.txt": {
+            "document_id": "doc-1",
+            "version_id": "ver-1",
+            "thread_id": "thread-42",
+            "text": "Штраф составляет 10 процентов от суммы договора.",
+            "path": "/tmp/contract.txt",
+            "ingestion_status": "indexed",
+        }
+    }
+
+    result = retrieve_merged_chunks(
+        query="Какой штраф указан в договоре?",
+        rag_scope="session_rag",
+        knowledge_collection_id=None,
+        session_docs=session_docs,
+        active_doc_ids=["doc-1"],
+        embed_fn=_stub_embed_fn,
+        kb_store=store,
+        top_k=3,
+        candidate_budget_per_scope=3,
+    )
+
+    assert result["source_scope_summary"] == "session"
+    assert result["chunks"][0]["document_id"] == "doc-1"
+    assert result["chunks"][0]["metadata_json"]["thread_id"] == "thread-42"
+    assert result["chunks"][0]["source_origin"] == "session_upload"
+
+
 def test_retrieve_merged_chunks_prefers_session_overlay_for_duplicate_text(tmp_path):
     store = SQLiteKnowledgeBaseStore(db_url=f"sqlite:///{tmp_path}/kb_retrieval.db")
     duplicate_text = "За просрочку поставки применяется штраф 3 процента."
