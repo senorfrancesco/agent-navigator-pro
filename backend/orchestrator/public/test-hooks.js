@@ -1,6 +1,6 @@
 (() => {
-  const HOOK_ATTR = "data-agent-nav-hook";
-  const CURRENT_THREAD_ATTR = "data-agent-nav-current-thread";
+  const HOOK_ATTR = "data-llm-tools-platform-hook";
+  const CURRENT_THREAD_ATTR = "data-llm-tools-platform-current-thread";
 
   const setHook = (element, hookName) => {
     if (!element || !(element instanceof HTMLElement)) return;

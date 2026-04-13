@@ -1,4 +1,4 @@
-ARG BACKEND_BASE_IMAGE=agent-nav-backend-app-offline:v1.0
+ARG BACKEND_BASE_IMAGE=llm-tools-platform-backend-app-offline:v1.0
 FROM ${BACKEND_BASE_IMAGE}
 
 WORKDIR /app/backend

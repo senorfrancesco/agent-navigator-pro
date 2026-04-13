@@ -6,7 +6,7 @@
 
 **Architecture:** Не вводить новый сервис. Использовать существующий `UMS` как canonical `model catalog + runtime gateway`, а `backend/config/models.yaml` оставить операторским source of truth для модели, её видимости, capabilities и lifecycle policy. `agent_api` остаётся product/orchestration API, а его текущий raw-provider path становится временным compatibility shim до завершения migration cleanup slice. Этот plan не должен повторно решать задачу tool-routing или agentic decision policy; она уже закрывается отдельным responsibility split.
 
-> **2026-04-09 update:** этот plan теперь зависит не только от `M3.5`, но и от [Open WebUI Responsibility Split Plan](/home/fisher/agent-navigator/docs/plans/migration/2026-04-09-openwebui-responsibility-split-plan.md). До unified catalog сначала нужно жёстко развести `plain model`, `explicit tools` и `agent mode`, иначе catalog cleanup снова смешается с hidden backend routing.
+> **2026-04-09 update:** этот plan теперь зависит не только от `M3.5`, но и от [Open WebUI Responsibility Split Plan](/home/fisher/llm-tools-platform/docs/plans/migration/2026-04-09-openwebui-responsibility-split-plan.md). До unified catalog сначала нужно жёстко развести `plain model`, `explicit tools` и `agent mode`, иначе catalog cleanup снова смешается с hidden backend routing.
 
 **Tech Stack:** FastAPI, `UMS`, `models.yaml`, `Open WebUI`, `llama-server`, optional `vLLM`, sentence-transformers / embedding service.
 
@@ -321,7 +321,7 @@ Endpoint должен строить response из registry-backed metadata, а 
     {
       "id": "qwen-14b-llm",
       "object": "model",
-      "owned_by": "agent-navigator-ums",
+      "owned_by": "llm-tools-platform-ums",
       "display_name": "Qwen 14B",
       "status": "available",
       "capabilities": ["chat"]

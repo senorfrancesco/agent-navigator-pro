@@ -39,7 +39,7 @@ SUPPORTED_GPU_LAYERS_MODES = {"auto", "max", "manual"}
 SUPPORTED_MODEL_SOURCE_MODES = {"bundle_layout", "external_host_mounts"}
 PLACEHOLDER_SECRET_VALUES = {
     "change-me-before-deploy",
-    "agent-navigator-secret-key-change-me",
+    "llm-tools-platform-secret-key-change-me",
     "change-me-grafana",
     "admin",
 }

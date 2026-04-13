@@ -37,4 +37,4 @@ def test_metrics_endpoint_exposes_orchestration_counter():
     payload = response.body.decode("utf-8")
 
     assert response.media_type == "text/plain; version=0.0.4; charset=utf-8"
-    assert "agent_nav_agent_api_orchestration_requests_total" in payload
+    assert "llm_tools_platform_agent_api_orchestration_requests_total" in payload

@@ -3,7 +3,7 @@ apiVersion: 1
 providers:
   - name: Offline Bundle Dashboards
     orgId: 1
-    folder: Agent Navigator Offline
+    folder: llm-tools-platform Offline
     type: file
     disableDeletion: true
     editable: false

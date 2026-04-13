@@ -169,7 +169,7 @@ def _emit_fallback_metric(
     fallback_model_id: str,
 ) -> None:
     inc_metric_counter(
-        "agent_nav_fallback_events_total",
+        "llm_tools_platform_fallback_events_total",
         labels={
             "component": component,
             "fallback": fallback,
@@ -291,7 +291,7 @@ class UMSClient:
                         exc,
                     )
                     inc_metric_counter(
-                        "agent_nav_fallback_events_total",
+                        "llm_tools_platform_fallback_events_total",
                         labels={"component": "ums_client", "fallback": "infer_retry", "source": "client"},
                     )
                     time.sleep(2)
@@ -308,7 +308,7 @@ class UMSClient:
                         exc,
                     )
                     inc_metric_counter(
-                        "agent_nav_fallback_events_total",
+                        "llm_tools_platform_fallback_events_total",
                         labels={"component": "ums_client", "fallback": "infer_retry", "source": "client"},
                     )
                     time.sleep(2)
@@ -352,7 +352,7 @@ class UMSClient:
                         exc,
                     )
                     inc_metric_counter(
-                        "agent_nav_fallback_events_total",
+                        "llm_tools_platform_fallback_events_total",
                         labels={"component": "ums_client", "fallback": "async_infer_retry", "source": "client"},
                     )
                     delay = min(max_delay_s, base_delay_s * (2 ** attempt))
@@ -371,7 +371,7 @@ class UMSClient:
                         exc,
                     )
                     inc_metric_counter(
-                        "agent_nav_fallback_events_total",
+                        "llm_tools_platform_fallback_events_total",
                         labels={"component": "ums_client", "fallback": "async_infer_retry", "source": "client"},
                     )
                     delay = min(max_delay_s, base_delay_s * (2 ** attempt))

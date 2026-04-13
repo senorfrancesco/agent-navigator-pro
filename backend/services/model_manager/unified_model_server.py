@@ -1241,7 +1241,7 @@ def _record_model_fallback_event(
     }
     state["last_fallback_event"] = event
     inc_metric_counter(
-        "agent_nav_fallback_events_total",
+        "llm_tools_platform_fallback_events_total",
         labels={
             "component": "ums",
             "fallback": "model_failover",
@@ -1613,7 +1613,7 @@ def _start_heavy_local_model(
         _drop_process_log_buffer(getattr(process, "pid", None))
         _cleanup_failed_start_state(model_id)
         inc_metric_counter(
-            "agent_nav_fallback_events_total",
+            "llm_tools_platform_fallback_events_total",
             labels={
                 "component": "ums",
                 "fallback": "heavy_gpu_retry",
@@ -1892,7 +1892,7 @@ def _start_server_once(model_id: str, device_mode: DeviceMode):
                         f"ST server startup failed on {device_arg}, retrying on {device_candidates[idx + 1]}: {e}"
                     )
                     inc_metric_counter(
-                        "agent_nav_fallback_events_total",
+                        "llm_tools_platform_fallback_events_total",
                         labels={
                             "component": "ums",
                             "fallback": "st_start_cpu_retry",
@@ -2144,7 +2144,7 @@ async def _reserve_runtime_slot(sem: asyncio.Semaphore, kind: str) -> Dict[str, 
         fail_fast = True
     if fail_fast and getattr(sem, "_value", 0) <= 0:
         inc_metric_counter(
-            "agent_nav_ums_concurrency_saturation_total",
+            "llm_tools_platform_ums_concurrency_saturation_total",
             labels={"kind": kind, "mode": "fail_fast"},
         )
         raise HTTPException(
@@ -2160,7 +2160,7 @@ async def _reserve_runtime_slot(sem: asyncio.Semaphore, kind: str) -> Dict[str, 
         await asyncio.wait_for(sem.acquire(), timeout=timeout_s)
     except TimeoutError as exc:
         inc_metric_counter(
-            "agent_nav_ums_concurrency_saturation_total",
+            "llm_tools_platform_ums_concurrency_saturation_total",
             labels={"kind": kind, "mode": "timeout"},
         )
         raise HTTPException(

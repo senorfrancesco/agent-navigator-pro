@@ -6,10 +6,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUNDLE_ROOT="$(dirname "$SCRIPT_DIR")"
 PROJECT_ROOT="$(dirname "$(dirname "$BUNDLE_ROOT")")"
 IMAGES_DIR="$BUNDLE_ROOT/images"
-BACKEND_APP_IMAGE="${BACKEND_APP_IMAGE:-agent-nav-backend-app-offline:v1.0}"
-UMS_IMAGE="${UMS_IMAGE:-agent-nav-ums-offline:v1.0}"
-CHAINLIT_IMAGE="${CHAINLIT_IMAGE:-agent-nav-chainlit-offline:v1.0}"
-VLLM_IMAGE="${VLLM_IMAGE:-agent-nav-vllm-offline:v1.0}"
+BACKEND_APP_IMAGE="${BACKEND_APP_IMAGE:-llm-tools-platform-backend-app-offline:v1.0}"
+UMS_IMAGE="${UMS_IMAGE:-llm-tools-platform-ums-offline:v1.0}"
+CHAINLIT_IMAGE="${CHAINLIT_IMAGE:-llm-tools-platform-chainlit-offline:v1.0}"
+VLLM_IMAGE="${VLLM_IMAGE:-llm-tools-platform-vllm-offline:v1.0}"
 BUILD_IMAGES=1
 UMS_BUILD_MODE="${UMS_BUILD_MODE:-offline}"
 
@@ -119,9 +119,9 @@ save_image() {
   fi
 }
 
-save_image "$BACKEND_APP_IMAGE" "agent-nav-backend-app-offline_v1.0.tar"
-save_image "$UMS_IMAGE" "agent-nav-ums-offline_v1.0.tar"
-save_image "$CHAINLIT_IMAGE" "agent-nav-chainlit-offline_v1.0.tar"
-save_image "$VLLM_IMAGE" "agent-nav-vllm-offline_v1.0.tar"
+save_image "$BACKEND_APP_IMAGE" "llm-tools-platform-backend-app-offline_v1.0.tar"
+save_image "$UMS_IMAGE" "llm-tools-platform-ums-offline_v1.0.tar"
+save_image "$CHAINLIT_IMAGE" "llm-tools-platform-chainlit-offline_v1.0.tar"
+save_image "$VLLM_IMAGE" "llm-tools-platform-vllm-offline_v1.0.tar"
 
 echo "export-images:ok"

@@ -34,7 +34,7 @@
 
 ```bash
 ./scripts/launcher.sh --target native --profile adaptive
-./scripts/launcher.sh --target native --profile adaptive --skip-chainlit
+./scripts/launcher.sh --target native --profile adaptive --skip-openwebui
 ./scripts/launcher.sh --target native --profile adaptive --report-only
 ./scripts/launcher.sh --target container --profile default --no-attach
 ./scripts/launcher.sh --install --platform ubuntu
@@ -59,7 +59,8 @@
 | `--skip-model-download` | пропустить model provisioning | оба |
 | `--ensure-model-download` | явно включить model provisioning | оба |
 | `--no-attach` | не подключаться к `tmux` | оба |
-| `--skip-chainlit` | не запускать окно `Chainlit` | только `native` |
+| `--skip-openwebui` | не запускать контейнер `Open WebUI` | только `native` |
+| `--skip-chainlit` | совместимый алиас для `--skip-openwebui` | только `native` |
 | `--report-only` | только вывести report/recommendation без запуска | оба |
 | `--install` | guided install path | отдельно |
 | `--platform auto|ubuntu|ubuntu-server|wsl|windows` | платформа installer path | c `--install` |
@@ -111,14 +112,14 @@ User-facing рекомендатель для native path.
 ```bash
 ./scripts/run_native.sh
 ./scripts/run_native.sh --no-attach
-./scripts/run_native.sh --skip-chainlit --no-attach
+./scripts/run_native.sh --skip-openwebui --no-attach
 ```
 
 Поведение по умолчанию:
 
 - читает `backend/.env`
 - не применяет `backend/.env.runtime`
-- поднимает `tmux`, `document_server`, `legal_server`, `UMS`, `agent_api`, `Chainlit`
+- поднимает `tmux`, `document_server`, `legal_server`, `UMS`, `agent_api`, `Qdrant`, `Open WebUI`
 
 Compatibility-флаги:
 
@@ -143,12 +144,12 @@ Compatibility-флаги:
 - `DOC_PORT`
 - `LEGAL_PORT`
 - `UMS_PORT`
-- `CHAINLIT_PORT`
+- `OPENWEBUI_PORT`
 - `UMS_URL`
 - `MCP_DOCUMENT_SERVER_URL`
 - `MCP_LEGAL_SERVER_URL`
-- `CHAINLIT_DB_URL`
-- `CHAINLIT_ENABLE_DATA_LAYER`
+- `QDRANT_URL`
+- `QDRANT_COLLECTION_NAME`
 
 ### Placement и multi-GPU split
 
@@ -236,7 +237,7 @@ RETRIEVAL_EMBEDDER_DEVICE_MODE="cpu"
 1. Запустить `./scripts/evaluate_runtime.sh recommend`
 2. Перенести только нужные значения в `backend/.env`
 3. Запустить `./scripts/run_native.sh`
-4. Если нужен только backend без UI, добавить `--skip-chainlit`
+4. Если нужен только backend без UI, добавить `--skip-openwebui`
 
 ## Что Считать Устаревшим
 

@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-SESSION_NAME="${1:-agent-nav-offline}"
+SESSION_NAME="${1:-llm-tools-platform-offline}"
 
 if ! command -v tmux >/dev/null 2>&1; then
   echo "missing:tmux" >&2

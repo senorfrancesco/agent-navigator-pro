@@ -7,8 +7,8 @@ services:
   # Legacy backend/orchestrator/.files is archived under
   # ./state/legacy-orchestrator-files but is not mounted into v1.0 runtime.
   agent-api:
-    image: ${BACKEND_APP_IMAGE:-agent-nav-backend-app-offline:v1.0}
-    container_name: agent-nav-agent-api-offline
+    image: ${BACKEND_APP_IMAGE:-llm-tools-platform-backend-app-offline:v1.0}
+    container_name: llm-tools-platform-agent-api-offline
     env_file:
       - ./env.bundle
     environment:
@@ -25,11 +25,11 @@ services:
       - ./state/backend-data:/app/backend/.data
       - ./state/uploads:/app/backend/uploads
       - ./models:/app/backend/models
-      - ${HOST_MODEL_PATH_LLM:-./state/host-install/.gitkeep}:/opt/agent-nav/external/llm/model.gguf:ro
-      - ${HOST_MODEL_PATH_VLM:-./state/host-install/.gitkeep}:/opt/agent-nav/external/vlm/model.gguf:ro
-      - ${HOST_MMPROJ_PATH:-./state/host-install/.gitkeep}:/opt/agent-nav/external/vlm/mmproj.gguf:ro
-      - ${HOST_MODEL_PATH_EMBEDDING_INTENT:-./state/host-install}:/opt/agent-nav/external/embedders/intent:ro
-      - ${HOST_MODEL_PATH_EMBEDDING_RETRIEVAL:-./state/host-install}:/opt/agent-nav/external/embedders/retrieval:ro
+      - ${HOST_MODEL_PATH_LLM:-./state/host-install/.gitkeep}:/opt/llm-tools-platform/external/llm/model.gguf:ro
+      - ${HOST_MODEL_PATH_VLM:-./state/host-install/.gitkeep}:/opt/llm-tools-platform/external/vlm/model.gguf:ro
+      - ${HOST_MMPROJ_PATH:-./state/host-install/.gitkeep}:/opt/llm-tools-platform/external/vlm/mmproj.gguf:ro
+      - ${HOST_MODEL_PATH_EMBEDDING_INTENT:-./state/host-install}:/opt/llm-tools-platform/external/embedders/intent:ro
+      - ${HOST_MODEL_PATH_EMBEDDING_RETRIEVAL:-./state/host-install}:/opt/llm-tools-platform/external/embedders/retrieval:ro
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()\""]
       interval: 15s
@@ -39,8 +39,8 @@ services:
     restart: unless-stopped
 
   document-server:
-    image: ${BACKEND_APP_IMAGE:-agent-nav-backend-app-offline:v1.0}
-    container_name: agent-nav-document-server-offline
+    image: ${BACKEND_APP_IMAGE:-llm-tools-platform-backend-app-offline:v1.0}
+    container_name: llm-tools-platform-document-server-offline
     env_file:
       - ./env.bundle
     environment:
@@ -52,11 +52,11 @@ services:
       - ./state/backend-data:/app/backend/.data
       - ./state/uploads:/app/backend/uploads
       - ./models:/app/backend/models
-      - ${HOST_MODEL_PATH_LLM:-./state/host-install/.gitkeep}:/opt/agent-nav/external/llm/model.gguf:ro
-      - ${HOST_MODEL_PATH_VLM:-./state/host-install/.gitkeep}:/opt/agent-nav/external/vlm/model.gguf:ro
-      - ${HOST_MMPROJ_PATH:-./state/host-install/.gitkeep}:/opt/agent-nav/external/vlm/mmproj.gguf:ro
-      - ${HOST_MODEL_PATH_EMBEDDING_INTENT:-./state/host-install}:/opt/agent-nav/external/embedders/intent:ro
-      - ${HOST_MODEL_PATH_EMBEDDING_RETRIEVAL:-./state/host-install}:/opt/agent-nav/external/embedders/retrieval:ro
+      - ${HOST_MODEL_PATH_LLM:-./state/host-install/.gitkeep}:/opt/llm-tools-platform/external/llm/model.gguf:ro
+      - ${HOST_MODEL_PATH_VLM:-./state/host-install/.gitkeep}:/opt/llm-tools-platform/external/vlm/model.gguf:ro
+      - ${HOST_MMPROJ_PATH:-./state/host-install/.gitkeep}:/opt/llm-tools-platform/external/vlm/mmproj.gguf:ro
+      - ${HOST_MODEL_PATH_EMBEDDING_INTENT:-./state/host-install}:/opt/llm-tools-platform/external/embedders/intent:ro
+      - ${HOST_MODEL_PATH_EMBEDDING_RETRIEVAL:-./state/host-install}:/opt/llm-tools-platform/external/embedders/retrieval:ro
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=2).read()\""]
       interval: 15s
@@ -66,8 +66,8 @@ services:
     restart: unless-stopped
 
   legal-server:
-    image: ${BACKEND_APP_IMAGE:-agent-nav-backend-app-offline:v1.0}
-    container_name: agent-nav-legal-server-offline
+    image: ${BACKEND_APP_IMAGE:-llm-tools-platform-backend-app-offline:v1.0}
+    container_name: llm-tools-platform-legal-server-offline
     env_file:
       - ./env.bundle
     environment:
@@ -79,11 +79,11 @@ services:
       - ./state/backend-data:/app/backend/.data
       - ./state/uploads:/app/backend/uploads
       - ./models:/app/backend/models
-      - ${HOST_MODEL_PATH_LLM:-./state/host-install/.gitkeep}:/opt/agent-nav/external/llm/model.gguf:ro
-      - ${HOST_MODEL_PATH_VLM:-./state/host-install/.gitkeep}:/opt/agent-nav/external/vlm/model.gguf:ro
-      - ${HOST_MMPROJ_PATH:-./state/host-install/.gitkeep}:/opt/agent-nav/external/vlm/mmproj.gguf:ro
-      - ${HOST_MODEL_PATH_EMBEDDING_INTENT:-./state/host-install}:/opt/agent-nav/external/embedders/intent:ro
-      - ${HOST_MODEL_PATH_EMBEDDING_RETRIEVAL:-./state/host-install}:/opt/agent-nav/external/embedders/retrieval:ro
+      - ${HOST_MODEL_PATH_LLM:-./state/host-install/.gitkeep}:/opt/llm-tools-platform/external/llm/model.gguf:ro
+      - ${HOST_MODEL_PATH_VLM:-./state/host-install/.gitkeep}:/opt/llm-tools-platform/external/vlm/model.gguf:ro
+      - ${HOST_MMPROJ_PATH:-./state/host-install/.gitkeep}:/opt/llm-tools-platform/external/vlm/mmproj.gguf:ro
+      - ${HOST_MODEL_PATH_EMBEDDING_INTENT:-./state/host-install}:/opt/llm-tools-platform/external/embedders/intent:ro
+      - ${HOST_MODEL_PATH_EMBEDDING_RETRIEVAL:-./state/host-install}:/opt/llm-tools-platform/external/embedders/retrieval:ro
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=2).read()\""]
       interval: 15s
@@ -93,8 +93,8 @@ services:
     restart: unless-stopped
 
   ums:
-    image: ${UMS_IMAGE:-agent-nav-ums-offline:v1.0}
-    container_name: agent-nav-ums-offline
+    image: ${UMS_IMAGE:-llm-tools-platform-ums-offline:v1.0}
+    container_name: llm-tools-platform-ums-offline
     env_file:
       - ./env.bundle
     command: ["python", "services/model_manager/unified_model_server.py"]
@@ -104,11 +104,11 @@ services:
       - ./state/backend-data:/app/backend/.data
       - ./state/uploads:/app/backend/uploads
       - ./models:/app/backend/models
-      - ${HOST_MODEL_PATH_LLM:-./state/host-install/.gitkeep}:/opt/agent-nav/external/llm/model.gguf:ro
-      - ${HOST_MODEL_PATH_VLM:-./state/host-install/.gitkeep}:/opt/agent-nav/external/vlm/model.gguf:ro
-      - ${HOST_MMPROJ_PATH:-./state/host-install/.gitkeep}:/opt/agent-nav/external/vlm/mmproj.gguf:ro
-      - ${HOST_MODEL_PATH_EMBEDDING_INTENT:-./state/host-install}:/opt/agent-nav/external/embedders/intent:ro
-      - ${HOST_MODEL_PATH_EMBEDDING_RETRIEVAL:-./state/host-install}:/opt/agent-nav/external/embedders/retrieval:ro
+      - ${HOST_MODEL_PATH_LLM:-./state/host-install/.gitkeep}:/opt/llm-tools-platform/external/llm/model.gguf:ro
+      - ${HOST_MODEL_PATH_VLM:-./state/host-install/.gitkeep}:/opt/llm-tools-platform/external/vlm/model.gguf:ro
+      - ${HOST_MMPROJ_PATH:-./state/host-install/.gitkeep}:/opt/llm-tools-platform/external/vlm/mmproj.gguf:ro
+      - ${HOST_MODEL_PATH_EMBEDDING_INTENT:-./state/host-install}:/opt/llm-tools-platform/external/embedders/intent:ro
+      - ${HOST_MODEL_PATH_EMBEDDING_RETRIEVAL:-./state/host-install}:/opt/llm-tools-platform/external/embedders/retrieval:ro
     gpus: all
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=2).read()\""]
@@ -119,7 +119,7 @@ services:
     restart: unless-stopped
 
   chainlit:
-    image: ${CHAINLIT_IMAGE:-agent-nav-chainlit-offline:v1.0}
+    image: ${CHAINLIT_IMAGE:-llm-tools-platform-chainlit-offline:v1.0}
     container_name: chainlit-ui-offline
     env_file:
       - ./env.bundle
@@ -148,8 +148,8 @@ services:
     restart: unless-stopped
 
   vllm:
-    image: ${VLLM_IMAGE:-agent-nav-vllm-offline:v1.0}
-    container_name: agent-nav-vllm-offline
+    image: ${VLLM_IMAGE:-llm-tools-platform-vllm-offline:v1.0}
+    container_name: llm-tools-platform-vllm-offline
     profiles: ["vllm"]
     env_file:
       - ./env.bundle
@@ -163,7 +163,7 @@ services:
 
   prometheus:
     image: prom/prometheus:v3.4.2
-    container_name: agent-nav-prometheus-offline
+    container_name: llm-tools-platform-prometheus-offline
     profiles: ["monitoring"]
     ports:
       - "${PROMETHEUS_PORT:-9090}:9090"
@@ -175,7 +175,7 @@ services:
 
   grafana:
     image: grafana/grafana:12.1.1
-    container_name: agent-nav-grafana-offline
+    container_name: llm-tools-platform-grafana-offline
     profiles: ["monitoring"]
     env_file:
       - ./env.bundle

@@ -1,6 +1,6 @@
 # Руководство по Установке
 
-Это руководство содержит пошаговые инструкции по настройке проекта Agent Navigator Pro.
+Это руководство содержит пошаговые инструкции по настройке проекта llm-tools-platform.
 
 ## Предварительные Требования
 
@@ -14,8 +14,8 @@
 ## Шаг 1: Клонирование Репозитория
 
 ```bash
-git clone https://github.com/senorfrancesco/agent-navigator-pro.git
-cd agent-navigator-pro
+git clone https://github.com/senorfrancesco/llm-tools-platform.git
+cd llm-tools-platform
 ```
 
 ## Шаг 2: Настройка Бэкенда (Backend)

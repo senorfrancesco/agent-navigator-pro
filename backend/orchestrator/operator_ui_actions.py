@@ -14,7 +14,7 @@ except ModuleNotFoundError:  # pragma: no cover - direct module import fallback
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_ROOT = REPO_ROOT / "scripts"
 OFFLINE_SCRIPTS_ROOT = REPO_ROOT / "deploy" / "offline_bundle" / "scripts"
-DEFAULT_BUNDLE_ARCHIVE = REPO_ROOT / "agent-nav-offline-bundle_v1.0.tar.gz"
+DEFAULT_BUNDLE_ARCHIVE = REPO_ROOT / "llm-tools-platform-offline-bundle_v1.0.tar.gz"
 
 
 from dataclasses import asdict, dataclass

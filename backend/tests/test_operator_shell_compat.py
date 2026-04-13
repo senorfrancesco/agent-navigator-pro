@@ -43,7 +43,7 @@ def test_operator_shell_compat_offline_deploy_test_mode_reports_flags(tmp_path):
         "--bundle-root",
         str(bundle_root),
         "--skip-host-check",
-        env={"AGENT_NAVIGATOR_TEST_MODE": "1"},
+        env={"LLM_TOOLS_PLATFORM_TEST_MODE": "1"},
     )
 
     assert result.returncode == 0
@@ -62,7 +62,7 @@ def test_operator_shell_compat_offline_deploy_can_explicitly_enable_image_load(t
         "--bundle-root",
         str(bundle_root),
         "--ensure-image-load",
-        env={"AGENT_NAVIGATOR_TEST_MODE": "1"},
+        env={"LLM_TOOLS_PLATFORM_TEST_MODE": "1"},
     )
 
     assert result.returncode == 0
@@ -80,7 +80,7 @@ def test_operator_shell_compat_offline_run_test_mode_reports_flags(tmp_path):
         str(bundle_root),
         "--with-monitoring",
         "--no-tmux",
-        env={"AGENT_NAVIGATOR_TEST_MODE": "1"},
+        env={"LLM_TOOLS_PLATFORM_TEST_MODE": "1"},
     )
 
     assert result.returncode == 0
@@ -99,7 +99,7 @@ def test_operator_shell_compat_offline_run_can_explicitly_enable_image_load(tmp_
         "--bundle-root",
         str(bundle_root),
         "--ensure-image-load",
-        env={"AGENT_NAVIGATOR_TEST_MODE": "1"},
+        env={"LLM_TOOLS_PLATFORM_TEST_MODE": "1"},
     )
 
     assert result.returncode == 0
@@ -111,7 +111,7 @@ def test_deploy_shell_wrapper_delegates_to_python_compat_in_test_mode():
     result = subprocess.run(
         ["bash", str(DEPLOY_WRAPPER), "--skip-host-check"],
         cwd=str(PROJECT_ROOT),
-        env={**os.environ.copy(), "AGENT_NAVIGATOR_TEST_MODE": "1"},
+        env={**os.environ.copy(), "LLM_TOOLS_PLATFORM_TEST_MODE": "1"},
         capture_output=True,
         text=True,
         check=False,
@@ -126,7 +126,7 @@ def test_run_offline_shell_wrapper_delegates_to_python_compat_in_test_mode():
     result = subprocess.run(
         ["bash", str(RUN_WRAPPER), "--with-monitoring", "--no-tmux"],
         cwd=str(PROJECT_ROOT),
-        env={**os.environ.copy(), "AGENT_NAVIGATOR_TEST_MODE": "1"},
+        env={**os.environ.copy(), "LLM_TOOLS_PLATFORM_TEST_MODE": "1"},
         capture_output=True,
         text=True,
         check=False,

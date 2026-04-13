@@ -11,35 +11,35 @@ def test_operator_observability_service_builds_summary_from_metrics(monkeypatch,
         'scrape_configs:\n  - job_name: "agent-api"\n  - job_name: "ums"\n',
         encoding="utf-8",
     )
-    (monitoring / "agent-navigator-overview.json").write_text(
-        '{"uid":"agent-navigator-overview","title":"Agent Navigator Overview"}',
+    (monitoring / "llm-tools-platform-overview.json").write_text(
+        '{"uid":"llm-tools-platform-overview","title":"llm-tools-platform Overview"}',
         encoding="utf-8",
     )
 
     metrics_payload = """
-# HELP agent_nav_http_requests_total Total HTTP requests.
-# TYPE agent_nav_http_requests_total counter
-agent_nav_http_requests_total{service="agent_api",method="GET",path="/operator/state",status_code="200"} 12
-agent_nav_http_requests_total{service="ums",method="POST",path="/infer",status_code="200"} 4
-# HELP agent_nav_http_requests_in_progress In-flight.
-# TYPE agent_nav_http_requests_in_progress gauge
-agent_nav_http_requests_in_progress{service="agent_api",method="GET"} 1
-agent_nav_http_requests_in_progress{service="ums",method="POST"} 2
-# HELP agent_nav_ums_running_models Running.
-# TYPE agent_nav_ums_running_models gauge
-agent_nav_ums_running_models{service="ums"} 2
-# HELP agent_nav_ums_active_heavy_model Active.
-# TYPE agent_nav_ums_active_heavy_model gauge
-agent_nav_ums_active_heavy_model{service="ums"} 1
-# HELP agent_nav_agent_api_orchestration_requests_total Orchestration.
-# TYPE agent_nav_agent_api_orchestration_requests_total counter
-agent_nav_agent_api_orchestration_requests_total{endpoint="/execute_orchestration",result="ok"} 7
-# HELP agent_nav_ums_concurrency_saturation_total Saturation.
-# TYPE agent_nav_ums_concurrency_saturation_total counter
-agent_nav_ums_concurrency_saturation_total{kind="heavy",mode="gpu"} 3
-# HELP agent_nav_fallback_events_total Fallbacks.
-# TYPE agent_nav_fallback_events_total counter
-agent_nav_fallback_events_total{component="document_analysis",fallback="llm_extract_failed"} 5
+# HELP llm_tools_platform_http_requests_total Total HTTP requests.
+# TYPE llm_tools_platform_http_requests_total counter
+llm_tools_platform_http_requests_total{service="agent_api",method="GET",path="/operator/state",status_code="200"} 12
+llm_tools_platform_http_requests_total{service="ums",method="POST",path="/infer",status_code="200"} 4
+# HELP llm_tools_platform_http_requests_in_progress In-flight.
+# TYPE llm_tools_platform_http_requests_in_progress gauge
+llm_tools_platform_http_requests_in_progress{service="agent_api",method="GET"} 1
+llm_tools_platform_http_requests_in_progress{service="ums",method="POST"} 2
+# HELP llm_tools_platform_ums_running_models Running.
+# TYPE llm_tools_platform_ums_running_models gauge
+llm_tools_platform_ums_running_models{service="ums"} 2
+# HELP llm_tools_platform_ums_active_heavy_model Active.
+# TYPE llm_tools_platform_ums_active_heavy_model gauge
+llm_tools_platform_ums_active_heavy_model{service="ums"} 1
+# HELP llm_tools_platform_agent_api_orchestration_requests_total Orchestration.
+# TYPE llm_tools_platform_agent_api_orchestration_requests_total counter
+llm_tools_platform_agent_api_orchestration_requests_total{endpoint="/execute_orchestration",result="ok"} 7
+# HELP llm_tools_platform_ums_concurrency_saturation_total Saturation.
+# TYPE llm_tools_platform_ums_concurrency_saturation_total counter
+llm_tools_platform_ums_concurrency_saturation_total{kind="heavy",mode="gpu"} 3
+# HELP llm_tools_platform_fallback_events_total Fallbacks.
+# TYPE llm_tools_platform_fallback_events_total counter
+llm_tools_platform_fallback_events_total{component="document_analysis",fallback="llm_extract_failed"} 5
 """.strip()
 
     monkeypatch.setattr(
@@ -63,8 +63,8 @@ def test_operator_observability_service_exposes_grafana_links(tmp_path: Path):
     repo_root = tmp_path
     dashboard_dir = repo_root / "monitoring" / "grafana" / "provisioning" / "dashboards" / "json"
     dashboard_dir.mkdir(parents=True)
-    (dashboard_dir / "agent-navigator-overview.json").write_text(
-        '{"uid":"agent-navigator-overview","title":"Agent Navigator Overview"}',
+    (dashboard_dir / "llm-tools-platform-overview.json").write_text(
+        '{"uid":"llm-tools-platform-overview","title":"llm-tools-platform Overview"}',
         encoding="utf-8",
     )
     (repo_root / "monitoring" / "prometheus.yml").write_text("scrape_configs: []\n", encoding="utf-8")
@@ -77,7 +77,7 @@ def test_operator_observability_service_exposes_grafana_links(tmp_path: Path):
     assert any(link["titleEn"] == "Overview Dashboard" for link in payload["links"])
     assert any(link["title"] == "Раздел Explore" for link in payload["links"])
     assert any(link["title"] == "Панель деплоя" for link in payload["links"])
-    assert any("agent-navigator-overview" in link["url"] for link in payload["links"])
+    assert any("llm-tools-platform-overview" in link["url"] for link in payload["links"])
 
 
 def test_operator_observability_service_handles_empty_metrics_and_missing_dashboard(monkeypatch, tmp_path: Path):
@@ -95,4 +95,4 @@ def test_operator_observability_service_handles_empty_metrics_and_missing_dashbo
     assert any(card["label"] == "HTTP-событий всего" and card["value"] == "0" for card in summary["overview"])
     assert any(card["labelEn"] == "Prometheus Scrape" and card["valueEn"] == "not found" for card in summary["deploy"])
     assert any(card["label"] == "Статус опроса Prometheus" and card["value"] == "не найден" for card in summary["deploy"])
-    assert links["dashboard_uid"] == "agent-navigator-overview"
+    assert links["dashboard_uid"] == "llm-tools-platform-overview"

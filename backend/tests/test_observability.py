@@ -65,7 +65,7 @@ def test_observability_middleware_propagates_trace_id_and_records_http_metrics()
     response_start = next(msg for msg in sent_messages if msg["type"] == "http.response.start")
     assert (b"x-trace-id", b"trace-123") in response_start["headers"]
     payload = render_metrics_text()
-    assert "agent_nav_http_requests_total" in payload
+    assert "llm_tools_platform_http_requests_total" in payload
     assert 'service="dummy"' in payload
     assert 'path="/health"' in payload
 
@@ -120,5 +120,5 @@ def test_observability_middleware_excludes_metrics_endpoint_from_http_metrics():
     response_start = next(msg for msg in sent_messages if msg["type"] == "http.response.start")
     assert any(header[0] == b"x-trace-id" for header in response_start["headers"])
     payload = render_metrics_text()
-    assert "agent_nav_http_requests_total" not in payload
+    assert "llm_tools_platform_http_requests_total" not in payload
     assert 'path="/metrics"' not in payload

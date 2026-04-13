@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUNDLE_ROOT="$(dirname "$SCRIPT_DIR")"
 COMPOSE_FILE="$BUNDLE_ROOT/compose.offline.yaml"
 ENV_FILE="$BUNDLE_ROOT/env.bundle"
-TMUX_SESSION_NAME="${1:-agent-nav-offline}"
+TMUX_SESSION_NAME="${1:-llm-tools-platform-offline}"
 
 print_help() {
   cat <<'EOF'

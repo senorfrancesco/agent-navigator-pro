@@ -1,6 +1,6 @@
 # Руководство по tmux
 
-Tmux — терминальный мультиплексор. В проекте используется для запуска всех backend-сервисов в одной tmux-сессии `agent-navigator`.
+Tmux — терминальный мультиплексор. В проекте используется для запуска всех backend-сервисов в одной tmux-сессии `llm-tools-platform`.
 
 ---
 
@@ -52,11 +52,11 @@ ln -sf "$(pwd)/config/tmux/tmux.conf.local" ~/.config/tmux/tmux.conf.local
 ## Запуск и подключение
 
 ```bash
-# Запуск системы (создаёт сессию agent-navigator автоматически)
+# Запуск системы (создаёт сессию llm-tools-platform автоматически)
 ./scripts/launcher.sh --target native
 
 # Подключиться к существующей сессии
-tmux attach -t agent-navigator
+tmux attach -t llm-tools-platform
 
 # Посмотреть все сессии
 tmux ls
@@ -70,7 +70,7 @@ tmux new -s my-session
 
 ---
 
-## Структура сессии agent-navigator
+## Структура сессии llm-tools-platform
 
 После запуска `launcher.sh` создаётся сессия с окнами:
 
@@ -166,7 +166,7 @@ tmux new -s my-session
 
 ```bash
 # Подключиться
-tmux attach -t agent-navigator
+tmux attach -t llm-tools-platform
 
 # Перейти в окно ums (следить за загрузкой модели)
 <P> 4

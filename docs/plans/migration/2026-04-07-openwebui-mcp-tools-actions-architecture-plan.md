@@ -6,11 +6,11 @@
 >
 > **Scope marker:** это не MVP и не текущий acceptance baseline. Документ описывает целевую архитектуру после стабилизации `M1-M3`, когда backend tool contracts, upload/document binding и `OpenAPI Tool Server` уже приведены в рабочее состояние.
 >
-> **Назначение:** описать, как в `Agent Navigator Pro` должны быть реализованы наши инструменты, какой слой должен быть каноническим, как должен выглядеть `MCP`-контур, как это подключается к `Open WebUI`, и как пользователи будут запускать сценарии через chat tools, slash-команды и видимые кнопки.
+> **Назначение:** описать, как в `llm-tools-platform` должны быть реализованы наши инструменты, какой слой должен быть каноническим, как должен выглядеть `MCP`-контур, как это подключается к `Open WebUI`, и как пользователи будут запускать сценарии через chat tools, slash-команды и видимые кнопки.
 
 ## 1. Executive Summary
 
-Для `Agent Navigator Pro` нельзя строить основную интеграцию вокруг “наивного MCP”, где модель просто получает много инструментов и сама свободно решает, как ими пользоваться. Это даёт слишком много недетерминизма, плохо масштабируется на тяжёлых данных и размывает backend-owned orchestration policy.
+Для `llm-tools-platform` нельзя строить основную интеграцию вокруг “наивного MCP”, где модель просто получает много инструментов и сама свободно решает, как ими пользоваться. Это даёт слишком много недетерминизма, плохо масштабируется на тяжёлых данных и размывает backend-owned orchestration policy.
 
 Целевой дизайн должен быть таким:
 
@@ -69,7 +69,7 @@
 
 ### 3.1 Канонический backend
 
-Все domain workflows, routing decisions, state, jobs, uploads, document binding и permissions должны жить в `Agent Navigator Pro backend`, а не в Open WebUI plugin code.
+Все domain workflows, routing decisions, state, jobs, uploads, document binding и permissions должны жить в `llm-tools-platform backend`, а не в Open WebUI plugin code.
 
 ### 3.2 No business logic inside Open WebUI
 
@@ -744,7 +744,7 @@ Sensitive actions должны требовать explicit user visibility/confi
 
 ## 16. Final Recommendation
 
-Для `Agent Navigator Pro` правильная стратегия не “строить всё через MCP”, а:
+Для `llm-tools-platform` правильная стратегия не “строить всё через MCP”, а:
 
 - **ядро делать через backend-owned OpenAPI tool catalog**
 - **MCP реализовать как совместимый слой поверх него**

@@ -109,14 +109,14 @@ async def test_compatible_data_layer_serializes_thread_tags_as_json(chainlit_per
             data_layer,
             thread_id="thread-1",
             name="Thread Name",
-            tags=["Agent Navigator"],
+            tags=["llm-tools-platform"],
             metadata={"assistant_mode": "general_chat"},
         )
 
     kwargs = mock_update_thread.await_args.kwargs
     assert kwargs["thread_id"] == "thread-1"
     assert kwargs["name"] == "Thread Name"
-    assert kwargs["tags"] == '["Agent Navigator"]'
+    assert kwargs["tags"] == '["llm-tools-platform"]'
     assert kwargs["metadata"] == {"assistant_mode": "general_chat"}
 
 
@@ -128,7 +128,7 @@ async def test_compatible_data_layer_decodes_thread_tags_from_json(chainlit_pers
             return_value=[
                 {
                     "id": "thread-1",
-                    "tags": '["Agent Navigator"]',
+                    "tags": '["llm-tools-platform"]',
                     "steps": [],
                     "elements": [],
                 }
@@ -142,7 +142,7 @@ async def test_compatible_data_layer_decodes_thread_tags_from_json(chainlit_pers
         )
 
     assert threads
-    assert threads[0]["tags"] == ["Agent Navigator"]
+    assert threads[0]["tags"] == ["llm-tools-platform"]
 
 
 def test_compatible_data_layer_sets_sqlite_timeout_connect_args(chainlit_persistence_module, monkeypatch):

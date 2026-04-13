@@ -564,7 +564,7 @@ class TestPolishItemsSpecsLlm:
         assert items[0]["specs"] == "Тип устройства: Сервер"
         assert items[1]["specs"] == "Тип корпуса: Rack 19"
         metrics = render_metrics_text()
-        assert "agent_nav_equipment_fallback_total" in metrics
+        assert "llm_tools_platform_equipment_fallback_total" in metrics
         assert 'stage="polisher"' in metrics
         assert 'reason="parse_failed"' in metrics
 
@@ -1018,7 +1018,7 @@ class TestEvaluateComplianceNode:
         assert len(results) == 1
         assert results[0]["result"] == "ERROR"
         metrics = render_metrics_text()
-        assert "agent_nav_equipment_fallback_total" in metrics
+        assert "llm_tools_platform_equipment_fallback_total" in metrics
         assert 'stage="evaluate"' in metrics
         assert 'reason="llm_batch_error"' in metrics
 
@@ -1043,6 +1043,35 @@ class TestEvaluateComplianceNode:
             result = await evaluate_compliance_node(base_state)
 
         assert result["analysis_results"][0]["result"] == "PRICE_CHANGE"
+
+    @pytest.mark.asyncio
+    async def test_nested_list_llm_payload_is_flattened(self, base_state):
+        """Вложенный список из LLM не должен валить evaluate."""
+        base_state["matches"] = [
+            {
+                "type": "MODIFIED",
+                "item_1": {"name": "Сервер 1", "specs": "32 GB RAM", "quantity": "1", "price": ""},
+                "item_2": {"name": "Сервер 2", "specs": "64 GB RAM", "quantity": "1", "price": ""},
+            },
+            {
+                "type": "MODIFIED",
+                "item_1": {"name": "SSD 1", "specs": "1 TB NVMe", "quantity": "2", "price": ""},
+                "item_2": {"name": "SSD 2", "specs": "512 GB SATA", "quantity": "2", "price": ""},
+            },
+        ]
+
+        llm_response = {
+            "content": '[[{"result": "PASS", "reason": "Соответствует"}, {"result": "FAIL", "reason": "Недостаточно памяти"}]]',
+        }
+
+        with patch("orchestrator.workflows.equipment.ums_client") as mock_ums:
+            mock_ums.async_infer = AsyncMock(return_value=llm_response)
+            result = await evaluate_compliance_node(base_state)
+
+        results = result["analysis_results"]
+        assert len(results) == 2
+        assert results[0]["result"] == "PASS"
+        assert results[1]["result"] == "FAIL"
 
 
 # ============================================================================
@@ -1428,7 +1457,7 @@ class TestChunkText:
             for c in chunks:
                 assert len(c) <= MAX_TEXT_FOR_LLM + 200  # допуск на последнюю строку
         metrics = render_metrics_text()
-        assert "agent_nav_equipment_fallback_total" in metrics
+        assert "llm_tools_platform_equipment_fallback_total" in metrics
         assert 'stage="chunking"' in metrics
         assert 'reason="smart_chunk_failed"' in metrics
 

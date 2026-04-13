@@ -1,5 +1,5 @@
 """
-Corrected integration test script for Agent Navigator Pro.
+Corrected integration test script for llm-tools-platform.
 Starts all microservices and performs health checks.
 """
 

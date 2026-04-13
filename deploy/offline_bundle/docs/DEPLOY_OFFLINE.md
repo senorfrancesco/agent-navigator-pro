@@ -8,7 +8,7 @@
 Короткий маршрут без пояснений для целевого оффлайн-сервера:
 
 ```bash
-tar -xzf agent-navigator-offline-bundle-v1.0.tar.gz
+tar -xzf llm-tools-platform-offline-bundle-v1.0.tar.gz
 cd deploy/offline_bundle
 
 sudo bash scripts/install_host_apt_bundle.sh --manual-driver
@@ -117,7 +117,7 @@ NVIDIA runtime обязателен прежде всего для `UMS`.
 На build-машине bundle обычно передают на сервер как один `tar.gz` архив:
 
 ```bash
-tar -czf agent-navigator-offline-bundle-v1.0.tar.gz \
+tar -czf llm-tools-platform-offline-bundle-v1.0.tar.gz \
   --exclude='deploy/offline_bundle/wheelhouse' \
   --exclude='deploy/offline_bundle/vendor/llama.cpp' \
   deploy/offline_bundle
@@ -126,7 +126,7 @@ tar -czf agent-navigator-offline-bundle-v1.0.tar.gz \
 На сервере:
 
 ```bash
-tar -xzf agent-navigator-offline-bundle-v1.0.tar.gz
+tar -xzf llm-tools-platform-offline-bundle-v1.0.tar.gz
 cd deploy/offline_bundle
 ```
 
@@ -334,7 +334,7 @@ tmux list-sessions
 - `-h`, `--help`: показать справку.
 
 `launch_tmux_workspace.sh`
-- Позиционный аргумент `<session-name>`: имя tmux-сессии, по умолчанию `agent-nav-offline`.
+- Позиционный аргумент `<session-name>`: имя tmux-сессии, по умолчанию `llm-tools-platform-offline`.
 - Отдельных флагов сейчас нет.
 
 `stop_offline_bundle.sh`
@@ -351,9 +351,9 @@ bash scripts/load_images.sh
 ```
 
 Перед этим в `images/` уже должны лежать минимум:
-- `agent-nav-backend-app-offline_v1.0.tar`
-- `agent-nav-ums-offline_v1.0.tar`
-- `agent-nav-chainlit-offline_v1.0.tar`
+- `llm-tools-platform-backend-app-offline_v1.0.tar`
+- `llm-tools-platform-ums-offline_v1.0.tar`
+- `llm-tools-platform-chainlit-offline_v1.0.tar`
 
 Короткая памятка для обновления уже запущенного локального стека из новых tar-архивов:
 

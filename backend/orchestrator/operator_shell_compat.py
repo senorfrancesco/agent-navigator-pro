@@ -24,7 +24,7 @@ def _offline_deploy(args: argparse.Namespace) -> int:
     compose_file = bundle_root / "compose.offline.yaml"
     env_file = bundle_root / "env.bundle"
 
-    if os.environ.get("AGENT_NAVIGATOR_TEST_MODE") == "1":
+    if os.environ.get("LLM_TOOLS_PLATFORM_TEST_MODE") == "1":
         print(
             "operator-shell-compat:test-mode "
             f"entrypoint=offline-deploy bundle_root={bundle_root} "
@@ -60,7 +60,7 @@ def _offline_run(args: argparse.Namespace) -> int:
     compose_file = bundle_root / "compose.offline.yaml"
     env_file = bundle_root / "env.bundle"
 
-    if os.environ.get("AGENT_NAVIGATOR_TEST_MODE") == "1":
+    if os.environ.get("LLM_TOOLS_PLATFORM_TEST_MODE") == "1":
         print(
             "operator-shell-compat:test-mode "
             f"entrypoint=offline-run bundle_root={bundle_root} "
@@ -169,7 +169,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Compatibility alias; image import is already skipped by default.",
     )
     run_parser.add_argument("--skip-host-check", action="store_true")
-    run_parser.add_argument("--tmux-session", default="agent-nav-offline")
+    run_parser.add_argument("--tmux-session", default="llm-tools-platform-offline")
     run_parser.set_defaults(func=_offline_run)
     return parser
 

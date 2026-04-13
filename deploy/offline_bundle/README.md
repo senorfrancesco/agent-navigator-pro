@@ -1,4 +1,4 @@
-# Оффлайн-бандл Agent Navigator v1.0
+# Оффлайн-бандл llm-tools-platform v1.0
 
 Этот каталог является оффлайн deployment slice для release-линии `release/v1.0`.
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Agent Navigator Pro — Benchmark / Stress-test скрипт.
+llm-tools-platform — Benchmark / Stress-test скрипт.
 
 Отправляет запросы к запущенной системе и измеряет время ответа.
 Предназначен для сравнения CPU / GPU / гибридного режимов
@@ -266,7 +266,7 @@ def scenario_embedding(client: httpx.Client) -> BenchmarkResult:
 def scenario_chat(client: httpx.Client) -> BenchmarkResult:
     """Простой чат без документов — чистый LLM inference."""
     payload = {
-        "model": "agent-navigator",
+        "model": "llm-tools-platform",
         "messages": [{"role": "user", "content": "Объясни кратко, что такое тендерная документация."}],
         "stream": False,
     }
@@ -758,7 +758,7 @@ def run_benchmark(scenarios: List[str], repeats: int = 1, api_url: Optional[str]
 
     print()
     print(f"\033[1;34m{'='*65}\033[0m")
-    print(f"\033[1;34m  Agent Navigator Pro — Benchmark\033[0m")
+    print(f"\033[1;34m  llm-tools-platform — Benchmark\033[0m")
     print(f"\033[1;34m{'='*65}\033[0m")
     print(f"  API:       {AGENT_API_URL}")
     print(f"  Сценарии:  {', '.join(scenarios)}")
@@ -857,7 +857,7 @@ def run_benchmark(scenarios: List[str], repeats: int = 1, api_url: Optional[str]
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Agent Navigator Pro — Benchmark",
+        description="llm-tools-platform — Benchmark",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Примеры:

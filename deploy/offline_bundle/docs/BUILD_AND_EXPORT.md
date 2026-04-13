@@ -24,17 +24,17 @@ bash deploy/offline_bundle/scripts/build_wheelhouse.sh
 
 docker build \
   -f deploy/offline_bundle/Dockerfile.backend.offline \
-  -t agent-nav-backend-app-offline:v1.0 \
+  -t llm-tools-platform-backend-app-offline:v1.0 \
   .
 
 docker build \
   -f deploy/offline_bundle/Dockerfile.chainlit.offline \
-  -t agent-nav-chainlit-offline:v1.0 \
+  -t llm-tools-platform-chainlit-offline:v1.0 \
   .
 
 docker build \
   -f deploy/offline_bundle/Dockerfile.ums.connected \
-  -t agent-nav-ums-offline:v1.0 \
+  -t llm-tools-platform-ums-offline:v1.0 \
   .
 
 bash deploy/offline_bundle/scripts/export_models.sh
@@ -43,7 +43,7 @@ bash deploy/offline_bundle/scripts/export_images.sh --skip-build
 python3 deploy/offline_bundle/scripts/generate_manifest.py
 python3 deploy/offline_bundle/scripts/validate_bundle.py --mode deploy
 
-tar -czf agent-navigator-offline-bundle-v1.0.tar.gz \
+tar -czf llm-tools-platform-offline-bundle-v1.0.tar.gz \
   --exclude='deploy/offline_bundle/wheelhouse' \
   --exclude='deploy/offline_bundle/vendor/llama.cpp' \
   deploy/offline_bundle
@@ -54,7 +54,7 @@ tar -czf agent-navigator-offline-bundle-v1.0.tar.gz \
 ```bash
 docker build \
   -f deploy/offline_bundle/Dockerfile.ums.offline \
-  -t agent-nav-ums-offline:v1.0 \
+  -t llm-tools-platform-ums-offline:v1.0 \
   .
 ```
 
@@ -106,33 +106,33 @@ cp tmux/tmux.conf.local ~/.config/tmux/tmux.conf.local
 ```bash
 docker build \
   -f deploy/offline_bundle/Dockerfile.backend.offline \
-  -t agent-nav-backend-app-offline:v1.0 \
+  -t llm-tools-platform-backend-app-offline:v1.0 \
   .
 
 docker build \
   -f deploy/offline_bundle/Dockerfile.ums.offline \
-  -t agent-nav-ums-offline:v1.0 \
+  -t llm-tools-platform-ums-offline:v1.0 \
   .
 
 docker build \
   -f deploy/offline_bundle/Dockerfile.chainlit.offline \
-  -t agent-nav-chainlit-offline:v1.0 \
+  -t llm-tools-platform-chainlit-offline:v1.0 \
   .
 ```
 
 Если вы запускаете сборку не из корня репозитория, а из `deploy/offline_bundle/`, build context всё равно должен оставаться корнем репозитория:
 
 ```bash
-docker build -f Dockerfile.backend.offline -t agent-nav-backend-app-offline:v1.0 ../..
+docker build -f Dockerfile.backend.offline -t llm-tools-platform-backend-app-offline:v1.0 ../..
 docker build -f Dockerfile.ums.offline \
-  -t agent-nav-ums-offline:v1.0 ../..
-docker build -f Dockerfile.chainlit.offline -t agent-nav-chainlit-offline:v1.0 ../..
+  -t llm-tools-platform-ums-offline:v1.0 ../..
+docker build -f Dockerfile.chainlit.offline -t llm-tools-platform-chainlit-offline:v1.0 ../..
 ```
 
 Если нужен `vllm` image для offline path, подготовить его отдельно и протегировать как:
 
 ```bash
-docker tag <existing-vllm-image> agent-nav-vllm-offline:v1.0
+docker tag <existing-vllm-image> llm-tools-platform-vllm-offline:v1.0
 ```
 
 Важно:
@@ -158,10 +158,10 @@ bash deploy/offline_bundle/scripts/export_images.sh
 ```
 
 Ожидаемые артефакты:
-- `images/agent-nav-backend-app-offline_v1.0.tar`
-- `images/agent-nav-ums-offline_v1.0.tar`
-- `images/agent-nav-chainlit-offline_v1.0.tar`
-- optional `images/agent-nav-vllm-offline_v1.0.tar`
+- `images/llm-tools-platform-backend-app-offline_v1.0.tar`
+- `images/llm-tools-platform-ums-offline_v1.0.tar`
+- `images/llm-tools-platform-chainlit-offline_v1.0.tar`
+- optional `images/llm-tools-platform-vllm-offline_v1.0.tar`
 
 После экспорта образов bundle можно проверить уже в deploy-режиме:
 
@@ -187,7 +187,7 @@ find deploy/offline_bundle/host_packages/ubuntu-24.04/pool -maxdepth 1 -type f |
 ```bash
 docker build \
   -f deploy/offline_bundle/Dockerfile.ums.offline \
-  -t agent-nav-ums-offline:v1.0 \
+  -t llm-tools-platform-ums-offline:v1.0 \
   .
 ```
 
@@ -197,7 +197,7 @@ docker build \
 ```bash
 docker build \
   -f deploy/offline_bundle/Dockerfile.ums.connected \
-  -t agent-nav-ums-offline:v1.0 \
+  -t llm-tools-platform-ums-offline:v1.0 \
   .
 ```
 
@@ -246,7 +246,7 @@ python3 deploy/offline_bundle/scripts/validate_bundle.py --mode deploy
 Если нужен архив именно для переноса на оффлайн-сервер, а не полный build-side snapshot:
 
 ```bash
-tar -czf agent-navigator-offline-bundle-v1.0.tar.gz \
+tar -czf llm-tools-platform-offline-bundle-v1.0.tar.gz \
   --exclude='deploy/offline_bundle/wheelhouse' \
   --exclude='deploy/offline_bundle/vendor/llama.cpp' \
   deploy/offline_bundle
@@ -255,7 +255,7 @@ tar -czf agent-navigator-offline-bundle-v1.0.tar.gz \
 Если нужен полный build-side архив со всеми build inputs:
 
 ```bash
-tar -czf agent-navigator-offline-bundle-full-v1.0.tar.gz deploy/offline_bundle
+tar -czf llm-tools-platform-offline-bundle-full-v1.0.tar.gz deploy/offline_bundle
 ```
 
 Что важно:

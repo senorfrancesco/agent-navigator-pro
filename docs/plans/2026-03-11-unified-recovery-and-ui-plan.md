@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Собрать единый антикризисный план для Agent Navigator Pro на основе `task.md`, текущего `TASKS.md` и stabilization-плана, чтобы выровнять архитектуру оркестрации, стабилизировать runtime и добавить управляемые UI-возможности в Chainlit без повторного смешивания слоёв.
+**Goal:** Собрать единый антикризисный план для llm-tools-platform на основе `task.md`, текущего `TASKS.md` и stabilization-плана, чтобы выровнять архитектуру оркестрации, стабилизировать runtime и добавить управляемые UI-возможности в Chainlit без повторного смешивания слоёв.
 
 **Architecture:** В репозитории уже есть рабочий фундамент через `Chainlit + Agent API + LangGraph + AdaptiveRAGPipeline + UMS`, но часть orchestration logic до сих пор находится в UI. План исходит из тревог и вопросов в `task.md`: оркестратор ощущается “размытым”, UI берёт на себя route decisions, routing quality ещё недостаточна, а старое железо страдает от жёстких runtime-лимитов. Поэтому порядок фиксируется жёстко: сначала orchestration boundary, затем classifier quality как следующий главный приоритет, потом runtime modes и context budgeting, и только поверх этого UI controls для mode/profile/prompt.
 
@@ -714,7 +714,7 @@ Starter cards:
 
 Использовать `ChatProfile` только для coarse entrypoint:
 
-- `Agent Navigator`
+- `llm-tools-platform`
 - `Document Analyst`
 - `Ops / Debug`
 
@@ -1130,7 +1130,7 @@ LangGraph и внешними best practices по production agent systems и gr
 
 1. `ChatProfile` не должен становиться местом для всей runtime-политики.
    Его лучше использовать как coarse entrypoint:
-   - `Agent Navigator`
+   - `llm-tools-platform`
    - `Document Analyst`
    - `Ops / Debug`
    А runtime-переключатели (`chat_only | auto | specialized_tasks`, `model_profile`,

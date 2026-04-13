@@ -50,7 +50,7 @@ async def test_compare_load_documents_failure_records_metric():
 
     assert any("Error loading docs" in error for error in result["errors"])
     metrics = render_metrics_text()
-    assert "agent_nav_fallback_events_total" in metrics
+    assert "llm_tools_platform_fallback_events_total" in metrics
     assert 'component="compare_workflow"' in metrics
     assert 'fallback="load_documents_failed"' in metrics
 
@@ -80,7 +80,7 @@ async def test_compare_match_batches_failure_records_metric():
 
     assert any("Error in batch matching" in error for error in result["errors"])
     metrics = render_metrics_text()
-    assert "agent_nav_fallback_events_total" in metrics
+    assert "llm_tools_platform_fallback_events_total" in metrics
     assert 'component="compare_workflow"' in metrics
     assert 'fallback="match_batches_failed"' in metrics
 
@@ -113,7 +113,7 @@ async def test_compare_analyze_partial_parse_records_metric():
 
     assert result["analysis_results"]
     metrics = render_metrics_text()
-    assert "agent_nav_fallback_events_total" in metrics
+    assert "llm_tools_platform_fallback_events_total" in metrics
     assert 'component="compare_workflow"' in metrics
     assert 'fallback="analyze_parse_partial"' in metrics
 

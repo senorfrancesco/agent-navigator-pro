@@ -165,7 +165,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "rate(agent_nav_http_requests_total[5m])",
+          "expr": "rate(llm_tools_platform_http_requests_total[5m])",
           "legendFormat": "{{service}} {{method}} {{path}}",
           "range": true,
           "refId": "A"
@@ -207,7 +207,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "agent_nav_ums_running_models",
+          "expr": "llm_tools_platform_ums_running_models",
           "legendFormat": "running_models",
           "range": true,
           "refId": "A"
@@ -222,7 +222,7 @@
   "style": "dark",
   "tags": [
     "offline",
-    "agent-navigator"
+    "llm-tools-platform"
   ],
   "templating": {
     "list": []

@@ -234,7 +234,7 @@ class LLMIntentClassifier:
         if not isinstance(parsed, dict):
             logger.warning("LLM intent classifier returned non-JSON payload: %s", raw_text)
             inc_metric_counter(
-                "agent_nav_fallback_events_total",
+                "llm_tools_platform_fallback_events_total",
                 labels={"component": "intent_classifier", "fallback": "llm_non_json", "source": "classifier"},
             )
             return None
@@ -242,7 +242,7 @@ class LLMIntentClassifier:
         if normalized is None:
             logger.warning("LLM intent classifier returned unsupported intent: %s", parsed)
             inc_metric_counter(
-                "agent_nav_fallback_events_total",
+                "llm_tools_platform_fallback_events_total",
                 labels={"component": "intent_classifier", "fallback": "llm_unsupported_intent", "source": "classifier"},
             )
         return normalized
@@ -352,7 +352,7 @@ def select_classifier_result(
         )
         if result is not None:
             inc_metric_counter(
-                "agent_nav_fallback_events_total",
+                "llm_tools_platform_fallback_events_total",
                 labels={"component": "intent_classifier", "fallback": "llm_missing_embedder_fallback", "source": "classifier"},
             )
         return result
@@ -379,7 +379,7 @@ def select_classifier_result(
             return merged
         if embedder_result:
             inc_metric_counter(
-                "agent_nav_fallback_events_total",
+                "llm_tools_platform_fallback_events_total",
                 labels={"component": "intent_classifier", "fallback": "hybrid_low_confidence_unsure", "source": "classifier"},
             )
             result = _build_unsure_result(

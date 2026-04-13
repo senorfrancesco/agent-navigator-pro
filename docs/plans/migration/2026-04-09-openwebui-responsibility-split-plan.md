@@ -80,7 +80,7 @@
 
 Контур:
 
-- отдельный `agent-navigator` assistant profile;
+- отдельный `llm-tools-platform` assistant profile;
 - `/orchestrate` / `/execute_orchestration`;
 - classifier + route decision + orchestration policy
 
@@ -202,14 +202,14 @@ Bootstrap должен:
 
 - зафиксировать четыре режима в docs/backlog;
 - прекратить implicit backend tool routing для `plain model`;
-- оставить `agent-navigator` только как explicit agent/compatibility profile;
+- оставить `llm-tools-platform` только как explicit agent/compatibility profile;
 - подтвердить, что canonical `Open WebUI` contour = `raw provider + native knowledge + explicit tools`.
 
 Acceptance:
 
 - обычный чат не вызывает backend tool route по умолчанию;
 - explicit tool path не зависит от wrapper-mode;
-- docs и backlog не описывают `agent-navigator` как default Open WebUI model.
+- docs и backlog не описывают `llm-tools-platform` как default Open WebUI model.
 
 Нормативные slices:
 
@@ -293,7 +293,7 @@ Acceptance:
 
 - `Open WebUI` может работать как понятный `model + tools` shell без backend-hidden routing;
 - `Open WebUI` может работать как понятный `model + knowledge + tools` shell;
-- `agent-navigator` существует только как explicit agent mode;
+- `llm-tools-platform` существует только как explicit agent mode;
 - tool config materialize’ится через bootstrap/native `Open WebUI` surfaces, а не через ручной post-import patching;
 - backend secrets остаются backend-owned и не мигрируют в user-facing `Open WebUI` config;
 - native Knowledge path не путается с explicit domain tools;

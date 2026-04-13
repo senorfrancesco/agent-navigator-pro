@@ -609,7 +609,7 @@ def run_behavior_sweep(
 
 
 def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run Agent Navigator system behavior sweep")
+    parser = argparse.ArgumentParser(description="Run llm-tools-platform system behavior sweep")
     parser.add_argument("--dataset", default=str(DEFAULT_SCENARIO_DATASET))
     parser.add_argument("--surface", choices=("api", "ui", "both"), default="api")
     parser.add_argument("--api-url", default=DEFAULT_AGENT_API_URL)

@@ -149,7 +149,7 @@ async def test_async_infer_retries_on_503(monkeypatch):
     assert result["content"] == "ok"
     assert fake_client.calls == 3
     metrics = render_metrics_text()
-    assert "agent_nav_fallback_events_total" in metrics
+    assert "llm_tools_platform_fallback_events_total" in metrics
     assert 'component="ums_client"' in metrics
     assert 'fallback="async_infer_retry"' in metrics
 
@@ -348,6 +348,6 @@ async def test_async_infer_stream_records_stream_error_metric():
                 pass
 
     metrics = render_metrics_text()
-    assert "agent_nav_fallback_events_total" in metrics
+    assert "llm_tools_platform_fallback_events_total" in metrics
     assert 'component="ums_client"' in metrics
     assert 'fallback="stream_error"' in metrics

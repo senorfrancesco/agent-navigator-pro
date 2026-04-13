@@ -123,7 +123,7 @@ class OperatorRuntimeService:
         candidates = sorted(self.deploy_root.parent.glob("*.tar.gz")) + sorted(self.repo_root.glob("*.tar.gz"))
         if candidates:
             return candidates[0].name
-        return "agent-nav-offline-bundle_v1.0.tar.gz"
+        return "llm-tools-platform-offline-bundle_v1.0.tar.gz"
 
     def get_archive_name(self) -> str:
         return self._detect_bundle_archive()

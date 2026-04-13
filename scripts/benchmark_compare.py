@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Agent Navigator Pro — Benchmark comparison tool.
+llm-tools-platform — Benchmark comparison tool.
 
 Сравнивает два JSON-отчёта, собранных через scripts/benchmark.py,
 и печатает operator-friendly сводку по latency/status/runtime metadata.
@@ -327,7 +327,7 @@ def _resolve_labels(
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Сравнить два JSON-отчёта benchmark Agent Navigator Pro.",
+        description="Сравнить два JSON-отчёта benchmark llm-tools-platform.",
         epilog="""
 Примеры:
   python scripts/benchmark_compare.py results/cpu.json results/gpu.json

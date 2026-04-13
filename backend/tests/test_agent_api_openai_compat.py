@@ -57,7 +57,7 @@ async def test_openai_chat_completions_routes_through_execute_orchestration(monk
     response = await agent_api.openai_completions(
         _FakeRequest(
             {
-                "model": "agent-navigator",
+                "model": "llm-tools-platform",
                 "messages": [{"role": "user", "content": "Привет"}],
             }
         )
@@ -134,7 +134,7 @@ async def test_openai_chat_completions_formats_multimodal_text_content(monkeypat
     response = await agent_api.openai_completions(
         _FakeRequest(
             {
-                "model": "agent-navigator",
+                "model": "llm-tools-platform",
                 "messages": [
                     {"role": "system", "content": "Будь строгим."},
                     {"role": "assistant", "content": "Готов."},
@@ -198,7 +198,7 @@ async def test_openai_chat_completions_non_streaming_returns_json(monkeypatch):
     response = await agent_api.openai_completions(
         _FakeRequest(
             {
-                "model": "agent-navigator",
+                "model": "llm-tools-platform",
                 "messages": [{"role": "user", "content": "Привет"}],
                 "stream": False,
             }
@@ -257,7 +257,7 @@ async def test_openai_chat_completions_loads_attachment_text_into_session_docs(m
     response = await agent_api.openai_completions(
         _FakeRequest(
             {
-                "model": "agent-navigator",
+                "model": "llm-tools-platform",
                 "messages": [{"role": "user", "content": "Сделай сводку по документам"}],
                 "stream": False,
             }
@@ -284,7 +284,7 @@ def test_raw_models_lists_chat_capable_models_without_agent_wrapper(monkeypatch)
 
     assert response["object"] == "list"
     assert [item["id"] for item in response["data"]] == ["qwen-14b-llm", "qwen-vl-8b"]
-    assert all(item["id"] != "agent-navigator" for item in response["data"])
+    assert all(item["id"] != "llm-tools-platform" for item in response["data"])
 
 
 @pytest.mark.asyncio

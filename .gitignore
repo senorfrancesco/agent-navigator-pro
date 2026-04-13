@@ -62,7 +62,7 @@ __pycache__/
 test_document.pdf
 test_logs/
 all_logs/
-tmp_agent_nav_smoke_doc.txt
+tmp_llm_tools_platform_smoke_doc.txt
 tmp_chainlit_element_smoke.txt
 task.md
 TASKS.md.bak
@@ -85,6 +85,7 @@ package-lock.json
 # Local visual/debug artifacts
 output/
 tmp/
+llm-tools-platform-offline-bundle*.tar.gz
 agent-navigator-offline-bundle*.tar.gz
 
 .playwright-cli

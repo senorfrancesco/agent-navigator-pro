@@ -172,7 +172,7 @@ def test_openai_chat_completions_routes_through_execute_orchestration(client, mo
     resp = client.post(
         "/v1/chat/completions",
         json={
-            "model": "agent-navigator",
+            "model": "llm-tools-platform",
             "messages": [{"role": "user", "content": "Привет"}],
         },
     )

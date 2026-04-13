@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Agent Navigator Pro — микросервисная агентная система для анализа юридических документов и смет. Python 3.11, FastAPI, LangGraph, локальные LLM (Qwen) через llama-server. Ветка: `feature/v3.0-agentic-system`.
+llm-tools-platform — микросервисная агентная система для анализа юридических документов и смет. Python 3.11, FastAPI, LangGraph, локальные LLM (Qwen) через llama-server. Ветка: `feature/v3.0-agentic-system`.
 
 **Архитектура:**
 - **Frontend:** Chainlit (Docker, порт 3000) — чат, загрузка файлов, `cl.Step` для визуализации workflow
@@ -32,10 +32,10 @@ source activate_env.sh
 ./scripts/run_all.sh        # Полный запуск (tmux + Docker + health-checks + ожидание модели)
 ./scripts/stop_all.sh        # Остановка всех сервисов
 ./scripts/restart_all.sh     # Перезапуск
-tmux attach-session -t agent-navigator  # Подключение к сессии
+tmux attach-session -t llm-tools-platform  # Подключение к сессии
 ```
 
-`run_all.sh` создаёт tmux-сессию `agent-navigator` с 6 окнами:
+`run_all.sh` создаёт tmux-сессию `llm-tools-platform` с 6 окнами:
 `chainlit` → `agent-api` → `doc-server` → `legal-server` → `ums` → `monitor`
 
 Скрипт после запуска ожидает `/health` от каждого сервиса и загрузку Qwen LLM через `/status` UMS (до 3 минут), затем выводит итоговый статус.

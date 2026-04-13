@@ -1,8 +1,13 @@
-# TASKS - Agent Navigator Pro
+# TASKS - llm-tools-platform
 
 > **Единственный operational backlog.** Планы в `docs/plans/` — исторические артефакты, не operational source.
 >
 > **Migration note:** отдельный backlog по `Open WebUI` migration, backend tool contracts и upload/document binding теперь ведётся в [TASKS_MIGRATION.md](/home/seral/HDD/proj/agent-navigator-pro/TASKS_MIGRATION.md). Здесь оставляем только общепроектные cross-project follow-up без детального migration ledger.
+
+- [ ] Repo rename follow-up — после фактического переименования checkout/remote заменить оставшиеся абсолютные локальные пути `/home/seral/HDD/proj/agent-navigator-pro/...` на новый корень или на repo-relative ссылки.
+  Progress: rebranding на `llm-tools-platform` выполнен по коду, конфигам, скриптам, метрикам, тестам и пользовательским строкам; старое имя оставлено только внутри абсолютных локальных путей, потому что текущая директория workspace ещё называется `agent-navigator-pro`.
+- [ ] Dependency refresh PR — после стабилизации текущего дерева поднять `backend/requirements.txt`, `requirements.chainlit.txt` и offline lock-файлы отдельной чистой веткой/PR по результатам аудита.
+  Progress: аудит зависимостей с текущими floor-версиями, установленной средой, `conda-forge`, точечной сверкой `PyPI` и заметками из `Context7` сохранён в `docs/reports/2026-04-12-dependency-audit.md`; массовый bump не смешивать с текущим ребрендингом и несвязанными изменениями.
 
 ## Release/v1.0 Transition (2026-03-22)
 
@@ -560,7 +565,7 @@
     - `CHAINLIT_AUTH_SECRET`
     - `CHAINLIT_ADMIN_PASSWORD`
     - `GF_SECURITY_ADMIN_PASSWORD`
-  - local/dev escape hatch только через явный `AGENT_NAVIGATOR_ALLOW_INSECURE_DEFAULTS=1`
+  - local/dev escape hatch только через явный `LLM_TOOLS_PLATFORM_ALLOW_INSECURE_DEFAULTS=1`
   - `run_all.sh` больше не печатает пароль в stdout и не подсказывает `admin/admin`
   - `backend/.env.example`, `README.md`, `docs/deploy-guide.md`, `docs/scripts/*` синхронизированы под required secret rotation
   Проверки:
@@ -846,15 +851,15 @@
     - `backend/orchestrator/agent_api.py`
     - `backend/services/model_manager/unified_model_server.py`
   - request telemetry:
-    - `agent_nav_http_requests_total`
-    - `agent_nav_http_request_duration_seconds`
-    - `agent_nav_http_requests_in_progress`
+    - `llm_tools_platform_http_requests_total`
+    - `llm_tools_platform_http_request_duration_seconds`
+    - `llm_tools_platform_http_requests_in_progress`
   - domain metrics:
-    - `agent_nav_agent_api_orchestration_requests_total`
-    - `agent_nav_agent_api_openai_dedup_hits_total`
-    - `agent_nav_ums_concurrency_saturation_total`
-    - `agent_nav_ums_running_models`
-    - `agent_nav_ums_active_heavy_model`
+    - `llm_tools_platform_agent_api_orchestration_requests_total`
+    - `llm_tools_platform_agent_api_openai_dedup_hits_total`
+    - `llm_tools_platform_ums_concurrency_saturation_total`
+    - `llm_tools_platform_ums_running_models`
+    - `llm_tools_platform_ums_active_heavy_model`
   - trace-aware `X-Trace-Id` propagation и request logging через ASGI middleware
   - compose profile `monitoring`:
     - `prometheus` (`:9090`)
@@ -862,7 +867,7 @@
   - provisioning assets:
     - `monitoring/prometheus.yml`
     - `monitoring/grafana/provisioning/...`
-    - starter dashboard `agent-navigator-overview`
+    - starter dashboard `llm-tools-platform-overview`
   - convenience launcher:
     - `scripts/run_monitoring.sh`
   Verification:
@@ -1036,31 +1041,31 @@
 - [x] TD-8 — Fallback-цепочки скрывают ошибки → WARNING + счётчики
   Закрыто на workflow/runtime critical slices, compare/document_analysis и `ums_client`.
   Что покрыто:
-  - `backend/orchestrator/workflows/equipment.py` теперь публикует `WARNING + agent_nav_equipment_fallback_total` для:
+  - `backend/orchestrator/workflows/equipment.py` теперь публикует `WARNING + llm_tools_platform_equipment_fallback_total` для:
     - `smart_chunk` → line-based fallback
     - invalid `DEBUG-POLISH` structured output
     - LLM batch error в `evaluate_compliance_node`
-  - `backend/orchestrator/execution_runtime.py` теперь публикует `WARNING + agent_nav_fallback_events_total` для:
+  - `backend/orchestrator/execution_runtime.py` теперь публикует `WARNING + llm_tools_platform_fallback_events_total` для:
     - `doc_question` retrieval exception (`fallback=rag_exception`)
     - generic `doc_question` no-sources degraded branch (`fallback=no_sources`)
-  - `backend/orchestrator/rag/classifier.py` теперь публикует `agent_nav_fallback_events_total` для:
+  - `backend/orchestrator/rag/classifier.py` теперь публикует `llm_tools_platform_fallback_events_total` для:
     - `llm_non_json`
     - `llm_unsupported_intent`
     - `llm_missing_embedder_fallback`
     - `hybrid_low_confidence_unsure`
-  - `backend/services/model_manager/unified_model_server.py` теперь публикует `agent_nav_fallback_events_total` для:
+  - `backend/services/model_manager/unified_model_server.py` теперь публикует `llm_tools_platform_fallback_events_total` для:
     - ST GPU → CPU retry (`fallback=st_start_cpu_retry`)
-  - `backend/orchestrator/workflows/compare.py` теперь публикует `WARNING + agent_nav_fallback_events_total` для:
+  - `backend/orchestrator/workflows/compare.py` теперь публикует `WARNING + llm_tools_platform_fallback_events_total` для:
     - document load error (`fallback=load_documents_failed`)
     - legal match error (`fallback=match_batches_failed`)
     - partial/short structured output в batch-анализе (`fallback=analyze_parse_partial`)
     - batch LLM error (`fallback=analyze_batch_error`)
-  - `backend/orchestrator/workflows/document_analysis.py` теперь публикует `WARNING + agent_nav_fallback_events_total` для:
+  - `backend/orchestrator/workflows/document_analysis.py` теперь публикует `WARNING + llm_tools_platform_fallback_events_total` для:
     - document load/page load/table load issues
     - table extraction / LLM extraction fallback
     - summarize chunk failure
     - reduce summarization failure
-  - `backend/services/model_manager/ums_client.py` теперь публикует `WARNING + agent_nav_fallback_events_total` для:
+  - `backend/services/model_manager/ums_client.py` теперь публикует `WARNING + llm_tools_platform_fallback_events_total` для:
     - sync infer retry (`fallback=infer_retry`)
     - async infer retry (`fallback=async_infer_retry`)
     - stream error (`fallback=stream_error`)
@@ -1119,7 +1124,7 @@
   - this repository uses `workflow.yaml` only as a local policy layer for unattended work
 - [x] Hardened shutdown and relaunch scripts against orphaned model runtimes:
   - `stop_native.sh` and `stop_all.sh` now clean up `unified_model_server.py`, project-scoped `llama-server`, and orphaned `st_server.py`
-  - `stop_all.sh` now stops both tmux sessions: `agent-navigator` and `agent-navigator-native`
+  - `stop_all.sh` now stops both tmux sessions: `llm-tools-platform` and `llm-tools-platform-native`
   - service ports are now loaded from `.env` / `.env.native` / `.env.runtime` instead of being hardcoded
   - `run_native.sh`, `run_all.sh`, `run_openwebui.sh`, and `start_system_test.sh` now reuse the full stop-path before relaunch so orphaned embedding runtimes do not accumulate across restarts
   Verification:
@@ -1531,7 +1536,7 @@
     - `would_skip_levels`
     - `estimated_token_saving`
   - Отдельный counter:
-    - `agent_nav_summary_strategy_shadow_diff_total`
+    - `llm_tools_platform_summary_strategy_shadow_diff_total`
   Acceptance:
   - можно собрать production-like данные о расхождениях без изменения runtime path;
   - видно, сколько merge levels были избыточными по новой policy;
@@ -2060,26 +2065,19 @@
   Verification:
   - `pytest backend/tests/test_openwebui_bootstrap.py -q`
 
-- [ ] **T6.4 P4 — Legacy Open WebUI: автоматический опрос `deep-job` и сохранение состояния `tool_job`**
+- [x] **T6.4 P4 — Legacy Open WebUI: автоматический опрос `deep-job` и сохранение состояния `tool_job`**
   Контекст:
   - live smoke `2026-04-12` после исправления backend-контракта подтвердил, что `tool_job_refresh_action` и `tool_job_cancel_action` уже возвращают корректный структурированный payload (`content`, `job_id`, `status_url`, `job_status`, `tool_job`) и больше не провоцируют `409 Conflict` для завершённого deep-job;
   - при этом `POST /api/v1/chats/{chat_id}` со стороны legacy `Open WebUI` по-прежнему сохраняет в историю только исходное сообщение ассистента и его `statusHistory` со статусом `accepted`; обновлённый ответ `Action Function` не записывается как новое сохранённое состояние `tool_job`;
   - текущий UX требует от пользователя вручную догадываться, что пора нажать `Обновить deep-job`, хотя после `accepted` интерфейс уже знает `job_id` и `status_url`;
   - для долгих задач правильный контракт другой: после `accepted` UI сам опрашивает `status_url`, при переходе в `completed` сам добавляет результат в чат, а `cancel` остаётся ручным действием.
-  Progress `2026-04-12`:
-  - backend-срез частично закрыт: `equipment_deep_tool` и `equipment_deep_action` уже запускают автоопрос, сохраняют `job_status` / `tool_job`, создают дочерний итоговый bubble для терминального `deep-job` и повторно закрепляют ветку результата в истории, чтобы переживать поздний `chat_completed`;
-  - живой API чата уже показывает терминальное сообщение и отдельный `result_message_id`, но legacy DOM всё ещё не перестраивается автоматически по этой сохранённой ветке; оставшийся объём задачи сосредоточен в клиентском восстановлении/отрисовке чата, а не в backend job lifecycle.
-  Что сделать:
-  - определить, где именно legacy `Open WebUI` хранит и обновляет состояние результата для `deep-job`, и добавить автоматический опрос `status_url` после `accepted`;
-  - при переходе задания в терминальное состояние (`completed` / `failed` / `cancelled`) автоматически записывать в историю чата актуальный `job_status` и `tool_job`, а для `completed` ещё и автоматически добавлять итоговый результат в чат;
-  - оставить `cancel` ручным действием и обеспечить, чтобы он корректно останавливал автоопрос и не допускал поздней дорисовки уже отменённого результата;
-  - добавить целевую регрессионную проверку на автоопрос, автозапись терминального состояния и `reload` страницы после завершения задания.
-  Acceptance:
-  - после `accepted` legacy `Open WebUI` сам опрашивает `status_url` без ручного `refresh` как основного пути;
-  - при переходе в `completed` итог deep-job автоматически появляется в чате и сохраняется вместе с актуальным `job_status` / `tool_job`;
-  - `cancel` остаётся ручным, останавливает автоопрос и не допускает позднего появления результата отменённого задания;
-  - reload страницы не возвращает deep-job визуально к исходному `accepted`, если терминальное состояние уже известно;
-  - повторные действия после `reload` используют последнее сохранённое состояние, а не только исходный `accepted`.
+  Выполнено `2026-04-12`:
+  - backend-срез доведён до конца: `equipment_deep_tool` и `equipment_deep_action` запускают автоопрос, сохраняют `job_status` / `tool_job`, создают дочерний итоговый bubble для терминального `deep-job` и повторно закрепляют ветку результата в истории, чтобы переживать поздний `chat_completed`;
+  - клиентский патч `deploy/openwebui_legacy_patch/llm_tools_platform_autopoll.js` переведён на восстановление по данным `/api/v1/chats/{chat_id}`: скрипт автоматически подставляет дочерний итоговый bubble рядом с родительским сообщением, скрывает `refresh/cancel` по `actions_disabled` / терминальному `job_status` и больше не пытается обращаться к `tool-server` из браузера;
+  - корень сбоя в клиентском слое был в конфликте между runtime guard и `id` инъецированного `<script>`: браузер клал элемент `llm-tools-platform-openwebui-autopoll-v2` в `window`, из-за чего guard завершал патч в первой строке; исправлено отдельным runtime-маркером `__llm_tools_platform_openwebui_autopoll_v2_loaded__`;
+  - периодический опрос после исправления стабилизирован до поздних стартовых попыток и шага `2` секунды без лавины запросов на каждую мутацию DOM;
+  - живой прогон в обычном persisted-чате подтвердил полный сценарий: после `reload` итоговый bubble автоматически появляется под статусным сообщением, текст `Завершено — результат добавлен ниже.` перестаёт быть пустым обещанием, а `Обновить deep-job` / `Отменить deep-job` скрываются;
+  - прогон в `temporary chat` остаётся непоказательным для этого слоя: там `chat_id` имеет вид `local:...`, история не пишет серверное состояние через `/api/v1/chats/{chat_id}`, поэтому дальнейшие проверки `deep-job` нужно делать только в обычных persisted-чатах.
 
 - [ ] **T6.4 P5 — Legacy Open WebUI: целостность запуска `deep-job` для native tool call**
   Контекст:
@@ -2096,6 +2094,33 @@
   - каждый успешный `analyze_equipment_deep` в legacy `Open WebUI` создаёт запись в `tool_jobs` и оставляет непустой `function_call_output` с `job_id/status_url`;
   - если запуск backend-задачи не состоялся, чат показывает явную ошибку запуска, а не ложный текст `анализ принят`;
   - `refresh/cancel` работают только по реально созданному `job_id`, без привязки к выдуманному или пустому состоянию.
+  Progress: добавлен локальный eval runner `tests/harness/openwebui/openwebui_deep_job_eval.py` и внешний `Playwright`-контур `tests/e2e/openwebui/deep-job.spec.ts`, который автоматизирует persisted-chat, upload через реальный `Open WebUI`, explicit `equipment_deep_action`, backend poll, `tool_job_refresh_action` и harvest артефактов в `output/openwebui-deep-job-eval/*`.
+  Progress: runner дочитывает фактический `request_payload` из `tool_jobs`, поэтому regression harness теперь различает UI-only accepted state и реальный backend launch с конкретным `equipment_query`.
+  Progress: live-run `output/openwebui-deep-job-eval/20260412T203316Z` подтвердил backend-contour для `requirements-p1`: `pytest` прошёл (`38 passed`), `equipment_deep_action` вернул реальный `job_id`, backend довёл `tool_job` до `completed`, а в persisted chat появился дочерний `result_message_id`.
+  Progress: после стабилизации harness полный matrix-run `output/openwebui-deep-job-eval/20260412T204428Z` завершился успешно (`Playwright: 11 passed, 1 skipped`; `pytest: 38 passed`), а `results.enriched.json` собрал все 11 document-driven deep-job кейсов без инфраструктурных падений.
+  Комментарий: предыдущий live-run выявил два инфраструктурных блокера harness — слишком жёсткое ожидание исходного accepted-bubble и неверное разрешение sqlite path для `tool_jobs`; в текущем slice оба места исправлены, поэтому полный matrix-run больше не падает на инфраструктуре и доходит до `results.enriched.json`.
+  Комментарий: полный matrix-run показал системный binding-defect explicit action path — во всех 11 кейсах `equipment_query_matches_prompt=false`, terminal payload приходит как `general_chat`-подобный ответ с `rag_scope: off` и `sources: []`, а после `completed` UI оставляет видимыми `refresh/cancel`; это не похоже на поломку `KB_BACKEND/qdrant`, а указывает на разрыв между extracted file context, user focus и фактическим deep-job execution contract.
+  Progress: узкий live recheck `output/openwebui-deep-job-eval/recheck-requirements-p1-after-reload` уточнил текущий single-file контракт legacy action path: при одном загруженном документе `Глубокий анализ оборудования` фактически уходит в `analyze_document_deep -> document_analysis`, prompt и file-context доходят до backend, а дочерний результат сохраняется через persisted chat.
+  Progress: в этом slice закрыты два backend-дефекта по single-file пути — в `agent_api` восстановлен импорт `create_ums_embed_fn`, а `document_analysis._extract_llm_content()` научен обрабатывать list-shaped `message` из ответа модели; повторное live подтверждение требует отдельного перезапуска native `agent-api`, потому что текущий tmux runtime запущен без `--reload`.
+  Progress: добавлен backend-регрессионный тест на single-file `document_analysis`, где `raw_specs` содержит вложенный `list`; полировщик характеристик теперь пропускает повреждённые элементы вместо падения на `'list' object has no attribute 'get'`, но живой `Playwright`-recheck всё ещё требует перезапуска `native run`, поднятого до этой правки.
+  Progress: для наблюдаемого ручного UX добавлен отдельный live-runner `npm run test:e2e:openwebui:live`; `Playwright` в этом режиме идёт через видимый браузер, отключает параллелизм, включает `slowMo`, печатает пользовательский prompt в видимый composer, жмёт `Обновить deep-job` реальным кликом вместо скрытого `POST` и при отсутствии внешнего `manifest` автоматически поднимает встроенный канонический сценарий `Requirements.pdf`.
+  Комментарий: пункт остаётся открытым, пока не устранён сам live-defect с пустым `function_call_output` в native tool-call path; новый harness зафиксирован как воспроизводимый источник истины для этого слоя.
+
+- [x] **T6.4 P6 — `equipment_deep_action` теряет файловый контекст и уводит `deep-job` в общий чатовый путь**
+  Контекст:
+  - живые прогоны `2026-04-12` на `Requirements.pdf`, `2._KSU_1_4_24_tz-V2.docx`, `qw23.pdf`, а затем на паре `Requirements.pdf` + `Quotation_12.pdf` показали один и тот же разрыв: обычный ответ `Open WebUI` использует `sources.document` и отвечает по содержимому файла, а `deep-job` завершаетcя общим текстом без опоры на извлечённый контент;
+  - корень найден в серверном коде `equipment_deep_action`: `_build_equipment_action_code()` в `backend/orchestrator/tool_bindings.py` берёт только последний пользовательский текст и отправляет в `/tool-server/tools/analyze_equipment_deep` лишь `equipment_query` и `job_mode`, полностью отбрасывая файлы, `sources.document`, `session_docs` и `attachments_meta`, хотя они есть в теле `POST /api/chat/actions/equipment_deep_action`;
+  - дальше backend-контур `equipment_analysis` в `backend/orchestrator/execution_runtime.py` запускает специализированный workflow только если `_select_pair_files()` видит две реальные записи в `new_files/session_docs`; иначе `_execute_equipment()` уходит в `_execute_general_chat()` с `EQUIPMENT_TOOL_FALLBACK_SYSTEM_PROMPT`;
+  - из-за этого даже при двух загруженных PDF `deep-job` может честно стартовать как async job, но его terminal result фактически строится как общий чатовый ответ без реального сравнительного конвейера `ТЗ ↔ КП`.
+  Что сделать:
+  - привести контракт к одному из двух явных вариантов: либо `Глубокий анализ оборудования` остаётся только сравнительным инструментом для пары документов и интерфейс честно сообщает это до запуска, либо action начинает передавать в tool-server документный контекст (`session_docs` / `attachments_meta` / `active_doc_ids`) вместо одного `equipment_query`;
+  - для пары документов action должен передавать выбранные файлы в backend так, чтобы `_execute_equipment()` действительно входил в специализированный workflow, а не в запасной `_execute_general_chat()`;
+  - для одиночного документа не допускать вводящий в заблуждение `deep-job` UX под видом специализированного анализа оборудования: либо явный отказ, либо отдельный одно-документный инструмент/маршрут.
+  Acceptance:
+  - при двух загруженных документах `equipment_deep_action` приводит к реальному запуску специализированного `equipment`-workflow с документным контекстом, а terminal result не сваливается в общий чатовый ответ про необходимость описаний;
+  - при одном документе интерфейс не делает вид, что запускает тот же самый сравнительный `deep-job`, если prerequisites не выполнены;
+  - поведение action и название инструмента больше не расходятся с его реальным backend-контрактом.
+  Комментарий: выполнено через проброс `document_refs` / `session_docs` / `attachments_meta` из `Open WebUI action` в `tool-server` и нормализацию путей `/app/backend/data/uploads/*` -> `backend/open_webui_uploads/*`; живой повторный запуск на паре `Requirements.pdf` + `Quotation_12.pdf` подтвердил настоящий equipment-конвейер с извлечением и сопоставлением обоих PDF.
 
 - [ ] **T6.5 P1 — Cross-backend parity tests (`llama-server` vs `vllm`)**
   Контекст: система уже поддерживает минимум два backend mode (`llama-server`, `vllm`), но нет единого contract test, который гарантирует что ключевые пользовательские сценарии не ломаются асимметрично.

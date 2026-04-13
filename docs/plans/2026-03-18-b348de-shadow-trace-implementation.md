@@ -72,7 +72,7 @@ Cover:
   - `recommended_strategy`
   - `would_skip_levels`
   - `estimated_token_saving`
-- counter `agent_nav_summary_strategy_shadow_diff_total` increments only when the executed strategy differs from shadow baseline
+- counter `llm_tools_platform_summary_strategy_shadow_diff_total` increments only when the executed strategy differs from shadow baseline
 
 **Step 2: Run targeted tests to verify red**
 
@@ -97,7 +97,7 @@ Rules:
   - `shadow_baseline_strategy`
   - `would_skip_levels`
   - `estimated_token_saving`
-- increment `agent_nav_summary_strategy_shadow_diff_total` when `shadow_baseline_strategy != executed_strategy`
+- increment `llm_tools_platform_summary_strategy_shadow_diff_total` when `shadow_baseline_strategy != executed_strategy`
 
 Do not add branching that changes retries, grouping, or cancellation behavior.
 

@@ -26,7 +26,7 @@ class OperatorObservabilityService:
             / "provisioning"
             / "dashboards"
             / "json"
-            / "agent-navigator-overview.json"
+            / "llm-tools-platform-overview.json"
         )
         self.prometheus_path = self.monitoring_root / "prometheus.yml"
         self.grafana_base_url = os.getenv("GRAFANA_URL", "http://127.0.0.1:3002").rstrip("/")
@@ -72,22 +72,22 @@ class OperatorObservabilityService:
 
     def _dashboard_uid(self) -> str:
         if not self.dashboard_path.exists():
-            return "agent-navigator-overview"
+            return "llm-tools-platform-overview"
         try:
             payload = json.loads(self.dashboard_path.read_text(encoding="utf-8"))
-            return str(payload.get("uid") or "agent-navigator-overview")
+            return str(payload.get("uid") or "llm-tools-platform-overview")
         except Exception:
-            return "agent-navigator-overview"
+            return "llm-tools-platform-overview"
 
     def get_metrics_summary(self) -> Dict[str, List[Dict[str, str]]]:
         metrics = self._parse_metrics()
-        total_http = int(self._sum_metric(metrics, "agent_nav_http_requests_total"))
-        inflight = int(self._sum_metric(metrics, "agent_nav_http_requests_in_progress"))
-        orchestration = int(self._sum_metric(metrics, "agent_nav_agent_api_orchestration_requests_total"))
-        ums_models = int(self._sum_metric(metrics, "agent_nav_ums_running_models", service="ums"))
-        heavy_active = self._sum_metric(metrics, "agent_nav_ums_active_heavy_model", service="ums") > 0
-        saturation = int(self._sum_metric(metrics, "agent_nav_ums_concurrency_saturation_total"))
-        fallbacks = int(self._sum_metric(metrics, "agent_nav_fallback_events_total"))
+        total_http = int(self._sum_metric(metrics, "llm_tools_platform_http_requests_total"))
+        inflight = int(self._sum_metric(metrics, "llm_tools_platform_http_requests_in_progress"))
+        orchestration = int(self._sum_metric(metrics, "llm_tools_platform_agent_api_orchestration_requests_total"))
+        ums_models = int(self._sum_metric(metrics, "llm_tools_platform_ums_running_models", service="ums"))
+        heavy_active = self._sum_metric(metrics, "llm_tools_platform_ums_active_heavy_model", service="ums") > 0
+        saturation = int(self._sum_metric(metrics, "llm_tools_platform_ums_concurrency_saturation_total"))
+        fallbacks = int(self._sum_metric(metrics, "llm_tools_platform_fallback_events_total"))
         overview = [
             {
                 "label": "HTTP-событий всего",

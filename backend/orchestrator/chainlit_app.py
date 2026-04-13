@@ -1,5 +1,5 @@
 """
-Chainlit App — совместимый и отладочный UI для Agent Navigator Pro.
+Chainlit App — совместимый и отладочный UI для llm-tools-platform.
 
 Особенности:
 - cl.Step → каждая LangGraph нода видна как шаг с прогрессом
@@ -452,7 +452,7 @@ if _ENABLE_DATA_LAYER:
             media_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
             return FileResponse(file_path, media_type=media_type, filename=file_path.name)
 
-        if not getattr(chainlit_server.app.state, "agent_nav_element_file_route_registered", False):
+        if not getattr(chainlit_server.app.state, "llm_tools_platform_element_file_route_registered", False):
 
             @chainlit_server.app.get(f"{chainlit_config.run.root_path}/project/file/{{object_key:path}}")
             async def get_local_chainlit_element_file(
@@ -464,7 +464,7 @@ if _ENABLE_DATA_LAYER:
                     current_user=current_user,
                 )
 
-            chainlit_server.app.state.agent_nav_element_file_route_registered = True
+            chainlit_server.app.state.llm_tools_platform_element_file_route_registered = True
 
         class _CompatibleSQLAlchemyDataLayer(SQLAlchemyDataLayer):
             """Compatibility wrapper for local SQLite bootstrap schema and tag serialization."""
@@ -972,7 +972,7 @@ def _derive_default_thread_name() -> str:
         "specific_tasks": "Специализированные задачи",
         "rag_qa": "Вопросы по документам (RAG)",
     }
-    base = mode_titles.get(str(assistant_mode), "Agent Navigator")
+    base = mode_titles.get(str(assistant_mode), "llm-tools-platform")
     if active_labels:
         return f"{base} — {active_labels[0]}"
     return base
@@ -1011,7 +1011,7 @@ def _build_context_status_markdown(title: str = "Текущий контекст
 
 def _build_welcome_markdown() -> str:
     return (
-        "## Добро пожаловать в Agent Navigator\n\n"
+        "## Добро пожаловать в llm-tools-platform\n\n"
         "Используйте starter cards или настройки справа, чтобы быстро переключить сценарий.\n\n"
         f"{_build_context_status_markdown(title='Стартовый контекст')}"
     )
@@ -1800,7 +1800,7 @@ MAX_HISTORY_MESSAGES = 10
 
 def _build_prompt(query: str, history: List, system_msg: str = "") -> str:
     if not system_msg:
-        system_msg = "Ты помощник Agent Navigator. Помогай пользователю."
+        system_msg = "Ты помощник llm-tools-platform. Помогай пользователю."
     prompt = f"<|im_start|>system\n{system_msg}<|im_end|>\n"
     for msg in history[-MAX_HISTORY_MESSAGES:]:
         prompt += f"<|im_start|>{msg['role']}\n{msg['content']}<|im_end|>\n"
@@ -1819,7 +1819,7 @@ def _get_profile_system_prompt() -> str:
 def _compose_doc_question_system_prompt(catalog: str) -> str:
     effective = _get_effective_settings()
     system_parts = [
-        "Ты помощник Agent Navigator.\n"
+        "Ты помощник llm-tools-platform.\n"
         "Отвечай только на основе CATALOG OF SOURCES.\n"
         "Каждое фактическое утверждение помечай ссылками [n] из каталога.\n"
         "Запрещено использовать ссылки вне диапазона каталога.\n"
@@ -1914,7 +1914,7 @@ def _infer_with_model_failover(
                     exc_info=True,
                 )
                 inc_metric_counter(
-                    "agent_nav_fallback_events_total",
+                    "llm_tools_platform_fallback_events_total",
                     labels={
                         "component": "chainlit",
                         "fallback": "model_failover_retry",
@@ -2630,9 +2630,9 @@ async def set_starters(user: Optional[cl.User] = None, language: Optional[str] =
 async def set_chat_profiles(current_user: Optional[cl.User]):
     return [
         cl.ChatProfile(
-            name="Agent Navigator",
+            name="llm-tools-platform",
             markdown_description=(
-                "Основной Chainlit UI для Agent Navigator с use-case режимами: "
+                "Основной Chainlit UI для llm-tools-platform с use-case режимами: "
                 "общий чат, помощь по коду, агентный режим, специализированные задачи и RAG-вопросы по документам."
             ),
             icon="/public/logo_dark.svg",

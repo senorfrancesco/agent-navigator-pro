@@ -1,6 +1,6 @@
-# Agent Navigator Pro
+# llm-tools-platform
 
-**Agent Navigator Pro** — агентная система для анализа документов, RAG-поиска, сравнения юридических актов и проверки соответствия ТЗ/КП. Основной пользовательский интерфейс проекта сейчас — **Open WebUI** на порту `3001`. **Chainlit** сохранён как совместимый и отладочный UI на порту `3000`.
+**llm-tools-platform** — агентная система для анализа документов, RAG-поиска, сравнения юридических актов и проверки соответствия ТЗ/КП. Основной пользовательский интерфейс проекта сейчас — **Open WebUI** на порту `3001`. **Chainlit** сохранён как совместимый и отладочный UI на порту `3000`.
 
 Каноническая основная ветка репозитория: `v3.0`.
 
@@ -108,7 +108,7 @@ graph TD
 
 | Компонент | Технология | Порт | Роль |
 | --- | --- | --- | --- |
-| `open-webui` | Docker + Open WebUI | `3001` | Основной пользовательский shell, сейчас поднимается через compose profile `legacy` |
+| `open-webui` | Docker + Open WebUI | `3001` | Основной пользовательский shell, входит в основной compose-стек |
 | `chainlit-ui` | Docker + Chainlit | `3000` | Совместимый и отладочный интерфейс чата, history, шаги workflow, загрузка файлов |
 | `agent_api` | FastAPI | `8000` | OpenAI-compatible entrypoint, маршрутизация в workflow |
 | `document_server` | FastAPI | `8001` | Парсинг PDF/DOCX, OCR, таблицы, чанки |
@@ -148,7 +148,7 @@ graph TD
 Клонировать репозиторий, установить все зависимости (Docker, Miniconda, Python env) и подготовить конфиг:
 
 ```bash
-git clone <repo-url> agent-navigator-pro && cd agent-navigator-pro
+git clone <repo-url> llm-tools-platform && cd llm-tools-platform
 ./scripts/launcher.sh --install --platform ubuntu
 ```
 
@@ -209,7 +209,7 @@ Windows host path подготавливает WSL/Docker Desktop, а сам р�
 
 ```bash
 # Скачать только скрипт установки
-curl -fsSL https://raw.githubusercontent.com/<org>/agent-navigator-pro/v3.0/scripts/setup_ubuntu.sh | bash
+curl -fsSL https://raw.githubusercontent.com/<org>/llm-tools-platform/v3.0/scripts/setup_ubuntu.sh | bash
 ```
 
 > **Примечание:** после выполнения `setup_ubuntu.sh` потребуется клонировать репозиторий вручную и указать пути к моделям в `backend/.env`.
@@ -308,7 +308,7 @@ Universal failover теперь тоже опирается на этот regist
 Для `WSL` и случаев, когда на системном диске не хватает места, модели можно хранить на другом диске и указывать абсолютные пути, например `/mnt/d/agent-models/...`:
 
 ```bash
-MODEL_REGISTRY_CONFIG_PATH="/mnt/d/agent-navigator-pro/backend/config/models.yaml"
+MODEL_REGISTRY_CONFIG_PATH="/mnt/d/llm-tools-platform/backend/config/models.yaml"
 MODEL_PATH_LLM="/mnt/d/agent-models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
 MODEL_PATH_VLM="/mnt/d/agent-models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
 MMPROJ_PATH="/mnt/d/agent-models/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf"
@@ -329,7 +329,7 @@ Legacy aliases для путей сохранены только для compatib
 Для local/dev launcher допускает override:
 
 ```bash
-AGENT_NAVIGATOR_ALLOW_INSECURE_DEFAULTS=1
+LLM_TOOLS_PLATFORM_ALLOW_INSECURE_DEFAULTS=1
 ```
 
 Но в production bootstrap считает дефолтные `CHAINLIT_ADMIN_PASSWORD` и `GF_SECURITY_ADMIN_PASSWORD` недопустимыми, а `CHAINLIT_AUTH_SECRET` при пустом/дефолтном значении ротирует автоматически в `backend/.env`.
@@ -496,7 +496,7 @@ Tier выбирается автоматически по железу чере�
 Для container path важно разделять `build` и `run`:
 
 - `./scripts/run_all.sh` и `./scripts/launcher.sh --target container --profile default` только запускают уже собранные образы через `docker compose up --no-build`;
-- backend образы (`agent-api`, `document-server`, `legal-server`, `ums`) нужно собирать отдельно явной командой `docker compose --profile backend build agent-api document-server legal-server ums`;
+- backend образы (`agent-api`, `document-server`, `legal-server`, `ums`) нужно собирать отдельно явной командой `docker compose build agent-api document-server legal-server ums`;
 - для Chainlit rebuild остаётся отдельным шагом: `docker compose build chainlit`.
 
 Для install-path launcher тоже остаётся user-facing entrypoint. Внутренний coordinator находится в `./scripts/install/install.sh`: сейчас он делегирует `native` установку в `scripts/setup_ubuntu.sh`, а для `container` target выводит guidance без host-install действий.
@@ -529,14 +529,14 @@ Windows host path подготавливает WSL/Docker Desktop, а сам р�
 Основной пользовательский shell:
 
 ```bash
-docker compose --profile legacy up -d open-webui
+docker compose up -d open-webui
 ```
 
 Он будет доступен на:
 
 - `http://localhost:3001`
 
-Текущий compose profile называется `legacy` только по историческим причинам и не означает вторичную продуктовую роль `Open WebUI`.
+Эта команда также подтянет `qdrant` как зависимость `Open WebUI`.
 
 Совместимый `Chainlit`-контур при необходимости:
 
@@ -759,7 +759,7 @@ docker compose logs --tail=200 chainlit
 Подключение к `tmux`:
 
 ```bash
-tmux attach -t agent-navigator
+tmux attach -t llm-tools-platform
 ```
 
 ## Текущее состояние UI и runtime

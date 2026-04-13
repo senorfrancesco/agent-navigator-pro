@@ -261,7 +261,7 @@ def test_start_server_records_cpu_placement_after_st_fallback():
     assert ums_server.state["placements"]["labse-embedding"]["gpu_indices"] == []
     assert ums_server.state["placements"]["labse-embedding"]["device_arg"] == "cpu"
     metrics = render_metrics_text()
-    assert "agent_nav_fallback_events_total" in metrics
+    assert "llm_tools_platform_fallback_events_total" in metrics
     assert 'component="ums"' in metrics
     assert 'fallback="st_start_cpu_retry"' in metrics
 
@@ -684,9 +684,9 @@ def test_metrics_endpoint_exposes_http_and_runtime_metrics():
 
     assert response.status_code == 200
     payload = response.text
-    assert "agent_nav_http_requests_total" in payload
+    assert "llm_tools_platform_http_requests_total" in payload
     assert 'service="ums"' in payload
-    assert "agent_nav_ums_running_models" in payload
+    assert "llm_tools_platform_ums_running_models" in payload
     assert 'path="/metrics"' not in payload
 
 

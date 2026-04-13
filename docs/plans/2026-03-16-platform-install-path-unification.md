@@ -67,8 +67,8 @@ launcher.sh -> bootstrap_env.sh --install -> scripts/install/install.sh
 - targeted pytest на installer dispatcher contract;
 - smoke:
   - `./scripts/install/detect_os.sh --print-platform`
-  - `AGENT_NAVIGATOR_TEST_MODE=1 ./scripts/install/install.sh --platform auto`
-  - `AGENT_NAVIGATOR_TEST_MODE=1 ./scripts/launcher.sh --install --platform ubuntu`
+  - `LLM_TOOLS_PLATFORM_TEST_MODE=1 ./scripts/install/install.sh --platform auto`
+  - `LLM_TOOLS_PLATFORM_TEST_MODE=1 ./scripts/launcher.sh --install --platform ubuntu`
 - doc sync review между `README.md`, `docs/scripts/README.md`, `docs/scripts/installers.md`.
 
 ## Exit Criteria

@@ -154,7 +154,7 @@ def test_connected_ums_dockerfile_keeps_legacy_networked_build_path() -> None:
 def test_chainlit_dockerfile_copies_runtime_dependencies() -> None:
     content = (BUNDLE_ROOT / "Dockerfile.chainlit.offline").read_text(encoding="utf-8")
 
-    assert "ARG BACKEND_BASE_IMAGE=agent-nav-backend-app-offline:v1.0" in content
+    assert "ARG BACKEND_BASE_IMAGE=llm-tools-platform-backend-app-offline:v1.0" in content
     assert "FROM ${BACKEND_BASE_IMAGE}" in content
     assert "WORKDIR /app/backend/orchestrator" in content
     assert "python -m pip install" in content

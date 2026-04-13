@@ -21,33 +21,33 @@ HTTP_DURATION_BUCKETS = (
 )
 
 _METRIC_HELP = {
-    "agent_nav_http_requests_total": "Total HTTP requests by service, method, path and status code.",
-    "agent_nav_http_request_duration_seconds": "HTTP request latency in seconds.",
-    "agent_nav_http_requests_in_progress": "HTTP requests currently in progress.",
-    "agent_nav_ums_running_models": "Number of model processes currently running in UMS.",
-    "agent_nav_ums_active_heavy_model": "Whether a heavy model is currently active in UMS.",
-    "agent_nav_agent_api_orchestration_requests_total": "Agent API orchestration requests by endpoint and result.",
-    "agent_nav_agent_api_openai_dedup_hits_total": "OpenAI-compatible deduplicated requests served without execution.",
-    "agent_nav_ums_concurrency_saturation_total": "UMS requests rejected because concurrency policy was saturated.",
-    "agent_nav_equipment_fallback_total": "Equipment workflow fallback and degraded-path activations by stage and reason.",
-    "agent_nav_fallback_events_total": "Fallback and degraded-path runtime events by component and fallback type.",
-    "agent_nav_summary_strategy_total": "Adaptive summary reduce strategy selections by component, strategy, and reason.",
-    "agent_nav_summary_strategy_shadow_diff_total": "Shadow-mode summary strategy diffs between executed and baseline paths.",
+    "llm_tools_platform_http_requests_total": "Total HTTP requests by service, method, path and status code.",
+    "llm_tools_platform_http_request_duration_seconds": "HTTP request latency in seconds.",
+    "llm_tools_platform_http_requests_in_progress": "HTTP requests currently in progress.",
+    "llm_tools_platform_ums_running_models": "Number of model processes currently running in UMS.",
+    "llm_tools_platform_ums_active_heavy_model": "Whether a heavy model is currently active in UMS.",
+    "llm_tools_platform_agent_api_orchestration_requests_total": "Agent API orchestration requests by endpoint and result.",
+    "llm_tools_platform_agent_api_openai_dedup_hits_total": "OpenAI-compatible deduplicated requests served without execution.",
+    "llm_tools_platform_ums_concurrency_saturation_total": "UMS requests rejected because concurrency policy was saturated.",
+    "llm_tools_platform_equipment_fallback_total": "Equipment workflow fallback and degraded-path activations by stage and reason.",
+    "llm_tools_platform_fallback_events_total": "Fallback and degraded-path runtime events by component and fallback type.",
+    "llm_tools_platform_summary_strategy_total": "Adaptive summary reduce strategy selections by component, strategy, and reason.",
+    "llm_tools_platform_summary_strategy_shadow_diff_total": "Shadow-mode summary strategy diffs between executed and baseline paths.",
 }
 
 _METRIC_TYPE = {
-    "agent_nav_http_requests_total": "counter",
-    "agent_nav_http_request_duration_seconds": "histogram",
-    "agent_nav_http_requests_in_progress": "gauge",
-    "agent_nav_ums_running_models": "gauge",
-    "agent_nav_ums_active_heavy_model": "gauge",
-    "agent_nav_agent_api_orchestration_requests_total": "counter",
-    "agent_nav_agent_api_openai_dedup_hits_total": "counter",
-    "agent_nav_ums_concurrency_saturation_total": "counter",
-    "agent_nav_equipment_fallback_total": "counter",
-    "agent_nav_fallback_events_total": "counter",
-    "agent_nav_summary_strategy_total": "counter",
-    "agent_nav_summary_strategy_shadow_diff_total": "counter",
+    "llm_tools_platform_http_requests_total": "counter",
+    "llm_tools_platform_http_request_duration_seconds": "histogram",
+    "llm_tools_platform_http_requests_in_progress": "gauge",
+    "llm_tools_platform_ums_running_models": "gauge",
+    "llm_tools_platform_ums_active_heavy_model": "gauge",
+    "llm_tools_platform_agent_api_orchestration_requests_total": "counter",
+    "llm_tools_platform_agent_api_openai_dedup_hits_total": "counter",
+    "llm_tools_platform_ums_concurrency_saturation_total": "counter",
+    "llm_tools_platform_equipment_fallback_total": "counter",
+    "llm_tools_platform_fallback_events_total": "counter",
+    "llm_tools_platform_summary_strategy_total": "counter",
+    "llm_tools_platform_summary_strategy_shadow_diff_total": "counter",
 }
 
 
@@ -189,7 +189,7 @@ def reset_observability_metrics() -> None:
 
 def begin_http_request(*, service: str, method: str, path: str) -> float:
     _METRICS.inc_gauge(
-        "agent_nav_http_requests_in_progress",
+        "llm_tools_platform_http_requests_in_progress",
         labels={"service": service, "method": method},
     )
     return time.perf_counter()
@@ -206,13 +206,13 @@ def end_http_request(
     duration = max(0.0, time.perf_counter() - started_at)
     inflight_labels = {"service": service, "method": method}
     labels = {"service": service, "method": method, "path": path}
-    _METRICS.dec_gauge("agent_nav_http_requests_in_progress", labels=inflight_labels)
+    _METRICS.dec_gauge("llm_tools_platform_http_requests_in_progress", labels=inflight_labels)
     _METRICS.inc_counter(
-        "agent_nav_http_requests_total",
+        "llm_tools_platform_http_requests_total",
         labels={**labels, "status_code": str(status_code)},
     )
     _METRICS.observe_histogram(
-        "agent_nav_http_request_duration_seconds",
+        "llm_tools_platform_http_request_duration_seconds",
         duration,
         labels=labels,
     )
@@ -220,9 +220,9 @@ def end_http_request(
 
 def set_ums_runtime_metrics(*, running_models: int, active_heavy_model_present: bool) -> None:
     labels = {"service": "ums"}
-    _METRICS.set_gauge("agent_nav_ums_running_models", float(running_models), labels=labels)
+    _METRICS.set_gauge("llm_tools_platform_ums_running_models", float(running_models), labels=labels)
     _METRICS.set_gauge(
-        "agent_nav_ums_active_heavy_model",
+        "llm_tools_platform_ums_active_heavy_model",
         1.0 if active_heavy_model_present else 0.0,
         labels=labels,
     )

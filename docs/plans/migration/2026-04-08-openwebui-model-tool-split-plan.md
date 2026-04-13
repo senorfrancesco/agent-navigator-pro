@@ -2,9 +2,9 @@
 
 **Дата:** 2026-04-08  
 **Статус:** рабочий implementation plan / source-backed decision record  
-**Назначение:** зафиксировать обязательное разделение между `model provider` и `tool server` в `Open WebUI`, чтобы native tool-calling не шёл через product-specific assistant wrapper `agent-navigator`.
+**Назначение:** зафиксировать обязательное разделение между `model provider` и `tool server` в `Open WebUI`, чтобы native tool-calling не шёл через product-specific assistant wrapper `llm-tools-platform`.
 
-> **2026-04-09 update:** этот plan остаётся актуальным как source-backed decision для `raw model + tool server` split, но execution sequencing теперь подчинён более широкому [Open WebUI Responsibility Split Plan](/home/fisher/agent-navigator/docs/plans/migration/2026-04-09-openwebui-responsibility-split-plan.md), который дополнительно фиксирует режимы `plain model`, `explicit tools`, `agent mode` и переход `Chainlit -> temporary compatibility shell`.
+> **2026-04-09 update:** этот plan остаётся актуальным как source-backed decision для `raw model + tool server` split, но execution sequencing теперь подчинён более широкому [Open WebUI Responsibility Split Plan](/home/fisher/llm-tools-platform/docs/plans/migration/2026-04-09-openwebui-responsibility-split-plan.md), который дополнительно фиксирует режимы `plain model`, `explicit tools`, `agent mode` и переход `Chainlit -> temporary compatibility shell`.
 
 ## 1. Problem Statement
 
@@ -12,15 +12,15 @@
 
 - `Open WebUI` уже умеет вызывать наш backend `OpenAPI Tool Server`;
 - fast/deep tools реально доходят до `/tool-server/tools/*`;
-- но выбранная в чате модель `agent-navigator` остаётся backend-specific assistant wrapper, а не raw model provider;
-- из-за этого даже корректный tool result затем снова проходит через product-specific system behavior `agent-navigator`, а не через нейтральный `model + tools` flow.
+- но выбранная в чате модель `llm-tools-platform` остаётся backend-specific assistant wrapper, а не raw model provider;
+- из-за этого даже корректный tool result затем снова проходит через product-specific system behavior `llm-tools-platform`, а не через нейтральный `model + tools` flow.
 
 Итог:
 
 - `Open WebUI` не получает чистую модель, которая должна делать native tool calling;
 - tool result пересказывается через wrapper-layer;
 - deep-tool UX и follow-up behavior искажаются;
-- становится трудно понять, где заканчивается поведение модели и где начинается логика `Agent Navigator backend`.
+- становится трудно понять, где заканчивается поведение модели и где начинается логика `llm-tools-platform backend`.
 
 ## 2. Source-Backed Decisions
 
@@ -78,7 +78,7 @@ Docs Open WebUI прямо предупреждают:
 - native function calling имеет смысл только если выбранная модель реально поддерживает tool calling;
 - некоторые local models “claim support but often produce poor results”.
 
-Это подтверждает наш практический вывод: даже при корректном `tool-server` contract нельзя оставлять `agent-navigator` wrapper основным chat model для Open WebUI native tool calling.
+Это подтверждает наш практический вывод: даже при корректном `tool-server` contract нельзя оставлять `llm-tools-platform` wrapper основным chat model для Open WebUI native tool calling.
 
 Источник:
 
@@ -93,7 +93,7 @@ Docs Open WebUI прямо предупреждают:
 1. **Model provider surface**
    - raw chat model endpoint;
    - speaks `OpenAI-compatible` protocol cleanly;
-   - не содержит product-specific assistant behavior `agent-navigator`;
+   - не содержит product-specific assistant behavior `llm-tools-platform`;
    - подключается в `Open WebUI` через `Admin Settings -> Connections`.
 
 2. **Tool server surface**
@@ -102,7 +102,7 @@ Docs Open WebUI прямо предупреждают:
    - подключается в `Open WebUI` как `OpenAPI Tool Server`.
 
 3. **Specialized assistant surface**
-   - `agent-navigator` wrapper остаётся отдельным specialized assistant mode / compatibility layer;
+   - `llm-tools-platform` wrapper остаётся отдельным specialized assistant mode / compatibility layer;
    - не используется как default model для native tool-calling path в Open WebUI.
 
 ### 3.1.1 Runtime mode boundary
@@ -119,7 +119,7 @@ Docs Open WebUI прямо предупреждают:
 
 Нельзя оставлять такую схему как canonical:
 
-`Open WebUI -> agent-navigator wrapper -> tool server -> agent-navigator wrapper`
+`Open WebUI -> llm-tools-platform wrapper -> tool server -> llm-tools-platform wrapper`
 
 Потому что это приводит к:
 
@@ -136,13 +136,13 @@ Docs Open WebUI прямо предупреждают:
 `Open WebUI`
 -> `raw OpenAI-compatible model provider`
 and separately
--> `Agent Navigator OpenAPI Tool Server`
+-> `llm-tools-platform OpenAPI Tool Server`
 -> `backend tool execution / jobs / retrieval / domain services`
 
 Опционально позже:
 
 `Open WebUI`
--> `agent-navigator specialized assistant`
+-> `llm-tools-platform specialized assistant`
 
 Но это отдельный assistant mode, а не primary chat provider for native tools.
 
@@ -153,7 +153,7 @@ and separately
 - backend tool server живёт в нашем backend;
 - `Open WebUI` model connection идёт на raw OpenAI-compatible endpoint;
 - tools подключаются как `User Tool Server`;
-- `agent-navigator` wrapper может оставаться отдельной model entry для compare/debug, но не как default.
+- `llm-tools-platform` wrapper может оставаться отдельной model entry для compare/debug, но не как default.
 
 ### 4.2 Production-like mode
 
@@ -168,7 +168,7 @@ and separately
 Если у нас уже есть endpoint, который:
 
 - говорит по `OpenAI-compatible` protocol;
-- не инжектит `agent-navigator` product behavior;
+- не инжектит `llm-tools-platform` product behavior;
 - не перехватывает domain logic;
 - даёт обычный `chat completions` surface,
 
@@ -176,7 +176,7 @@ and separately
 
 ### Option B — Introduce thin raw-chat gateway
 
-Если текущий `/v1/chat/completions` в `agent_api.py` уже слишком связан с `agent-navigator` behavior, нужно выделить тонкий raw provider surface, например:
+Если текущий `/v1/chat/completions` в `agent_api.py` уже слишком связан с `llm-tools-platform` behavior, нужно выделить тонкий raw provider surface, например:
 
 - новый `raw_model_api.py`;
 - или отдельный route namespace в `agent_api.py`;
@@ -203,7 +203,7 @@ and separately
 Что фиксируем:
 
 - `model/tool split required`;
-- `agent-navigator` wrapper is not the primary Open WebUI model provider;
+- `llm-tools-platform` wrapper is not the primary Open WebUI model provider;
 - `Direct Connections` are experimental and not canonical.
 
 ### Slice B — Inventory Current Model Surfaces
@@ -228,7 +228,7 @@ Acceptance:
 
 Acceptance:
 
-- `Open WebUI` может выбрать raw model, который не injects `agent-navigator` behavior;
+- `Open WebUI` может выбрать raw model, который не injects `llm-tools-platform` behavior;
 - обычный чат через raw provider не идёт через product-specific orchestration;
 - любое tool execution в этом contour либо приходит из native tool-calling модели, либо из explicit UI action/tool picker, но не из backend hidden router.
 
@@ -237,9 +237,9 @@ Acceptance:
 Нужно:
 
 - подключить raw model provider в `Open WebUI`;
-- оставить `Agent Navigator Tools` как отдельный tool server;
-- убрать `agent-navigator` wrapper из роли default chat model для native tool-calling smoke;
-- зафиксировать `agent-navigator` только как explicit agent/compatibility profile.
+- оставить `llm-tools-platform Tools` как отдельный tool server;
+- убрать `llm-tools-platform` wrapper из роли default chat model для native tool-calling smoke;
+- зафиксировать `llm-tools-platform` только как explicit agent/compatibility profile.
 
 Acceptance:
 
@@ -252,10 +252,10 @@ Acceptance:
 `Model/tool split` считается закрытым, если одновременно верны все пункты:
 
 - в `Open WebUI` настроен отдельный raw model provider;
-- `Agent Navigator Tools` остаётся отдельным `OpenAPI Tool Server`;
-- выбранная для tool smoke модель больше не является `agent-navigator` wrapper;
+- `llm-tools-platform Tools` остаётся отдельным `OpenAPI Tool Server`;
+- выбранная для tool smoke модель больше не является `llm-tools-platform` wrapper;
 - fast tool end-to-end response не проходит через product-specific assistant layer;
-- docs/backlog фиксируют `agent-navigator` only as specialized assistant / compatibility mode.
+- docs/backlog фиксируют `llm-tools-platform` only as specialized assistant / compatibility mode.
 - `plain model` path больше не содержит hidden backend tool routing.
 - `explicit tools` path не содержит backend semantic guesswork сверх уже выбранного tool contract.
 
@@ -273,7 +273,7 @@ Acceptance:
 
 Ближайший правильный шаг после этого плана:
 
-1. не чинить дальше UX deep tools в текущем `agent-navigator` model path;
+1. не чинить дальше UX deep tools в текущем `llm-tools-platform` model path;
 2. сначала развести raw model и product wrapper;
 3. затем повторить `M3.3/M3.5` smoke уже на raw provider + tool server split и отдельно проверить clean manual named-tool path;
 4. только затем решать, нужен ли дополнительный Open WebUI-side polling UX for async tools.

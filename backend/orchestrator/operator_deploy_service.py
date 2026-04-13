@@ -19,7 +19,7 @@ class OperatorDeployService:
         self.offline_scripts_root = self.deploy_root / "scripts"
 
     def get_deploy_surface(self, *, archive_name: str | None = None, docker_socket_available: bool = False) -> Dict[str, Dict[str, object]]:
-        archive_name = archive_name or "agent-nav-offline-bundle_v1.0.tar.gz"
+        archive_name = archive_name or "llm-tools-platform-offline-bundle_v1.0.tar.gz"
         return {
             "build": {
                 "label": "Сборка офлайн-бандла",
@@ -122,7 +122,7 @@ class OperatorDeployService:
         }
 
     def get_deploy_log_lines(self, archive_name: str | None = None) -> List[Dict[str, str]]:
-        archive_name = archive_name or "agent-nav-offline-bundle_v1.0.tar.gz"
+        archive_name = archive_name or "llm-tools-platform-offline-bundle_v1.0.tar.gz"
         return [
             {"mode": "build", "stage": "build", "text": "[build_bundle] deploy/offline_bundle build/export orchestration is available"},
             {"mode": "build", "stage": "wheelhouse", "text": "[build_wheelhouse] script detected and ready for offline Python wheel preparation"},

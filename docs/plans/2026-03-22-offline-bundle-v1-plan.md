@@ -136,7 +136,7 @@ Expected: структура каталога существует и читае
 
 **Step 3: Проверка**
 
-Run: `docker build -f deploy/offline_bundle/Dockerfile.backend.offline -t agent-nav-backend-offline:test .`
+Run: `docker build -f deploy/offline_bundle/Dockerfile.backend.offline -t llm-tools-platform-backend-offline:test .`
 Expected: backend offline image собирается отдельно от legacy Dockerfile.
 
 ### Task 5: Собрать новый Chainlit Docker image для offline runtime
@@ -160,7 +160,7 @@ UI image должен ожидать persistent mount для chainlit SQLite dat
 
 **Step 3: Проверка**
 
-Run: `docker build -f deploy/offline_bundle/Dockerfile.chainlit.offline -t agent-nav-chainlit-offline:test .`
+Run: `docker build -f deploy/offline_bundle/Dockerfile.chainlit.offline -t llm-tools-platform-chainlit-offline:test .`
 Expected: UI image собирается и не зависит от старого compose path.
 
 ### Task 6: Собрать новый `compose.offline.yaml`

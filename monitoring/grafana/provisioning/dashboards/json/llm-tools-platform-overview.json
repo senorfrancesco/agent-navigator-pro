@@ -1,7 +1,7 @@
 {
   "id": null,
-  "uid": "agent-navigator-overview",
-  "title": "Agent Navigator Overview",
+  "uid": "llm-tools-platform-overview",
+  "title": "llm-tools-platform Overview",
   "schemaVersion": 39,
   "version": 1,
   "refresh": "15s",
@@ -12,7 +12,7 @@
       "type": "timeseries",
       "targets": [
         {
-          "expr": "sum by (service, path) (rate(agent_nav_http_requests_total[5m]))",
+          "expr": "sum by (service, path) (rate(llm_tools_platform_http_requests_total[5m]))",
           "legendFormat": "{{service}} {{path}}"
         }
       ],
@@ -24,7 +24,7 @@
       "type": "timeseries",
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le, service, path) (rate(agent_nav_http_request_duration_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, service, path) (rate(llm_tools_platform_http_request_duration_seconds_bucket[5m])))",
           "legendFormat": "{{service}} {{path}}"
         }
       ],
@@ -36,7 +36,7 @@
       "type": "stat",
       "targets": [
         {
-          "expr": "agent_nav_ums_running_models{service=\"ums\"}",
+          "expr": "llm_tools_platform_ums_running_models{service=\"ums\"}",
           "legendFormat": "running"
         }
       ],
@@ -48,7 +48,7 @@
       "type": "stat",
       "targets": [
         {
-          "expr": "agent_nav_ums_active_heavy_model{service=\"ums\"}",
+          "expr": "llm_tools_platform_ums_active_heavy_model{service=\"ums\"}",
           "legendFormat": "active"
         }
       ],
@@ -60,7 +60,7 @@
       "type": "timeseries",
       "targets": [
         {
-          "expr": "sum by (kind, mode) (rate(agent_nav_ums_concurrency_saturation_total[5m]))",
+          "expr": "sum by (kind, mode) (rate(llm_tools_platform_ums_concurrency_saturation_total[5m]))",
           "legendFormat": "{{kind}} {{mode}}"
         }
       ],

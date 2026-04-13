@@ -274,7 +274,7 @@ def test_config_service_exposes_intuitive_container_model_path_descriptions(tmp_
     _write(
         tmp_path / "deploy" / "offline_bundle" / "env.bundle",
         "MODEL_SOURCE_MODE=external_host_mounts\n"
-        "MODEL_PATH_LLM=/opt/agent-nav/external/llm/model.gguf\n"
+        "MODEL_PATH_LLM=/opt/llm-tools-platform/external/llm/model.gguf\n"
         "HOST_MODEL_PATH_LLM=/mnt/models/qwen14b.gguf\n",
     )
     _write(tmp_path / "deploy" / "offline_bundle" / "compose.offline.yaml", "services: {}\n")

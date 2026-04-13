@@ -159,7 +159,7 @@ def test_llm_intent_classifier_rejects_unknown_intent():
 
     assert classifier.classify("какой-то запрос") is None
     metrics = render_metrics_text()
-    assert "agent_nav_fallback_events_total" in metrics
+    assert "llm_tools_platform_fallback_events_total" in metrics
     assert 'component="intent_classifier"' in metrics
     assert 'fallback="llm_unsupported_intent"' in metrics
 
@@ -171,7 +171,7 @@ def test_llm_intent_classifier_non_json_records_metric():
 
     assert classifier.classify("какой-то запрос") is None
     metrics = render_metrics_text()
-    assert "agent_nav_fallback_events_total" in metrics
+    assert "llm_tools_platform_fallback_events_total" in metrics
     assert 'component="intent_classifier"' in metrics
     assert 'fallback="llm_non_json"' in metrics
 
@@ -233,7 +233,7 @@ def test_select_classifier_result_hybrid_can_end_unsure():
     assert result["abstained"] is True
     assert result["source"] == "hybrid_unsure"
     metrics = render_metrics_text()
-    assert "agent_nav_fallback_events_total" in metrics
+    assert "llm_tools_platform_fallback_events_total" in metrics
     assert 'fallback="hybrid_low_confidence_unsure"' in metrics
 
 
@@ -252,5 +252,5 @@ def test_select_classifier_result_llm_fallback_still_respects_embedder_abstain()
     assert result["abstain_reason"] == "llm_fallback_embedder_low_confidence"
     assert result["source"] == "embedder_abstain"
     metrics = render_metrics_text()
-    assert "agent_nav_fallback_events_total" in metrics
+    assert "llm_tools_platform_fallback_events_total" in metrics
     assert 'fallback="llm_missing_embedder_fallback"' in metrics

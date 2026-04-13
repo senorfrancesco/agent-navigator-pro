@@ -1,6 +1,6 @@
 """
 title: Example Workspace Tool
-author: Agent Navigator
+author: llm-tools-platform
 version: 1.0.0
 requirements:
 """

@@ -2,7 +2,7 @@
 
 Status: execution-ready after current `P0` backend fixes.
 
-> **2026-04-09 update:** этот plan остаётся execution plan для `M3.5`, но дальнейшая эволюция bootstrap/config теперь должна подчиняться [Open WebUI Responsibility Split Plan](/home/fisher/agent-navigator/docs/plans/migration/2026-04-09-openwebui-responsibility-split-plan.md): `raw model + explicit tools` как canonical contour, `agent-navigator` только как explicit agent mode, а runtime config tools/actions — по возможности в `Open WebUI`-native surfaces, а не в ручной `.env`-patching workflow.
+> **2026-04-09 update:** этот plan остаётся execution plan для `M3.5`, но дальнейшая эволюция bootstrap/config теперь должна подчиняться [Open WebUI Responsibility Split Plan](/home/fisher/llm-tools-platform/docs/plans/migration/2026-04-09-openwebui-responsibility-split-plan.md): `raw model + explicit tools` как canonical contour, `llm-tools-platform` только как explicit agent mode, а runtime config tools/actions — по возможности в `Open WebUI`-native surfaces, а не в ручной `.env`-patching workflow.
 
 ## Summary
 
@@ -110,7 +110,7 @@ Bootstrap не должен навсегда оставлять imported tools/f
 
 Оставляем один backend source:
 
-- `Agent Navigator OpenAPI Tool Server`
+- `llm-tools-platform OpenAPI Tool Server`
 
 Он нужен как transport layer и source-of-truth для endpoint contracts.
 
@@ -212,7 +212,7 @@ Compare wrappers должны проверять наличие минимум �
 
 Named tools и action functions должны привязываться только к `raw.*` моделям.
 
-`agent-navigator` wrapper path не должен быть primary execution model для этих flows.
+`llm-tools-platform` wrapper path не должен быть primary execution model для этих flows.
 
 Если модель выбирает tool сама, это допустимо только внутри native tool-calling contour `Open WebUI`, когда tools уже явно переданы в chat runtime.
 

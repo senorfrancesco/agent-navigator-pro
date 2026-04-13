@@ -338,10 +338,12 @@ def _detect_tz_columns(header_rows: List[List]) -> Dict[str, int]:
 _GARBAGE_SPEC_VALUES = {'nan', 'none', '-', '.', '..', 'да', 'есть', 'соответствие', 'соответствует'}
 
 
-def _format_specs_fallback(raw_specs: List[Dict]) -> str:
+def _format_specs_fallback(raw_specs: List[Any]) -> str:
     """Форматирует сырые specs без LLM, фильтруя мусорные значения."""
     parts = []
     for s in raw_specs:
+        if not isinstance(s, dict):
+            continue
         param = str(s.get('p', '')).strip()
         value = str(s.get('v', '')).strip()
         unit = str(s.get('u', '')).strip()
@@ -356,8 +358,10 @@ def _format_specs_fallback(raw_specs: List[Dict]) -> str:
     return ", ".join(parts[:15]) if parts else ""
 
 
-def _normalize_spec_for_polish(spec: Dict[str, Any]) -> Optional[str]:
+def _normalize_spec_for_polish(spec: Any) -> Optional[str]:
     """Нормализует одну spec-запись для LLM-polisher, убирая только явный мусор."""
+    if not isinstance(spec, dict):
+        return None
     param = re.sub(r"\s+", " ", str(spec.get("p", "") or "")).strip()
     value = re.sub(r"\s+", " ", str(spec.get("v", "") or "")).strip()
     unit = re.sub(r"\s+", " ", str(spec.get("u", "") or "")).strip()
@@ -515,14 +519,14 @@ async def _polish_items_specs_llm(
                 print("  [DEBUG-POLISH] Failed to parse XML polish response.")
                 logger.warning("DEBUG-POLISH returned invalid structured output; applying fallback", extra={"stage": "polisher"})
                 inc_metric_counter(
-                    "agent_nav_equipment_fallback_total",
+                    "llm_tools_platform_equipment_fallback_total",
                     labels={"stage": "polisher", "reason": "parse_failed"},
                 )
         except Exception as e:
             print(f"  [LLM Polisher] Error batch {batch_idx}: {e}")
             logger.warning("DEBUG-POLISH failed; applying fallback: %s", e, exc_info=True)
             inc_metric_counter(
-                "agent_nav_equipment_fallback_total",
+                "llm_tools_platform_equipment_fallback_total",
                 labels={"stage": "polisher", "reason": "llm_error"},
             )
             
@@ -583,6 +587,32 @@ def _parse_polish_results_json(content: str, expected_ids: List[int]) -> Optiona
         return None
 
     return results
+
+
+def _normalize_evaluate_results_payload(parsed: Any) -> List[Dict[str, Any]]:
+    """Нормализует LLM-ответ evaluate в плоский список объектов verdict."""
+    if isinstance(parsed, dict):
+        nested_results = parsed.get("results")
+        if isinstance(nested_results, list):
+            parsed = nested_results
+        else:
+            return [parsed]
+
+    if not isinstance(parsed, list):
+        return []
+
+    normalized: List[Dict[str, Any]] = []
+
+    def _collect(value: Any) -> None:
+        if isinstance(value, dict):
+            normalized.append(value)
+            return
+        if isinstance(value, list):
+            for item in value:
+                _collect(item)
+
+    _collect(parsed)
+    return normalized
 
 
 def _parse_tz_table_rows(
@@ -836,7 +866,7 @@ async def _chunk_text(text: str) -> List[str]:
         print(f"[Chunk] /smart_chunk failed, fallback: {e}")
         logger.warning("/smart_chunk failed, using line-based fallback: %s", e, exc_info=True)
         inc_metric_counter(
-            "agent_nav_equipment_fallback_total",
+            "llm_tools_platform_equipment_fallback_total",
             labels={"stage": "chunking", "reason": "smart_chunk_failed"},
         )
 
@@ -1353,12 +1383,10 @@ SAME — без изменений, PRICE_CHANGE — изменилась цен
                 if isinstance(r, dict) and "choices" in r:
                     content = r["choices"][0].get("text", "")
 
-            parsed = parse_json_garbage(content)
-            if not isinstance(parsed, list):
-                parsed = [parsed] if isinstance(parsed, dict) else []
+            parsed = _normalize_evaluate_results_payload(parse_json_garbage(content))
 
             for idx, m in enumerate(batch):
-                item_data = parsed[idx] if idx < len(parsed) else {}
+                item_data = parsed[idx] if idx < len(parsed) and isinstance(parsed[idx], dict) else {}
                 results.append({
                     "item_1": m.get("item_1"),
                     "item_2": m.get("item_2"),
@@ -1372,7 +1400,7 @@ SAME — без изменений, PRICE_CHANGE — изменилась цен
             print(f"[Equipment] Error in batch {batch_idx + 1}: {e}")
             logger.warning("Equipment LLM batch failed: %s", e, exc_info=True)
             inc_metric_counter(
-                "agent_nav_equipment_fallback_total",
+                "llm_tools_platform_equipment_fallback_total",
                 labels={"stage": "evaluate", "reason": "llm_batch_error"},
             )
             for m in batch:

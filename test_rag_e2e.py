@@ -210,7 +210,7 @@ def separator(char="-", width=70):
 def main():
     print()
     separator("=")
-    print("  RAG End-to-End Test — Agent Navigator Pro")
+    print("  RAG End-to-End Test — llm-tools-platform")
     separator("=")
 
     # 1. Embed function

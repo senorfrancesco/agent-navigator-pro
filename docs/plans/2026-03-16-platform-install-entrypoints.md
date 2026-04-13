@@ -216,9 +216,9 @@ Expected: docs consistent with scripts.
 
 Run:
 - `./scripts/launcher.sh --install --platform ubuntu --report-only` is invalid by design; install path should ignore report-only and go to bootstrap install dispatcher
-- `AGENT_NAVIGATOR_TEST_MODE=1 ./scripts/launcher.sh --install --platform ubuntu`
-- `AGENT_NAVIGATOR_TEST_MODE=1 ./scripts/launcher.sh --install --platform ubuntu-server`
-- `AGENT_NAVIGATOR_TEST_MODE=1 ./scripts/launcher.sh --install --platform wsl`
+- `LLM_TOOLS_PLATFORM_TEST_MODE=1 ./scripts/launcher.sh --install --platform ubuntu`
+- `LLM_TOOLS_PLATFORM_TEST_MODE=1 ./scripts/launcher.sh --install --platform ubuntu-server`
+- `LLM_TOOLS_PLATFORM_TEST_MODE=1 ./scripts/launcher.sh --install --platform wsl`
 
 Expected: dispatcher path resolves without runtime launch.
 

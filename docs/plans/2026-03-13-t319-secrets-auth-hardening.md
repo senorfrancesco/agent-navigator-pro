@@ -13,7 +13,7 @@
 ## Implemented
 
 - `scripts/bootstrap_env.sh` теперь читает `backend/.env` и валидирует critical secrets.
-- known insecure defaults блокируются fail-fast, если не задан `AGENT_NAVIGATOR_ALLOW_INSECURE_DEFAULTS=1`.
+- known insecure defaults блокируются fail-fast, если не задан `LLM_TOOLS_PLATFORM_ALLOW_INSECURE_DEFAULTS=1`.
 - `scripts/run_all.sh` больше не показывает пароль в stdout.
 - `backend/tests/test_runtime_launcher.py` покрывает bootstrap security guard и отсутствие password hint в launcher output.
 - `backend/.env.example`, `README.md`, `docs/deploy-guide.md`, `TASKS.md` синхронизированы под required secret rotation.

@@ -96,7 +96,7 @@ if not stream_mode:
         data=data, messages=messages, user_query=user_query, attachments=found_files,
     )
     effective_settings = resolve_effective_settings(_collect_request_control_plane(compat_request))
-    if target_model != "agent-navigator":
+    if target_model != "llm-tools-platform":
         effective_settings["resolved_model_id"] = target_model
     payload = compat_request.model_dump(exclude_none=True)
     payload["runtime_mode"] = resolve_request_runtime_mode(payload, effective_settings)
@@ -126,7 +126,7 @@ def test_openai_completions_non_streaming_returns_json(client, monkeypatch):
         return {"assistant_message": "non-stream answer"}
     monkeypatch.setattr("orchestrator.agent_api.execute_orchestration", fake_execute)
     resp = client.post("/v1/chat/completions", json={
-        "model": "agent-navigator",
+        "model": "llm-tools-platform",
         "messages": [{"role": "user", "content": "Привет"}],
         "stream": False,
     })

@@ -356,7 +356,7 @@ is_critical, diff, impact.<|im_end|>
             len(parsed_list),
         )
         inc_metric_counter(
-            "agent_nav_fallback_events_total",
+            "llm_tools_platform_fallback_events_total",
             labels={"component": "compare_workflow", "fallback": "analyze_parse_partial", "source": "workflow"},
         )
         if allow_item_retry and len(batch) > 1:
@@ -565,7 +565,7 @@ async def load_documents_node(state: CompareState):
     except Exception as e:
         logger.warning("Compare load_documents fallback: %s", e, exc_info=True)
         inc_metric_counter(
-            "agent_nav_fallback_events_total",
+            "llm_tools_platform_fallback_events_total",
             labels={"component": "compare_workflow", "fallback": "load_documents_failed", "source": "workflow"},
         )
         return {"errors": [f"Error loading docs: {str(e)}"]}
@@ -610,7 +610,7 @@ async def match_chunks_node(state: CompareState):
         print(f"Error in match_batches workflow: {e}")
         logger.warning("Compare match_batches fallback: %s", e, exc_info=True)
         inc_metric_counter(
-            "agent_nav_fallback_events_total",
+            "llm_tools_platform_fallback_events_total",
             labels={"component": "compare_workflow", "fallback": "match_batches_failed", "source": "workflow"},
         )
         return {"errors": [f"Error in batch matching: {str(e)}"]}
@@ -671,7 +671,7 @@ async def analyze_differences_node(state: CompareState):
         except Exception as e:
             logger.warning("Compare semantic fallback failed: %s", e, exc_info=True)
             inc_metric_counter(
-                "agent_nav_fallback_events_total",
+                "llm_tools_platform_fallback_events_total",
                 labels={"component": "compare_workflow", "fallback": "semantic_compare_error", "source": "workflow"},
             )
 
@@ -699,7 +699,7 @@ async def analyze_differences_node(state: CompareState):
             print(f"[Workflow] Error in batch {batch_idx+1}: {e}")
             logger.warning("Compare analyze fallback in batch %s: %s", batch_idx + 1, e, exc_info=True)
             inc_metric_counter(
-                "agent_nav_fallback_events_total",
+                "llm_tools_platform_fallback_events_total",
                 labels={"component": "compare_workflow", "fallback": "analyze_batch_error", "source": "workflow"},
             )
             for m in batch:
