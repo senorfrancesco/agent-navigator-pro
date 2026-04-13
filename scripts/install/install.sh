@@ -14,7 +14,7 @@ print_help() {
   cat <<EOF
 install.sh
 
-Единая точка входа в guided installer Agent Navigator Pro.
+Единая точка входа в guided installer llm-tools-platform.
 
 Использование:
   ./scripts/install/install.sh --target=native --platform=auto
@@ -75,7 +75,7 @@ if [[ "$PLATFORM" == "auto" ]]; then
   PLATFORM="$(bash "$DETECT_SCRIPT" --print-platform)"
 fi
 
-if [ "${AGENT_NAVIGATOR_TEST_MODE:-0}" = "1" ]; then
+if [ "${LLM_TOOLS_PLATFORM_TEST_MODE:-0}" = "1" ]; then
   WRAPPER_PATH="$(wrapper_for_platform "$PLATFORM" 2>/dev/null || true)"
   COORDINATOR="$(basename "${WRAPPER_PATH:-unsupported}")"
   echo "install:test-mode target=$TARGET platform=$PLATFORM dry_run=$DRY_RUN coordinator=$COORDINATOR"

@@ -33,7 +33,7 @@ def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
         ("run_monitoring.sh", "Prometheus"),
         ("restart_all.sh", "Перезапускает"),
         ("run_vllm_service.sh", "Переменные окружения"),
-        ("setup_ubuntu.sh", "AGENT_NAVIGATOR_ASSUME_YES"),
+        ("setup_ubuntu.sh", "LLM_TOOLS_PLATFORM_ASSUME_YES"),
         ("start_system_test.sh", "Проверочный"),
         ("stop_all.sh", "Останавливает"),
         ("stop_native.sh", "Останавливает"),
@@ -56,7 +56,7 @@ def test_shell_scripts_expose_russian_help(script_name: str, expected: str):
         ("run_monitoring.sh", "Prometheus"),
         ("restart_all.sh", "Перезапускает"),
         ("run_vllm_service.sh", "Переменные окружения"),
-        ("setup_ubuntu.sh", "AGENT_NAVIGATOR_ASSUME_YES"),
+        ("setup_ubuntu.sh", "LLM_TOOLS_PLATFORM_ASSUME_YES"),
         ("start_system_test.sh", "Проверочный"),
         ("stop_all.sh", "Останавливает"),
         ("stop_native.sh", "Останавливает"),
@@ -105,5 +105,5 @@ def test_run_native_reexecs_with_bash_when_started_via_sh():
 def test_readme_openwebui_eval_contour_uses_direct_compose_command():
     readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
 
-    assert "docker compose --profile legacy up -d open-webui" in readme
+    assert "docker compose up -d open-webui" in readme
     assert "./scripts/run_openwebui.sh" not in readme

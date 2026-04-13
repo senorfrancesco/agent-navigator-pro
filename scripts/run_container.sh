@@ -12,6 +12,8 @@ run_container.sh
 Скрипт не содержит собственной orchestration-логики и сразу делегирует в:
   ./scripts/launcher.sh --target container
 
+Целевой контейнерный контур теперь поднимает `Open WebUI` как основной UI.
+
 Использование:
   ./scripts/run_container.sh
   ./scripts/run_container.sh --no-attach

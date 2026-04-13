@@ -5,8 +5,8 @@ resolve_env_loader_python() {
     printf '%s\n' "${ENV_LOADER_PYTHON}"
     return 0
   fi
-  if [ -n "${AGENT_NAVIGATOR_ENV_LOADER_PYTHON:-}" ] && command -v "${AGENT_NAVIGATOR_ENV_LOADER_PYTHON}" >/dev/null 2>&1; then
-    printf '%s\n' "${AGENT_NAVIGATOR_ENV_LOADER_PYTHON}"
+  if [ -n "${LLM_TOOLS_PLATFORM_ENV_LOADER_PYTHON:-}" ] && command -v "${LLM_TOOLS_PLATFORM_ENV_LOADER_PYTHON}" >/dev/null 2>&1; then
+    printf '%s\n' "${LLM_TOOLS_PLATFORM_ENV_LOADER_PYTHON}"
     return 0
   fi
   if command -v python3 >/dev/null 2>&1; then

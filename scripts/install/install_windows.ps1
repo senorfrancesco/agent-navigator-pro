@@ -31,7 +31,7 @@ if ($Help) {
     exit 0
 }
 
-Write-Host "Agent Navigator Pro - Windows bootstrap"
+Write-Host "llm-tools-platform - Windows bootstrap"
 Write-Host "Recommended path: Windows host + WSL2 Ubuntu + Docker Desktop"
 Write-Host "See: $DocsPath"
 Write-Host ""

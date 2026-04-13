@@ -23,7 +23,7 @@ EOF
   exit 0
 fi
 
-if [ "${AGENT_NAVIGATOR_TEST_MODE:-0}" = "1" ]; then
+if [ "${LLM_TOOLS_PLATFORM_TEST_MODE:-0}" = "1" ]; then
   echo "install-ubuntu:test-mode setup=$SETUP_SCRIPT"
   exit 0
 fi
@@ -33,5 +33,5 @@ if [ ! -x "$SETUP_SCRIPT" ]; then
   exit 1
 fi
 
-export AGENT_NAVIGATOR_INSTALL_PROFILE="ubuntu"
+export LLM_TOOLS_PLATFORM_INSTALL_PROFILE="ubuntu"
 exec "$SETUP_SCRIPT"

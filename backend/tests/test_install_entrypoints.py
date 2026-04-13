@@ -26,7 +26,7 @@ def test_launcher_install_passes_platform_to_bootstrap():
         SCRIPTS_DIR / "launcher.sh",
         "--install",
         "--platform=ubuntu-server",
-        env={"AGENT_NAVIGATOR_TEST_MODE": "1"},
+        env={"LLM_TOOLS_PLATFORM_TEST_MODE": "1"},
     )
 
     assert result.returncode == 0
@@ -41,7 +41,7 @@ def test_bootstrap_install_test_mode_includes_platform():
         "--install",
         "--target=native",
         "--platform=wsl",
-        env={"AGENT_NAVIGATOR_TEST_MODE": "1"},
+        env={"LLM_TOOLS_PLATFORM_TEST_MODE": "1"},
     )
 
     assert result.returncode == 0
@@ -55,7 +55,7 @@ def test_install_coordinator_resolves_wrapper_in_test_mode():
         SCRIPTS_DIR / "install" / "install.sh",
         "--target=native",
         "--platform=ubuntu",
-        env={"AGENT_NAVIGATOR_TEST_MODE": "1"},
+        env={"LLM_TOOLS_PLATFORM_TEST_MODE": "1"},
     )
 
     assert result.returncode == 0

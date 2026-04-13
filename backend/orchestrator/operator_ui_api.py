@@ -4,6 +4,7 @@ import ipaddress
 import os
 import shutil
 import subprocess
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -18,7 +19,12 @@ try:
     from orchestrator.operator_deploy_service import OperatorDeployService
     from orchestrator.operator_observability_service import OperatorObservabilityService
     from orchestrator.operator_runtime_service import OperatorRuntimeService, env_value, file_freshness, parse_env_file
-    from orchestrator.tool_bindings import build_openwebui_binding_export, list_tool_bindings, summarize_tool_binding_catalog
+    from orchestrator.tool_bindings import (
+        OPENWEBUI_QDRANT_COLLECTION_PREFIX,
+        build_openwebui_binding_export,
+        list_tool_bindings,
+        summarize_tool_binding_catalog,
+    )
     from orchestrator.telemetry_runtime import get_timing_summary
 except ModuleNotFoundError:  # pragma: no cover - direct module import fallback
     from backend.orchestrator.operator_ui_actions import cancel_action_job, get_action, get_job, list_actions, start_action_job
@@ -26,7 +32,12 @@ except ModuleNotFoundError:  # pragma: no cover - direct module import fallback
     from backend.orchestrator.operator_deploy_service import OperatorDeployService
     from backend.orchestrator.operator_observability_service import OperatorObservabilityService
     from backend.orchestrator.operator_runtime_service import OperatorRuntimeService, env_value, file_freshness, parse_env_file
-    from backend.orchestrator.tool_bindings import build_openwebui_binding_export, list_tool_bindings, summarize_tool_binding_catalog
+    from backend.orchestrator.tool_bindings import (
+        OPENWEBUI_QDRANT_COLLECTION_PREFIX,
+        build_openwebui_binding_export,
+        list_tool_bindings,
+        summarize_tool_binding_catalog,
+    )
     from backend.orchestrator.telemetry_runtime import get_timing_summary
 
 
@@ -367,6 +378,146 @@ def _bundle_runtime_port_conflict(request_port: int | None) -> Dict[str, str] | 
     return None
 
 
+def _load_qdrant_client_class() -> Any:
+    try:
+        from qdrant_client import QdrantClient
+    except ImportError:
+        return None
+    return QdrantClient
+
+
+def _list_qdrant_collection_names(client: Any) -> List[str]:
+    response = client.get_collections()
+    collections = []
+    for item in getattr(response, "collections", []) or []:
+        name = getattr(item, "name", None)
+        if name is None and isinstance(item, dict):
+            name = item.get("name")
+        if name:
+            collections.append(str(name))
+    collections.sort()
+    return collections
+
+
+def _scroll_qdrant_payloads(client: Any, *, collection_name: str, limit: int = 256) -> List[Dict[str, Any]]:
+    payloads: List[Dict[str, Any]] = []
+    offset: Any = None
+    while True:
+        points, offset = client.scroll(
+            collection_name=collection_name,
+            limit=limit,
+            offset=offset,
+            with_payload=True,
+            with_vectors=False,
+        )
+        for point in points or []:
+            payloads.append(dict(getattr(point, "payload", {}) or {}))
+        if offset is None:
+            break
+    return payloads
+
+
+def _build_qdrant_summary(backend_env: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    env_payload = backend_env or parse_env_file(BACKEND_ROOT / ".env")
+    backend_mode = str(os.getenv("KB_BACKEND") or env_value(env_payload, "KB_BACKEND", default="sqlite")).strip().lower()
+    qdrant_url = str(os.getenv("QDRANT_URL") or env_value(env_payload, "QDRANT_URL", default="http://127.0.0.1:6333")).strip()
+    backend_collection_name = str(
+        os.getenv("QDRANT_COLLECTION_NAME") or env_value(env_payload, "QDRANT_COLLECTION_NAME", default="rag_chunks_v1")
+    ).strip()
+    namespace_prefix = OPENWEBUI_QDRANT_COLLECTION_PREFIX
+    now_ts = time.time()
+
+    summary: Dict[str, Any] = {
+        "backend": {
+            "mode": backend_mode,
+            "qdrantUrl": qdrant_url,
+            "collectionName": backend_collection_name,
+            "collectionPresent": False,
+        },
+        "openWebUI": {
+            "collectionPrefix": namespace_prefix,
+            "collections": [],
+        },
+        "server": {
+            "reachable": False,
+            "collections": [],
+            "error": None,
+        },
+        "namespaces": {
+            "separationOk": False,
+            "issues": [],
+        },
+        "payloads": {
+            "knowledgeCount": 0,
+            "sessionCount": 0,
+            "unknownCount": 0,
+            "activeSessionCount": 0,
+            "expiredSessionCount": 0,
+            "sessionMetadataOk": True,
+        },
+    }
+
+    client_class = _load_qdrant_client_class()
+    if client_class is None:
+        summary["server"]["error"] = "qdrant-client-not-installed"
+        summary["namespaces"]["issues"].append("qdrant client is unavailable for operator diagnostics")
+        return summary
+
+    client = None
+    try:
+        client = client_class(url=qdrant_url)
+        collection_names = _list_qdrant_collection_names(client)
+        summary["server"]["reachable"] = True
+        summary["server"]["collections"] = collection_names
+        summary["backend"]["collectionPresent"] = backend_collection_name in collection_names
+        summary["openWebUI"]["collections"] = [
+            name for name in collection_names if name.startswith(namespace_prefix) and name != backend_collection_name
+        ]
+
+        if summary["backend"]["collectionPresent"]:
+            payloads = _scroll_qdrant_payloads(client, collection_name=backend_collection_name)
+            for payload in payloads:
+                source_scope = str(payload.get("source_scope") or "").strip().lower()
+                if source_scope in {"knowledge", "knowledge_base"}:
+                    summary["payloads"]["knowledgeCount"] += 1
+                    continue
+                if source_scope == "session":
+                    summary["payloads"]["sessionCount"] += 1
+                    has_thread = str(payload.get("thread_id") or "").strip() != ""
+                    expires_at = payload.get("expires_at")
+                    has_expiry = expires_at is not None
+                    if not has_thread or not has_expiry:
+                        summary["payloads"]["sessionMetadataOk"] = False
+                    try:
+                        if expires_at is None or float(expires_at) < now_ts:
+                            summary["payloads"]["expiredSessionCount"] += 1
+                        else:
+                            summary["payloads"]["activeSessionCount"] += 1
+                    except (TypeError, ValueError):
+                        summary["payloads"]["sessionMetadataOk"] = False
+                        summary["payloads"]["expiredSessionCount"] += 1
+                    continue
+                summary["payloads"]["unknownCount"] += 1
+    except Exception as exc:  # pragma: no cover - exercised through fake client in tests
+        summary["server"]["error"] = str(exc)
+        summary["namespaces"]["issues"].append("qdrant server is unreachable or returned an invalid response")
+        return summary
+    finally:
+        close_client = getattr(client, "close", None)
+        if callable(close_client):
+            close_client()
+
+    if backend_collection_name.startswith(namespace_prefix):
+        summary["namespaces"]["issues"].append("backend collection name overlaps native Knowledge prefix")
+    if backend_collection_name in summary["openWebUI"]["collections"]:
+        summary["namespaces"]["issues"].append("backend collection name is listed inside native Knowledge namespaces")
+    if summary["payloads"]["sessionCount"] and not summary["payloads"]["sessionMetadataOk"]:
+        summary["namespaces"]["issues"].append("session payloads are missing required thread_id/expires_at metadata")
+
+    summary["namespaces"]["separationOk"] = not summary["namespaces"]["issues"]
+    return summary
+
+
 def build_operator_state(request_port: int | None = None) -> Dict[str, Any]:
     runtime_service = OperatorRuntimeService(REPO_ROOT)
     config_service = OperatorConfigService(REPO_ROOT)
@@ -381,6 +532,7 @@ def build_operator_state(request_port: int | None = None) -> Dict[str, Any]:
     backend_env = envs["backend_env"]
     bundle_env = envs["bundle_env"]
     offline_running_services = _offline_bundle_running_services(DEPLOY_ROOT)
+    qdrant_summary = _build_qdrant_summary(backend_env)
 
     warnings = []
     if not docker_binary:
@@ -638,6 +790,7 @@ def build_operator_state(request_port: int | None = None) -> Dict[str, Any]:
         "metricsSummary": metrics_summary,
         "timingSummary": timing_summary,
         "grafanaLinks": grafana_links,
+        "qdrantSummary": qdrant_summary,
     }
 
 
@@ -839,6 +992,11 @@ def operator_metrics_deploy(request: Request) -> Dict[str, Any]:
 @router.get("/links/grafana")
 def operator_grafana_links(request: Request) -> Dict[str, Any]:
     return build_operator_state(getattr(request.url, "port", None))["grafanaLinks"]
+
+
+@router.get("/rag/qdrant/summary")
+def operator_qdrant_summary() -> Dict[str, Any]:
+    return _build_qdrant_summary()
 
 
 @router.get("/config/{path_key}")

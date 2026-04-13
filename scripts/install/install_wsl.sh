@@ -30,7 +30,7 @@ EOF
   exit 0
 fi
 
-if [ "${AGENT_NAVIGATOR_TEST_MODE:-0}" = "1" ]; then
+if [ "${LLM_TOOLS_PLATFORM_TEST_MODE:-0}" = "1" ]; then
   echo "install-wsl:test-mode next=$SCRIPT_DIR/install_ubuntu.sh"
   exit 0
 fi
@@ -52,5 +52,5 @@ If docker is not available inside WSL, the installer will not silently continue.
 It will print guidance and ask whether to skip the Docker step or stop.
 See: $DOC_PATH
 EOF
-export AGENT_NAVIGATOR_INSTALL_PROFILE="wsl"
+export LLM_TOOLS_PLATFORM_INSTALL_PROFILE="wsl"
 exec bash "$SCRIPT_DIR/install_ubuntu.sh"

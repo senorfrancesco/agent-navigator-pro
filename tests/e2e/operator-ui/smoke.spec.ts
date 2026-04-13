@@ -20,30 +20,30 @@ test.describe('Operator UI smoke', () => {
 
     await page.goto(operatorUrl!, { waitUntil: 'domcontentloaded' });
 
-    await expect(page.locator('[data-agent-nav-hook="operator-topbar-start"]')).toBeVisible();
-    await expect(page.locator('[data-agent-nav-hook="operator-topbar-runtime-badge"]')).toBeVisible();
-    await expect(page.locator('[data-agent-nav-hook="operator-section-overview"]')).toBeVisible();
-    await expect(page.locator('[data-agent-nav-hook="operator-overview-metrics"]')).toBeVisible();
+    await expect(page.locator('[data-llm-tools-platform-hook="operator-topbar-start"]')).toBeVisible();
+    await expect(page.locator('[data-llm-tools-platform-hook="operator-topbar-runtime-badge"]')).toBeVisible();
+    await expect(page.locator('[data-llm-tools-platform-hook="operator-section-overview"]')).toBeVisible();
+    await expect(page.locator('[data-llm-tools-platform-hook="operator-overview-metrics"]')).toBeVisible();
 
-    await page.locator('[data-agent-nav-hook="operator-nav-services"]').click();
-    await expect(page.locator('[data-agent-nav-hook="operator-section-services"]')).toBeVisible();
-    await expect(page.locator('[data-agent-nav-hook="operator-services-strip"]')).toBeVisible();
-    await expect(page.locator('[data-agent-nav-hook="operator-services-grid"]')).toBeVisible();
-    await expect(page.locator('[data-agent-nav-hook="operator-services-metrics"]')).toBeVisible();
-    await expect(page.locator('[data-agent-nav-hook="operator-services-links"]')).toBeVisible();
-    await expect(page.locator('[data-agent-nav-hook="operator-services-logs"]')).toBeVisible();
+    await page.locator('[data-llm-tools-platform-hook="operator-nav-services"]').click();
+    await expect(page.locator('[data-llm-tools-platform-hook="operator-section-services"]')).toBeVisible();
+    await expect(page.locator('[data-llm-tools-platform-hook="operator-services-strip"]')).toBeVisible();
+    await expect(page.locator('[data-llm-tools-platform-hook="operator-services-grid"]')).toBeVisible();
+    await expect(page.locator('[data-llm-tools-platform-hook="operator-services-metrics"]')).toBeVisible();
+    await expect(page.locator('[data-llm-tools-platform-hook="operator-services-links"]')).toBeVisible();
+    await expect(page.locator('[data-llm-tools-platform-hook="operator-services-logs"]')).toBeVisible();
 
-    await page.locator('[data-agent-nav-hook="operator-nav-deploy"]').click();
-    await expect(page.locator('[data-agent-nav-hook="operator-section-deploy"]')).toBeVisible();
-    await expect(page.locator('[data-agent-nav-hook="operator-deploy-strip"]')).toBeVisible();
-    await expect(page.locator('[data-agent-nav-hook="operator-deploy-summary"]')).toBeVisible();
-    await expect(page.locator('[data-agent-nav-hook="operator-deploy-metrics"]')).toBeVisible();
-    await expect(page.locator('[data-agent-nav-hook="operator-deploy-links"]')).toBeVisible();
-    await expect(page.locator('[data-agent-nav-hook="operator-deploy-stepper"]')).toBeVisible();
-    await expect(page.locator('[data-agent-nav-hook="operator-deploy-logs"]')).toBeVisible();
+    await page.locator('[data-llm-tools-platform-hook="operator-nav-deploy"]').click();
+    await expect(page.locator('[data-llm-tools-platform-hook="operator-section-deploy"]')).toBeVisible();
+    await expect(page.locator('[data-llm-tools-platform-hook="operator-deploy-strip"]')).toBeVisible();
+    await expect(page.locator('[data-llm-tools-platform-hook="operator-deploy-summary"]')).toBeVisible();
+    await expect(page.locator('[data-llm-tools-platform-hook="operator-deploy-metrics"]')).toBeVisible();
+    await expect(page.locator('[data-llm-tools-platform-hook="operator-deploy-links"]')).toBeVisible();
+    await expect(page.locator('[data-llm-tools-platform-hook="operator-deploy-stepper"]')).toBeVisible();
+    await expect(page.locator('[data-llm-tools-platform-hook="operator-deploy-logs"]')).toBeVisible();
 
-    await page.locator('[data-agent-nav-hook="operator-nav-config"]').click();
-    await expect(page.locator('[data-agent-nav-hook="operator-section-config"]')).toBeVisible();
+    await page.locator('[data-llm-tools-platform-hook="operator-nav-config"]').click();
+    await expect(page.locator('[data-llm-tools-platform-hook="operator-section-config"]')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Применить изменения' })).toBeVisible();
 
     await page.getByRole('button', { name: 'Реестр моделей и пути' }).click();
@@ -53,12 +53,12 @@ test.describe('Operator UI smoke', () => {
     await page.getByRole('button', { name: 'Артефакты и пути' }).click();
     await expect(page.getByRole('button', { name: /Выбрать (файл|папку)/ }).first()).toBeVisible();
 
-    await expect(page.locator('[data-agent-nav-hook="operator-help-open"]')).toBeVisible();
-    await page.locator('[data-agent-nav-hook="operator-help-open"]').click();
-    await expect(page.locator('[data-agent-nav-hook="operator-help-drawer"]')).toBeVisible();
-    await page.locator('[data-agent-nav-hook="operator-help-close"]').click();
+    await expect(page.locator('[data-llm-tools-platform-hook="operator-help-open"]')).toBeVisible();
+    await page.locator('[data-llm-tools-platform-hook="operator-help-open"]').click();
+    await expect(page.locator('[data-llm-tools-platform-hook="operator-help-drawer"]')).toBeVisible();
+    await page.locator('[data-llm-tools-platform-hook="operator-help-close"]').click();
 
-    await page.locator('[data-agent-nav-hook="operator-nav-launch"]').click();
-    await expect(page.locator('[data-agent-nav-hook="operator-launch-runtime-state"]').first()).toBeVisible();
+    await page.locator('[data-llm-tools-platform-hook="operator-nav-launch"]').click();
+    await expect(page.locator('[data-llm-tools-platform-hook="operator-launch-runtime-state"]').first()).toBeVisible();
   });
 });

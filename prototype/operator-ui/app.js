@@ -190,9 +190,9 @@ let configState = {
       {
         title: "Точки монтирования артефактов",
         fields: [
-          { key: "BUNDLE_MODEL_ROOT", label: "Корень моделей bundle", value: "/opt/agent-nav/models", suggested: "/opt/agent-nav/models", applied: "/opt/agent-nav/models", source: "deploy/offline_bundle/env.bundle" },
-          { key: "BUNDLE_UPLOADS_ROOT", label: "Корень uploads", value: "/opt/agent-nav/uploads", suggested: "/opt/agent-nav/uploads", applied: "/opt/agent-nav/uploads", source: "deploy/offline_bundle/env.bundle" },
-          { key: "BUNDLE_REPORTS_ROOT", label: "Корень reports", value: "/opt/agent-nav/reports", suggested: "/opt/agent-nav/reports", applied: "/opt/agent-nav/reports", source: "deploy/offline_bundle/env.bundle" },
+          { key: "BUNDLE_MODEL_ROOT", label: "Корень моделей bundle", value: "/opt/llm-tools-platform/models", suggested: "/opt/llm-tools-platform/models", applied: "/opt/llm-tools-platform/models", source: "deploy/offline_bundle/env.bundle" },
+          { key: "BUNDLE_UPLOADS_ROOT", label: "Корень uploads", value: "/opt/llm-tools-platform/uploads", suggested: "/opt/llm-tools-platform/uploads", applied: "/opt/llm-tools-platform/uploads", source: "deploy/offline_bundle/env.bundle" },
+          { key: "BUNDLE_REPORTS_ROOT", label: "Корень reports", value: "/opt/llm-tools-platform/reports", suggested: "/opt/llm-tools-platform/reports", applied: "/opt/llm-tools-platform/reports", source: "deploy/offline_bundle/env.bundle" },
         ],
       },
       {
@@ -233,7 +233,7 @@ let deploySurface = {
     logsTitle: "Лог сборки и экспорта",
     summary: [
       { label: "Корень бандла", value: "deploy/offline_bundle", note: "Канонический рабочий каталог сборки.", tone: "cyan" },
-      { label: "Целевой архив", value: "agent-nav-offline-bundle_v1.0.tar.gz", note: "Единый переносимый артефакт для передачи.", tone: "lime" },
+      { label: "Целевой архив", value: "llm-tools-platform-offline-bundle_v1.0.tar.gz", note: "Единый переносимый артефакт для передачи.", tone: "lime" },
       { label: "Матрица системных пакетов", value: "ubuntu-24.04 готов", note: "Собрано через локальный сценарий APT-бандла.", tone: "lime" },
       { label: "Состояние манифеста", value: "проверен", note: "Выход готов к деплою и проходит проверку бандла.", tone: "lime" },
     ],
@@ -261,7 +261,7 @@ let deploySurface = {
       { title: "Посмотреть логи сборки", body: "Открыть stage-oriented output сборки и экспорта.", action: "Посмотреть логи сборки" },
     ],
     artifacts: [
-      { title: "Архив бандла", body: "agent-nav-offline-bundle_v1.0.tar.gz · 18.6 GB · готов к передаче", badge: "ready" },
+      { title: "Архив бандла", body: "llm-tools-platform-offline-bundle_v1.0.tar.gz · 18.6 GB · готов к передаче", badge: "ready" },
       { title: "Архивы образов", body: "backend-app, ums, chainlit, vllm сохранены в deploy/offline_bundle/images", badge: "ready" },
       { title: "Пакет системных пакетов", body: "ubuntu-24.04 pool + Packages.gz + versions.lock.json", badge: "ready" },
       { title: "Манифест", body: "manifest.json содержит контрольные суммы для images, state, models, wheelhouse и host_packages", badge: "ready" },
@@ -276,7 +276,7 @@ let deploySurface = {
     logsTitle: "Лог импорта / деплоя",
     summary: [
       { label: "Приём архива", value: "выбран", note: "Один tar.gz принимается как канонический переносимый артефакт.", tone: "lime" },
-      { label: "Корень распаковки", value: "/opt/agent-nav/offline_bundle", note: "Бандл распакован в целевой корень среды.", tone: "cyan" },
+      { label: "Корень распаковки", value: "/opt/llm-tools-platform/offline_bundle", note: "Бандл распакован в целевой корень среды.", tone: "cyan" },
       { label: "Состояние деплоя", value: "частично", note: "Бандл проходит проверку, но среда на хосте ещё ждёт установку пакетов и загрузку образов.", tone: "orange" },
       { label: "Каноническая точка входа", value: "deploy.sh", note: "run_offline_bundle.sh остаётся верхнеуровневой обёрткой для удобного запуска.", tone: "cyan" },
     ],
@@ -304,7 +304,7 @@ let deploySurface = {
       { title: "Запустить офлайн-бандл", body: "Использовать верхнеуровневый launcher после прохождения обязательного деплоя.", action: "Запустить офлайн-бандл" },
     ],
     artifacts: [
-      { title: "Приём архива", body: "agent-nav-offline-bundle_v1.0.tar.gz получен с машины сборки", badge: "ready" },
+      { title: "Приём архива", body: "llm-tools-platform-offline-bundle_v1.0.tar.gz получен с машины сборки", badge: "ready" },
       { title: "Распакованный бандл", body: "compose.offline.yaml, env.bundle, manifest.json, images/, models/ и state/ доступны", badge: "ready" },
       { title: "Установка системных пакетов", body: "versions.lock.json совпадает с целевым дистрибутивом, установка ещё ждёт настройки среды", badge: "partial" },
       { title: "Деплой среды", body: "Ожидается загрузка образов и выполнение deploy.sh на целевом хосте", badge: "partial" },
@@ -315,12 +315,12 @@ let deploySurface = {
 let deployLogLines = [
   { mode: "build", stage: "build", text: "[10:04:03] build_bundle: starting export orchestration in deploy/offline_bundle" },
   { mode: "build", stage: "wheelhouse", text: "[10:04:18] build_wheelhouse: ok wheelhouse prepared for offline image builds" },
-  { mode: "build", stage: "images", text: "[10:06:10] export_images: saved agent-nav-backend-app-offline_v1.0.tar" },
+  { mode: "build", stage: "images", text: "[10:06:10] export_images: saved llm-tools-platform-backend-app-offline_v1.0.tar" },
   { mode: "build", stage: "host", text: "[10:07:42] build_host_apt_bundle: host-apt-bundle:ok distro=ubuntu-24.04" },
   { mode: "build", stage: "manifest", text: "[10:08:05] generate_manifest: manifest.json refreshed with checksums and build metadata" },
-  { mode: "build", stage: "pack", text: "[10:08:34] archive: created agent-nav-offline-bundle_v1.0.tar.gz from deploy/offline_bundle" },
-  { mode: "import", stage: "archive", text: "[11:12:01] intake: selected agent-nav-offline-bundle_v1.0.tar.gz for import" },
-  { mode: "import", stage: "archive", text: "[11:12:08] unpack: extracted archive into /opt/agent-nav/offline_bundle" },
+  { mode: "build", stage: "pack", text: "[10:08:34] archive: created llm-tools-platform-offline-bundle_v1.0.tar.gz from deploy/offline_bundle" },
+  { mode: "import", stage: "archive", text: "[11:12:01] intake: selected llm-tools-platform-offline-bundle_v1.0.tar.gz for import" },
+  { mode: "import", stage: "archive", text: "[11:12:08] unpack: extracted archive into /opt/llm-tools-platform/offline_bundle" },
   { mode: "import", stage: "validate", text: "[11:12:25] validate_bundle: mode=deploy passed required files, images, models, host_packages" },
   { mode: "import", stage: "host", text: "[11:13:10] install_host_apt_bundle: host-apt-install-check:ok ubuntu-24.04" },
   { mode: "import", stage: "images", text: "[11:14:42] load_images: loaded backend-app, ums, chainlit archives into local docker image store" },
@@ -1358,7 +1358,7 @@ function hasBundlePortConflict() {
 
 function localizeStaticShell() {
   document.documentElement.lang = currentLanguage;
-  document.title = currentLanguage === "en" ? "Agent Navigator Pro | Operator Console" : "Agent Navigator Pro | Операторская панель";
+  document.title = currentLanguage === "en" ? "llm-tools-platform | Operator Console" : "llm-tools-platform | Операторская панель";
 
   const textMap = currentLanguage === "en" ? [
     [".topbar-copy .eyebrow", "Operator Console"],
@@ -2258,7 +2258,7 @@ function renderPathCard(path, includeProfiles = true) {
         <div class="button-row">${path.profiles.map((profile) => `<span class="profile-pill ${chipClass(profile.status)}">${displayLabel(localizedField(profile, "title"))} · ${cap(profile.status)}</span>`).join("")}</div>
       </div>
     ` : ""}
-    <div class="launch-runtime-inline" data-agent-nav-hook="operator-launch-runtime-state">
+    <div class="launch-runtime-inline" data-llm-tools-platform-hook="operator-launch-runtime-state">
       <div class="launch-runtime-inline-head">
         <strong class="launch-runtime-inline-title">${inlineState.title}</strong>
         <span class="status-pill ${inlineState.tone}">${inlineState.badge}</span>
@@ -2808,7 +2808,7 @@ function isResolvableHostBrowserPath(pathValue) {
   if (!rawValue) return false;
   if (rawValue.startsWith("/models/")) return false;
   if (rawValue.startsWith("/app/")) return false;
-  if (rawValue.startsWith("/opt/agent-nav/")) return false;
+  if (rawValue.startsWith("/opt/llm-tools-platform/")) return false;
   return true;
 }
 
@@ -2840,7 +2840,7 @@ function localBundlePathValidation(field, value) {
         : "Container-side путь модели будет проверен относительно layout офлайн-бандла после применения.",
     };
   }
-  if (rawValue.startsWith("/opt/agent-nav/external/")) {
+  if (rawValue.startsWith("/opt/llm-tools-platform/external/")) {
     return {
       status: "info",
       message: currentLanguage === "en"
@@ -2851,8 +2851,8 @@ function localBundlePathValidation(field, value) {
   return {
     status: "warning",
     message: currentLanguage === "en"
-      ? "Expected a container-side model path under /app/backend/models/ or an external mount target under /opt/agent-nav/external/."
-      : "Ожидается container-side путь под /app/backend/models/ или target внешнего mount под /opt/agent-nav/external/.",
+      ? "Expected a container-side model path under /app/backend/models/ or an external mount target under /opt/llm-tools-platform/external/."
+      : "Ожидается container-side путь под /app/backend/models/ или target внешнего mount под /opt/llm-tools-platform/external/.",
   };
 }
 
@@ -3600,7 +3600,7 @@ function renderConfigVariantHelper(pathKey, variant) {
           <span class="config-flow-arrow">→</span>
           <div class="config-flow-node ${modelSourceMode === "external_host_mounts" ? "active" : ""}">
             <span class="config-flow-kicker">${currentLanguage === "en" ? "External mode" : "Внешний режим"}</span>
-            <strong>/opt/agent-nav/external/...</strong>
+            <strong>/opt/llm-tools-platform/external/...</strong>
           </div>
         </div>
         <p class="config-helper-note">${currentLanguage === "en"
@@ -3630,7 +3630,7 @@ function renderConfigVariantHelper(pathKey, variant) {
           <span class="config-flow-arrow">→</span>
           <div class="config-flow-node">
             <span class="config-flow-kicker">${currentLanguage === "en" ? "Runtime path" : "Путь для runtime"}</span>
-            <strong>${isExternal ? "/opt/agent-nav/external/..." : "/app/backend/models/..."}</strong>
+            <strong>${isExternal ? "/opt/llm-tools-platform/external/..." : "/app/backend/models/..."}</strong>
           </div>
         </div>
         <p class="config-helper-note">${currentLanguage === "en"

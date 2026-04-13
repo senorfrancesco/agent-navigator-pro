@@ -36,7 +36,7 @@ def test_detect_os_print_platform_returns_supported_value():
 def test_install_dispatcher_reports_platform_in_test_mode():
     result = _run_script(
         ["bash", str(SCRIPTS_DIR / "install" / "install.sh"), "--platform=ubuntu", "--target=native"],
-        env={"AGENT_NAVIGATOR_TEST_MODE": "1"},
+        env={"LLM_TOOLS_PLATFORM_TEST_MODE": "1"},
     )
     assert result.returncode == 0
     assert "platform=ubuntu" in result.stdout
@@ -51,9 +51,9 @@ def test_bootstrap_env_uses_python3_when_python_alias_is_missing(tmp_path):
     result = _run_script(
         ["bash", str(SCRIPTS_DIR / "bootstrap_env.sh"), "--check", "--target=native"],
         env={
-            "AGENT_NAVIGATOR_TEST_MODE": "1",
-            "AGENT_NAVIGATOR_BACKEND_ENV_FILE": str(env_file),
-            "AGENT_NAVIGATOR_BACKEND_ENV_TEMPLATE_FILE": str(env_template),
+            "LLM_TOOLS_PLATFORM_TEST_MODE": "1",
+            "LLM_TOOLS_PLATFORM_BACKEND_ENV_FILE": str(env_file),
+            "LLM_TOOLS_PLATFORM_BACKEND_ENV_TEMPLATE_FILE": str(env_template),
             "PATH": os.environ["PATH"],
         },
     )
@@ -67,7 +67,7 @@ def test_bootstrap_env_uses_python3_when_python_alias_is_missing(tmp_path):
 def test_launcher_install_forwards_platform_to_dispatcher():
     result = _run_script(
         ["bash", str(SCRIPTS_DIR / "launcher.sh"), "--install", "--platform=ubuntu-server"],
-        env={"AGENT_NAVIGATOR_TEST_MODE": "1"},
+        env={"LLM_TOOLS_PLATFORM_TEST_MODE": "1"},
     )
     assert result.returncode == 0
     assert "platform=ubuntu-server" in result.stdout
@@ -109,7 +109,7 @@ def test_setup_ubuntu_uses_canonical_runtime_and_model_steps_in_final_guidance()
     assert "./scripts/models/install_models.sh --ensure-present" in script
     assert "./scripts/launcher.sh --target native" in script
     assert 'echo "   cd backend"' not in script
-    assert "tmux attach -t agent-navigator-native" in script
+    assert "tmux attach -t llm-tools-platform-native" in script
     assert "./scripts/stop_native.sh" in script
     assert "docker logs open-webui" not in script
     assert "CLAUDE_MEMORY.md" not in script
@@ -134,7 +134,7 @@ def test_setup_ubuntu_uses_conda_base_instead_of_creating_diploma_env():
     assert "conda tos accept" in script
     assert 'find_existing_conda_sh()' in script
     assert '"$HOME/miniconda3/etc/profile.d/conda.sh"' in script
-    assert 'mktemp "${TMPDIR:-/tmp}/agent-nav-miniconda-' in script
+    assert 'mktemp "${TMPDIR:-/tmp}/llm-tools-platform-miniconda-' in script
     assert 'trap cleanup_miniconda_installer EXIT' in script
     assert 'wget -O miniconda_installer.sh' not in script
 
@@ -175,9 +175,9 @@ def test_setup_ubuntu_uses_importlib_metadata_for_package_checks_and_honest_llam
 def test_setup_ubuntu_wires_llamacpp_build_and_prompted_bashrc_management():
     script = (SCRIPTS_DIR / "setup_ubuntu.sh").read_text(encoding="utf-8")
     assert 'bash "$PROJECT_ROOT/scripts/install/build_llamacpp.sh"' in script
-    assert "Добавить managed Agent Navigator block в ~/.bashrc" in script
+    assert "Добавить managed llm-tools-platform block в ~/.bashrc" in script
     assert "conda activate base >/dev/null 2>&1 || true" in script
-    assert 'agent_nav_prepend_path "$LLAMA_CPP_BUILD_DIR/bin"' in script
+    assert 'llm_tools_platform_prepend_path "$LLAMA_CPP_BUILD_DIR/bin"' in script
     assert "activate_env.sh" not in script
 
 
@@ -277,7 +277,7 @@ def test_model_downloader_reads_quoted_env_without_shell_evaluation(tmp_path):
             "--dry-run",
         ],
         env={
-            "AGENT_NAVIGATOR_BACKEND_ENV_FILE": str(env_file),
+            "LLM_TOOLS_PLATFORM_BACKEND_ENV_FILE": str(env_file),
         },
     )
 

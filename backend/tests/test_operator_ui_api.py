@@ -23,6 +23,7 @@ from orchestrator.operator_ui_api import (
     operator_health,
     OperatorActionRequest,
     operator_runtime_health,
+    operator_qdrant_summary,
     operator_metrics_summary,
     operator_grafana_links,
     operator_job_cancel,
@@ -31,6 +32,32 @@ from orchestrator.operator_ui_api import (
     operator_tool_bindings_export_openwebui,
     router,
 )
+
+
+class _FakeQdrantCollectionsResponse:
+    def __init__(self, names):
+        self.collections = [SimpleNamespace(name=name) for name in names]
+
+
+class _FakeQdrantClient:
+    collections_payloads = {}
+
+    def __init__(self, url=None):
+        self.url = url
+
+    def get_collections(self):
+        return _FakeQdrantCollectionsResponse(list(self.collections_payloads.keys()))
+
+    def scroll(self, collection_name, limit, offset=None, with_payload=True, with_vectors=False):
+        payloads = list(self.collections_payloads.get(collection_name, []))
+        start = int(offset or 0)
+        end = start + int(limit)
+        chunk = payloads[start:end]
+        next_offset = end if end < len(payloads) else None
+        return [SimpleNamespace(payload=item) for item in chunk], next_offset
+
+    def close(self):
+        return None
 
 
 def test_operator_ui_state_exposes_python_control_plane_contract():
@@ -130,6 +157,93 @@ def test_operator_metrics_summary_exposes_timing_summary():
     assert {"latest", "by_executor"} <= set(metrics_payload["timingSummary"].keys())
 
 
+def test_operator_qdrant_summary_reports_namespace_separation(monkeypatch):
+    monkeypatch.setenv("KB_BACKEND", "qdrant")
+    monkeypatch.setenv("QDRANT_URL", "http://fake-qdrant:6333")
+    monkeypatch.setenv("QDRANT_COLLECTION_NAME", "rag_chunks_v1")
+    monkeypatch.setattr("orchestrator.operator_ui_api._load_qdrant_client_class", lambda: _FakeQdrantClient)
+    _FakeQdrantClient.collections_payloads = {
+        "rag_chunks_v1": [
+            {"source_scope": "knowledge", "document_id": "kb-1"},
+            {"source_scope": "session", "document_id": "doc-1", "thread_id": "thread-1", "expires_at": 4102444800.0},
+            {"source_scope": "session", "document_id": "doc-2", "thread_id": "thread-2", "expires_at": 946684800.0},
+        ],
+        "anp-openwebui-team-a": [],
+        "anp-openwebui-team-b": [],
+    }
+
+    payload = operator_qdrant_summary()
+
+    assert payload["backend"]["mode"] == "qdrant"
+    assert payload["backend"]["collectionName"] == "rag_chunks_v1"
+    assert payload["server"]["reachable"] is True
+    assert payload["server"]["collections"] == [
+        "anp-openwebui-team-a",
+        "anp-openwebui-team-b",
+        "rag_chunks_v1",
+    ]
+    assert payload["openWebUI"]["collections"] == ["anp-openwebui-team-a", "anp-openwebui-team-b"]
+    assert payload["namespaces"]["separationOk"] is True
+    assert payload["namespaces"]["issues"] == []
+    assert payload["payloads"] == {
+        "knowledgeCount": 1,
+        "sessionCount": 2,
+        "unknownCount": 0,
+        "activeSessionCount": 1,
+        "expiredSessionCount": 1,
+        "sessionMetadataOk": True,
+    }
+
+
+def test_operator_qdrant_summary_flags_namespace_collision(monkeypatch):
+    monkeypatch.setenv("KB_BACKEND", "qdrant")
+    monkeypatch.setenv("QDRANT_URL", "http://fake-qdrant:6333")
+    monkeypatch.setenv("QDRANT_COLLECTION_NAME", "anp-openwebui-shared")
+    monkeypatch.setattr("orchestrator.operator_ui_api._load_qdrant_client_class", lambda: _FakeQdrantClient)
+    _FakeQdrantClient.collections_payloads = {
+        "anp-openwebui-shared": [],
+        "anp-openwebui-tenant-a": [],
+    }
+
+    payload = operator_qdrant_summary()
+
+    assert payload["namespaces"]["separationOk"] is False
+    assert any("backend collection name overlaps" in issue for issue in payload["namespaces"]["issues"])
+
+
+def test_operator_qdrant_summary_route_returns_payload(monkeypatch):
+    monkeypatch.setenv("OPERATOR_UI_LOCALHOST_ONLY", "false")
+    monkeypatch.setattr(
+        "orchestrator.operator_ui_api._build_qdrant_summary",
+        lambda *_args, **_kwargs: {"backend": {"mode": "qdrant"}, "namespaces": {"separationOk": True}},
+    )
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    response = client.get("/operator/rag/qdrant/summary", headers={"host": "127.0.0.1"})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "backend": {"mode": "qdrant"},
+        "namespaces": {"separationOk": True},
+    }
+
+
+def test_build_operator_state_includes_qdrant_summary(monkeypatch):
+    monkeypatch.setattr(
+        "orchestrator.operator_ui_api._build_qdrant_summary",
+        lambda *_args, **_kwargs: {"backend": {"mode": "qdrant"}, "namespaces": {"separationOk": True}},
+    )
+
+    state = build_operator_state()
+
+    assert state["qdrantSummary"] == {
+        "backend": {"mode": "qdrant"},
+        "namespaces": {"separationOk": True},
+    }
+
+
 def test_operator_tool_bindings_expose_enabled_and_document_dependent_entries():
     payload = operator_tool_bindings()
 
@@ -164,7 +278,9 @@ def test_operator_tool_bindings_export_openwebui_returns_manual_import_bundle():
     assert len(payload["workspaceTools"]) == 2
     assert payload["workspaceTools"][0]["tool_id"] == "equipment_fast_tool"
     assert "class Tools" in payload["workspaceTools"][0]["pythonCode"]
-    assert "/tools/analyze_equipment_fast" in payload["workspaceTools"][0]["pythonCode"]
+    assert "/tools/{target_tool_name}" in payload["workspaceTools"][0]["pythonCode"]
+    assert "analyze_document_fast" in payload["workspaceTools"][0]["pythonCode"]
+    assert "analyze_equipment_fast" in payload["workspaceTools"][0]["pythonCode"]
     assert payload["directActions"][0]["binding_id"] == "equipment.fast.direct"
     assert payload["workspacePrompts"][0]["slash_command"] == "/hw_fast"
     assert payload["workspacePrompts"][0]["manualImportRequired"] is True
@@ -187,14 +303,42 @@ def test_operator_tool_bindings_export_openwebui_returns_manual_import_bundle():
         "tool_job_refresh_action",
         "tool_job_cancel_action",
     }
+    assert payload["runtimeConfig"]["rag"] == {
+        "vectorDb": "qdrant",
+        "embeddingEngine": "openai",
+        "embeddingModel": "labse-embedding",
+        "embeddingOpenAIBaseUrl": "http://host.docker.internal:8090/v1",
+        "rerankingEngine": "",
+    }
+    assert payload["knowledgeConfig"]["bootstrapMode"] == "manual_checklist"
+    assert payload["knowledgeConfig"]["sessionFlow"] == "backend_owned_qdrant"
+    assert payload["qdrantConfig"] == {
+        "provider": "qdrant",
+        "uri": "http://host.docker.internal:6333",
+        "collectionPrefix": "anp-openwebui",
+        "multitenancy": True,
+        "backendCollectionNameSource": "backend_env:QDRANT_COLLECTION_NAME",
+        "ownership": "shared_server_separate_namespaces",
+    }
+    assert payload["manualChecklist"]["sessionRag"][0].startswith("Проверьте, что backend запущен")
+    assert payload["manualChecklist"]["knowledgeQdrant"][0].startswith("Откройте `Admin Settings -> Documents`")
+    assert payload["preflightRequirements"]["requiredServices"] == ["agent-api", "open-webui", "qdrant", "ums"]
+    assert payload["preflightRequirements"]["backendEnv"] == [
+        "OPENAPI_TOOL_SERVER_TOKEN",
+        "KB_BACKEND",
+        "QDRANT_URL",
+        "QDRANT_COLLECTION_NAME",
+    ]
     equipment_fast_action = next(item for item in payload["actionFunctions"] if item["action_id"] == "equipment_fast_action")
     assert equipment_fast_action["manualImportRequired"] is True
     assert equipment_fast_action["targetModels"] == ["raw.*"]
     assert equipment_fast_action["isActive"] is True
     assert equipment_fast_action["isGlobal"] is True
     assert "Authorization" in equipment_fast_action["pythonCode"]
-    assert "/tools/analyze_equipment_fast" in equipment_fast_action["pythonCode"]
-    assert payload["importChecklist"][0].startswith("1. Материализуйте только named tools")
+    assert "/tools/{target_tool_name}" in equipment_fast_action["pythonCode"]
+    assert "analyze_document_fast" in equipment_fast_action["pythonCode"]
+    assert "analyze_equipment_fast" in equipment_fast_action["pythonCode"]
+    assert payload["importChecklist"][0].startswith("1. Создайте только именованные tools")
 
 
 def test_operator_config_apply_rejects_unknown_path():

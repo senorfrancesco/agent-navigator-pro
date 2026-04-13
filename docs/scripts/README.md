@@ -1,20 +1,20 @@
 # Script Runtime Map
 
-Этот документ фиксирует каноническую карту runtime-скриптов проекта и разделяет user-facing entrypoints, основной путь `Open WebUI`, совместимый и отладочный shell `Chainlit` и internal helpers.
+Этот документ фиксирует каноническую карту runtime-скриптов проекта и разделяет user-facing entrypoints, основной путь `Open WebUI`, совместимый и отладочный путь `Chainlit` и внутренние helper-скрипты.
 
 Канонический справочник флагов и env-переменных находится в [docs/flags-reference.md](../flags-reference.md). Здесь остаётся карта entrypoints, script roles и launcher/runtime semantics.
 
 ## Canonical Paths
 
 - Основной entrypoint для разработки: `./scripts/launcher.sh --target native --profile adaptive`
-- Основной entrypoint для разработки без UI Chainlit: `./scripts/launcher.sh --target native --profile adaptive --skip-chainlit`
-- Основной entrypoint для container/compose path: `./scripts/launcher.sh --target container --profile default`
+- Основной entrypoint для разработки без UI: `./scripts/launcher.sh --target native --profile adaptive --skip-openwebui`
+- Основной entrypoint для container/compose path: `./scripts/launcher.sh --target container --profile default`  (`Open WebUI` + `Qdrant`)
 - Основной entrypoint для guided install path: `./scripts/launcher.sh --install --platform <platform>`
 - Основной entrypoint для Linux/WSL installer dispatch: `./scripts/install/install.sh --platform auto`
 - Основной entrypoint для Windows host bootstrap: `powershell -ExecutionPolicy Bypass -File scripts/install/install_windows.ps1 -CheckOnly`
 - Основной stop-path для native runtime: `./scripts/stop_native.sh`
 - Основной stop-path для compose/container runtime: `./scripts/stop_all.sh`
-- Основной пользовательский UI сейчас — `Open WebUI`; поднимается напрямую через `docker compose --profile legacy up -d open-webui`, где `legacy` пока остаётся только историческим именем compose profile.
+- Основной пользовательский UI сейчас — `Open WebUI`; поднимается напрямую через `docker compose up -d open-webui`. Этот запуск также поднимает `Qdrant` для native `Knowledge`.
 
 ## Platform Install Quick Start
 
@@ -72,11 +72,12 @@ Launcher поддерживает текущие override без правки к
 ./scripts/launcher.sh --target native --gpu-layers-mode max
 ./scripts/launcher.sh --target native --gpu-layers-mode manual --gpu-layers 24
 ./scripts/launcher.sh --target native --device-mode gpu
-./scripts/launcher.sh --target native --skip-chainlit --no-attach
+./scripts/launcher.sh --target native --skip-openwebui --no-attach
 ```
 
-Если нужен только backend native runtime без окна `Chainlit`, используйте `--skip-chainlit`.
-Флаг работает для `launcher.sh --target native` и для прямого `./scripts/run_native.sh --skip-chainlit`.
+Если нужен только backend native runtime без `Open WebUI`, используйте `--skip-openwebui`.
+Для обратной совместимости `--skip-chainlit` остаётся алиасом к `--skip-openwebui`.
+Флаг работает для `launcher.sh --target native` и для прямого `./scripts/run_native.sh --skip-openwebui`.
 
 Persistent user-owned runtime intent:
 - `backend/.env`
@@ -144,11 +145,11 @@ cd backend && pip install -r requirements.txt
 | Script | Classification | Mode | Когда использовать | Риски / side effects | Текущий статус |
 | --- | --- | --- | --- | --- | --- |
 | `scripts/launcher.sh` | `canonical` | `native`, `container` | Основной запуск runtime с bootstrap/preflight слоем | Для `native` использует `backend/.env`; для `container` может писать `backend/.env.runtime`; затем делегирует в target runner | Canonical entrypoint |
-| `scripts/run_native.sh` | `native-runner` | `native` | Прямой host-only запуск и совместимость со старыми командами | Поднимает tmux-сессию, host-сервисы и вызывает `stop_native.sh`; по умолчанию читает только `backend/.env` | Direct native runner |
-| `scripts/run_all.sh` | `compatibility` | `container-compose` | Для обратной совместимости container path | При прямом вызове уходит в `launcher.sh`; при запуске из launcher вызывает `stop_all.sh`, поднимает compose stack и tmux monitoring | Compatibility alias + container runner behind launcher |
+| `scripts/run_native.sh` | `native-runner` | `native` | Прямой native запуск и совместимость со старыми командами | Поднимает tmux-сессию, host-сервисы, `Qdrant`, опционально `Open WebUI`, и вызывает `stop_native.sh`; по умолчанию читает только `backend/.env` | Direct native runner |
+| `scripts/run_all.sh` | `compatibility` | `container-compose` | Для обратной совместимости container path | При прямом вызове уходит в `launcher.sh`; при запуске из launcher вызывает `stop_all.sh`, поднимает compose-стек `Open WebUI` + backend + `Qdrant` и tmux monitoring | Compatibility alias + container runner behind launcher |
 | `scripts/run_container.sh` | `compatibility` | `container` | Тонкий alias для старых вызовов container path | Немедленно делегирует в `launcher.sh --target container` | Thin compatibility alias |
 | `scripts/bootstrap_env.sh` | `internal` | `check`, `install` | В основном используется через `launcher.sh`; вручную полезен только для диагностики bootstrap слоя | Создаёт `backend/.env` из шаблона при отсутствии, автогенерирует/ротирует `CHAINLIT_AUTH_SECRET`, валидирует команды и остальные critical secrets; `--install` делегирует в `scripts/install/install.sh` | Internal helper for launcher/bootstrap |
-| `scripts/stop_native.sh` | `canonical` | `native stop` | Каноническая остановка native tmux/runtime path | Убивает native tmux session и процессы на service ports; Docker не трогает | Canonical native stop script |
+| `scripts/stop_native.sh` | `canonical` | `native stop` | Каноническая остановка native tmux/runtime path | Убивает native tmux session и процессы на service ports, останавливает `Open WebUI` и `Qdrant` для native path | Canonical native stop script |
 | `scripts/stop_all.sh` | `canonical` | `container stop`, `global cleanup` | Каноническая остановка compose/container path | Делает `docker compose down`, завершает обе tmux session и зачищает runtime-процессы на service ports | Canonical container/global stop script |
 | `scripts/utils/env_loader.sh` | `internal-helper` | `shared env parsing` | Общий helper для canonical runtime/start/stop scripts | Экспортирует `.env` значения через `python-dotenv`, не исполняя файл как shell-код | Shared env loader for canonical scripts |
 | `scripts/install/install.sh` | `canonical-installer` | installer | Guided install path за `launcher.sh --install` | Выбирает platform wrapper (`ubuntu`, `ubuntu-server`, `wsl`, `windows`); heavy Linux install всё ещё сводится к legacy `setup_ubuntu.sh` через wrapper layer | Canonical install coordinator |
@@ -197,7 +198,7 @@ cd backend && pip install -r requirements.txt
 
 - `run_native.sh`, `run_all.sh`, `run_container.sh` не должны описываться как отдельные конкурирующие entrypoints.
 - Их роль: compatibility aliases и target-specific runners за `launcher.sh`.
-- Отдельного `run_openwebui.sh` больше нет; `Open WebUI` поднимается прямой `docker compose --profile legacy up -d open-webui` командой.
+- Отдельного `run_openwebui.sh` больше нет; основной container-path поднимается через `./scripts/launcher.sh --target container` или `./scripts/run_all.sh`. Прямой `docker compose up -d open-webui` остаётся только как сокращённый запуск одного `Open WebUI`-контура.
 
 ## Script Notes
 
@@ -236,7 +237,7 @@ cd backend && pip install -r requirements.txt
   - `--no-attach`: не attach’иться к tmux runner.
   - `--report-only`: только вывести plan/apply report без запуска.
   - `--install`: перейти в installer path.
-- Важные env vars: `UMS_RUNTIME_PROFILE`, `AGENT_NAVIGATOR_RUNTIME_ENV_FILE`, `AGENT_NAVIGATOR_TEST_MODE`.
+- Важные env vars: `UMS_RUNTIME_PROFILE`, `LLM_TOOLS_PLATFORM_RUNTIME_ENV_FILE`, `LLM_TOOLS_PLATFORM_TEST_MODE`.
 - Ограничения: не заменяет legacy heavy installer path; для `--install` ведёт в unified installer coordinator `scripts/install/install.sh`, который затем выбирает platform wrapper.
   Для native path review нужно делать через `./scripts/evaluate_runtime.sh recommend`, а не через `launcher.sh --review-runtime`.
 
@@ -276,18 +277,19 @@ python scripts/runtime_preflight.py recommend --profile adaptive
 
 ### `scripts/run_native.sh`
 
-- Назначение: прямой native host runner для Chainlit + backend сервисов.
+- Назначение: прямой native runner для backend-сервисов на host, `Qdrant` и `Open WebUI`.
 - Кто использует: локальные native-сценарии и launcher после preflight.
 - Пример:
 
 ```bash
 ./scripts/run_native.sh
 ./scripts/run_native.sh --no-attach
+./scripts/run_native.sh --skip-openwebui --no-attach
 ```
 
-- Основные флаги: `--no-attach`, `--skip-chainlit`; внутренний `--from-launcher` только для launcher.
-- Важные env vars: `CONDA_ENV`, `AGENT_NAVIGATOR_RUNTIME_ENV_FILE`, `AGENT_API_PORT`, `DOC_PORT`, `LEGAL_PORT`, `UMS_PORT`, `CHAINLIT_PORT`, `UPLOADS_DIR`, `CHAINLIT_DB_URL`.
-- Side effects: создаёт tmux session `agent-navigator-native`, вызывает `stop_native.sh`, поднимает host-side `document_server`, `legal_server`, `UMS`, `agent_api`, `Chainlit`.
+- Основные флаги: `--no-attach`, `--skip-openwebui`; `--skip-chainlit` оставлен как совместимый алиас; внутренний `--from-launcher` только для launcher.
+- Важные env vars: `CONDA_ENV`, `LLM_TOOLS_PLATFORM_RUNTIME_ENV_FILE`, `AGENT_API_PORT`, `DOC_PORT`, `LEGAL_PORT`, `UMS_PORT`, `OPENWEBUI_PORT`, `QDRANT_URL`, `UPLOADS_DIR`.
+- Side effects: создаёт tmux session `llm-tools-platform-native`, вызывает `stop_native.sh`, поднимает host-side `document_server`, `legal_server`, `UMS`, `agent_api`, а также контейнеры `qdrant` и `open-webui`.
 - Ограничения: по умолчанию читает `backend/.env`; `backend/.env.runtime` применяется только при явном `--apply-runtime`.
 
 ### `scripts/run_all.sh`
@@ -302,10 +304,10 @@ python scripts/runtime_preflight.py recommend --profile adaptive
 ```
 
 - Основные флаги: `--no-attach`; внутренний `--from-launcher` только для launcher.
-- Важные env vars: `BACKEND_MODE`, `VLLM_BASE_URL`, `VLLM_PORT`, `VLLM_MODEL_ID_QWEN_14B_LLM`, `AGENT_NAVIGATOR_RUNTIME_ENV_FILE`, `AGENT_NAVIGATOR_TEST_MODE`.
-- Side effects: вызывает `stop_all.sh`, поднимает Docker Compose backend/Chainlit stack, при `BACKEND_MODE=vllm` добавляет профиль `vllm`, создаёт tmux session `agent-navigator`.
+- Важные env vars: `BACKEND_MODE`, `VLLM_BASE_URL`, `VLLM_PORT`, `VLLM_MODEL_ID_QWEN_14B_LLM`, `LLM_TOOLS_PLATFORM_RUNTIME_ENV_FILE`, `LLM_TOOLS_PLATFORM_TEST_MODE`.
+- Side effects: вызывает `stop_all.sh`, поднимает Docker Compose stack `Open WebUI` + backend + `Qdrant`, при `BACKEND_MODE=vllm` добавляет профиль `vllm`, создаёт tmux session `llm-tools-platform`.
 - Ограничения: не описывать как независимый canonical orchestration path; canonical выбор между native/container делает `launcher.sh`.
-- Build contract: `run_all.sh` и `launcher.sh --target container` запускают `docker compose up --no-build`, то есть используют только уже собранные образы. Сборка backend образов должна запускаться отдельно явной командой `docker compose --profile backend build agent-api document-server legal-server ums`; для Chainlit остаётся отдельный `docker compose build chainlit`.
+- Build contract: `run_all.sh` и `launcher.sh --target container` запускают `docker compose up --no-build`, то есть используют только уже собранные образы. Сборка backend образов должна запускаться отдельно явной командой `docker compose build agent-api document-server legal-server ums`; для Chainlit остаётся отдельный `docker compose build chainlit`.
 
 ### `scripts/run_container.sh`
 
@@ -336,7 +338,7 @@ python scripts/runtime_preflight.py recommend --profile adaptive
 ```
 
 - Основные флаги: `--check`, `--install`, `--target=native|container`, `--platform=auto|windows|wsl|ubuntu|ubuntu-server`.
-- Важные env vars: `AGENT_NAVIGATOR_BACKEND_ENV_FILE`, `AGENT_NAVIGATOR_SKIP_COMMAND_CHECKS`, `AGENT_NAVIGATOR_ALLOW_INSECURE_DEFAULTS`, `AGENT_NAVIGATOR_TEST_MODE`.
+- Важные env vars: `LLM_TOOLS_PLATFORM_BACKEND_ENV_FILE`, `LLM_TOOLS_PLATFORM_SKIP_COMMAND_CHECKS`, `LLM_TOOLS_PLATFORM_ALLOW_INSECURE_DEFAULTS`, `LLM_TOOLS_PLATFORM_TEST_MODE`.
 - Side effects: в `check` режиме валидирует команды и secrets; в `install` режиме делегирует в `scripts/install/install.sh`.
 - Ограничения: не является полным installer framework; это guard/bootstrap wrapper вокруг installer coordinator.
 
@@ -356,7 +358,7 @@ python scripts/runtime_preflight.py recommend --profile adaptive
 ```
 
 - Основные флаги: `--target`, `--platform`, `--dry-run`, `--help`.
-- Важные env vars: `AGENT_NAVIGATOR_TEST_MODE`, `WSL_DISTRO_NAME`.
+- Важные env vars: `LLM_TOOLS_PLATFORM_TEST_MODE`, `WSL_DISTRO_NAME`.
 - Side effects: выбирает platform wrapper; Linux wrappers по-прежнему сводят heavy install к `scripts/setup_ubuntu.sh`, а Windows path печатает host-side guidance / bootstrap command.
 - Ограничения: модульные installer-step scripts пока scaffold-only; `install.sh` остаётся coordinator-wrapper, а `scripts/models/install_models.sh` отвечает только за model provisioning, а не за весь installer engine.
 
@@ -426,8 +428,8 @@ powershell -ExecutionPolicy Bypass -File scripts/install/install_windows.ps1 -Ap
 ```
 
 - Основные флаги: нет.
-- Важные env vars: `AGENT_NAVIGATOR_BACKEND_ENV_FILE`; по умолчанию читает `backend/.env` через `scripts/utils/env_loader.sh`.
-- Side effects: убивает tmux session `agent-navigator-native`, завершает связанные runtime-процессы и процессы на service ports.
+- Важные env vars: `LLM_TOOLS_PLATFORM_BACKEND_ENV_FILE`; по умолчанию читает `backend/.env` через `scripts/utils/env_loader.sh`.
+- Side effects: убивает tmux session `llm-tools-platform-native`, завершает связанные runtime-процессы и процессы на service ports.
 - Ограничения: Docker intentionally не останавливает.
 
 ### `scripts/stop_all.sh`
@@ -441,8 +443,8 @@ powershell -ExecutionPolicy Bypass -File scripts/install/install_windows.ps1 -Ap
 ```
 
 - Основные флаги: нет.
-- Важные env vars: `AGENT_NAVIGATOR_BACKEND_ENV_FILE`, `AGENT_NAVIGATOR_RUNTIME_ENV_FILE`; по умолчанию читает `backend/.env` и `backend/.env.runtime` через `scripts/utils/env_loader.sh`.
-- Side effects: завершает tmux session `agent-navigator` и `agent-navigator-native`, делает `docker compose down`, затем зачищает зависшие процессы.
+- Важные env vars: `LLM_TOOLS_PLATFORM_BACKEND_ENV_FILE`, `LLM_TOOLS_PLATFORM_RUNTIME_ENV_FILE`; по умолчанию читает `backend/.env` и `backend/.env.runtime` через `scripts/utils/env_loader.sh`.
+- Side effects: завершает tmux session `llm-tools-platform` и `llm-tools-platform-native`, делает `docker compose down`, затем зачищает зависшие процессы.
 - Ограничения: это более широкий cleanup, чем `stop_native.sh`; для native-only path лучше использовать именно `stop_native.sh`.
 
 ### `scripts/models/install_models.sh`
@@ -460,7 +462,7 @@ powershell -ExecutionPolicy Bypass -File scripts/install/install_windows.ps1 -Ap
 - Флаги:
   - `--ensure-present`: скачать только недостающие артефакты.
   - `--asset-set core|all`: `core = LLM + intent + retrieval`, `all = core + VLM + mmproj`.
- - Важные env vars: `AGENT_NAVIGATOR_BACKEND_ENV_FILE`, `AGENT_NAVIGATOR_MODEL_ASSET_SET`, `AGENT_NAVIGATOR_MODELS_ROOT`, `AGENT_NAVIGATOR_HF_CACHE`; `backend/.env` читается через `scripts/utils/env_loader.sh`, а не через shell `source`.
+ - Важные env vars: `LLM_TOOLS_PLATFORM_BACKEND_ENV_FILE`, `LLM_TOOLS_PLATFORM_MODEL_ASSET_SET`, `LLM_TOOLS_PLATFORM_MODELS_ROOT`, `LLM_TOOLS_PLATFORM_HF_CACHE`; `backend/.env` читается через `scripts/utils/env_loader.sh`, а не через shell `source`.
   - `--models-root <path>`: корень моделей.
   - `--huggingface-cache <path>`: путь к HF cache.
   - `--dry-run`: показать источники и target paths без скачивания.

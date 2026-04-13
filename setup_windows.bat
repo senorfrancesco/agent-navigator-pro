@@ -1,11 +1,11 @@
 @echo off
 REM ============================================================
-REM Полный скрипт установки Agent Navigator Pro для Windows
+REM Полный скрипт установки llm-tools-platform для Windows
 REM Устанавливает: Anaconda, Python окружение, все библиотеки
 REM ============================================================
 
 echo ============================================================
-echo Agent Navigator Pro - Полная установка для Windows
+echo llm-tools-platform - Полная установка для Windows
 echo ============================================================
 echo.
 
@@ -320,7 +320,7 @@ echo python --version >> activate_env.bat
 REM Создание скрипта запуска всех сервисов для Windows
 echo @echo off > start_all_services.bat
 echo call conda activate diploma_llm >> start_all_services.bat
-echo echo Запуск всех сервисов Agent Navigator Pro... >> start_all_services.bat
+echo echo Запуск всех сервисов llm-tools-platform... >> start_all_services.bat
 echo echo. >> start_all_services.bat
 echo start "Agent API" cmd /k "cd backend\orchestrator && uvicorn agent_api:app --host 0.0.0.0 --port 8000" >> start_all_services.bat
 echo timeout /t 2 /nobreak ^>nul >> start_all_services.bat

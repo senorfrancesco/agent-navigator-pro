@@ -5,8 +5,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BACKEND_DIR="$PROJECT_ROOT/backend"
-ENV_FILE="${AGENT_NAVIGATOR_BACKEND_ENV_FILE:-$BACKEND_DIR/.env}"
-RUNTIME_ENV_FILE="${AGENT_NAVIGATOR_RUNTIME_ENV_FILE:-$BACKEND_DIR/.env.runtime}"
+ENV_FILE="${LLM_TOOLS_PLATFORM_BACKEND_ENV_FILE:-$BACKEND_DIR/.env}"
+RUNTIME_ENV_FILE="${LLM_TOOLS_PLATFORM_RUNTIME_ENV_FILE:-$BACKEND_DIR/.env.runtime}"
 
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/utils/env_loader.sh"
@@ -14,18 +14,19 @@ source "$SCRIPT_DIR/utils/env_loader.sh"
 TARGET="native"
 PROFILE="${UMS_RUNTIME_PROFILE:-adaptive}"
 NO_ATTACH=false
-SKIP_CHAINLIT=false
+SKIP_OPENWEBUI=false
+SKIP_CHAINLIT_ALIAS=false
 REPORT_ONLY=false
 NON_INTERACTIVE=false
 REVIEW_RUNTIME=false
 RUNTIME_ENV_FLAGS_SET=false
 INSTALL=false
-SKIP_RUNTIME_APPLY="${AGENT_NAVIGATOR_SKIP_RUNTIME_APPLY:-true}"
+SKIP_RUNTIME_APPLY="${LLM_TOOLS_PLATFORM_SKIP_RUNTIME_APPLY:-true}"
 INSTALL_PLATFORM="auto"
 ENSURE_MODELS=false
-MODEL_ASSET_SET="${AGENT_NAVIGATOR_MODEL_ASSET_SET:-core}"
-MODELS_ROOT="${AGENT_NAVIGATOR_MODELS_ROOT:-}"
-HF_CACHE="${HF_HOME:-${AGENT_NAVIGATOR_HF_CACHE:-}}"
+MODEL_ASSET_SET="${LLM_TOOLS_PLATFORM_MODEL_ASSET_SET:-core}"
+MODELS_ROOT="${LLM_TOOLS_PLATFORM_MODELS_ROOT:-}"
+HF_CACHE="${HF_HOME:-${LLM_TOOLS_PLATFORM_HF_CACHE:-}}"
 GPU_LAYERS_MODE_OVERRIDE="${GPU_LAYERS_MODE:-}"
 GPU_LAYERS_OVERRIDE_VALUE="${N_GPU_LAYERS_OVERRIDE:-}"
 DEVICE_MODE_OVERRIDE="${DEVICE_MODE:-}"
@@ -51,7 +52,8 @@ Operator UI and /operator/* endpoints remain the canonical product API; this scr
 
 Флаги:
   --target native|container
-      Целевой runtime path: host-only native запуск или compose/container запуск.
+      Целевой runtime path: native backend на host с `Open WebUI`/`Qdrant`
+      или compose/container запуск.
   --profile <runtime-profile>
       Runtime-профиль preflight слоя: default, adaptive или manual.
   --platform auto|ubuntu|ubuntu-server|wsl|windows
@@ -90,9 +92,11 @@ Operator UI and /operator/* endpoints remain the canonical product API; this scr
       Явно включить model provisioning phase перед запуском.
   --no-attach
       Не подключаться к tmux после запуска target runner.
+  --skip-openwebui
+      Только для `--target native`: не запускать контейнер `Open WebUI`.
+      `Qdrant` и backend-сервисы продолжают стартовать как обычно.
   --skip-chainlit
-      Только для `--target native`: не запускать окно Chainlit в native tmux-сессии.
-      Backend-сервисы и Agent API продолжают стартовать как обычно.
+      Совместимый алиас для `--skip-openwebui`.
   --report-only
       Только вывести runtime plan без записи .env.runtime и без запуска.
   --install
@@ -132,8 +136,13 @@ while [ $# -gt 0 ]; do
       NO_ATTACH=true
       shift
       ;;
+    --skip-openwebui)
+      SKIP_OPENWEBUI=true
+      shift
+      ;;
     --skip-chainlit)
-      SKIP_CHAINLIT=true
+      SKIP_OPENWEBUI=true
+      SKIP_CHAINLIT_ALIAS=true
       shift
       ;;
     --report-only)
@@ -438,7 +447,7 @@ INTERACTIVE_REVIEW=false
 if [ "$TARGET" = "container" ] && [ "$REPORT_ONLY" = false ]; then
   if [ "$REVIEW_RUNTIME" = true ]; then
     INTERACTIVE_REVIEW=true
-  elif [ "${AGENT_NAVIGATOR_TEST_MODE:-0}" != "1" ] && [ "$NON_INTERACTIVE" = false ] && [ -t 0 ] && [ -t 1 ]; then
+  elif [ "${LLM_TOOLS_PLATFORM_TEST_MODE:-0}" != "1" ] && [ "$NON_INTERACTIVE" = false ] && [ -t 0 ] && [ -t 1 ]; then
     INTERACTIVE_REVIEW=true
   fi
 fi
@@ -521,14 +530,14 @@ if [ "$ENSURE_MODELS" = true ]; then
   if [ -n "$HF_CACHE" ]; then
     MODEL_ARGS+=("--huggingface-cache=$HF_CACHE")
   fi
-  if [ "${AGENT_NAVIGATOR_TEST_MODE:-0}" = "1" ]; then
+  if [ "${LLM_TOOLS_PLATFORM_TEST_MODE:-0}" = "1" ]; then
     MODEL_ARGS+=("--dry-run")
   fi
   bash "$SCRIPT_DIR/models/install_models.sh" "${MODEL_ARGS[@]}"
 fi
 
-if [ "${AGENT_NAVIGATOR_TEST_MODE:-0}" = "1" ]; then
-  echo "launcher:test-mode target=$TARGET profile=$PROFILE env_runtime=$RUNTIME_ENV_FILE no_attach=$NO_ATTACH skip_chainlit=$SKIP_CHAINLIT"
+if [ "${LLM_TOOLS_PLATFORM_TEST_MODE:-0}" = "1" ]; then
+  echo "launcher:test-mode target=$TARGET profile=$PROFILE env_runtime=$RUNTIME_ENV_FILE no_attach=$NO_ATTACH skip_openwebui=$SKIP_OPENWEBUI skip_chainlit_compat=$SKIP_CHAINLIT_ALIAS"
   exit 0
 fi
 
@@ -537,8 +546,8 @@ if [ "$TARGET" = "native" ]; then
   if [ "$NO_ATTACH" = true ]; then
     native_args+=(--no-attach)
   fi
-  if [ "$SKIP_CHAINLIT" = true ]; then
-    native_args+=(--skip-chainlit)
+  if [ "$SKIP_OPENWEBUI" = true ]; then
+    native_args+=(--skip-openwebui)
   fi
   exec bash "$SCRIPT_DIR/run_native.sh" "${native_args[@]}"
 elif [ "$TARGET" = "container" ]; then

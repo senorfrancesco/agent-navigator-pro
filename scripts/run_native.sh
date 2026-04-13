@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # ===========================================
-# Native launch (host-only, no Docker)
-# Agent Navigator Pro v3.0 (Chainlit + services)
+# Native launch (host backend + `Open WebUI`/`Qdrant`)
+# llm-tools-platform v3.0 (`Open WebUI` как основной UI)
 # ===========================================
 
 if [ -z "${BASH_VERSION:-}" ]; then
@@ -14,8 +14,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BACKEND_DIR="$PROJECT_ROOT/backend"
-ENV_FILE="${AGENT_NAVIGATOR_BACKEND_ENV_FILE:-$BACKEND_DIR/.env}"
-RUNTIME_ENV_FILE="${AGENT_NAVIGATOR_RUNTIME_ENV_FILE:-$BACKEND_DIR/.env.runtime}"
+ENV_FILE="${LLM_TOOLS_PLATFORM_BACKEND_ENV_FILE:-$BACKEND_DIR/.env}"
+RUNTIME_ENV_FILE="${LLM_TOOLS_PLATFORM_RUNTIME_ENV_FILE:-$BACKEND_DIR/.env.runtime}"
 ENV_ROOT="$(dirname "$ENV_FILE")"
 
 # shellcheck disable=SC1091
@@ -23,9 +23,10 @@ source "$SCRIPT_DIR/utils/env_loader.sh"
 
 ATTACH_TMUX=true
 FROM_LAUNCHER=false
-SKIP_CHAINLIT=false
-if [ -n "${AGENT_NAVIGATOR_SKIP_RUNTIME_APPLY+x}" ]; then
-  SKIP_RUNTIME_APPLY="${AGENT_NAVIGATOR_SKIP_RUNTIME_APPLY}"
+SKIP_OPENWEBUI=false
+SKIP_CHAINLIT_ALIAS=false
+if [ -n "${LLM_TOOLS_PLATFORM_SKIP_RUNTIME_APPLY+x}" ]; then
+  SKIP_RUNTIME_APPLY="${LLM_TOOLS_PLATFORM_SKIP_RUNTIME_APPLY}"
   EXPLICIT_RUNTIME_ENV_SELECTION=true
 else
   SKIP_RUNTIME_APPLY=""
@@ -33,17 +34,18 @@ else
 fi
 
 print_help() {
-  cat <<EOF
+  cat <<'EOF'
 run_native.sh
 
-Поднимает native runtime без Docker: tmux-сессию, backend-сервисы, UMS и Chainlit.
+Поднимает native runtime: tmux-сессию и backend-сервисы на host,
+а также `Qdrant` и `Open WebUI` через Docker Compose.
 По умолчанию использует только ручные настройки из backend/.env.
 Оценка железа и рекомендации для backend/.env выполняются отдельно через ./scripts/evaluate_runtime.sh.
 
 Использование:
   ./scripts/run_native.sh
   ./scripts/run_native.sh --no-attach
-  ./scripts/run_native.sh --skip-chainlit --no-attach
+  ./scripts/run_native.sh --skip-openwebui --no-attach
 
 Флаги:
   --from-launcher
@@ -51,9 +53,11 @@ run_native.sh
       и скрипт должен сразу запускать native runtime, а не делегировать обратно.
   --no-attach
       Не подключаться к tmux после запуска; оставить сессию в фоне.
+  --skip-openwebui
+      Не запускать контейнер `Open WebUI`. `Qdrant` и backend-сервисы продолжают
+      стартовать как обычно.
   --skip-chainlit
-      Не запускать окно Chainlit в native tmux-сессии. Backend-сервисы и Agent API
-      продолжают стартовать как обычно.
+      Совместимый алиас для `--skip-openwebui`.
   --skip-runtime-apply
       Явно не загружать backend/.env.runtime для этого запуска.
   --apply-runtime
@@ -64,7 +68,7 @@ run_native.sh
 Примеры:
   ./scripts/run_native.sh
   ./scripts/run_native.sh --no-attach
-  ./scripts/run_native.sh --skip-chainlit --no-attach
+  ./scripts/run_native.sh --skip-openwebui --no-attach
   ./scripts/run_native.sh --apply-runtime
   ./scripts/evaluate_runtime.sh recommend
   ./scripts/evaluate_runtime.sh plan
@@ -83,8 +87,12 @@ for arg in "$@"; do
     --no-attach)
       ATTACH_TMUX=false
       ;;
+    --skip-openwebui)
+      SKIP_OPENWEBUI=true
+      ;;
     --skip-chainlit)
-      SKIP_CHAINLIT=true
+      SKIP_OPENWEBUI=true
+      SKIP_CHAINLIT_ALIAS=true
       ;;
     --skip-runtime-apply)
       SKIP_RUNTIME_APPLY=true
@@ -119,7 +127,7 @@ NC='\033[0m'
 
 ENV_LOADER_PYTHON="$(resolve_env_loader_python || true)"
 
-echo -e "${GREEN}=== Native запуск Agent Navigator Pro (без Docker) ===${NC}"
+echo -e "${GREEN}=== Native запуск llm-tools-platform (host backend + Open WebUI/Qdrant) ===${NC}"
 
 die() {
   echo -e "${RED}$1${NC}" >&2
@@ -190,7 +198,7 @@ ensure_writable_dir() {
   if ! chmod u+rwx "$dir_path" 2>/dev/null; then
     :
   fi
-  local probe_file="$dir_path/.agent_navigator_write_check.$$"
+  local probe_file="$dir_path/.llm_tools_platform_write_check.$$"
   if ! : > "$probe_file" 2>/dev/null; then
     if chmod u+rwx "$dir_path" 2>/dev/null && : > "$probe_file" 2>/dev/null; then
       :
@@ -269,7 +277,6 @@ validate_native_runtime_env() {
   validate_dir_path_var "MODEL_PATH_EMBEDDING_RETRIEVAL"
   UPLOADS_DIR="$(resolve_backend_relative_path "${UPLOADS_DIR:-$BACKEND_DIR/open_webui_uploads}")"
   ensure_writable_dir "${UPLOADS_DIR:-$BACKEND_DIR/open_webui_uploads}" "UPLOADS_DIR"
-  ensure_writable_dir "$BACKEND_DIR/.data" "CHAINLIT_DATA_DIR"
 }
 
 UPLOADS_DIR="${UPLOADS_DIR:-$BACKEND_DIR/open_webui_uploads}"
@@ -279,14 +286,14 @@ AGENT_PORT="${AGENT_API_PORT:-8000}"
 DOC_PORT="${DOC_PORT:-8001}"
 LEGAL_PORT="${LEGAL_PORT:-8002}"
 UMS_PORT="${UMS_PORT:-8090}"
-CHAINLIT_PORT="${CHAINLIT_PORT:-3000}"
+OPENWEBUI_PORT="${OPENWEBUI_PORT:-3001}"
+QDRANT_PORT="${QDRANT_PORT:-6333}"
 
 MCP_DOCUMENT_SERVER_URL="${MCP_DOCUMENT_SERVER_URL:-http://localhost:8001}"
 MCP_LEGAL_SERVER_URL="${MCP_LEGAL_SERVER_URL:-http://localhost:8002}"
 UMS_URL="${UMS_URL:-http://localhost:8090}"
 HOST_UPLOADS_DIR="${HOST_UPLOADS_DIR:-}"
-CHAINLIT_DB_URL="${CHAINLIT_DB_URL:-sqlite+aiosqlite:///$BACKEND_DIR/.data/chainlit.db}"
-CHAINLIT_ENABLE_DATA_LAYER="${CHAINLIT_ENABLE_DATA_LAYER:-true}"
+QDRANT_URL="${QDRANT_URL:-http://127.0.0.1:$QDRANT_PORT}"
 
 first_non_empty() {
   local value=""
@@ -301,7 +308,7 @@ first_non_empty() {
 
 print_startup_config_summary() {
   local config_source="backend/.env"
-  local chainlit_mode="on"
+  local openwebui_mode="on"
   local llm_device_summary=""
   local vlm_device_summary=""
   local intent_device_summary=""
@@ -312,8 +319,8 @@ print_startup_config_summary() {
   if [ "$SKIP_RUNTIME_APPLY" != true ]; then
     config_source="backend/.env + backend/.env.runtime"
   fi
-  if [ "$SKIP_CHAINLIT" = true ]; then
-    chainlit_mode="off"
+  if [ "$SKIP_OPENWEBUI" = true ]; then
+    openwebui_mode="off"
   fi
 
   llm_device_summary="$(first_non_empty "${LLM_DEVICE_MODE:-}" "${DEVICE_MODE:-}")"
@@ -324,9 +331,9 @@ print_startup_config_summary() {
   embed_gpu_summary="$(first_non_empty "${UMS_EMBEDDING_GPU_INDEX:-}")"
 
   echo -e "${BLUE}Конфиг запуска:${NC}"
-  echo "  runtime: source=${config_source} conda=${CONDA_ENV} backend=${BACKEND_MODE:-llama-cpp-python} profile=${UMS_RUNTIME_PROFILE:-adaptive} chainlit=${chainlit_mode}"
+  echo "  runtime: source=${config_source} conda=${CONDA_ENV} backend=${BACKEND_MODE:-llama-cpp-python} profile=${UMS_RUNTIME_PROFILE:-adaptive} qdrant=on openwebui=${openwebui_mode}"
   echo "  placement: llm=${llm_device_summary} vlm=${vlm_device_summary} intent=${intent_device_summary} retrieval=${retrieval_device_summary} llm_gpus=${llm_gpu_summary} embed_gpu=${embed_gpu_summary}"
-  echo "  ports: api=${AGENT_PORT} doc=${DOC_PORT} legal=${LEGAL_PORT} ums=${UMS_PORT} chainlit=${CHAINLIT_PORT}"
+  echo "  ports: api=${AGENT_PORT} doc=${DOC_PORT} legal=${LEGAL_PORT} ums=${UMS_PORT} qdrant=${QDRANT_PORT} openwebui=${OPENWEBUI_PORT}"
 }
 
 render_ums_status_summary() {
@@ -374,7 +381,7 @@ print_ums_status_summary() {
   render_ums_status_summary "$status_json"
 }
 
-if [ "${AGENT_NAVIGATOR_SKIP_CONDA_CHECKS:-0}" != "1" ]; then
+if [ "${LLM_TOOLS_PLATFORM_SKIP_CONDA_CHECKS:-0}" != "1" ]; then
   echo -e "${YELLOW}Активация conda окружения: $CONDA_ENV${NC}"
   if ! command -v conda >/dev/null 2>&1 && [ ! -f "$HOME/miniconda3/etc/profile.d/conda.sh" ] && [ ! -f "$HOME/anaconda3/etc/profile.d/conda.sh" ]; then
     die "env-invalid:CONDA:not-installed"
@@ -390,16 +397,41 @@ fi
 
 print_startup_config_summary
 
-if [ "${AGENT_NAVIGATOR_TEST_MODE:-0}" = "1" ]; then
-  echo "run_native:test-mode validated conda_env=${CONDA_ENV} uploads_dir=${UPLOADS_DIR} skip_chainlit=${SKIP_CHAINLIT}"
+if [ "${LLM_TOOLS_PLATFORM_TEST_MODE:-0}" = "1" ]; then
+  echo "run_native:test-mode validated conda_env=${CONDA_ENV} uploads_dir=${UPLOADS_DIR} skip_openwebui=${SKIP_OPENWEBUI} skip_chainlit_compat=${SKIP_CHAINLIT_ALIAS}"
   exit 0
 fi
+
+ensure_docker_compose() {
+  command -v docker >/dev/null 2>&1 || die "missing:docker"
+  docker compose version >/dev/null 2>&1 || die "missing:docker-compose"
+}
+
+normalize_native_qdrant_url() {
+  local current_value="$1"
+  if [ -z "$current_value" ]; then
+    printf 'http://127.0.0.1:%s\n' "$QDRANT_PORT"
+    return 0
+  fi
+  if printf '%s' "$current_value" | grep -Eq '://qdrant(:|/|$)'; then
+    printf 'http://127.0.0.1:%s\n' "$QDRANT_PORT"
+    return 0
+  fi
+  printf '%s\n' "$current_value"
+}
+
+ensure_docker_compose
+QDRANT_URL="$(normalize_native_qdrant_url "${QDRANT_URL:-}")"
 
 if ! command -v tmux &> /dev/null; then
   die "missing:tmux"
 fi
 
-SESSION_NAME="agent-navigator-native"
+if [ "$SKIP_CHAINLIT_ALIAS" = true ]; then
+  warn "Флаг --skip-chainlit устарел; используйте --skip-openwebui."
+fi
+
+SESSION_NAME="llm-tools-platform-native"
 echo -e "${YELLOW}Завершение существующей native tmux сессии и runtime-процессов...${NC}"
 "$SCRIPT_DIR/stop_native.sh" >/dev/null 2>&1 || true
 
@@ -494,6 +526,14 @@ echo -e "${YELLOW}Проверка и запуск сервисов...${NC}"
 
 SERVICES_OK=true
 
+# 0) Qdrant
+echo -e "${GREEN}Запуск Qdrant через Docker Compose на порту $QDRANT_PORT...${NC}"
+(
+  cd "$PROJECT_ROOT"
+  docker compose up --no-build -d qdrant
+)
+wait_for_service "Qdrant" "$QDRANT_PORT" "/collections" 30 || SERVICES_OK=false
+
 # 1) Document Server
 echo -e "${GREEN}Запуск Document Server на порту $DOC_PORT...${NC}"
 start_tmux_window "doc-server" "cd $BACKEND_DIR/services/document_server && $ACTIVATE_CMD && export PYTHONPATH='$BACKEND_DIR' && uvicorn mcp_document_server:app --host 0.0.0.0 --port $DOC_PORT 2>&1 | tee doc-server.log"
@@ -526,23 +566,26 @@ fi
 # 4) Agent API
 if [ "$UMS_INFER_READY" = true ]; then
   echo -e "${GREEN}Запуск Agent API на порту $AGENT_PORT...${NC}"
-  start_tmux_window "agent-api" "cd $BACKEND_DIR/orchestrator && $ACTIVATE_CMD && export MCP_DOCUMENT_SERVER_URL='$MCP_DOCUMENT_SERVER_URL' MCP_LEGAL_SERVER_URL='$MCP_LEGAL_SERVER_URL' UMS_URL='$UMS_URL' UPLOADS_DIR='$UPLOADS_DIR' HOST_UPLOADS_DIR='$HOST_UPLOADS_DIR' CHAINLIT_DB_URL='$CHAINLIT_DB_URL' && python agent_api.py 2>&1 | tee agent-api.log"
+  start_tmux_window "agent-api" "cd $BACKEND_DIR/orchestrator && $ACTIVATE_CMD && export MCP_DOCUMENT_SERVER_URL='$MCP_DOCUMENT_SERVER_URL' MCP_LEGAL_SERVER_URL='$MCP_LEGAL_SERVER_URL' UMS_URL='$UMS_URL' QDRANT_URL='$QDRANT_URL' UPLOADS_DIR='$UPLOADS_DIR' HOST_UPLOADS_DIR='$HOST_UPLOADS_DIR' && python agent_api.py 2>&1 | tee agent-api.log"
   wait_for_service "Agent API" "$AGENT_PORT" "/health" 30 || SERVICES_OK=false
 
-  # 5) Chainlit (native)
-  if [ "$SKIP_CHAINLIT" = true ]; then
-    echo -e "${YELLOW}Пропуск запуска Chainlit (--skip-chainlit).${NC}"
+  # 5) Open WebUI (Docker)
+  if [ "$SKIP_OPENWEBUI" = true ]; then
+    echo -e "${YELLOW}Пропуск запуска Open WebUI (--skip-openwebui).${NC}"
   else
-    echo -e "${GREEN}Запуск Chainlit (native) на порту $CHAINLIT_PORT...${NC}"
-    start_tmux_window "chainlit" "cd $BACKEND_DIR/orchestrator && $ACTIVATE_CMD && export MCP_DOCUMENT_SERVER_URL='$MCP_DOCUMENT_SERVER_URL' MCP_LEGAL_SERVER_URL='$MCP_LEGAL_SERVER_URL' UMS_URL='$UMS_URL' UPLOADS_DIR='$UPLOADS_DIR' HOST_UPLOADS_DIR='$HOST_UPLOADS_DIR' CHAINLIT_DB_URL='$CHAINLIT_DB_URL' CHAINLIT_ENABLE_DATA_LAYER='$CHAINLIT_ENABLE_DATA_LAYER' && chainlit run chainlit_app.py --host 0.0.0.0 --port $CHAINLIT_PORT 2>&1 | tee chainlit.log"
-    wait_for_service "Chainlit UI" "$CHAINLIT_PORT" "/" 60 || SERVICES_OK=false
+    echo -e "${GREEN}Запуск Open WebUI через Docker Compose на порту $OPENWEBUI_PORT...${NC}"
+    (
+      cd "$PROJECT_ROOT"
+      docker compose up --no-build --no-deps -d open-webui
+    )
+    wait_for_service "Open WebUI" "$OPENWEBUI_PORT" "/health" 60 || SERVICES_OK=false
   fi
 else
-  echo -e "${YELLOW}Пропуск запуска Agent API и Chainlit: UMS infer-ready не подтвержден.${NC}"
+  echo -e "${YELLOW}Пропуск запуска Agent API и Open WebUI: UMS infer-ready не подтвержден.${NC}"
 fi
 
 # 6) Monitor
-start_tmux_window "monitor" "cd $BACKEND_DIR && echo 'Native mode: logs in tmux windows' && (htop 2>/dev/null || top)"
+start_tmux_window "monitor" "cd $PROJECT_ROOT && echo 'Native mode: backend на host, Qdrant и Open WebUI через Docker Compose' && (docker compose ps || true) && (htop 2>/dev/null || top)"
 
 if [ "$SERVICES_OK" = true ]; then
   SYSTEM_STATUS="${GREEN}ГОТОВА К РАБОТЕ${NC}"
@@ -552,15 +595,16 @@ fi
 
 echo ""
 echo -e "${GREEN}╔════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║      Agent Navigator Pro v3.0 (Native Dev)               ║${NC}"
+echo -e "${GREEN}║      llm-tools-platform v3.0 (Native Dev)               ║${NC}"
 echo -e "${GREEN}╠════════════════════════════════════════════════════════════╣${NC}"
 echo -e "${GREEN}║${NC} Статус:          $SYSTEM_STATUS"
 echo -e "${GREEN}║${NC} tmux сессия:     ${YELLOW}$SESSION_NAME${NC}"
-if [ "$SKIP_CHAINLIT" = true ]; then
-  echo -e "${GREEN}║${NC} Chainlit UI:     ${YELLOW}пропущен (--skip-chainlit)${NC}"
+if [ "$SKIP_OPENWEBUI" = true ]; then
+  echo -e "${GREEN}║${NC} Open WebUI:      ${YELLOW}пропущен (--skip-openwebui)${NC}"
 else
-  echo -e "${GREEN}║${NC} Chainlit UI:     ${YELLOW}http://localhost:$CHAINLIT_PORT${NC}"
+  echo -e "${GREEN}║${NC} Open WebUI:      ${YELLOW}http://localhost:$OPENWEBUI_PORT${NC}"
 fi
+echo -e "${GREEN}║${NC} Qdrant:          ${YELLOW}http://localhost:$QDRANT_PORT${NC}"
 echo -e "${GREEN}║${NC} Agent API:       ${YELLOW}http://localhost:$AGENT_PORT${NC}"
 echo -e "${GREEN}║${NC} Document Server: ${YELLOW}http://localhost:$DOC_PORT${NC}"
 echo -e "${GREEN}║${NC} Legal Server:    ${YELLOW}http://localhost:$LEGAL_PORT${NC}"

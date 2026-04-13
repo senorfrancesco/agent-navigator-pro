@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# Полный скрипт установки Agent Navigator Pro для Ubuntu
+# Полный скрипт установки llm-tools-platform для Ubuntu
 # Устанавливает: системные зависимости, tmux, Anaconda,
 # Python окружение и все библиотеки
 # ============================================================
@@ -60,11 +60,11 @@ Docker guidance и печатает дальнейшие шаги по launcher/
       Показать эту справку.
 
 Переменные окружения:
-  AGENT_NAVIGATOR_ASSUME_YES=1
+  LLM_TOOLS_PLATFORM_ASSUME_YES=1
       Автоматически отвечать "yes" на интерактивные подтверждения.
-  AGENT_NAVIGATOR_INSTALL_PROFILE
+  LLM_TOOLS_PLATFORM_INSTALL_PROFILE
       Профиль install-path, который передают wrapper-скрипты install.sh.
-  AGENT_NAVIGATOR_TEST_MODE=1
+  LLM_TOOLS_PLATFORM_TEST_MODE=1
       Тестовый режим для install wrappers; сам heavy install не запускается.
 EOF
     exit 0
@@ -78,7 +78,7 @@ prompt_yes_no() {
     local prompt="$1"
     local default="${2:-n}"
 
-    if [[ "${AGENT_NAVIGATOR_ASSUME_YES:-0}" == "1" ]]; then
+    if [[ "${LLM_TOOLS_PLATFORM_ASSUME_YES:-0}" == "1" ]]; then
         return 0
     fi
 
@@ -345,11 +345,11 @@ upsert_managed_block() {
 
 configure_shell_environment() {
     local bashrc_path="$HOME/.bashrc"
-    local block_name="Agent Navigator managed env"
+    local block_name="llm-tools-platform managed env"
     local block_content
 
     read -r -d '' block_content <<EOF || true
-agent_nav_prepend_path() {
+llm_tools_platform_prepend_path() {
     case ":\$PATH:" in
         *":\$1:"*) ;;
         *) PATH="\$1:\$PATH" ;;
@@ -362,7 +362,7 @@ cleanup_miniconda_installer() {
     fi
 }
 
-agent_nav_prepend_ld_path() {
+llm_tools_platform_prepend_ld_path() {
     case ":\${LD_LIBRARY_PATH:-}:" in
         *":\$1:"*) ;;
         *)
@@ -376,10 +376,10 @@ agent_nav_prepend_ld_path() {
 }
 
 if [ -d "\$HOME/miniconda3/bin" ]; then
-    agent_nav_prepend_path "\$HOME/miniconda3/bin"
+    llm_tools_platform_prepend_path "\$HOME/miniconda3/bin"
 fi
 if [ -d "\$HOME/anaconda3/bin" ]; then
-    agent_nav_prepend_path "\$HOME/anaconda3/bin"
+    llm_tools_platform_prepend_path "\$HOME/anaconda3/bin"
 fi
 if [ -f "\$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
     source "\$HOME/miniconda3/etc/profile.d/conda.sh"
@@ -390,25 +390,25 @@ elif [ -f "\$HOME/anaconda3/etc/profile.d/conda.sh" ]; then
 fi
 
 if [ -d "/usr/local/cuda/bin" ]; then
-    agent_nav_prepend_path "/usr/local/cuda/bin"
+    llm_tools_platform_prepend_path "/usr/local/cuda/bin"
 fi
 if [ -d "/usr/local/cuda/lib64" ]; then
-    agent_nav_prepend_ld_path "/usr/local/cuda/lib64"
+    llm_tools_platform_prepend_ld_path "/usr/local/cuda/lib64"
 fi
 if [ -d "$LLAMA_CPP_BUILD_DIR/bin" ]; then
-    agent_nav_prepend_path "$LLAMA_CPP_BUILD_DIR/bin"
-    agent_nav_prepend_ld_path "$LLAMA_CPP_BUILD_DIR/bin"
+    llm_tools_platform_prepend_path "$LLAMA_CPP_BUILD_DIR/bin"
+    llm_tools_platform_prepend_ld_path "$LLAMA_CPP_BUILD_DIR/bin"
 fi
 
 export PATH
 export LD_LIBRARY_PATH
-unset -f agent_nav_prepend_path
-unset -f agent_nav_prepend_ld_path
+unset -f llm_tools_platform_prepend_path
+unset -f llm_tools_platform_prepend_ld_path
 EOF
 
-    if prompt_yes_no "Добавить managed Agent Navigator block в ~/.bashrc для conda base, CUDA toolkit и llama.cpp paths?" "y"; then
+    if prompt_yes_no "Добавить managed llm-tools-platform block в ~/.bashrc для conda base, CUDA toolkit и llama.cpp paths?" "y"; then
         upsert_managed_block "$bashrc_path" "$block_name" "$block_content"
-        echo -e "${GREEN}[OK]${NC} Обновлён ~/.bashrc managed-block для Agent Navigator"
+        echo -e "${GREEN}[OK]${NC} Обновлён ~/.bashrc managed-block для llm-tools-platform"
         echo "Чтобы применить сейчас:"
         echo "  source ~/.bashrc"
     else
@@ -477,13 +477,13 @@ install_managed_config() {
 }
 
 echo -e "${BLUE}============================================================${NC}"
-echo -e "${BLUE}Agent Navigator Pro - Полная установка для Ubuntu${NC}"
+echo -e "${BLUE}llm-tools-platform - Полная установка для Ubuntu${NC}"
 echo -e "${BLUE}============================================================${NC}"
 echo ""
 echo -e "${YELLOW}После установки canonical runtime entrypoint: ./scripts/launcher.sh${NC}"
 echo ""
 
-if ! prompt_yes_no "Начать guided установку зависимостей для Agent Navigator?" "y"; then
+if ! prompt_yes_no "Начать guided установку зависимостей для llm-tools-platform?" "y"; then
     echo -e "${YELLOW}[INFO]${NC} Установка отменена пользователем."
     exit 0
 fi
@@ -786,7 +786,7 @@ else
         exit 1
     fi
 
-    MINICONDA_INSTALLER_TMP="$(mktemp "${TMPDIR:-/tmp}/agent-nav-miniconda-XXXXXX.sh")"
+    MINICONDA_INSTALLER_TMP="$(mktemp "${TMPDIR:-/tmp}/llm-tools-platform-miniconda-XXXXXX.sh")"
     trap cleanup_miniconda_installer EXIT
 
     echo "Скачивание Miniconda для $ARCH..."
@@ -1090,8 +1090,8 @@ echo "   ./scripts/launcher.sh --target native"
 echo ""
 echo -e "5. ${BLUE}При необходимости используйте дополнительные сценарии запуска:${NC}"
 echo "   ./scripts/run_native.sh"
-echo "   ./scripts/run_all.sh"
-echo "   docker compose --profile legacy up -d open-webui   # основной Open WebUI path"
+echo "   ./scripts/run_all.sh                              # container path с Open WebUI и Qdrant"
+echo "   docker compose up -d open-webui                  # только Open WebUI, если backend уже запущен отдельно"
 echo ""
 echo -e "6. ${BLUE}Откройте браузер:${NC}"
 echo "   http://localhost:3001"
@@ -1101,7 +1101,7 @@ echo "   - README.md - Основная документация"
 echo "   - INSTALLATION.md - Руководство по установке"
 echo ""
 echo -e "${YELLOW}Полезные команды:${NC}"
-echo "   - tmux attach -t agent-navigator-native  # Подключиться к native сессии"
+echo "   - tmux attach -t llm-tools-platform-native  # Подключиться к native сессии"
 echo "   - ./scripts/stop_native.sh               # Остановить native runtime"
 echo "   - ./scripts/stop_all.sh                  # Остановить compose/container path"
 echo ""

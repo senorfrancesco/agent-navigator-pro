@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.backend
-    container_name: agent-nav-agent-api
+    container_name: llm-tools-platform-agent-api
     env_file:
       - path: ./backend/.env
         required: true
@@ -16,6 +16,7 @@ services:
       - MCP_DOCUMENT_SERVER_URL=${AGENT_API_MCP_DOCUMENT_SERVER_URL:-http://document-server:8001}
       - MCP_LEGAL_SERVER_URL=${AGENT_API_MCP_LEGAL_SERVER_URL:-http://legal-server:8002}
       - HOST_UPLOADS_DIR=/app/backend/open_webui_uploads
+      - QDRANT_URL=http://qdrant:6333
     volumes:
       - ./backend/open_webui_uploads:/app/backend/open_webui_uploads
       - ./backend/models:/app/backend/models
@@ -40,14 +41,21 @@ services:
       retries: 20
       start_period: 20s
     restart: unless-stopped
-    profiles:
-      - backend
+    depends_on:
+      qdrant:
+        condition: service_started
+      document-server:
+        condition: service_healthy
+      legal-server:
+        condition: service_healthy
+      ums:
+        condition: service_healthy
 
   document-server:
     build:
       context: .
       dockerfile: Dockerfile.backend
-    container_name: agent-nav-document-server
+    container_name: llm-tools-platform-document-server
     env_file:
       - path: ./backend/.env
         required: true
@@ -79,14 +87,12 @@ services:
       retries: 20
       start_period: 20s
     restart: unless-stopped
-    profiles:
-      - backend
 
   legal-server:
     build:
       context: .
       dockerfile: Dockerfile.backend
-    container_name: agent-nav-legal-server
+    container_name: llm-tools-platform-legal-server
     env_file:
       - path: ./backend/.env
         required: true
@@ -118,14 +124,12 @@ services:
       retries: 20
       start_period: 20s
     restart: unless-stopped
-    profiles:
-      - backend
 
   ums:
     build:
       context: .
       dockerfile: Dockerfile.backend
-    container_name: agent-nav-ums
+    container_name: llm-tools-platform-ums
     env_file:
       - path: ./backend/.env
         required: true
@@ -149,8 +153,16 @@ services:
       retries: 30
       start_period: 30s
     restart: unless-stopped
-    profiles:
-      - backend
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: llm-tools-platform-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    restart: unless-stopped
 
   # --- Open WebUI ---
   open-webui:
@@ -158,7 +170,7 @@ services:
     container_name: open-webui
     entrypoint:
       - /bin/bash
-      - /agent-nav-patch/entrypoint.sh
+      - /llm-tools-platform-patch/entrypoint.sh
     ports:
       - "3001:8080"
     env_file:
@@ -169,7 +181,7 @@ services:
     volumes:
       - open-webui:/app/backend/data
       - ./backend/open_webui_uploads:/app/backend/data/uploads
-      - ./deploy/openwebui_legacy_patch:/agent-nav-patch:ro
+      - ./deploy/openwebui_legacy_patch:/llm-tools-platform-patch:ro
     environment:
       - OPENAI_API_BASE_URL=http://host.docker.internal:8000/v1
       - OPENAI_API_KEY=sk-dummy
@@ -177,13 +189,23 @@ services:
       - HF_HUB_OFFLINE=1
       - ENABLE_RAG_WEB_SEARCH=False
       - ENABLE_RAG_LOCAL_WEB_FETCH=False
-      #- WEBUI_NAME=Agent Navigator
-      # Отключаем встроенный RAG, так как он требует загрузки моделей из интернета
-      - RAG_EMBEDDING_ENGINE=
+      - VECTOR_DB=qdrant
+      - QDRANT_URI=http://host.docker.internal:6333
+      - ENABLE_QDRANT_MULTITENANCY_MODE=true
+      - QDRANT_COLLECTION_PREFIX=anp-openwebui
+      - RAG_EMBEDDING_ENGINE=openai
+      - RAG_OPENAI_API_BASE_URL=http://host.docker.internal:8090/v1
+      - RAG_OPENAI_API_KEY=sk-dummy
+      - RAG_EMBEDDING_MODEL=labse-embedding
       - RAG_RERANKING_ENGINE=
     restart: always
-    profiles:
-      - legacy
+    depends_on:
+      qdrant:
+        condition: service_started
+      agent-api:
+        condition: service_healthy
+      ums:
+        condition: service_healthy
 
   # --- Chainlit UI ---
   chainlit:
@@ -204,7 +226,7 @@ services:
       - ./backend/open_webui_uploads:/app/uploads
       - chainlit-data:/app/orchestrator/.data
     environment:
-      - CHAINLIT_AUTH_SECRET=${CHAINLIT_AUTH_SECRET:-agent-navigator-secret-key-change-me}
+      - CHAINLIT_AUTH_SECRET=${CHAINLIT_AUTH_SECRET:-llm-tools-platform-secret-key-change-me}
       - CHAINLIT_ADMIN_USER=${CHAINLIT_ADMIN_USER:-admin}
       - CHAINLIT_ADMIN_PASSWORD=${CHAINLIT_ADMIN_PASSWORD:-admin}
       - CHAINLIT_DB_URL=${CHAINLIT_DB_URL:-sqlite+aiosqlite:///app/orchestrator/.data/chainlit.db}
@@ -229,10 +251,12 @@ services:
       ums:
         condition: service_healthy
         required: false
+    profiles:
+      - compat
 
   vllm:
     image: ${VLLM_IMAGE:-vllm/vllm-openai:latest}
-    container_name: agent-nav-vllm
+    container_name: llm-tools-platform-vllm
     profiles:
       - vllm
     ports:
@@ -248,11 +272,11 @@ services:
       - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
     volumes:
       - ./backend/models:/models
-      - ./scripts/run_vllm_service.sh:/opt/agent-navigator/run_vllm_service.sh:ro
+      - ./scripts/run_vllm_service.sh:/opt/llm-tools-platform/run_vllm_service.sh:ro
       - vllm-cache:/root/.cache/huggingface
     entrypoint:
       - /bin/bash
-      - /opt/agent-navigator/run_vllm_service.sh
+      - /opt/llm-tools-platform/run_vllm_service.sh
     healthcheck:
       test:
         - CMD-SHELL
@@ -267,7 +291,7 @@ services:
 
   prometheus:
     image: prom/prometheus:latest
-    container_name: agent-nav-prometheus
+    container_name: llm-tools-platform-prometheus
     ports:
       - "9090:9090"
     extra_hosts:
@@ -282,7 +306,7 @@ services:
 
   grafana:
     image: grafana/grafana:latest
-    container_name: agent-nav-grafana
+    container_name: llm-tools-platform-grafana
     ports:
       - "3002:3000"
     depends_on:
@@ -303,3 +327,4 @@ volumes:
   open-webui: {}
   chainlit-data: {}
   vllm-cache: {}
+  qdrant-data: {}

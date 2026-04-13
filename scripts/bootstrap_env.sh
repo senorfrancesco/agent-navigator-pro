@@ -4,10 +4,10 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-BACKEND_ENV_FILE="${AGENT_NAVIGATOR_BACKEND_ENV_FILE:-$PROJECT_ROOT/backend/.env}"
-BACKEND_ENV_TEMPLATE_FILE="${AGENT_NAVIGATOR_BACKEND_ENV_TEMPLATE_FILE:-$PROJECT_ROOT/backend/.env.example}"
+BACKEND_ENV_FILE="${LLM_TOOLS_PLATFORM_BACKEND_ENV_FILE:-$PROJECT_ROOT/backend/.env}"
+BACKEND_ENV_TEMPLATE_FILE="${LLM_TOOLS_PLATFORM_BACKEND_ENV_TEMPLATE_FILE:-$PROJECT_ROOT/backend/.env.example}"
 INSTALL_COORDINATOR_SCRIPT="$SCRIPT_DIR/install/install.sh"
-DEFAULT_CHAINLIT_AUTH_SECRET="agent-navigator-secret-key-change-me"
+DEFAULT_CHAINLIT_AUTH_SECRET="llm-tools-platform-secret-key-change-me"
 
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/utils/env_loader.sh"
@@ -207,7 +207,7 @@ source_backend_env
 ensure_chainlit_auth_secret "$env_created"
 source_backend_env
 
-if [ "${AGENT_NAVIGATOR_TEST_MODE:-0}" = "1" ] && [ "$MODE" != "install" ]; then
+if [ "${LLM_TOOLS_PLATFORM_TEST_MODE:-0}" = "1" ] && [ "$MODE" != "install" ]; then
   echo "bootstrap:test-mode mode=$MODE target=$TARGET platform=$PLATFORM"
   exit 0
 fi
@@ -224,7 +224,7 @@ check_cmd() {
   fi
 }
 
-if [ "${AGENT_NAVIGATOR_SKIP_COMMAND_CHECKS:-0}" != "1" ]; then
+if [ "${LLM_TOOLS_PLATFORM_SKIP_COMMAND_CHECKS:-0}" != "1" ]; then
   check_cmd "tmux" "tmux"
   if ! command -v python >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
     echo "missing:python"
@@ -257,8 +257,8 @@ check_secret() {
   fi
 }
 
-if [ "${AGENT_NAVIGATOR_ALLOW_INSECURE_DEFAULTS:-0}" != "1" ]; then
-  check_secret "CHAINLIT_AUTH_SECRET" "agent-navigator-secret-key-change-me"
+if [ "${LLM_TOOLS_PLATFORM_ALLOW_INSECURE_DEFAULTS:-0}" != "1" ]; then
+  check_secret "CHAINLIT_AUTH_SECRET" "llm-tools-platform-secret-key-change-me"
   check_secret "CHAINLIT_ADMIN_PASSWORD" "admin"
   check_secret "GF_SECURITY_ADMIN_PASSWORD" "change-me-grafana"
 fi
@@ -269,7 +269,7 @@ if [ "$missing" -ne 0 ]; then
 fi
 
 if [ "$security_failed" -ne 0 ]; then
-  echo "Bootstrap security check failed. Replace default secrets in backend/.env or set AGENT_NAVIGATOR_ALLOW_INSECURE_DEFAULTS=1 only for local/dev." >&2
+  echo "Bootstrap security check failed. Replace default secrets in backend/.env or set LLM_TOOLS_PLATFORM_ALLOW_INSECURE_DEFAULTS=1 only for local/dev." >&2
   exit 1
 fi
 

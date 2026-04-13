@@ -2,25 +2,26 @@
 
 # ===========================================
 # Скрипт для запуска всех компонентов системы
-# Agent Navigator Pro v3.0 (Chainlit as compatibility UI)
+# llm-tools-platform v3.0 (`Open WebUI` как основной UI, `Qdrant` как векторное хранилище)
 # ===========================================
 # Использует tmux для управления несколькими процессами
-# Chainlit запускается через Docker как совместимый UI (порт 3000)
+# `Open WebUI` запускается через Docker как основной UI (порт 3001)
+# `Chainlit` здесь не стартует и остаётся совместимым/отладочным путём
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BACKEND_DIR="$PROJECT_ROOT/backend"
-ENV_FILE="${AGENT_NAVIGATOR_BACKEND_ENV_FILE:-$BACKEND_DIR/.env}"
-RUNTIME_ENV_FILE="${AGENT_NAVIGATOR_RUNTIME_ENV_FILE:-$BACKEND_DIR/.env.runtime}"
+ENV_FILE="${LLM_TOOLS_PLATFORM_BACKEND_ENV_FILE:-$BACKEND_DIR/.env}"
+RUNTIME_ENV_FILE="${LLM_TOOLS_PLATFORM_RUNTIME_ENV_FILE:-$BACKEND_DIR/.env.runtime}"
 
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/utils/env_loader.sh"
 
 ATTACH_TMUX=true
 FROM_LAUNCHER=false
-SKIP_RUNTIME_APPLY="${AGENT_NAVIGATOR_SKIP_RUNTIME_APPLY:-true}"
+SKIP_RUNTIME_APPLY="${LLM_TOOLS_PLATFORM_SKIP_RUNTIME_APPLY:-true}"
 
 EXTERNAL_BACKEND_MODE="${BACKEND_MODE:-}"
 EXTERNAL_VLLM_BASE_URL="${VLLM_BASE_URL:-}"
@@ -33,8 +34,9 @@ print_help() {
   cat <<EOF
 run_all.sh
 
-Поднимает container/compose runtime для текущего compose-стека с совместимым `Chainlit`.
-При прямом вызове считается совместимым entrypoint и делегирует в launcher.sh.
+Поднимает container/compose runtime для текущего compose-стека с `Open WebUI`
+и backend `Qdrant` для поиска по знаниям и документам сеанса.
+При прямом вызове считается совместимой точкой запуска и делегирует в `launcher.sh`.
 
 Использование:
   ./scripts/run_all.sh
@@ -97,7 +99,7 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-echo -e "${GREEN}=== Запуск системы Agent Navigator Pro v3.0 (Chainlit as compatibility UI) ===${NC}"
+echo -e "${GREEN}=== Запуск системы llm-tools-platform v3.0 (Open WebUI как основной UI, Qdrant как векторное хранилище) ===${NC}"
 
 # -------------------------------------------
 # Загрузка переменных окружения из .env
@@ -130,26 +132,26 @@ fi
 
 BACKEND_MODE_RESOLVED="${BACKEND_MODE:-llama-cpp-python}"
 VLLM_ENABLED=false
-COMPOSE_PROFILE_ARGS=("--profile" "backend")
-COMPOSE_LOG_TARGETS=("agent-api" "document-server" "legal-server" "ums" "chainlit")
-COMPOSE_PROFILE_TEXT="--profile backend"
-COMPOSE_SERVICES_TEXT="agent-api document-server legal-server ums chainlit"
+COMPOSE_PROFILE_ARGS=()
+COMPOSE_LOG_TARGETS=("qdrant" "agent-api" "document-server" "legal-server" "ums" "open-webui")
+COMPOSE_PROFILE_TEXT="(none)"
+COMPOSE_SERVICES_TEXT="qdrant agent-api document-server legal-server ums open-webui"
 COMPOSE_UP_MODE_TEXT="--no-build"
-PHASE1_SERVICES=("document-server" "legal-server" "ums")
-PHASE2_SERVICES=("agent-api" "chainlit")
+PHASE1_SERVICES=("qdrant" "document-server" "legal-server" "ums")
+PHASE2_SERVICES=("agent-api" "open-webui")
 VLLM_PORT="${VLLM_PORT:-8101}"
 VLLM_SERVED_MODEL_ID="${VLLM_MODEL_ID_QWEN_14B_LLM:-qwen-14b-llm}"
 
 if [ "$BACKEND_MODE_RESOLVED" = "vllm" ]; then
     VLLM_ENABLED=true
-    COMPOSE_PROFILE_ARGS=("--profile" "backend" "--profile" "vllm")
-    COMPOSE_LOG_TARGETS=("agent-api" "document-server" "legal-server" "ums" "chainlit" "vllm")
-    COMPOSE_PROFILE_TEXT="--profile backend --profile vllm"
-    COMPOSE_SERVICES_TEXT="agent-api document-server legal-server ums chainlit vllm"
-    PHASE1_SERVICES=("document-server" "legal-server" "ums" "vllm")
+    COMPOSE_PROFILE_ARGS=("--profile" "vllm")
+    COMPOSE_LOG_TARGETS=("qdrant" "agent-api" "document-server" "legal-server" "ums" "open-webui" "vllm")
+    COMPOSE_PROFILE_TEXT="--profile vllm"
+    COMPOSE_SERVICES_TEXT="qdrant agent-api document-server legal-server ums open-webui vllm"
+    PHASE1_SERVICES=("qdrant" "document-server" "legal-server" "ums" "vllm")
 fi
 
-if [ "${AGENT_NAVIGATOR_TEST_MODE:-0}" = "1" ]; then
+if [ "${LLM_TOOLS_PLATFORM_TEST_MODE:-0}" = "1" ]; then
     echo "run_all:test-mode backend_mode=$BACKEND_MODE_RESOLVED compose_profiles=$COMPOSE_PROFILE_TEXT compose_up_mode=$COMPOSE_UP_MODE_TEXT phase1_services=${PHASE1_SERVICES[*]} phase2_services=${PHASE2_SERVICES[*]} attach_tmux=$ATTACH_TMUX"
     exit 0
 fi
@@ -167,7 +169,7 @@ fi
 # -------------------------------------------
 # Создаем новую tmux сессию
 # -------------------------------------------
-SESSION_NAME="agent-navigator"
+SESSION_NAME="llm-tools-platform"
 echo -e "${YELLOW}Завершение существующих tmux/runtime/docker процессов...${NC}"
 "$SCRIPT_DIR/stop_all.sh" >/dev/null 2>&1 || true
 
@@ -178,7 +180,8 @@ AGENT_PORT="${AGENT_API_PORT:-8000}"
 DOC_PORT=8001
 LEGAL_PORT=8002
 UMS_PORT="${UMS_PORT:-8090}"
-CHAINLIT_PORT=3000
+OPENWEBUI_PORT=3001
+QDRANT_PORT=6333
 
 # -------------------------------------------
 # Функция ожидания готовности сервиса
@@ -293,17 +296,20 @@ echo -e "${YELLOW}Проверка и запуск сервисов...${NC}"
 SERVICES_OK=true
 
 echo -e "${GREEN}Запуск backend services через Docker Compose...${NC}"
-COMPOSE_ENV_PREFIX="CHAINLIT_UMS_URL=http://ums:$UMS_PORT CHAINLIT_DOC_SERVER_URL=http://document-server:$DOC_PORT CHAINLIT_LEGAL_SERVER_URL=http://legal-server:$LEGAL_PORT CHAINLIT_MCP_DOCUMENT_SERVER_URL=http://document-server:$DOC_PORT CHAINLIT_MCP_LEGAL_SERVER_URL=http://legal-server:$LEGAL_PORT"
+COMPOSE_ENV_PREFIX=""
 cd "$PROJECT_ROOT"
 env $COMPOSE_ENV_PREFIX docker compose "${COMPOSE_PROFILE_ARGS[@]}" up --no-build -d "${PHASE1_SERVICES[@]}"
 
-# 1) Document Server
+# 1) Qdrant
+wait_for_service "Qdrant" "$QDRANT_PORT" "/collections" 30 || SERVICES_OK=false
+
+# 2) Document Server
 wait_for_service "Document Server" "$DOC_PORT" "/health" 60 || SERVICES_OK=false
 
-# 2) Legal Server
+# 3) Legal Server
 wait_for_service "Legal Server" "$LEGAL_PORT" "/health" 60 || SERVICES_OK=false
 
-# 3) UMS
+# 4) UMS
 wait_for_service "UMS" "$UMS_PORT" "/health" 120 || SERVICES_OK=false
 
 echo ""
@@ -319,26 +325,26 @@ if [ "$UMS_INFER_READY" = false ]; then
 fi
 
 if [ "$UMS_INFER_READY" = true ]; then
-    env $COMPOSE_ENV_PREFIX docker compose "${COMPOSE_PROFILE_ARGS[@]}" up --no-build -d "${PHASE2_SERVICES[@]}"
+    env $COMPOSE_ENV_PREFIX docker compose "${COMPOSE_PROFILE_ARGS[@]}" up --no-build --no-deps -d "${PHASE2_SERVICES[@]}"
 
-    # 4) Agent API
+    # 5) Agent API
     wait_for_service "Agent API" "$AGENT_PORT" "/health" 30 || SERVICES_OK=false
 
-    # 5) Chainlit UI (Docker)
+    # 6) Open WebUI (Docker)
     if [ "$VLLM_ENABLED" = true ]; then
         wait_for_service "vLLM" "$VLLM_PORT" "/health" 180 || SERVICES_OK=false
     fi
-    wait_for_service "Chainlit UI" "$CHAINLIT_PORT" "/" 60 || SERVICES_OK=false
+    wait_for_service "Open WebUI" "$OPENWEBUI_PORT" "/health" 60 || SERVICES_OK=false
 else
-    echo -e "${YELLOW}Пропуск запуска Agent API и Chainlit: UMS infer-ready не подтвержден.${NC}"
+    echo -e "${YELLOW}Пропуск запуска Agent API и Open WebUI: UMS infer-ready не подтвержден.${NC}"
 fi
 
-CHAINLIT_COMPOSE_CMD="cd $PROJECT_ROOT && env $COMPOSE_ENV_PREFIX docker compose ${COMPOSE_PROFILE_ARGS[*]} logs -f ${COMPOSE_LOG_TARGETS[*]}"
-start_tmux_window "backend-compose" "$CHAINLIT_COMPOSE_CMD"
+COMPOSE_LOG_CMD="cd $PROJECT_ROOT && env $COMPOSE_ENV_PREFIX docker compose ${COMPOSE_PROFILE_ARGS[*]} logs -f ${COMPOSE_LOG_TARGETS[*]}"
+start_tmux_window "backend-compose" "$COMPOSE_LOG_CMD"
 
-# 6) Monitor/Logs
+# 7) Monitor/Logs
 echo -e "${GREEN}Открытие окна мониторинга...${NC}"
-start_tmux_window "monitor" "cd $PROJECT_ROOT && echo -e '${GREEN}Compose backend stack запущен.${NC}\nДля остановки используйте ${YELLOW}docker compose down${NC} или завершите tmux сессию.' && (docker compose ps || true) && (htop 2>/dev/null || top)"
+start_tmux_window "monitor" "cd $PROJECT_ROOT && echo -e '${GREEN}Compose stack с Open WebUI запущен.${NC}\nДля остановки используйте ${YELLOW}docker compose down${NC} или завершите tmux сессию.' && (docker compose ps || true) && (htop 2>/dev/null || top)"
 
 if [ "$SERVICES_OK" = true ]; then
     SYSTEM_STATUS="${GREEN}ГОТОВА К РАБОТЕ${NC}"
@@ -351,17 +357,18 @@ fi
 # -------------------------------------------
 echo ""
 echo -e "${GREEN}╔════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║        Agent Navigator Pro v3.0                          ║${NC}"
+echo -e "${GREEN}║        llm-tools-platform v3.0                          ║${NC}"
 echo -e "${GREEN}╠════════════════════════════════════════════════════════════╣${NC}"
 echo -e "${GREEN}║${NC} Статус:          $SYSTEM_STATUS"
 echo -e "${GREEN}║${NC} Сессия tmux:     ${YELLOW}$SESSION_NAME${NC}"
 echo -e "${GREEN}║${NC} Runtime target:   ${YELLOW}container-compose${NC}"
 echo -e "${GREEN}╠════════════════════════════════════════════════════════════╣${NC}"
-echo -e "${GREEN}║${NC} Chainlit UI:     ${YELLOW}http://localhost:$CHAINLIT_PORT${NC}  (login: ${CHAINLIT_ADMIN_USER:-admin}, password from env)"
+echo -e "${GREEN}║${NC} Open WebUI:      ${YELLOW}http://localhost:$OPENWEBUI_PORT${NC}"
 echo -e "${GREEN}║${NC} Agent API:       ${YELLOW}http://localhost:$AGENT_PORT${NC}"
 echo -e "${GREEN}║${NC} Document Server: ${YELLOW}http://localhost:$DOC_PORT${NC}"
 echo -e "${GREEN}║${NC} Legal Server:    ${YELLOW}http://localhost:$LEGAL_PORT${NC}"
 echo -e "${GREEN}║${NC} UMS:             ${YELLOW}http://localhost:$UMS_PORT${NC}"
+echo -e "${GREEN}║${NC} Qdrant:          ${YELLOW}http://localhost:$QDRANT_PORT${NC}"
 echo -e "${GREEN}╠════════════════════════════════════════════════════════════╣${NC}"
 echo -e "${GREEN}║${NC} Подключение: ${BLUE}tmux attach-session -t $SESSION_NAME${NC}"
 echo -e "${GREEN}║${NC} Завершение:  ${BLUE}./scripts/stop_all.sh${NC}"

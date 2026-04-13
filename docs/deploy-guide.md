@@ -1,4 +1,4 @@
-# Agent Navigator Pro — Инструкция по сборке и деплою на сервер
+# llm-tools-platform — Инструкция по сборке и деплою на сервер
 
 > Инструкция для переноса проекта с dev-машины на production/staging сервер.
 > Актуальна для runtime-контракта ветки `v3.0`.
@@ -68,8 +68,8 @@ source ~/.bashrc
 
 ```bash
 cd /opt  # или ваш target dir
-git clone <repo-url> agent-navigator-pro
-cd agent-navigator-pro
+git clone <repo-url> llm-tools-platform
+cd llm-tools-platform
 git checkout codex/orchestration-control-plane-snapshot
 ```
 
@@ -87,7 +87,7 @@ rsync -avz --progress \
   --exclude '.gemini/' \
   --exclude 'node_modules' \
   /home/seral/HDD/proj/agent-navigator-pro/ \
-  user@server:/opt/agent-navigator-pro/
+  user@server:/opt/llm-tools-platform/
 ```
 
 **Модели переносить отдельно** (они большие):
@@ -95,7 +95,7 @@ rsync -avz --progress \
 ```bash
 rsync -avz --progress \
   /home/seral/HDD/proj/agent-navigator-pro/backend/models/ \
-  user@server:/opt/agent-navigator-pro/backend/models/
+  user@server:/opt/llm-tools-platform/backend/models/
 ```
 
 ---
@@ -103,7 +103,7 @@ rsync -avz --progress \
 ## 4. Структура проекта на сервере
 
 ```
-/opt/agent-navigator-pro/
+/opt/llm-tools-platform/
 ├── backend/
 │   ├── .env                          # ← создать из .env.example
 │   ├── .env.example
@@ -149,7 +149,7 @@ rsync -avz --progress \
 ### 5.1. Conda environment
 
 ```bash
-cd /opt/agent-navigator-pro
+cd /opt/llm-tools-platform
 conda create -n diploma_llm python=3.11 -y
 conda activate diploma_llm
 pip install -r backend/requirements.txt
@@ -165,11 +165,11 @@ cp backend/.env.example backend/.env
 
 ```bash
 # Канонический registry и env contract для путей моделей: значения должны быть АБСОЛЮТНЫМИ на сервере
-MODEL_REGISTRY_CONFIG_PATH="/opt/agent-navigator-pro/backend/config/models.yaml"
-MODEL_PATH_LLM="/opt/agent-navigator-pro/backend/models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
-MODEL_PATH_VLM="/opt/agent-navigator-pro/backend/models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
-MODEL_PATH_EMBEDDING_INTENT="/opt/agent-navigator-pro/backend/models/st/Qwen3-Embedding-0.6B"
-MODEL_PATH_EMBEDDING_RETRIEVAL="/opt/agent-navigator-pro/backend/models/st/LaBSE"
+MODEL_REGISTRY_CONFIG_PATH="/opt/llm-tools-platform/backend/config/models.yaml"
+MODEL_PATH_LLM="/opt/llm-tools-platform/backend/models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf"
+MODEL_PATH_VLM="/opt/llm-tools-platform/backend/models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
+MODEL_PATH_EMBEDDING_INTENT="/opt/llm-tools-platform/backend/models/st/Qwen3-Embedding-0.6B"
+MODEL_PATH_EMBEDDING_RETRIEVAL="/opt/llm-tools-platform/backend/models/st/LaBSE"
 
 # Рекомендуемый shared runtime profile
 UMS_RUNTIME_PROFILE="adaptive"
@@ -191,7 +191,7 @@ GF_SECURITY_ADMIN_PASSWORD="your-grafana-password"
 
 Launcher/bootstrap валидируют эти значения. Для local/dev можно временно разрешить дефолтные секреты только через:
 
-AGENT_NAVIGATOR_ALLOW_INSECURE_DEFAULTS=1
+LLM_TOOLS_PLATFORM_ALLOW_INSECURE_DEFAULTS=1
 
 # Intent classifier
 INTENT_CLASSIFIER_MODE="embedder"
@@ -208,7 +208,7 @@ Role bindings (`primary` / `fallback`) и preload policy теперь берут
 - диагностику нужно проверять в:
   - `GET /status` -> `last_fallback_event`
   - orchestration response -> `model_execution`
-  - Prometheus metric `agent_nav_fallback_events_total`
+  - Prometheus metric `llm_tools_platform_fallback_events_total`
 
 Legacy aliases для rollout и старых инсталляций всё ещё допустимы:
 `MODEL_PATH_QWEN14B` -> `MODEL_PATH_LLM`,
@@ -249,15 +249,19 @@ mkdir -p backend/.data
 Основной пользовательский shell сейчас — `Open WebUI`, он поднимается отдельной командой:
 
 ```bash
-docker compose --profile legacy up -d open-webui
+docker compose up -d open-webui
 ```
 
-Текущее имя compose profile `legacy` историческое и не означает вторичную роль `Open WebUI`.
+В текущем `Open WebUI-first` контуре этот запуск также поднимает `Qdrant` как внешнюю векторную базу для native `Knowledge`; backend `session RAG` использует тот же сервер `Qdrant`, но отдельную коллекцию `rag_chunks_v1`, которой управляет серверная часть.
+
+Полное операторское руководство по `Open WebUI`, bootstrap, ручной настройке `Knowledge` и проверке `session`-пути вынесено в отдельный документ:
+
+- [Open WebUI + Qdrant Operator Guide](./guides/openwebui-qdrant-operator-guide.md)
 
 `Chainlit` остаётся совместимым и отладочным UI. Его Docker-образ по-прежнему собирается отдельно. Backend-сервисы (UMS, Document Server, Legal Server, Agent API) работают на хосте.
 
 ```bash
-cd /opt/agent-navigator-pro
+cd /opt/llm-tools-platform
 
 # Сборка образа
 docker compose build chainlit
@@ -286,7 +290,7 @@ docker compose run --rm chainlit python -c "from orchestrator.execution_runtime 
 ### Вариант A: Полный запуск через launcher (рекомендуется)
 
 ```bash
-cd /opt/agent-navigator-pro
+cd /opt/llm-tools-platform
 ./scripts/launcher.sh --target container --profile default --no-attach
 ```
 
@@ -401,7 +405,7 @@ Probe идёт напрямую через `UMS /infer`, а в JSON-резуль
 ### Подключение к tmux
 
 ```bash
-tmux attach-session -t agent-navigator
+tmux attach-session -t llm-tools-platform
 # Переключение между окнами: Ctrl+B, затем номер окна (0-5)
 ```
 
@@ -433,7 +437,7 @@ curl -s http://localhost:8090/ready/infer | python3 -m json.tool
 # OpenAI-compatible endpoint
 curl -s http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"agent-navigator","messages":[{"role":"user","content":"Привет"}],"stream":false}' \
+  -d '{"model":"llm-tools-platform","messages":[{"role":"user","content":"Привет"}],"stream":false}' \
   | python3 -m json.tool
 
 # Orchestration endpoint
@@ -459,7 +463,7 @@ curl -s http://localhost:8090/metrics | head
 ### 8.6. Unit-тесты
 
 ```bash
-cd /opt/agent-navigator-pro/backend
+cd /opt/llm-tools-platform/backend
 conda activate diploma_llm
 pytest tests/ -v -m "not integration" --tb=short
 # Ожидание: 326+ passed
@@ -472,7 +476,7 @@ pytest tests/ -v -m "not integration" --tb=short
 Chainlit код копируется в Docker-образ при сборке. После любых изменений в `backend/orchestrator/`:
 
 ```bash
-cd /opt/agent-navigator-pro
+cd /opt/llm-tools-platform
 docker compose build chainlit && docker compose up -d chainlit
 ```
 
@@ -569,7 +573,7 @@ ls -la $(grep MODEL_PATH_LLM backend/.env | cut -d= -f2 | tr -d '"')
 # Проверить GPU
 nvidia-smi
 # Проверить логи UMS
-tmux attach -t agent-navigator   # окно "ums"
+tmux attach -t llm-tools-platform   # окно "ums"
 ```
 
 Если используется старый `.env`, можно временно проверить и legacy alias `MODEL_PATH_QWEN14B`, но для новых конфигураций ориентиром остаётся `MODEL_PATH_LLM`.

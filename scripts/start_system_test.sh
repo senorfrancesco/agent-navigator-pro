@@ -30,7 +30,7 @@ cd "$PROJECT_ROOT" && docker compose up -d
 # 2. Run backend services in tmux (using existing script logic but detached)
 echo "Starting Backend Services in tmux..."
 
-SESSION_NAME="agent-navigator"
+SESSION_NAME="llm-tools-platform"
 CONDA_ENV="base" # Hardcoded for test safety, or derive from .env
 
 echo "Stopping existing tmux/runtime/docker processes..."

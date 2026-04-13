@@ -12,7 +12,7 @@ print_help() {
 detect_os.sh
 
 Безопасный detector платформы для install-path.
-Safe platform detector for Agent Navigator installer path.
+Safe platform detector for llm-tools-platform installer path.
 
 Использование:
   ./scripts/install/detect_os.sh

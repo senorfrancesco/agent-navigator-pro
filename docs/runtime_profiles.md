@@ -1,6 +1,6 @@
 # Runtime Profiles
 
-`Agent Navigator Pro` использует backend-owned runtime profiles для подстройки под железо и budget-контракт `UMS`.
+`llm-tools-platform` использует backend-owned runtime profiles для подстройки под железо и budget-контракт `UMS`.
 
 Этот документ описывает semantics runtime profiles. Канонический ответ на вопрос “куда писать какой флаг” вынесен в [docs/flags-reference.md](./flags-reference.md).
 
@@ -42,7 +42,7 @@ Universal model failover теперь backend-owned и registry-backed:
 - diagnostics публикуются как:
   - `model_execution` в client/workflow responses;
   - `last_fallback_event` в `UMS /status`;
-  - `agent_nav_fallback_events_total` в metrics.
+  - `llm_tools_platform_fallback_events_total` в metrics.
 
 ## Model path contract
 

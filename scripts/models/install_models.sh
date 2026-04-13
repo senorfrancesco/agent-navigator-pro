@@ -5,16 +5,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
 BACKEND_DIR="$PROJECT_ROOT/backend"
-ENV_FILE="${AGENT_NAVIGATOR_BACKEND_ENV_FILE:-$BACKEND_DIR/.env}"
+ENV_FILE="${LLM_TOOLS_PLATFORM_BACKEND_ENV_FILE:-$BACKEND_DIR/.env}"
 PYTHON_HELPER="$SCRIPT_DIR/download_models.py"
 
 # shellcheck disable=SC1091
 source "$PROJECT_ROOT/scripts/utils/env_loader.sh"
 
 MODE="ensure-present"
-ASSET_SET="${AGENT_NAVIGATOR_MODEL_ASSET_SET:-core}"
-MODELS_ROOT="${AGENT_NAVIGATOR_MODELS_ROOT:-}"
-HF_CACHE="${HF_HOME:-${AGENT_NAVIGATOR_HF_CACHE:-}}"
+ASSET_SET="${LLM_TOOLS_PLATFORM_MODEL_ASSET_SET:-core}"
+MODELS_ROOT="${LLM_TOOLS_PLATFORM_MODELS_ROOT:-}"
+HF_CACHE="${HF_HOME:-${LLM_TOOLS_PLATFORM_HF_CACHE:-}}"
 DRY_RUN=0
 PYTHON_CMD="$(resolve_env_loader_python || true)"
 
@@ -112,7 +112,7 @@ if [ -n "$HF_CACHE" ]; then
   PY_ARGS+=("--huggingface-cache" "$HF_CACHE")
 fi
 
-if [ "$DRY_RUN" = "1" ] || [ "${AGENT_NAVIGATOR_TEST_MODE:-0}" = "1" ]; then
+if [ "$DRY_RUN" = "1" ] || [ "${LLM_TOOLS_PLATFORM_TEST_MODE:-0}" = "1" ]; then
   PY_ARGS+=("--dry-run")
 fi
 

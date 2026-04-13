@@ -14,7 +14,7 @@ SPEC.loader.exec_module(bootstrap_openwebui)
 def test_build_tool_server_connection_splits_origin_and_spec_path():
     connection = bootstrap_openwebui.build_tool_server_connection(
         {
-            "name": "Agent Navigator OpenAPI Tool Server",
+            "name": "llm-tools-platform OpenAPI Tool Server",
             "containerReachableBaseUrl": "http://host.docker.internal:8000/tool-server",
         },
         tool_server_token="secret-token",
@@ -234,7 +234,7 @@ def test_cleanup_tool_server_connections_removes_canonical_picker_entries_only(m
             "auth_type": "bearer",
             "key": "legacy-token",
             "headers": {},
-            "config": {"enable": True, "name": "Agent Navigator OpenAPI Tool Server"},
+            "config": {"enable": True, "name": "llm-tools-platform OpenAPI Tool Server"},
         },
         {
             "url": "http://127.0.0.1:8000",
@@ -262,7 +262,7 @@ def test_cleanup_tool_server_connections_removes_canonical_picker_entries_only(m
     summary = bootstrap_openwebui.cleanup_tool_server_connections(
         client,
         tool_server_export={
-            "name": "Agent Navigator OpenAPI Tool Server",
+            "name": "llm-tools-platform OpenAPI Tool Server",
             "baseUrl": "http://127.0.0.1:8000/tool-server",
             "browserReachableBaseUrl": "http://127.0.0.1:8000/tool-server",
             "containerReachableBaseUrl": "http://host.docker.internal:8000/tool-server",
@@ -273,8 +273,8 @@ def test_cleanup_tool_server_connections_removes_canonical_picker_entries_only(m
         "action": "updated",
         "removedCount": 2,
         "removedConnectionNames": [
-            "Agent Navigator OpenAPI Tool Server",
-            "Agent Navigator OpenAPI Tool Server",
+            "llm-tools-platform OpenAPI Tool Server",
+            "llm-tools-platform OpenAPI Tool Server",
         ],
     }
     assert updates == [
@@ -337,7 +337,7 @@ def test_cleanup_user_settings_tool_servers_removes_canonical_direct_servers_onl
                     "auth_type": "bearer",
                     "key": "legacy-token",
                     "config": {"enable": True},
-                    "info": {"name": "Agent Navigator Tools"},
+                    "info": {"name": "llm-tools-platform Tools"},
                 },
                 {
                     "type": "openapi",
@@ -359,7 +359,7 @@ def test_cleanup_user_settings_tool_servers_removes_canonical_direct_servers_onl
     summary = bootstrap_openwebui.cleanup_user_settings_tool_servers(
         client,
         tool_server_export={
-            "name": "Agent Navigator OpenAPI Tool Server",
+            "name": "llm-tools-platform OpenAPI Tool Server",
             "baseUrl": "http://127.0.0.1:8000/tool-server",
             "browserReachableBaseUrl": "http://127.0.0.1:8000/tool-server",
             "containerReachableBaseUrl": "http://host.docker.internal:8000/tool-server",
@@ -369,7 +369,7 @@ def test_cleanup_user_settings_tool_servers_removes_canonical_direct_servers_onl
     assert summary == {
         "action": "updated",
         "removedCount": 1,
-        "removedToolServerNames": ["Agent Navigator Tools"],
+        "removedToolServerNames": ["llm-tools-platform Tools"],
     }
     assert updates == [
         {
@@ -405,10 +405,10 @@ def test_ensure_default_model_preserves_existing_model_config(monkeypatch):
         if method == "GET":
             assert path == "/api/v1/configs/models"
             return {
-                "DEFAULT_MODELS": "agent-navigator",
+                "DEFAULT_MODELS": "llm-tools-platform",
                 "DEFAULT_PINNED_MODELS": None,
-                "MODEL_ORDER_LIST": ["agent-navigator"],
-                "DEFAULT_MODEL_METADATA": {"agent-navigator": {"hidden": False}},
+                "MODEL_ORDER_LIST": ["llm-tools-platform"],
+                "DEFAULT_MODEL_METADATA": {"llm-tools-platform": {"hidden": False}},
                 "DEFAULT_MODEL_PARAMS": {"temperature": 0.2},
             }
         assert method == "POST"
@@ -427,8 +427,8 @@ def test_ensure_default_model_preserves_existing_model_config(monkeypatch):
             {
                 "DEFAULT_MODELS": "raw.qwen-14b-llm",
                 "DEFAULT_PINNED_MODELS": None,
-                "MODEL_ORDER_LIST": ["agent-navigator"],
-                "DEFAULT_MODEL_METADATA": {"agent-navigator": {"hidden": False}},
+                "MODEL_ORDER_LIST": ["llm-tools-platform"],
+                "DEFAULT_MODEL_METADATA": {"llm-tools-platform": {"hidden": False}},
                 "DEFAULT_MODEL_PARAMS": {"temperature": 0.2, "function_calling": "native"},
             },
         ),
@@ -757,10 +757,19 @@ def test_bootstrap_openwebui_summary_reports_native_function_calling(monkeypatch
         bootstrap_openwebui,
         "fetch_binding_export",
         lambda backend_base_url: {
-            "toolServer": {"name": "Agent Navigator OpenAPI Tool Server"},
+            "toolServer": {"name": "llm-tools-platform OpenAPI Tool Server"},
             "runtimeConfig": {
                 "defaultModel": "raw.qwen-14b-llm",
                 "defaultFunctionCalling": "native",
+                "rag": {"vectorDb": "qdrant"},
+            },
+            "knowledgeConfig": {"bootstrapMode": "manual_checklist"},
+            "manualChecklist": {"knowledgeQdrant": ["step-1"], "sessionRag": ["step-2"]},
+            "preflightRequirements": {
+                "requiredServices": ["agent-api", "open-webui", "qdrant", "ums"],
+                "backendEnv": ["OPENAPI_TOOL_SERVER_TOKEN", "KB_BACKEND", "QDRANT_URL", "QDRANT_COLLECTION_NAME"],
+                "openWebUIRuntimeEnv": ["VECTOR_DB", "QDRANT_URI"],
+                "manualOnly": ["native_openwebui_knowledge_connection"],
             },
             "ownership": {
                 "backendOwned": {"toolServerConnection": ["url"]},
@@ -859,12 +868,23 @@ def test_bootstrap_openwebui_summary_reports_native_function_calling(monkeypatch
         admin_email="admin@example.com",
         admin_password="secret",
         tool_server_token="tool-token",
+        env_values={
+            "OPENAPI_TOOL_SERVER_TOKEN": "tool-token",
+            "KB_BACKEND": "qdrant",
+            "QDRANT_URL": "http://127.0.0.1:6333",
+            "QDRANT_COLLECTION_NAME": "rag_chunks_v1",
+        },
     )
 
     assert result["status"] == "ok"
     assert result["defaultModel"] == "raw.qwen-14b-llm"
     assert result["defaultFunctionCalling"] == "native"
     assert result["runtimeConfig"]["defaultModel"] == "raw.qwen-14b-llm"
+    assert result["preflight"]["status"] == "needs_attention"
+    assert result["preflight"]["backendEnv"]["missing"] == []
+    assert result["manualChecklist"]["knowledgeQdrant"] == ["step-1"]
+    assert result["knowledgeBootstrapMode"] == "manual_checklist"
+    assert any("manual-only контуром" in warning for warning in result["warnings"])
     assert result["ownership"]["backendOwned"]["toolServerConnection"] == ["url"]
     assert result["driftSummary"]["noOp"] is True
 
@@ -946,11 +966,14 @@ def test_bootstrap_openwebui_summary_reports_follow_up_disabled_task_policy(monk
         bootstrap_openwebui,
         "fetch_binding_export",
         lambda backend_base_url: {
-            "toolServer": {"name": "Agent Navigator OpenAPI Tool Server"},
+            "toolServer": {"name": "llm-tools-platform OpenAPI Tool Server"},
             "runtimeConfig": {
                 "defaultModel": "raw.qwen-14b-llm",
                 "defaultFunctionCalling": "native",
             },
+            "knowledgeConfig": {"bootstrapMode": "manual_checklist"},
+            "manualChecklist": {},
+            "preflightRequirements": {},
             "ownership": {
                 "backendOwned": {"toolServerConnection": ["url"]},
                 "openWebUIOwned": {"toolServerConnection": ["config.enable"]},
@@ -992,8 +1015,8 @@ def test_bootstrap_openwebui_summary_reports_follow_up_disabled_task_policy(monk
             "action": "updated",
             "removedCount": 2,
             "removedConnectionNames": [
-                "Agent Navigator OpenAPI Tool Server",
-                "Agent Navigator OpenAPI Tool Server",
+                "llm-tools-platform OpenAPI Tool Server",
+                "llm-tools-platform OpenAPI Tool Server",
             ],
         },
     )
@@ -1005,7 +1028,7 @@ def test_bootstrap_openwebui_summary_reports_follow_up_disabled_task_policy(monk
     monkeypatch.setattr(
         bootstrap_openwebui,
         "cleanup_user_settings_tool_servers",
-        lambda *args, **kwargs: {"action": "updated", "removedCount": 1, "removedToolServerNames": ["Agent Navigator Tools"]},
+        lambda *args, **kwargs: {"action": "updated", "removedCount": 1, "removedToolServerNames": ["llm-tools-platform Tools"]},
     )
     monkeypatch.setattr(
         bootstrap_openwebui,
@@ -1057,8 +1080,8 @@ def test_bootstrap_openwebui_summary_reports_follow_up_disabled_task_policy(monk
         "action": "updated",
         "removedCount": 2,
         "removedConnectionNames": [
-            "Agent Navigator OpenAPI Tool Server",
-            "Agent Navigator OpenAPI Tool Server",
+            "llm-tools-platform OpenAPI Tool Server",
+            "llm-tools-platform OpenAPI Tool Server",
         ],
     }
     assert result["driftSummary"]["workspaceToolCleanup"] == {
@@ -1068,7 +1091,7 @@ def test_bootstrap_openwebui_summary_reports_follow_up_disabled_task_policy(monk
     assert result["driftSummary"]["userToolServerCleanup"] == {
         "action": "updated",
         "removedCount": 1,
-        "removedToolServerNames": ["Agent Navigator Tools"],
+        "removedToolServerNames": ["llm-tools-platform Tools"],
     }
     assert result["driftSummary"]["taskConfig"] == {
         "action": "updated",
@@ -1076,3 +1099,65 @@ def test_bootstrap_openwebui_summary_reports_follow_up_disabled_task_policy(monk
         "uiOwnedDriftIgnored": [],
     }
     assert result["driftSummary"]["noOp"] is False
+
+
+def test_bootstrap_openwebui_dry_run_reports_planned_changes_without_mutation(monkeypatch):
+    monkeypatch.setattr(
+        bootstrap_openwebui,
+        "fetch_binding_export",
+        lambda backend_base_url: {
+            "toolServer": {"name": "llm-tools-platform OpenAPI Tool Server"},
+            "runtimeConfig": {
+                "defaultModel": "raw.qwen-14b-llm",
+                "defaultFunctionCalling": "native",
+                "rag": {"vectorDb": "qdrant"},
+            },
+            "knowledgeConfig": {"bootstrapMode": "manual_checklist"},
+            "manualChecklist": {"sessionRag": ["session-step"], "knowledgeQdrant": ["knowledge-step"]},
+            "preflightRequirements": {
+                "requiredServices": ["agent-api", "open-webui", "qdrant", "ums"],
+                "backendEnv": ["OPENAPI_TOOL_SERVER_TOKEN", "KB_BACKEND"],
+                "openWebUIRuntimeEnv": ["VECTOR_DB"],
+                "manualOnly": ["knowledge_reindex"],
+            },
+            "ownership": {},
+            "workspaceTools": [{"tool_id": "equipment_fast_tool"}],
+            "actionFunctions": [{"action_id": "equipment_fast_action"}],
+            "workspacePrompts": [{"openwebui": {"command": "/hw_fast"}}],
+        },
+    )
+    monkeypatch.setattr(
+        bootstrap_openwebui,
+        "sign_in",
+        lambda openwebui_base_url, *, email, password: "admin-token",
+    )
+    monkeypatch.setattr(
+        bootstrap_openwebui,
+        "cleanup_tool_server_connections",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("dry-run must not mutate tool server connections")),
+    )
+    monkeypatch.setattr(
+        bootstrap_openwebui,
+        "upsert_workspace_tools",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("dry-run must not upsert workspace tools")),
+    )
+
+    result = bootstrap_openwebui.bootstrap_openwebui(
+        backend_base_url="http://127.0.0.1:8000",
+        openwebui_base_url="http://127.0.0.1:3001",
+        admin_email="admin@example.com",
+        admin_password="secret",
+        tool_server_token="tool-token",
+        env_values={"OPENAPI_TOOL_SERVER_TOKEN": "tool-token", "KB_BACKEND": "qdrant"},
+        dry_run=True,
+    )
+
+    assert result["mode"] == "dry_run"
+    assert result["defaultModel"] == "raw.qwen-14b-llm"
+    assert result["driftSummary"]["toolServerCleanup"] == {"action": "dry_run"}
+    assert result["driftSummary"]["workspaceTools"]["plannedIds"] == ["equipment_fast_tool"]
+    assert result["driftSummary"]["actionFunctions"]["plannedIds"] == ["equipment_fast_action"]
+    assert result["driftSummary"]["workspacePrompts"]["plannedIds"] == ["/hw_fast"]
+    assert result["preflight"]["backendEnv"]["missing"] == []
+    assert result["manualChecklist"]["knowledgeQdrant"] == ["knowledge-step"]
+    assert result["knowledgeBootstrapMode"] == "manual_checklist"

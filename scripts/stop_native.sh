@@ -1,12 +1,12 @@
 #!/bin/bash
 
 # ===========================================
-# Stop native dev session (no Docker actions)
+# Stop native dev session (`Open WebUI`/`Qdrant` + host backend)
 # ===========================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-BACKEND_ENV_FILE="${AGENT_NAVIGATOR_BACKEND_ENV_FILE:-$PROJECT_ROOT/backend/.env}"
+BACKEND_ENV_FILE="${LLM_TOOLS_PLATFORM_BACKEND_ENV_FILE:-$PROJECT_ROOT/backend/.env}"
 
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/utils/env_loader.sh"
@@ -18,13 +18,14 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-SESSION_NAME="agent-navigator-native"
+SESSION_NAME="llm-tools-platform-native"
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-  cat <<EOF
+  cat <<'EOF'
 stop_native.sh
 
-Останавливает native tmux/runtime path без воздействия на Docker-контейнеры.
+Останавливает native tmux/runtime path, а также контейнеры `Open WebUI` и `Qdrant`,
+если они были подняты для native-сценария.
 
 Использование:
   ./scripts/stop_native.sh
@@ -71,13 +72,14 @@ kill_matching_processes() {
 
 load_runtime_env || exit 1
 
-CHAINLIT_PORT="${CHAINLIT_PORT:-3000}"
 AGENT_API_PORT="${AGENT_API_PORT:-8000}"
 DOC_PORT="${DOC_PORT:-8001}"
 LEGAL_PORT="${LEGAL_PORT:-8002}"
 UMS_PORT="${UMS_PORT:-8090}"
+OPENWEBUI_PORT="${OPENWEBUI_PORT:-3001}"
+QDRANT_PORT="${QDRANT_PORT:-6333}"
 
-echo -e "${RED}=== Остановка native сессии Agent Navigator ===${NC}"
+echo -e "${RED}=== Остановка native сессии llm-tools-platform ===${NC}"
 
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
   echo -e "${YELLOW}Завершение tmux сессии '$SESSION_NAME'...${NC}"
@@ -85,6 +87,20 @@ if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
   echo -e "${GREEN}  tmux сессия завершена${NC}"
 else
   echo -e "${BLUE}  tmux сессия '$SESSION_NAME' не найдена${NC}"
+fi
+
+echo -e "${YELLOW}Остановка контейнеров Open WebUI и Qdrant для native path...${NC}"
+if command -v docker &> /dev/null && [ -f "$PROJECT_ROOT/docker-compose.yaml" ]; then
+  (
+    cd "$PROJECT_ROOT"
+    if docker compose stop open-webui qdrant >/dev/null 2>&1; then
+      echo -e "${GREEN}  Open WebUI и Qdrant остановлены${NC}"
+    else
+      echo -e "${YELLOW}  Docker stop завершился с ошибкой, проверьте docker compose ps${NC}"
+    fi
+  )
+else
+  echo -e "${BLUE}  Docker compose не найден или не настроен${NC}"
 fi
 
 kill_matching_processes "UMS" "services/model_manager/unified_model_server.py"
@@ -96,10 +112,9 @@ kill_matching_processes "embedding runtime" "$PROJECT_ROOT/backend/services/mode
 kill_matching_processes "Document Server" "uvicorn mcp_document_server:app --host 0.0.0.0 --port $DOC_PORT"
 kill_matching_processes "Legal Server" "uvicorn mcp_legal_server:app --host 0.0.0.0 --port $LEGAL_PORT"
 kill_matching_processes "Agent API" "python agent_api.py"
-kill_matching_processes "Chainlit" "chainlit run chainlit_app.py --host 0.0.0.0 --port $CHAINLIT_PORT"
 
-PORTS=("$CHAINLIT_PORT" "$AGENT_API_PORT" "$DOC_PORT" "$LEGAL_PORT" "$UMS_PORT")
-NAMES=("Chainlit" "Agent API" "Document Server" "Legal Server" "UMS")
+PORTS=("$AGENT_API_PORT" "$DOC_PORT" "$LEGAL_PORT" "$UMS_PORT")
+NAMES=("Agent API" "Document Server" "Legal Server" "UMS")
 KILLED=0
 
 for i in "${!PORTS[@]}"; do
@@ -117,4 +132,4 @@ if [ "$KILLED" -eq 0 ]; then
 fi
 
 echo ""
-echo -e "${GREEN}Native сессия остановлена. Docker контейнеры не затрагивались.${NC}"
+echo -e "${GREEN}Native сессия остановлена. Open WebUI/Qdrant для native path тоже остановлены, если были запущены.${NC}"

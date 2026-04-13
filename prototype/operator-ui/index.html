@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Agent Navigator Pro | Панель управления runtime</title>
+  <title>llm-tools-platform | Панель управления runtime</title>
   <link rel="icon" href="/operator-assets/favicon.svg" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -16,7 +16,7 @@
       <div class="brand-block">
         <img src="/operator-assets/logo_dark.svg" alt="" class="brand-logo" />
         <div>
-          <div class="brand-title">Agent Navigator</div>
+          <div class="brand-title">llm-tools-platform</div>
           <div class="brand-subtitle">Операторская панель запуска</div>
         </div>
       </div>
@@ -24,12 +24,12 @@
       <section class="sidebar-card sidebar-nav-card">
         <div class="sidebar-label" id="sidebar-nav-label">Разделы</div>
         <nav class="nav-list" aria-label="Разделы">
-          <button class="nav-item active" data-target="overview" data-agent-nav-hook="operator-nav-overview">Обзор</button>
-          <button class="nav-item" data-target="launch" data-agent-nav-hook="operator-nav-launch">Запуск</button>
-          <button class="nav-item" data-target="config" data-agent-nav-hook="operator-nav-config">Конфиг</button>
-          <button class="nav-item" data-target="services" data-agent-nav-hook="operator-nav-services">Сервисы</button>
-          <button class="nav-item" data-target="deploy" data-agent-nav-hook="operator-nav-deploy">Сборка / Деплой</button>
-          <button class="nav-item" data-target="maintenance" data-agent-nav-hook="operator-nav-maintenance">Действия</button>
+          <button class="nav-item active" data-target="overview" data-llm-tools-platform-hook="operator-nav-overview">Обзор</button>
+          <button class="nav-item" data-target="launch" data-llm-tools-platform-hook="operator-nav-launch">Запуск</button>
+          <button class="nav-item" data-target="config" data-llm-tools-platform-hook="operator-nav-config">Конфиг</button>
+          <button class="nav-item" data-target="services" data-llm-tools-platform-hook="operator-nav-services">Сервисы</button>
+          <button class="nav-item" data-target="deploy" data-llm-tools-platform-hook="operator-nav-deploy">Сборка / Деплой</button>
+          <button class="nav-item" data-target="maintenance" data-llm-tools-platform-hook="operator-nav-maintenance">Действия</button>
         </nav>
       </section>
 
@@ -85,7 +85,7 @@
                 <span class="sidebar-action-note" id="ui-settings-button-note">Язык интерфейса, метрики, env keys и показ секретов.</span>
               </span>
             </button>
-            <button class="sidebar-action sidebar-help-button" id="help-drawer-open" type="button" data-agent-nav-hook="operator-help-open">
+            <button class="sidebar-action sidebar-help-button" id="help-drawer-open" type="button" data-llm-tools-platform-hook="operator-help-open">
               <span class="sidebar-help-badge" aria-hidden="true">?</span>
               <span class="sidebar-action-copy">
                 <strong class="sidebar-action-title" id="help-drawer-button-label">Help</strong>
@@ -116,7 +116,7 @@
               aria-haspopup="menu"
               aria-expanded="false"
               aria-controls="topbar-launch-menu"
-              data-agent-nav-hook="operator-topbar-start"
+              data-llm-tools-platform-hook="operator-topbar-start"
             >
               <span class="launch-button-copy">
                 <span class="launch-button-label" id="topbar-start-button-label">Запуск</span>
@@ -130,11 +130,11 @@
             </button>
             <div class="launch-menu" id="topbar-launch-menu" role="menu" hidden></div>
           </div>
-          <span class="status-pill neutral topbar-runtime-badge" id="topbar-runtime-badge" data-agent-nav-hook="operator-topbar-runtime-badge">Не запущено</span>
+          <span class="status-pill neutral topbar-runtime-badge" id="topbar-runtime-badge" data-llm-tools-platform-hook="operator-topbar-runtime-badge">Не запущено</span>
         </div>
       </header>
 
-      <section class="page-section active" id="section-overview" data-agent-nav-hook="operator-section-overview">
+      <section class="page-section active" id="section-overview" data-llm-tools-platform-hook="operator-section-overview">
         <div class="section-hero">
           <div>
             <p class="eyebrow">Обзор</p>
@@ -158,7 +158,7 @@
             </div>
             <span class="status-pill cyan" id="overview-metrics-pill">Наблюдаемость</span>
           </div>
-          <div class="deploy-summary-grid" id="overview-metrics-grid" data-agent-nav-hook="operator-overview-metrics"></div>
+          <div class="deploy-summary-grid" id="overview-metrics-grid" data-llm-tools-platform-hook="operator-overview-metrics"></div>
         </article>
 
         <div class="overview-grid">
@@ -208,7 +208,7 @@
         </div>
       </section>
 
-      <section class="page-section" id="section-launch" data-agent-nav-hook="operator-section-launch">
+      <section class="page-section" id="section-launch" data-llm-tools-platform-hook="operator-section-launch">
         <div class="section-hero">
           <div>
             <p class="eyebrow">Запуск</p>
@@ -217,7 +217,7 @@
           </div>
         </div>
 
-        <div class="workspace-strip" id="launch-strip" data-agent-nav-hook="operator-launch-strip"></div>
+        <div class="workspace-strip" id="launch-strip" data-llm-tools-platform-hook="operator-launch-strip"></div>
 
         <article class="panel launch-fail-summary" id="launch-fail-summary" hidden>
           <div class="panel-header">
@@ -253,7 +253,7 @@
                 <span class="status-pill neutral" id="launch-runtime-pill">Ожидание runtime</span>
               </div>
             </div>
-            <pre class="log-console" id="launch-log-console" data-agent-nav-hook="operator-launch-logs"></pre>
+            <pre class="log-console" id="launch-log-console" data-llm-tools-platform-hook="operator-launch-logs"></pre>
           </article>
         </div>
 
@@ -268,7 +268,7 @@
         </article>
       </section>
 
-      <section class="page-section" id="section-config" data-agent-nav-hook="operator-section-config">
+      <section class="page-section" id="section-config" data-llm-tools-platform-hook="operator-section-config">
         <div class="section-hero">
           <div>
             <p class="eyebrow">Конфиг</p>
@@ -320,7 +320,7 @@
         </article>
       </section>
 
-      <section class="page-section" id="section-services" data-agent-nav-hook="operator-section-services">
+      <section class="page-section" id="section-services" data-llm-tools-platform-hook="operator-section-services">
         <div class="section-hero">
           <div>
             <p class="eyebrow">Сервисы и логи</p>
@@ -330,7 +330,7 @@
           <div class="path-switcher" id="services-path-switcher"></div>
         </div>
 
-        <div class="workspace-strip" id="services-strip" data-agent-nav-hook="operator-services-strip"></div>
+        <div class="workspace-strip" id="services-strip" data-llm-tools-platform-hook="operator-services-strip"></div>
 
         <div class="services-layout">
           <article class="panel">
@@ -340,7 +340,7 @@
                 <h3 id="services-status-title">Статус выбранного пути</h3>
               </div>
             </div>
-            <div class="service-grid" id="services-grid" data-agent-nav-hook="operator-services-grid"></div>
+            <div class="service-grid" id="services-grid" data-llm-tools-platform-hook="operator-services-grid"></div>
           </article>
 
           <article class="panel">
@@ -351,7 +351,7 @@
               </div>
               <span class="status-pill neutral" id="diagnostics-status-pill">Нет runtime-диагностики</span>
             </div>
-            <div class="diagnostics-list" id="diagnostics-list" data-agent-nav-hook="operator-diagnostics-list"></div>
+            <div class="diagnostics-list" id="diagnostics-list" data-llm-tools-platform-hook="operator-diagnostics-list"></div>
           </article>
         </div>
 
@@ -363,8 +363,8 @@
             </div>
           </div>
           <div class="overview-grid">
-            <div class="deploy-summary-grid" id="services-metrics-grid" data-agent-nav-hook="operator-services-metrics"></div>
-            <div class="source-list" id="services-links-grid" data-agent-nav-hook="operator-services-links"></div>
+            <div class="deploy-summary-grid" id="services-metrics-grid" data-llm-tools-platform-hook="operator-services-metrics"></div>
+            <div class="source-list" id="services-links-grid" data-llm-tools-platform-hook="operator-services-links"></div>
           </div>
         </article>
 
@@ -378,11 +378,11 @@
               <select id="log-filter" class="log-filter"></select>
             </div>
           </div>
-          <pre class="log-console" id="log-console" data-agent-nav-hook="operator-services-logs"></pre>
+          <pre class="log-console" id="log-console" data-llm-tools-platform-hook="operator-services-logs"></pre>
         </article>
       </section>
 
-      <section class="page-section" id="section-deploy" data-agent-nav-hook="operator-section-deploy">
+      <section class="page-section" id="section-deploy" data-llm-tools-platform-hook="operator-section-deploy">
         <div class="section-hero">
           <div>
             <p class="eyebrow">Сборка / Деплой</p>
@@ -392,7 +392,7 @@
           <div class="path-switcher" id="deploy-mode-switcher"></div>
         </div>
 
-        <div class="workspace-strip" id="deploy-strip" data-agent-nav-hook="operator-deploy-strip"></div>
+        <div class="workspace-strip" id="deploy-strip" data-llm-tools-platform-hook="operator-deploy-strip"></div>
 
         <div class="deploy-primary-grid">
           <article class="panel">
@@ -403,7 +403,7 @@
               </div>
               <span class="status-pill cyan" id="deploy-summary-pill">Сборка офлайн-бандла</span>
             </div>
-            <div class="deploy-summary-grid" id="deploy-summary-grid" data-agent-nav-hook="operator-deploy-summary"></div>
+            <div class="deploy-summary-grid" id="deploy-summary-grid" data-llm-tools-platform-hook="operator-deploy-summary"></div>
           </article>
 
           <article class="panel">
@@ -413,7 +413,7 @@
                   <h3 id="deploy-stages-title">Стадии сборки</h3>
               </div>
             </div>
-            <div class="deploy-stepper" id="deploy-stage-grid" data-agent-nav-hook="operator-deploy-stepper"></div>
+            <div class="deploy-stepper" id="deploy-stage-grid" data-llm-tools-platform-hook="operator-deploy-stepper"></div>
           </article>
         </div>
 
@@ -427,7 +427,7 @@
               <select id="deploy-log-filter" class="log-filter"></select>
             </div>
           </div>
-          <pre class="log-console" id="deploy-log-console" data-agent-nav-hook="operator-deploy-logs"></pre>
+          <pre class="log-console" id="deploy-log-console" data-llm-tools-platform-hook="operator-deploy-logs"></pre>
         </article>
 
         <div class="deploy-secondary-grid">
@@ -449,8 +449,8 @@
               </div>
             </div>
             <div class="deploy-observability-grid">
-              <div class="deploy-summary-grid" id="deploy-metrics-grid" data-agent-nav-hook="operator-deploy-metrics"></div>
-              <div class="source-list" id="deploy-links-grid" data-agent-nav-hook="operator-deploy-links"></div>
+              <div class="deploy-summary-grid" id="deploy-metrics-grid" data-llm-tools-platform-hook="operator-deploy-metrics"></div>
+              <div class="source-list" id="deploy-links-grid" data-llm-tools-platform-hook="operator-deploy-links"></div>
             </div>
           </article>
 
@@ -476,7 +476,7 @@
         </div>
       </section>
 
-      <section class="page-section" id="section-maintenance" data-agent-nav-hook="operator-section-maintenance">
+      <section class="page-section" id="section-maintenance" data-llm-tools-platform-hook="operator-section-maintenance">
         <div class="section-hero">
           <div>
             <p class="eyebrow">Действия</p>
@@ -520,14 +520,14 @@
     </main>
   </div>
 
-  <aside class="help-drawer" id="help-drawer" hidden data-agent-nav-hook="operator-help-drawer">
+  <aside class="help-drawer" id="help-drawer" hidden data-llm-tools-platform-hook="operator-help-drawer">
     <div class="help-drawer-card">
       <div class="panel-header">
         <div>
           <p class="eyebrow" id="help-drawer-eyebrow">Help</p>
           <h3 id="help-drawer-title">Контекст текущего раздела</h3>
         </div>
-        <button class="ghost-button" id="help-drawer-close" type="button" data-agent-nav-hook="operator-help-close">Закрыть</button>
+        <button class="ghost-button" id="help-drawer-close" type="button" data-llm-tools-platform-hook="operator-help-close">Закрыть</button>
       </div>
       <div class="help-drawer-body">
         <div class="help-drawer-section">

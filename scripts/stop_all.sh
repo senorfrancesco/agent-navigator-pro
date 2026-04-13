@@ -2,14 +2,14 @@
 
 # ===========================================
 # Скрипт для остановки всех компонентов системы
-# Agent Navigator Pro
+# llm-tools-platform
 # ===========================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BACKEND_DIR="$PROJECT_ROOT/backend"
-BACKEND_ENV_FILE="${AGENT_NAVIGATOR_BACKEND_ENV_FILE:-$BACKEND_DIR/.env}"
-RUNTIME_ENV_FILE="${AGENT_NAVIGATOR_RUNTIME_ENV_FILE:-$BACKEND_DIR/.env.runtime}"
+BACKEND_ENV_FILE="${LLM_TOOLS_PLATFORM_BACKEND_ENV_FILE:-$BACKEND_DIR/.env}"
+RUNTIME_ENV_FILE="${LLM_TOOLS_PLATFORM_RUNTIME_ENV_FILE:-$BACKEND_DIR/.env.runtime}"
 
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/utils/env_loader.sh"
@@ -22,14 +22,14 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-SESSION_NAMES=("agent-navigator" "agent-navigator-native")
+SESSION_NAMES=("llm-tools-platform" "llm-tools-platform-native")
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     cat <<EOF
 stop_all.sh
 
 Останавливает compose/container runtime path и выполняет глобальную зачистку
-tmux-сессий и сервисных процессов Agent Navigator Pro.
+tmux-сессий и сервисных процессов llm-tools-platform.
 
 Использование:
   ./scripts/stop_all.sh
@@ -83,7 +83,7 @@ DOC_PORT="${DOC_PORT:-8001}"
 LEGAL_PORT="${LEGAL_PORT:-8002}"
 UMS_PORT="${UMS_PORT:-8090}"
 
-echo -e "${RED}=== Остановка системы Agent Navigator Pro ===${NC}"
+echo -e "${RED}=== Остановка системы llm-tools-platform ===${NC}"
 echo ""
 
 # -------------------------------------------
@@ -100,9 +100,9 @@ for SESSION_NAME in "${SESSION_NAMES[@]}"; do
 done
 
 # -------------------------------------------
-# 2. Остановка Docker контейнеров (Open WebUI)
+# 2. Остановка Docker контейнеров (`Open WebUI`, `Qdrant` и compose runtime)
 # -------------------------------------------
-echo -e "${YELLOW}Остановка Docker контейнеров...${NC}"
+echo -e "${YELLOW}Остановка Docker контейнеров compose runtime...${NC}"
 if command -v docker &> /dev/null && [ -f "$PROJECT_ROOT/docker-compose.yaml" ]; then
     cd "$PROJECT_ROOT"
     if docker compose down >/dev/null 2>&1; then
@@ -154,5 +154,5 @@ fi
 # -------------------------------------------
 echo ""
 echo -e "${GREEN}╔════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║   Agent Navigator Pro - Остановлен             ║${NC}"
+echo -e "${GREEN}║   llm-tools-platform - Остановлен             ║${NC}"
 echo -e "${GREEN}╚════════════════════════════════════════════════╝${NC}"
