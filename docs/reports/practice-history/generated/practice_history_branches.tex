@@ -1,0 +1,23 @@
+\begin{table}[h]
+\centering
+\begin{tabular}{p{0.25\textwidth} p{0.5\textwidth} r}
+\textbf{Ветка} & \textbf{Смысл} & \textbf{vs dev} \\
+\hline
+\texttt{dev} & Основная интеграционная ветка, в которой сходятся рабочие срезы перед закреплением следующего состояния проекта. & +0 / -0 \\
+\texttt{refactor/openwebui-responsibility-split} & Текущая активная линия, где проект закрепляет \texttt{Open WebUI} как основной интерфейс и разводит зоны ответственности между bootstrap, tool-контуром и рантаймом. & +14 / -0 \\
+\texttt{release/v0.1} & Исторический релизный срез на этапе начала миграционного контура; полезен как точка сравнения перед дальнейшей консолидацией. & +0 / -19 \\
+\texttt{v0.1\_history} & Дублирующий исторический срез той же точки, сохранённый как архивная ветка состояния. & +0 / -19 \\
+\end{tabular}
+\caption{Ключевые ветки, которые использованы в отчёте}
+\end{table}
+
+\paragraph{Точечные удалённые ветки.} Помимо основных линий, в истории есть короткие вспомогательные ветки под узкие задачи. Они важны как маркеры направления, но не образуют самостоятельную продуктовую линию.
+\begin{itemize}
+\item \texttt{origin/claude/compare-workflow-llm-discrepancy} --- Точечная ветка для корректировки compare-workflow и снижения расхождений в LLM-обработке.
+\item \texttt{origin/claude/redesign-compare-bounded-latency} --- Точечная ветка для корректировки compare-workflow и снижения расхождений в LLM-обработке.
+\item \texttt{origin/codex/orchestration-control-plane-snapshot} --- Снимок состояния оркестрационного контура в отдельный момент разработки.
+\item \texttt{origin/copilot/check-pull-requests-for-v3-0} --- Служебная ветка для узкой правки зависимостей, очистки или проверки конкретного сценария.
+\item \texttt{origin/copilot/fix-model-download-scripts} --- Служебная ветка для узкой правки зависимостей, очистки или проверки конкретного сценария.
+\item \texttt{origin/copilot/remove-legacy-code-and-update-docs} --- Служебная ветка для узкой правки зависимостей, очистки или проверки конкретного сценария.
+\item \texttt{origin/copilot/update-package-scripts-and-dependencies} --- Служебная ветка для узкой правки зависимостей, очистки или проверки конкретного сценария.
+\end{itemize}

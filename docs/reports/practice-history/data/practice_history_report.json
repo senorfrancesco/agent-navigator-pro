@@ -1,0 +1,1774 @@
+{
+  "summary": {
+    "total_commits": 256,
+    "date_range": {
+      "start": "2025-01-01",
+      "end": "2026-04-12"
+    },
+    "working_start_date": "2026-01-05",
+    "head_branch": "refactor/openwebui-responsibility-split",
+    "active_days": 38,
+    "type_counts": {
+      "other": 35,
+      "refactor": 17,
+      "merge": 5,
+      "fix": 52,
+      "chore": 15,
+      "feat": 77,
+      "revert": 2,
+      "docs": 45,
+      "test": 8
+    },
+    "monthly_activity": [
+      {
+        "month": "2025-01",
+        "total": 1,
+        "feat": 0,
+        "fix": 0,
+        "docs": 0,
+        "refactor": 0,
+        "test": 0,
+        "chore": 0,
+        "other": 1
+      },
+      {
+        "month": "2026-01",
+        "total": 54,
+        "feat": 5,
+        "fix": 13,
+        "docs": 1,
+        "refactor": 6,
+        "test": 0,
+        "chore": 3,
+        "other": 21
+      },
+      {
+        "month": "2026-02",
+        "total": 7,
+        "feat": 2,
+        "fix": 2,
+        "docs": 0,
+        "refactor": 1,
+        "test": 0,
+        "chore": 1,
+        "other": 1
+      },
+      {
+        "month": "2026-03",
+        "total": 150,
+        "feat": 55,
+        "fix": 31,
+        "docs": 35,
+        "refactor": 6,
+        "test": 6,
+        "chore": 9,
+        "other": 7
+      },
+      {
+        "month": "2026-04",
+        "total": 44,
+        "feat": 15,
+        "fix": 6,
+        "docs": 9,
+        "refactor": 4,
+        "test": 2,
+        "chore": 2,
+        "other": 5
+      }
+    ],
+    "busiest_days": [
+      {
+        "date": "2026-01-06",
+        "commit_count": 36,
+        "types": {
+          "other": 10,
+          "fix": 12,
+          "chore": 3,
+          "refactor": 3,
+          "merge": 2,
+          "feat": 4,
+          "revert": 2
+        },
+        "themes": {
+          "other": 22,
+          "ums": 12,
+          "docs": 2
+        },
+        "focus": "общая стабилизация и организационные правки и модели, `UMS`, распределение ресурсов и наблюдаемость",
+        "summary": "2026-01-06 работа была сосредоточена на направлении «общая стабилизация и организационные правки и модели, `UMS`, распределение ресурсов и наблюдаемость». По истории коммитов видно, что в этот день основной упор делался на стабилизацию уже внедрённых решений и снятие регрессий. Особенно хорошо это видно по коммитам e7e7645 — Chore: Clean up warnings and modernize FastAPI events in UMS; f79bddb — Feature: Add .env support and clean up GPU monitoring imports.",
+        "highlights": [
+          {
+            "sha": "e7e7645",
+            "subject": "Chore: Clean up warnings and modernize FastAPI events in UMS"
+          },
+          {
+            "sha": "f79bddb",
+            "subject": "Feature: Add .env support and clean up GPU monitoring imports"
+          },
+          {
+            "sha": "62ff5e8",
+            "subject": "Feature: End-to-end real-time streaming"
+          }
+        ]
+      },
+      {
+        "date": "2026-03-18",
+        "commit_count": 28,
+        "types": {
+          "docs": 3,
+          "feat": 11,
+          "refactor": 3,
+          "chore": 3,
+          "fix": 5,
+          "test": 3
+        },
+        "themes": {
+          "docs": 4,
+          "ums": 12,
+          "runtime": 8,
+          "other": 7,
+          "chainlit": 4,
+          "rag": 1,
+          "operator_ui": 1,
+          "document": 1
+        },
+        "focus": "модели, `UMS`, распределение ресурсов и наблюдаемость и рантайм, запуск, офлайн-развёртывание и инсталляция",
+        "summary": "2026-03-18 работа была сосредоточена на направлении «модели, `UMS`, распределение ресурсов и наблюдаемость и рантайм, запуск, офлайн-развёртывание и инсталляция». По истории коммитов видно, что в этот день добавлялись новые возможности и связывались крупные части системы. Особенно хорошо это видно по коммитам 85bd9cb — feat(model-registry): add canonical yaml registry; f5278e9 — chore(repo): untrack local agent workspace files.",
+        "highlights": [
+          {
+            "sha": "85bd9cb",
+            "subject": "feat(model-registry): add canonical yaml registry"
+          },
+          {
+            "sha": "f5278e9",
+            "subject": "chore(repo): untrack local agent workspace files"
+          },
+          {
+            "sha": "27f0926",
+            "subject": "chore(runtime): update local hardware override profile"
+          }
+        ]
+      },
+      {
+        "date": "2026-03-13",
+        "commit_count": 26,
+        "types": {
+          "feat": 20,
+          "fix": 2,
+          "docs": 3,
+          "test": 1
+        },
+        "themes": {
+          "ums": 11,
+          "migration": 1,
+          "runtime": 7,
+          "docs": 4,
+          "other": 5,
+          "rag": 4
+        },
+        "focus": "модели, `UMS`, распределение ресурсов и наблюдаемость и рантайм, запуск, офлайн-развёртывание и инсталляция",
+        "summary": "2026-03-13 работа была сосредоточена на направлении «модели, `UMS`, распределение ресурсов и наблюдаемость и рантайм, запуск, офлайн-развёртывание и инсталляция». По истории коммитов видно, что в этот день добавлялись новые возможности и связывались крупные части системы. Особенно хорошо это видно по коммитам 6e42425 — feat(bench): add benchmark comparison tool; 254483c — feat(control-plane): resolve llm and embedder profiles.",
+        "highlights": [
+          {
+            "sha": "6e42425",
+            "subject": "feat(bench): add benchmark comparison tool"
+          },
+          {
+            "sha": "254483c",
+            "subject": "feat(control-plane): resolve llm and embedder profiles"
+          },
+          {
+            "sha": "346c85a",
+            "subject": "feat(obs): add prometheus and grafana stack"
+          }
+        ]
+      },
+      {
+        "date": "2026-03-19",
+        "commit_count": 15,
+        "types": {
+          "feat": 3,
+          "docs": 8,
+          "test": 1,
+          "merge": 1,
+          "fix": 2
+        },
+        "themes": {
+          "compare": 6,
+          "document": 1,
+          "docs": 9,
+          "runtime": 3,
+          "other": 2,
+          "ums": 1,
+          "chainlit": 1
+        },
+        "focus": "документация и фиксация правил эксплуатации и улучшение сценариев сравнения документов",
+        "summary": "2026-03-19 работа была сосредоточена на направлении «документация и фиксация правил эксплуатации и улучшение сценариев сравнения документов». По истории коммитов видно, что в этот день команда фиксировала архитектурные решения, правила эксплуатации и план следующего шага. Особенно хорошо это видно по коммитам 1b11881 — docs(readme): adopt layered architecture diagram; f1a3064 — docs(readme): improve architecture diagram data flow.",
+        "highlights": [
+          {
+            "sha": "1b11881",
+            "subject": "docs(readme): adopt layered architecture diagram"
+          },
+          {
+            "sha": "f1a3064",
+            "subject": "docs(readme): improve architecture diagram data flow"
+          },
+          {
+            "sha": "644904f",
+            "subject": "docs(tasks): add document analysis truncation follow-up"
+          }
+        ]
+      },
+      {
+        "date": "2026-03-04",
+        "commit_count": 12,
+        "types": {
+          "docs": 5,
+          "fix": 4,
+          "chore": 2,
+          "feat": 1
+        },
+        "themes": {
+          "docs": 5,
+          "runtime": 1,
+          "chainlit": 3,
+          "other": 1,
+          "ums": 3,
+          "openwebui": 1
+        },
+        "focus": "документация и фиксация правил эксплуатации и поддержка и эволюция `Chainlit`-контура",
+        "summary": "2026-03-04 работа была сосредоточена на направлении «документация и фиксация правил эксплуатации и поддержка и эволюция `Chainlit`-контура». По истории коммитов видно, что в этот день команда фиксировала архитектурные решения, правила эксплуатации и план следующего шага. Особенно хорошо это видно по коммитам adf9bbf — chore(repo): ignore local test logs and ad-hoc node bootstrap; 512fd97 — chore(repo): remove obsolete verification script.",
+        "highlights": [
+          {
+            "sha": "adf9bbf",
+            "subject": "chore(repo): ignore local test logs and ad-hoc node bootstrap"
+          },
+          {
+            "sha": "512fd97",
+            "subject": "chore(repo): remove obsolete verification script"
+          },
+          {
+            "sha": "5c62f9a",
+            "subject": "docs(repo): consolidate task docs and ignore local artifacts"
+          }
+        ]
+      }
+    ],
+    "top_authors": [
+      {
+        "name": "senorfrancesco",
+        "commits": 215,
+        "aliases": [
+          "105391984+senorfrancesco@users.noreply.github.com",
+          "Senor_Francesco",
+          "aleksandrsego@gmail.com",
+          "senorfrancesco",
+          "senorfrancesco@gmail.com",
+          "sn_franc",
+          "snfranc"
+        ]
+      },
+      {
+        "name": "Manus AI",
+        "commits": 19,
+        "aliases": [
+          "Manus AI",
+          "manus@ai.bot",
+          "manus@manus.im"
+        ]
+      },
+      {
+        "name": "copilot-swe-agent[bot]",
+        "commits": 10,
+        "aliases": [
+          "198982749+Copilot@users.noreply.github.com",
+          "copilot-swe-agent[bot]"
+        ]
+      },
+      {
+        "name": "gpt-engineer-app[bot]",
+        "commits": 6,
+        "aliases": [
+          "159125892+gpt-engineer-app[bot]@users.noreply.github.com",
+          "gpt-engineer-app[bot]"
+        ]
+      },
+      {
+        "name": "anthropic-code-agent[bot]",
+        "commits": 5,
+        "aliases": [
+          "242468646+Claude@users.noreply.github.com",
+          "anthropic-code-agent[bot]"
+        ]
+      },
+      {
+        "name": "Lovable",
+        "commits": 1,
+        "aliases": [
+          "Lovable",
+          "noreply@lovable.dev"
+        ]
+      }
+    ]
+  },
+  "main_phases": [
+    {
+      "slug": "bootstrap",
+      "title": "Фаза 1. Сборка основы и ранняя интеграция",
+      "start_date": "2026-01-05",
+      "end_date": "2026-01-09",
+      "focus": "Проект собирается из нескольких заготовок в единую систему: складываются backend, UI, потоковый режим, `UMS` и первые пользовательские сценарии.",
+      "commit_count": 53,
+      "type_counts": {
+        "refactor": 6,
+        "merge": 3,
+        "other": 20,
+        "fix": 13,
+        "chore": 3,
+        "feat": 5,
+        "revert": 2,
+        "docs": 1
+      },
+      "top_themes": [
+        "other",
+        "ums",
+        "docs",
+        "openwebui"
+      ],
+      "summary": "Проект собирается из нескольких заготовок в единую систему: складываются backend, UI, потоковый режим, `UMS` и первые пользовательские сценарии. По коммитам доминируют общая стабилизация и организационные правки и модели, `UMS`, распределение ресурсов и наблюдаемость. Это был период шлифовки, когда устойчивость становилась важнее простого прироста функций.",
+      "highlight_commits": [
+        {
+          "sha": "2b2010c",
+          "subject": "merge with all proj",
+          "date": "2026-01-05"
+        },
+        {
+          "sha": "d0c788d",
+          "subject": "feat: Integrate Open WebUI, fix UMS inference, add MD reporting",
+          "date": "2026-01-07"
+        },
+        {
+          "sha": "e7e7645",
+          "subject": "Chore: Clean up warnings and modernize FastAPI events in UMS",
+          "date": "2026-01-06"
+        },
+        {
+          "sha": "f79bddb",
+          "subject": "Feature: Add .env support and clean up GPU monitoring imports",
+          "date": "2026-01-06"
+        },
+        {
+          "sha": "62ff5e8",
+          "subject": "Feature: End-to-end real-time streaming",
+          "date": "2026-01-06"
+        }
+      ]
+    },
+    {
+      "slug": "v3",
+      "title": "Фаза 2. Переход к v3.0 и аппаратно-адаптивной архитектуре",
+      "start_date": "2026-02-24",
+      "end_date": "2026-03-05",
+      "focus": "Появляется более зрелый контур `v3.0`: `Chainlit`, `AdaptiveRAGPipeline`, аппаратное профилирование, новые workflow и тестовое покрытие.",
+      "commit_count": 33,
+      "type_counts": {
+        "refactor": 3,
+        "fix": 10,
+        "other": 1,
+        "chore": 3,
+        "feat": 10,
+        "docs": 6
+      },
+      "top_themes": [
+        "chainlit",
+        "other",
+        "docs",
+        "document"
+      ],
+      "summary": "Появляется более зрелый контур `v3.0`: `Chainlit`, `AdaptiveRAGPipeline`, аппаратное профилирование, новые workflow и тестовое покрытие. По коммитам доминируют поддержка и эволюция `Chainlit`-контура и общая стабилизация и организационные правки. Это был период ускоренного наращивания продукта и архитектуры.",
+      "highlight_commits": [
+        {
+          "sha": "ceae15c",
+          "subject": "feat: v3.0 Hardware-Adaptive Agentic System — profiler, tiered RAG, Chainlit UI",
+          "date": "2026-02-26"
+        },
+        {
+          "sha": "adf9bbf",
+          "subject": "chore(repo): ignore local test logs and ad-hoc node bootstrap",
+          "date": "2026-03-04"
+        },
+        {
+          "sha": "512fd97",
+          "subject": "chore(repo): remove obsolete verification script",
+          "date": "2026-03-04"
+        },
+        {
+          "sha": "0f59b70",
+          "subject": "chore: update .gitignore and requirements.txt for v3.0",
+          "date": "2026-02-26"
+        },
+        {
+          "sha": "5c62f9a",
+          "subject": "docs(repo): consolidate task docs and ignore local artifacts",
+          "date": "2026-03-04"
+        }
+      ]
+    },
+    {
+      "slug": "stabilization",
+      "title": "Фаза 3. Backend-first усиление и операционализация",
+      "start_date": "2026-03-12",
+      "end_date": "2026-03-31",
+      "focus": "Команда переводит проект от набора функций к платформе: усиливаются `orchestrator`, `UMS`, реестр моделей, `operator UI`, офлайн-поставка и наблюдаемость.",
+      "commit_count": 124,
+      "type_counts": {
+        "fix": 23,
+        "feat": 47,
+        "docs": 29,
+        "test": 6,
+        "chore": 7,
+        "refactor": 4,
+        "merge": 1,
+        "other": 7
+      },
+      "top_themes": [
+        "runtime",
+        "docs",
+        "ums",
+        "other"
+      ],
+      "summary": "Команда переводит проект от набора функций к платформе: усиливаются `orchestrator`, `UMS`, реестр моделей, `operator UI`, офлайн-поставка и наблюдаемость. По коммитам доминируют рантайм, запуск, офлайн-развёртывание и инсталляция и документация и фиксация правил эксплуатации. Это был период ускоренного наращивания продукта и архитектуры.",
+      "highlight_commits": [
+        {
+          "sha": "85bd9cb",
+          "subject": "feat(model-registry): add canonical yaml registry",
+          "date": "2026-03-18"
+        },
+        {
+          "sha": "fac57e5",
+          "subject": "feat(operator): add python control plane for operator ui",
+          "date": "2026-03-29"
+        },
+        {
+          "sha": "5ac5f34",
+          "subject": "Fix compare workflow LLM queue discrepancy and JSON parsing",
+          "date": "2026-03-31"
+        },
+        {
+          "sha": "8ef99cd",
+          "subject": "chore(config): add local hardware override defaults",
+          "date": "2026-03-17"
+        },
+        {
+          "sha": "d91b8f1",
+          "subject": "chore(git): ignore local runtime artifacts",
+          "date": "2026-03-16"
+        }
+      ]
+    },
+    {
+      "slug": "openwebui_first",
+      "title": "Фаза 4. Консолидация вокруг Open WebUI-first",
+      "start_date": "2026-04-01",
+      "end_date": "2026-04-12",
+      "focus": "Основной вектор смещается к `Open WebUI`: уточняется разделение ответственности между инструментами, bootstrap-процессом, рантаймом и миграционной документацией.",
+      "commit_count": 44,
+      "type_counts": {
+        "feat": 15,
+        "other": 5,
+        "merge": 1,
+        "fix": 6,
+        "chore": 2,
+        "docs": 9,
+        "test": 2,
+        "refactor": 4
+      },
+      "top_themes": [
+        "docs",
+        "openwebui",
+        "migration",
+        "other"
+      ],
+      "summary": "Основной вектор смещается к `Open WebUI`: уточняется разделение ответственности между инструментами, bootstrap-процессом, рантаймом и миграционной документацией. По коммитам доминируют документация и фиксация правил эксплуатации и миграция и стабилизация `Open WebUI`. Это был период ускоренного наращивания продукта и архитектуры.",
+      "highlight_commits": [
+        {
+          "sha": "71c9c51",
+          "subject": "feat(openwebui): reconcile bootstrap drift and native function-calling defaults",
+          "date": "2026-04-11"
+        },
+        {
+          "sha": "4a800b1",
+          "subject": "Fix model download scripts: Qwen3-14B from MaziyarPanahi, LaBSE from cointegrated",
+          "date": "2026-04-01"
+        },
+        {
+          "sha": "c8e8671",
+          "subject": "chore: update package version lower bounds and build script version pins",
+          "date": "2026-04-01"
+        },
+        {
+          "sha": "062d6e9",
+          "subject": "docs(repo): relocate forms and research artifacts",
+          "date": "2026-04-07"
+        },
+        {
+          "sha": "02d83c8",
+          "subject": "feat(compare): implement B3.51g and B3.51h - summary-first bounded latency with fast/deep modes",
+          "date": "2026-04-01"
+        }
+      ]
+    }
+  ],
+  "branches": [
+    {
+      "name": "dev",
+      "description": "Основная интеграционная ветка, в которой сходятся рабочие срезы перед закреплением следующего состояния проекта.",
+      "status": "reference",
+      "ahead_behind_vs_dev": {
+        "ahead": 0,
+        "behind": 0
+      },
+      "tip": {
+        "sha": "845096f",
+        "date": "2026-04-09",
+        "subject": "fix(openwebui): stabilize bootstrap and capture split plan"
+      },
+      "highlights": [
+        {
+          "sha": "845096f",
+          "date": "2026-04-09",
+          "subject": "fix(openwebui): stabilize bootstrap and capture split plan"
+        },
+        {
+          "sha": "1e1aa42",
+          "date": "2026-04-08",
+          "subject": "add documentations for tests"
+        },
+        {
+          "sha": "7794361",
+          "date": "2026-04-08",
+          "subject": "feat(runtime): add skip-chainlit flag for native launcher"
+        },
+        {
+          "sha": "42e2e42",
+          "date": "2026-04-08",
+          "subject": "docs(migration): add model catalog gateway follow-up plan"
+        }
+      ]
+    },
+    {
+      "name": "refactor/openwebui-responsibility-split",
+      "description": "Текущая активная линия, где проект закрепляет `Open WebUI` как основной интерфейс и разводит зоны ответственности между bootstrap, tool-контуром и рантаймом.",
+      "status": "active",
+      "ahead_behind_vs_dev": {
+        "behind": 0,
+        "ahead": 14
+      },
+      "tip": {
+        "sha": "f75066a",
+        "date": "2026-04-12",
+        "subject": "docs(openwebui): align product wording and migration plans"
+      },
+      "highlights": [
+        {
+          "sha": "f75066a",
+          "date": "2026-04-12",
+          "subject": "docs(openwebui): align product wording and migration plans"
+        },
+        {
+          "sha": "032fc5c",
+          "date": "2026-04-12",
+          "subject": "feat(runtime): consolidate native env flow and busy handling"
+        },
+        {
+          "sha": "231fe2a",
+          "date": "2026-04-12",
+          "subject": "feat(openwebui): stabilize bootstrap ownership and deep-job contour"
+        },
+        {
+          "sha": "efd7c21",
+          "date": "2026-04-11",
+          "subject": "docs(migration): align OpenWebUI-first ownership, knowledge/tool split, and rag architecture"
+        }
+      ]
+    },
+    {
+      "name": "release/v0.1",
+      "description": "Исторический релизный срез на этапе начала миграционного контура; полезен как точка сравнения перед дальнейшей консолидацией.",
+      "status": "reference",
+      "ahead_behind_vs_dev": {
+        "behind": 19,
+        "ahead": 0
+      },
+      "tip": {
+        "sha": "ddae3dc",
+        "date": "2026-04-01",
+        "subject": "docs(migration): add reference architecture overview"
+      },
+      "highlights": [
+        {
+          "sha": "ddae3dc",
+          "date": "2026-04-01",
+          "subject": "docs(migration): add reference architecture overview"
+        },
+        {
+          "sha": "1a7037a",
+          "date": "2026-04-01",
+          "subject": "Planning migrations"
+        },
+        {
+          "sha": "08effd9",
+          "date": "2026-03-31",
+          "subject": "feat(operator-ui): add runtime telemetry and resilient launch controls"
+        },
+        {
+          "sha": "4e1ad49",
+          "date": "2026-03-31",
+          "subject": "feat(operator-ui): finalize config surface and offline bundle controls"
+        }
+      ]
+    },
+    {
+      "name": "v0.1_history",
+      "description": "Дублирующий исторический срез той же точки, сохранённый как архивная ветка состояния.",
+      "status": "reference",
+      "ahead_behind_vs_dev": {
+        "behind": 19,
+        "ahead": 0
+      },
+      "tip": {
+        "sha": "ddae3dc",
+        "date": "2026-04-01",
+        "subject": "docs(migration): add reference architecture overview"
+      },
+      "highlights": [
+        {
+          "sha": "ddae3dc",
+          "date": "2026-04-01",
+          "subject": "docs(migration): add reference architecture overview"
+        },
+        {
+          "sha": "1a7037a",
+          "date": "2026-04-01",
+          "subject": "Planning migrations"
+        },
+        {
+          "sha": "08effd9",
+          "date": "2026-03-31",
+          "subject": "feat(operator-ui): add runtime telemetry and resilient launch controls"
+        },
+        {
+          "sha": "4e1ad49",
+          "date": "2026-03-31",
+          "subject": "feat(operator-ui): finalize config surface and offline bundle controls"
+        }
+      ]
+    }
+  ],
+  "supporting_remote_branches": [
+    {
+      "name": "origin/claude/compare-workflow-llm-discrepancy",
+      "description": "Точечная ветка для корректировки compare-workflow и снижения расхождений в LLM-обработке."
+    },
+    {
+      "name": "origin/claude/redesign-compare-bounded-latency",
+      "description": "Точечная ветка для корректировки compare-workflow и снижения расхождений в LLM-обработке."
+    },
+    {
+      "name": "origin/codex/orchestration-control-plane-snapshot",
+      "description": "Снимок состояния оркестрационного контура в отдельный момент разработки."
+    },
+    {
+      "name": "origin/copilot/check-pull-requests-for-v3-0",
+      "description": "Служебная ветка для узкой правки зависимостей, очистки или проверки конкретного сценария."
+    },
+    {
+      "name": "origin/copilot/fix-model-download-scripts",
+      "description": "Служебная ветка для узкой правки зависимостей, очистки или проверки конкретного сценария."
+    },
+    {
+      "name": "origin/copilot/remove-legacy-code-and-update-docs",
+      "description": "Служебная ветка для узкой правки зависимостей, очистки или проверки конкретного сценария."
+    },
+    {
+      "name": "origin/copilot/update-package-scripts-and-dependencies",
+      "description": "Служебная ветка для узкой правки зависимостей, очистки или проверки конкретного сценария."
+    }
+  ],
+  "days": [
+    {
+      "date": "2025-01-01",
+      "commit_count": 1,
+      "types": {
+        "other": 1
+      },
+      "themes": {
+        "other": 1
+      },
+      "focus": "общая стабилизация и организационные правки",
+      "summary": "2025-01-01 работа была сосредоточена на направлении «общая стабилизация и организационные правки». По истории коммитов видно, что в этот день добавлялись новые возможности и связывались крупные части системы. Особенно хорошо это видно по коммитам bebc3a2 — template: new_style_vite_react_shadcn_ts.",
+      "highlights": [
+        {
+          "sha": "bebc3a2",
+          "subject": "template: new_style_vite_react_shadcn_ts"
+        }
+      ]
+    },
+    {
+      "date": "2026-01-05",
+      "commit_count": 11,
+      "types": {
+        "refactor": 3,
+        "merge": 1,
+        "other": 6,
+        "fix": 1
+      },
+      "themes": {
+        "other": 9,
+        "ums": 1,
+        "docs": 2
+      },
+      "focus": "общая стабилизация и организационные правки и документация и фиксация правил эксплуатации",
+      "summary": "2026-01-05 работа была сосредоточена на направлении «общая стабилизация и организационные правки и документация и фиксация правил эксплуатации». По истории коммитов видно, что в этот день параллельно шли структурные улучшения и уточнение технического контура. Особенно хорошо это видно по коммитам 2b2010c — merge with all proj; 035f9fc — Refactor add resource query.",
+      "highlights": [
+        {
+          "sha": "2b2010c",
+          "subject": "merge with all proj"
+        },
+        {
+          "sha": "035f9fc",
+          "subject": "Refactor add resource query"
+        },
+        {
+          "sha": "8602c33",
+          "subject": "Refactor: Reorganize repository structure"
+        }
+      ]
+    },
+    {
+      "date": "2026-01-06",
+      "commit_count": 36,
+      "types": {
+        "other": 10,
+        "fix": 12,
+        "chore": 3,
+        "refactor": 3,
+        "merge": 2,
+        "feat": 4,
+        "revert": 2
+      },
+      "themes": {
+        "other": 22,
+        "ums": 12,
+        "docs": 2
+      },
+      "focus": "общая стабилизация и организационные правки и модели, `UMS`, распределение ресурсов и наблюдаемость",
+      "summary": "2026-01-06 работа была сосредоточена на направлении «общая стабилизация и организационные правки и модели, `UMS`, распределение ресурсов и наблюдаемость». По истории коммитов видно, что в этот день основной упор делался на стабилизацию уже внедрённых решений и снятие регрессий. Особенно хорошо это видно по коммитам e7e7645 — Chore: Clean up warnings and modernize FastAPI events in UMS; f79bddb — Feature: Add .env support and clean up GPU monitoring imports.",
+      "highlights": [
+        {
+          "sha": "e7e7645",
+          "subject": "Chore: Clean up warnings and modernize FastAPI events in UMS"
+        },
+        {
+          "sha": "f79bddb",
+          "subject": "Feature: Add .env support and clean up GPU monitoring imports"
+        },
+        {
+          "sha": "62ff5e8",
+          "subject": "Feature: End-to-end real-time streaming"
+        }
+      ]
+    },
+    {
+      "date": "2026-01-07",
+      "commit_count": 3,
+      "types": {
+        "docs": 1,
+        "other": 1,
+        "feat": 1
+      },
+      "themes": {
+        "openwebui": 2,
+        "docs": 1,
+        "other": 1,
+        "ums": 1
+      },
+      "focus": "миграция и стабилизация `Open WebUI` и документация и фиксация правил эксплуатации",
+      "summary": "2026-01-07 работа была сосредоточена на направлении «миграция и стабилизация `Open WebUI` и документация и фиксация правил эксплуатации». По истории коммитов видно, что в этот день добавлялись новые возможности и связывались крупные части системы. Особенно хорошо это видно по коммитам d0c788d — feat: Integrate Open WebUI, fix UMS inference, add MD reporting; 43f6027 — docs: Update README with Open WebUI architecture and instructions.",
+      "highlights": [
+        {
+          "sha": "d0c788d",
+          "subject": "feat: Integrate Open WebUI, fix UMS inference, add MD reporting"
+        },
+        {
+          "sha": "43f6027",
+          "subject": "docs: Update README with Open WebUI architecture and instructions"
+        },
+        {
+          "sha": "81759ac",
+          "subject": "update Context_Log"
+        }
+      ]
+    },
+    {
+      "date": "2026-01-09",
+      "commit_count": 3,
+      "types": {
+        "other": 3
+      },
+      "themes": {
+        "other": 3
+      },
+      "focus": "общая стабилизация и организационные правки",
+      "summary": "2026-01-09 работа была сосредоточена на направлении «общая стабилизация и организационные правки». По истории коммитов видно, что в этот день добавлялись новые возможности и связывались крупные части системы. Особенно хорошо это видно по коммитам 480c2d3 — Delete for_cli directory; ae47352 — modified:   .gitignore.",
+      "highlights": [
+        {
+          "sha": "480c2d3",
+          "subject": "Delete for_cli directory"
+        },
+        {
+          "sha": "ae47352",
+          "subject": "modified:   .gitignore"
+        },
+        {
+          "sha": "f5146cd",
+          "subject": "Изменения, но есть ошибки. Проблема в agent_api.py. Его нужно переписывать, поскольку код утерян"
+        }
+      ]
+    },
+    {
+      "date": "2026-01-25",
+      "commit_count": 1,
+      "types": {
+        "other": 1
+      },
+      "themes": {
+        "other": 1
+      },
+      "focus": "общая стабилизация и организационные правки",
+      "summary": "2026-01-25 работа была сосредоточена на направлении «общая стабилизация и организационные правки». По истории коммитов видно, что в этот день добавлялись новые возможности и связывались крупные части системы. Особенно хорошо это видно по коммитам 84afaba — Add comprehensive setup scripts and Claude Code documentation.",
+      "highlights": [
+        {
+          "sha": "84afaba",
+          "subject": "Add comprehensive setup scripts and Claude Code documentation"
+        }
+      ]
+    },
+    {
+      "date": "2026-02-24",
+      "commit_count": 1,
+      "types": {
+        "refactor": 1
+      },
+      "themes": {
+        "other": 1
+      },
+      "focus": "общая стабилизация и организационные правки",
+      "summary": "2026-02-24 работа была сосредоточена на направлении «общая стабилизация и организационные правки». По истории коммитов видно, что в этот день параллельно шли структурные улучшения и уточнение технического контура. Особенно хорошо это видно по коммитам 03435ac — refactor: async LLM inference, Hungarian matching, batch analysis, dedup middleware.",
+      "highlights": [
+        {
+          "sha": "03435ac",
+          "subject": "refactor: async LLM inference, Hungarian matching, batch analysis, dedup middleware"
+        }
+      ]
+    },
+    {
+      "date": "2026-02-25",
+      "commit_count": 2,
+      "types": {
+        "fix": 1,
+        "other": 1
+      },
+      "themes": {
+        "ums": 1,
+        "docs": 1
+      },
+      "focus": "модели, `UMS`, распределение ресурсов и наблюдаемость и документация и фиксация правил эксплуатации",
+      "summary": "2026-02-25 работа была сосредоточена на направлении «модели, `UMS`, распределение ресурсов и наблюдаемость и документация и фиксация правил эксплуатации». По истории коммитов видно, что в этот день основной упор делался на стабилизацию уже внедрённых решений и снятие регрессий. Особенно хорошо это видно по коммитам 40ac554 — fix: explicitly terminate llama-server in all stop/start scripts; b2d23c3 — v2.3.1: fix streaming, scripts reorganization, architecture docs.",
+      "highlights": [
+        {
+          "sha": "40ac554",
+          "subject": "fix: explicitly terminate llama-server in all stop/start scripts"
+        },
+        {
+          "sha": "b2d23c3",
+          "subject": "v2.3.1: fix streaming, scripts reorganization, architecture docs"
+        }
+      ]
+    },
+    {
+      "date": "2026-02-26",
+      "commit_count": 3,
+      "types": {
+        "chore": 1,
+        "feat": 2
+      },
+      "themes": {
+        "other": 1,
+        "chainlit": 2,
+        "rag": 2
+      },
+      "focus": "поддержка и эволюция `Chainlit`-контура и развитие `RAG`, хранилища знаний и поиска",
+      "summary": "2026-02-26 работа была сосредоточена на направлении «поддержка и эволюция `Chainlit`-контура и развитие `RAG`, хранилища знаний и поиска». По истории коммитов видно, что в этот день добавлялись новые возможности и связывались крупные части системы. Особенно хорошо это видно по коммитам ceae15c — feat: v3.0 Hardware-Adaptive Agentic System — profiler, tiered RAG, Chainlit UI; 0f59b70 — chore: update .gitignore and requirements.txt for v3.0.",
+      "highlights": [
+        {
+          "sha": "ceae15c",
+          "subject": "feat: v3.0 Hardware-Adaptive Agentic System — profiler, tiered RAG, Chainlit UI"
+        },
+        {
+          "sha": "0f59b70",
+          "subject": "chore: update .gitignore and requirements.txt for v3.0"
+        },
+        {
+          "sha": "58dc08e",
+          "subject": "feat: ONNX LaBSE export, Chainlit cl.Step workflows, replace naive RAG with AdaptiveRAGPipeline"
+        }
+      ]
+    },
+    {
+      "date": "2026-02-27",
+      "commit_count": 1,
+      "types": {
+        "fix": 1
+      },
+      "themes": {
+        "chainlit": 1
+      },
+      "focus": "поддержка и эволюция `Chainlit`-контура",
+      "summary": "2026-02-27 работа была сосредоточена на направлении «поддержка и эволюция `Chainlit`-контура». По истории коммитов видно, что в этот день основной упор делался на стабилизацию уже внедрённых решений и снятие регрессий. Особенно хорошо это видно по коммитам 08e8210 — fix: Chainlit Docker pipeline — path mismatch, UUID names, env vars, report saving.",
+      "highlights": [
+        {
+          "sha": "08e8210",
+          "subject": "fix: Chainlit Docker pipeline — path mismatch, UUID names, env vars, report saving"
+        }
+      ]
+    },
+    {
+      "date": "2026-03-01",
+      "commit_count": 1,
+      "types": {
+        "feat": 1
+      },
+      "themes": {
+        "chainlit": 1
+      },
+      "focus": "поддержка и эволюция `Chainlit`-контура",
+      "summary": "2026-03-01 работа была сосредоточена на направлении «поддержка и эволюция `Chainlit`-контура». По истории коммитов видно, что в этот день добавлялись новые возможности и связывались крупные части системы. Особенно хорошо это видно по коммитам a98d32a — feat: integrate AdaptiveRAGPipeline into Chainlit — semantic intent routing, spec chunker, e2e tests.",
+      "highlights": [
+        {
+          "sha": "a98d32a",
+          "subject": "feat: integrate AdaptiveRAGPipeline into Chainlit — semantic intent routing, spec chunker, e2e tests"
+        }
+      ]
+    },
+    {
+      "date": "2026-03-02",
+      "commit_count": 3,
+      "types": {
+        "docs": 1,
+        "fix": 1,
+        "feat": 1
+      },
+      "themes": {
+        "docs": 1,
+        "document": 2
+      },
+      "focus": "обработка документов, парсинг и профильные workflow и документация и фиксация правил эксплуатации",
+      "summary": "2026-03-02 работа была сосредоточена на направлении «обработка документов, парсинг и профильные workflow и документация и фиксация правил эксплуатации». По истории коммитов видно, что в этот день добавлялись новые возможности и связывались крупные части системы. Особенно хорошо это видно по коммитам 6acb61d — docs: add GEMINI.md, .gemini config, .claude agents for AI coding assistant handoff; af1f04c — feat: document_analysis workflow, equipment refactor, tests — single-doc analysis pipeline.",
+      "highlights": [
+        {
+          "sha": "6acb61d",
+          "subject": "docs: add GEMINI.md, .gemini config, .claude agents for AI coding assistant handoff"
+        },
+        {
+          "sha": "af1f04c",
+          "subject": "feat: document_analysis workflow, equipment refactor, tests — single-doc analysis pipeline"
+        },
+        {
+          "sha": "8683faa",
+          "subject": "fix: intent routing, system prompt, equipment parser + claude automations"
+        }
+      ]
+    },
+    {
+      "date": "2026-03-03",
+      "commit_count": 8,
+      "types": {
+        "fix": 3,
+        "feat": 3,
+        "refactor": 2
+      },
+      "themes": {
+        "other": 5,
+        "document": 3
+      },
+      "focus": "общая стабилизация и организационные правки и обработка документов, парсинг и профильные workflow",
+      "summary": "2026-03-03 работа была сосредоточена на направлении «общая стабилизация и организационные правки и обработка документов, парсинг и профильные workflow». По истории коммитов видно, что в этот день добавлялись новые возможности и связывались крупные части системы. Особенно хорошо это видно по коммитам 3bb9cc9 — feat(agent): implement conditional routing to prevent over-extraction; 781445e — feat(parser): finalize LLM Polisher and parsers configuration.",
+      "highlights": [
+        {
+          "sha": "3bb9cc9",
+          "subject": "feat(agent): implement conditional routing to prevent over-extraction"
+        },
+        {
+          "sha": "781445e",
+          "subject": "feat(parser): finalize LLM Polisher and parsers configuration"
+        },
+        {
+          "sha": "bf39c7f",
+          "subject": "feat(parser): implement table pagination fix and multi-line header support"
+        }
+      ]
+    },
+    {
+      "date": "2026-03-04",
+      "commit_count": 12,
+      "types": {
+        "docs": 5,
+        "fix": 4,
+        "chore": 2,
+        "feat": 1
+      },
+      "themes": {
+        "docs": 5,
+        "runtime": 1,
+        "chainlit": 3,
+        "other": 1,
+        "ums": 3,
+        "openwebui": 1
+      },
+      "focus": "документация и фиксация правил эксплуатации и поддержка и эволюция `Chainlit`-контура",
+      "summary": "2026-03-04 работа была сосредоточена на направлении «документация и фиксация правил эксплуатации и поддержка и эволюция `Chainlit`-контура». По истории коммитов видно, что в этот день команда фиксировала архитектурные решения, правила эксплуатации и план следующего шага. Особенно хорошо это видно по коммитам adf9bbf — chore(repo): ignore local test logs and ad-hoc node bootstrap; 512fd97 — chore(repo): remove obsolete verification script.",
+      "highlights": [
+        {
+          "sha": "adf9bbf",
+          "subject": "chore(repo): ignore local test logs and ad-hoc node bootstrap"
+        },
+        {
+          "sha": "512fd97",
+          "subject": "chore(repo): remove obsolete verification script"
+        },
+        {
+          "sha": "5c62f9a",
+          "subject": "docs(repo): consolidate task docs and ignore local artifacts"
+        }
+      ]
+    },
+    {
+      "date": "2026-03-05",
+      "commit_count": 2,
+      "types": {
+        "feat": 2
+      },
+      "themes": {
+        "chainlit": 2
+      },
+      "focus": "поддержка и эволюция `Chainlit`-контура",
+      "summary": "2026-03-05 работа была сосредоточена на направлении «поддержка и эволюция `Chainlit`-контура». По истории коммитов видно, что в этот день добавлялись новые возможности и связывались крупные части системы. Особенно хорошо это видно по коммитам 64606b2 — feat(chainlit): improve routing, summaries, and report handling; c561dcf — feat(chainlit): improve routing, summaries, and report handling.",
+      "highlights": [
+        {
+          "sha": "64606b2",
+          "subject": "feat(chainlit): improve routing, summaries, and report handling"
+        },
+        {
+          "sha": "c561dcf",
+          "subject": "feat(chainlit): improve routing, summaries, and report handling"
+        }
+      ]
+    },
+    {
+      "date": "2026-03-12",
+      "commit_count": 2,
+      "types": {
+        "fix": 1,
+        "feat": 1
+      },
+      "themes": {
+        "other": 1,
+        "chainlit": 1,
+        "operator_ui": 1,
+        "docs": 1
+      },
+      "focus": "общая стабилизация и организационные правки и поддержка и эволюция `Chainlit`-контура",
+      "summary": "2026-03-12 работа была сосредоточена на направлении «общая стабилизация и организационные правки и поддержка и эволюция `Chainlit`-контура». По истории коммитов видно, что в этот день добавлялись новые возможности и связывались крупные части системы. Особенно хорошо это видно по коммитам 75be309 — fix(orchestrator): close b3.31 overnight fix pack; b2d5eae — feat(orchestrator): centralize chainlit control plane and execution.",
+      "highlights": [
+        {
+          "sha": "75be309",
+          "subject": "fix(orchestrator): close b3.31 overnight fix pack"
+        },
+        {
+          "sha": "b2d5eae",
+          "subject": "feat(orchestrator): centralize chainlit control plane and execution"
+        }
+      ]
+    },
+    {
+      "date": "2026-03-13",
+      "commit_count": 26,
+      "types": {
+        "feat": 20,
+        "fix": 2,
+        "docs": 3,
+        "test": 1
+      },
+      "themes": {
+        "ums": 11,
+        "migration": 1,
+        "runtime": 7,
+        "docs": 4,
+        "other": 5,
+        "rag": 4
+      },
+      "focus": "модели, `UMS`, распределение ресурсов и наблюдаемость и рантайм, запуск, офлайн-развёртывание и инсталляция",
+      "summary": "2026-03-13 работа была сосредоточена на направлении «модели, `UMS`, распределение ресурсов и наблюдаемость и рантайм, запуск, офлайн-развёртывание и инсталляция». По истории коммитов видно, что в этот день добавлялись новые возможности и связывались крупные части системы. Особенно хорошо это видно по коммитам 6e42425 — feat(bench): add benchmark comparison tool; 254483c — feat(control-plane): resolve llm and embedder profiles.",
+      "highlights": [
+        {
+          "sha": "6e42425",
+          "subject": "feat(bench): add benchmark comparison tool"
+        },
+        {
+          "sha": "254483c",
+          "subject": "feat(control-plane): resolve llm and embedder profiles"
+        },
+        {
+          "sha": "346c85a",
+          "subject": "feat(obs): add prometheus and grafana stack"
+        }
+      ]
+    },
+    {
+      "date": "2026-03-15",
+      "commit_count": 2,
+      "types": {
+        "fix": 2
+      },
+      "themes": {
+        "other": 1,
+        "chainlit": 1,
+        "ums": 1
+      },
+      "focus": "общая стабилизация и организационные правки и поддержка и эволюция `Chainlit`-контура",
+      "summary": "2026-03-15 работа была сосредоточена на направлении «общая стабилизация и организационные правки и поддержка и эволюция `Chainlit`-контура». По истории коммитов видно, что в этот день основной упор делался на стабилизацию уже внедрённых решений и снятие регрессий. Особенно хорошо это видно по коммитам 69bff5f — fix(orchestrator): harden live behavior sweep regressions; dae7ef0 — fix(chainlit): restore settings defaults and unify model path envs.",
+      "highlights": [
+        {
+          "sha": "69bff5f",
+          "subject": "fix(orchestrator): harden live behavior sweep regressions"
+        },
+        {
+          "sha": "dae7ef0",
+          "subject": "fix(chainlit): restore settings defaults and unify model path envs"
+        }
+      ]
+    },
+    {
+      "date": "2026-03-16",
+      "commit_count": 8,
+      "types": {
+        "feat": 2,
+        "fix": 2,
+        "docs": 2,
+        "test": 1,
+        "chore": 1
+      },
+      "themes": {
+        "runtime": 4,
+        "ums": 1,
+        "other": 1,
+        "docs": 2,
+        "chainlit": 1
+      },
+      "focus": "рантайм, запуск, офлайн-развёртывание и инсталляция и документация и фиксация правил эксплуатации",
+      "summary": "2026-03-16 работа была сосредоточена на направлении «рантайм, запуск, офлайн-развёртывание и инсталляция и документация и фиксация правил эксплуатации». По истории коммитов видно, что в этот день добавлялись новые возможности и связывались крупные части системы. Особенно хорошо это видно по коммитам d91b8f1 — chore(git): ignore local runtime artifacts; b2b44fa — docs(agent): route night logs to TASKS_NIGHT.",
+      "highlights": [
+        {
+          "sha": "d91b8f1",
+          "subject": "chore(git): ignore local runtime artifacts"
+        },
+        {
+          "sha": "b2b44fa",
+          "subject": "docs(agent): route night logs to TASKS_NIGHT"
+        },
+        {
+          "sha": "79a4154",
+          "subject": "docs(evals): add system behavior sweep plan"
+        }
+      ]
+    },
+    {
+      "date": "2026-03-17",
+      "commit_count": 7,
+      "types": {
+        "fix": 3,
+        "chore": 1,
+        "docs": 2,
+        "feat": 1
+      },
+      "themes": {
+        "chainlit": 1,
+        "rag": 1,
+        "openwebui": 1,
+        "runtime": 3,
+        "other": 2,
+        "docs": 2,
+        "document": 1
+      },
+      "focus": "рантайм, запуск, офлайн-развёртывание и инсталляция и общая стабилизация и организационные правки",
+      "summary": "2026-03-17 работа была сосредоточена на направлении «рантайм, запуск, офлайн-развёртывание и инсталляция и общая стабилизация и организационные правки». По истории коммитов видно, что в этот день основной упор делался на стабилизацию уже внедрённых решений и снятие регрессий. Особенно хорошо это видно по коммитам 8ef99cd — chore(config): add local hardware override defaults; e91ed8c — docs(scripts): expand script manual and sync env templates.",
+      "highlights": [
+        {
+          "sha": "8ef99cd",
+          "subject": "chore(config): add local hardware override defaults"
+        },
+        {
+          "sha": "e91ed8c",
+          "subject": "docs(scripts): expand script manual and sync env templates"
+        },
+        {
+          "sha": "d8a8d43",
+          "subject": "feat(reports): render markdown reports to styled pdf"
+        }
+      ]
+    },
+    {
+      "date": "2026-03-18",
+      "commit_count": 28,
+      "types": {
+        "docs": 3,
+        "feat": 11,
+        "refactor": 3,
+        "chore": 3,
+        "fix": 5,
+        "test": 3
+      },
+      "themes": {
+        "docs": 4,
+        "ums": 12,
+        "runtime": 8,
+        "other": 7,
+        "chainlit": 4,
+        "rag": 1,
+        "operator_ui": 1,
+        "document": 1
+      },
+      "focus": "модели, `UMS`, распределение ресурсов и наблюдаемость и рантайм, запуск, офлайн-развёртывание и инсталляция",
+      "summary": "2026-03-18 работа была сосредоточена на направлении «модели, `UMS`, распределение ресурсов и наблюдаемость и рантайм, запуск, офлайн-развёртывание и инсталляция». По истории коммитов видно, что в этот день добавлялись новые возможности и связывались крупные части системы. Особенно хорошо это видно по коммитам 85bd9cb — feat(model-registry): add canonical yaml registry; f5278e9 — chore(repo): untrack local agent workspace files.",
+      "highlights": [
+        {
+          "sha": "85bd9cb",
+          "subject": "feat(model-registry): add canonical yaml registry"
+        },
+        {
+          "sha": "f5278e9",
+          "subject": "chore(repo): untrack local agent workspace files"
+        },
+        {
+          "sha": "27f0926",
+          "subject": "chore(runtime): update local hardware override profile"
+        }
+      ]
+    },
+    {
+      "date": "2026-03-19",
+      "commit_count": 15,
+      "types": {
+        "feat": 3,
+        "docs": 8,
+        "test": 1,
+        "merge": 1,
+        "fix": 2
+      },
+      "themes": {
+        "compare": 6,
+        "document": 1,
+        "docs": 9,
+        "runtime": 3,
+        "other": 2,
+        "ums": 1,
+        "chainlit": 1
+      },
+      "focus": "документация и фиксация правил эксплуатации и улучшение сценариев сравнения документов",
+      "summary": "2026-03-19 работа была сосредоточена на направлении «документация и фиксация правил эксплуатации и улучшение сценариев сравнения документов». По истории коммитов видно, что в этот день команда фиксировала архитектурные решения, правила эксплуатации и план следующего шага. Особенно хорошо это видно по коммитам 1b11881 — docs(readme): adopt layered architecture diagram; f1a3064 — docs(readme): improve architecture diagram data flow.",
+      "highlights": [
+        {
+          "sha": "1b11881",
+          "subject": "docs(readme): adopt layered architecture diagram"
+        },
+        {
+          "sha": "f1a3064",
+          "subject": "docs(readme): improve architecture diagram data flow"
+        },
+        {
+          "sha": "644904f",
+          "subject": "docs(tasks): add document analysis truncation follow-up"
+        }
+      ]
+    },
+    {
+      "date": "2026-03-22",
+      "commit_count": 2,
+      "types": {
+        "docs": 2
+      },
+      "themes": {
+        "runtime": 1,
+        "docs": 2
+      },
+      "focus": "документация и фиксация правил эксплуатации и рантайм, запуск, офлайн-развёртывание и инсталляция",
+      "summary": "2026-03-22 работа была сосредоточена на направлении «документация и фиксация правил эксплуатации и рантайм, запуск, офлайн-развёртывание и инсталляция». По истории коммитов видно, что в этот день команда фиксировала архитектурные решения, правила эксплуатации и план следующего шага. Особенно хорошо это видно по коммитам c428938 — docs: add motivation research backlog; 5626d75 — docs(offline-bundle): add kernel package data checklist.",
+      "highlights": [
+        {
+          "sha": "c428938",
+          "subject": "docs: add motivation research backlog"
+        },
+        {
+          "sha": "5626d75",
+          "subject": "docs(offline-bundle): add kernel package data checklist"
+        }
+      ]
+    },
+    {
+      "date": "2026-03-24",
+      "commit_count": 4,
+      "types": {
+        "docs": 1,
+        "chore": 1,
+        "fix": 1,
+        "feat": 1
+      },
+      "themes": {
+        "docs": 1,
+        "runtime": 3
+      },
+      "focus": "рантайм, запуск, офлайн-развёртывание и инсталляция и документация и фиксация правил эксплуатации",
+      "summary": "2026-03-24 работа была сосредоточена на направлении «рантайм, запуск, офлайн-развёртывание и инсталляция и документация и фиксация правил эксплуатации». По истории коммитов видно, что в этот день добавлялись новые возможности и связывались крупные части системы. Особенно хорошо это видно по коммитам 8f54ccc — chore(offline-bundle): add local tmux override template; 2a750c8 — docs(tasks): add v1.0 transition backlog.",
+      "highlights": [
+        {
+          "sha": "8f54ccc",
+          "subject": "chore(offline-bundle): add local tmux override template"
+        },
+        {
+          "sha": "2a750c8",
+          "subject": "docs(tasks): add v1.0 transition backlog"
+        },
+        {
+          "sha": "f2bcdc7",
+          "subject": "feat(offline-bundle): add source-only offline deployment scaffold"
+        }
+      ]
+    },
+    {
+      "date": "2026-03-26",
+      "commit_count": 11,
+      "types": {
+        "feat": 2,
+        "docs": 5,
+        "chore": 1,
+        "fix": 3
+      },
+      "themes": {
+        "runtime": 9,
+        "ums": 5,
+        "operator_ui": 2,
+        "docs": 5,
+        "compare": 1
+      },
+      "focus": "рантайм, запуск, офлайн-развёртывание и инсталляция и модели, `UMS`, распределение ресурсов и наблюдаемость",
+      "summary": "2026-03-26 работа была сосредоточена на направлении «рантайм, запуск, офлайн-развёртывание и инсталляция и модели, `UMS`, распределение ресурсов и наблюдаемость». По истории коммитов видно, что в этот день команда фиксировала архитектурные решения, правила эксплуатации и план следующего шага. Особенно хорошо это видно по коммитам 2775b94 — chore(offline-bundle): ignore local build archives; e90a33d — docs(offline-bundle): add compact end-to-end runbooks.",
+      "highlights": [
+        {
+          "sha": "2775b94",
+          "subject": "chore(offline-bundle): ignore local build archives"
+        },
+        {
+          "sha": "e90a33d",
+          "subject": "docs(offline-bundle): add compact end-to-end runbooks"
+        },
+        {
+          "sha": "e9578d5",
+          "subject": "docs(offline-bundle): document handoff and archive flow"
+        }
+      ]
+    },
+    {
+      "date": "2026-03-27",
+      "commit_count": 1,
+      "types": {
+        "other": 1
+      },
+      "themes": {
+        "other": 1
+      },
+      "focus": "общая стабилизация и организационные правки",
+      "summary": "2026-03-27 работа была сосредоточена на направлении «общая стабилизация и организационные правки». По истории коммитов видно, что в этот день добавлялись новые возможности и связывались крупные части системы. Особенно хорошо это видно по коммитам d6e692f — Improve offline host bundle package indexing.",
+      "highlights": [
+        {
+          "sha": "d6e692f",
+          "subject": "Improve offline host bundle package indexing"
+        }
+      ]
+    },
+    {
+      "date": "2026-03-29",
+      "commit_count": 6,
+      "types": {
+        "feat": 3,
+        "docs": 2,
+        "refactor": 1
+      },
+      "themes": {
+        "operator_ui": 5,
+        "migration": 2,
+        "docs": 3,
+        "runtime": 1
+      },
+      "focus": "операторский интерфейс и управляющий контур и документация и фиксация правил эксплуатации",
+      "summary": "2026-03-29 работа была сосредоточена на направлении «операторский интерфейс и управляющий контур и документация и фиксация правил эксплуатации». По истории коммитов видно, что в этот день добавлялись новые возможности и связывались крупные части системы. Особенно хорошо это видно по коммитам fac57e5 — feat(operator): add python control plane for operator ui; f8855f5 — feat(operator-ui): add backend-served ui shell and smoke coverage.",
+      "highlights": [
+        {
+          "sha": "fac57e5",
+          "subject": "feat(operator): add python control plane for operator ui"
+        },
+        {
+          "sha": "f8855f5",
+          "subject": "feat(operator-ui): add backend-served ui shell and smoke coverage"
+        },
+        {
+          "sha": "17ce2e4",
+          "subject": "feat(operator-ui): expand config secrets and polish secret controls"
+        }
+      ]
+    },
+    {
+      "date": "2026-03-30",
+      "commit_count": 8,
+      "types": {
+        "other": 5,
+        "feat": 1,
+        "docs": 1,
+        "fix": 1
+      },
+      "themes": {
+        "runtime": 3,
+        "operator_ui": 2,
+        "rag": 1,
+        "migration": 1,
+        "docs": 2,
+        "other": 1,
+        "ums": 1
+      },
+      "focus": "рантайм, запуск, офлайн-развёртывание и инсталляция и операторский интерфейс и управляющий контур",
+      "summary": "2026-03-30 работа была сосредоточена на направлении «рантайм, запуск, офлайн-развёртывание и инсталляция и операторский интерфейс и управляющий контур». По истории коммитов видно, что в этот день добавлялись новые возможности и связывались крупные части системы. Особенно хорошо это видно по коммитам 8dbb4d9 — docs: add PR analysis for v3.0 branch; c8e54e2 — fix: use aiofiles for async upload write, move HTTPException import to top.",
+      "highlights": [
+        {
+          "sha": "8dbb4d9",
+          "subject": "docs: add PR analysis for v3.0 branch"
+        },
+        {
+          "sha": "c8e54e2",
+          "subject": "fix: use aiofiles for async upload write, move HTTPException import to top"
+        },
+        {
+          "sha": "2e17ca3",
+          "subject": "feat: add migration readiness report + OpenAI compat fixes + KB Protocol"
+        }
+      ]
+    },
+    {
+      "date": "2026-03-31",
+      "commit_count": 4,
+      "types": {
+        "feat": 2,
+        "fix": 1,
+        "other": 1
+      },
+      "themes": {
+        "runtime": 2,
+        "ums": 1,
+        "operator_ui": 2,
+        "compare": 1,
+        "docs": 1
+      },
+      "focus": "рантайм, запуск, офлайн-развёртывание и инсталляция и операторский интерфейс и управляющий контур",
+      "summary": "2026-03-31 работа была сосредоточена на направлении «рантайм, запуск, офлайн-развёртывание и инсталляция и операторский интерфейс и управляющий контур». По истории коммитов видно, что в этот день добавлялись новые возможности и связывались крупные части системы. Особенно хорошо это видно по коммитам 5ac5f34 — Fix compare workflow LLM queue discrepancy and JSON parsing; 4e1ad49 — feat(operator-ui): finalize config surface and offline bundle controls.",
+      "highlights": [
+        {
+          "sha": "5ac5f34",
+          "subject": "Fix compare workflow LLM queue discrepancy and JSON parsing"
+        },
+        {
+          "sha": "4e1ad49",
+          "subject": "feat(operator-ui): finalize config surface and offline bundle controls"
+        },
+        {
+          "sha": "08effd9",
+          "subject": "feat(operator-ui): add runtime telemetry and resilient launch controls"
+        }
+      ]
+    },
+    {
+      "date": "2026-04-01",
+      "commit_count": 11,
+      "types": {
+        "feat": 2,
+        "other": 4,
+        "merge": 1,
+        "fix": 1,
+        "chore": 1,
+        "docs": 1,
+        "test": 1
+      },
+      "themes": {
+        "compare": 2,
+        "migration": 3,
+        "docs": 6,
+        "other": 2,
+        "ums": 1
+      },
+      "focus": "документация и фиксация правил эксплуатации и архитектурная миграция и фиксация целевого контура",
+      "summary": "2026-04-01 работа была сосредоточена на направлении «документация и фиксация правил эксплуатации и архитектурная миграция и фиксация целевого контура». По истории коммитов видно, что в этот день добавлялись новые возможности и связывались крупные части системы. Особенно хорошо это видно по коммитам 4a800b1 — Fix model download scripts: Qwen3-14B from MaziyarPanahi, LaBSE from cointegrated; c8e8671 — chore: update package version lower bounds and build script version pins.",
+      "highlights": [
+        {
+          "sha": "4a800b1",
+          "subject": "Fix model download scripts: Qwen3-14B from MaziyarPanahi, LaBSE from cointegrated"
+        },
+        {
+          "sha": "c8e8671",
+          "subject": "chore: update package version lower bounds and build script version pins"
+        },
+        {
+          "sha": "02d83c8",
+          "subject": "feat(compare): implement B3.51g and B3.51h - summary-first bounded latency with fast/deep modes"
+        }
+      ]
+    },
+    {
+      "date": "2026-04-02",
+      "commit_count": 4,
+      "types": {
+        "refactor": 2,
+        "docs": 2
+      },
+      "themes": {
+        "runtime": 2,
+        "openwebui": 1,
+        "migration": 1,
+        "docs": 2,
+        "operator_ui": 1
+      },
+      "focus": "рантайм, запуск, офлайн-развёртывание и инсталляция и документация и фиксация правил эксплуатации",
+      "summary": "2026-04-02 работа была сосредоточена на направлении «рантайм, запуск, офлайн-развёртывание и инсталляция и документация и фиксация правил эксплуатации». По истории коммитов видно, что в этот день команда фиксировала архитектурные решения, правила эксплуатации и план следующего шага. Особенно хорошо это видно по коммитам 05e1eec — refactor(operator): align env contract with runtime; bde06e4 — refactor(runtime): simplify native env chain.",
+      "highlights": [
+        {
+          "sha": "05e1eec",
+          "subject": "refactor(operator): align env contract with runtime"
+        },
+        {
+          "sha": "bde06e4",
+          "subject": "refactor(runtime): simplify native env chain"
+        },
+        {
+          "sha": "e2fc606",
+          "subject": "docs(repo): refresh agent and operator ui notes"
+        }
+      ]
+    },
+    {
+      "date": "2026-04-06",
+      "commit_count": 4,
+      "types": {
+        "refactor": 1,
+        "feat": 2,
+        "docs": 1
+      },
+      "themes": {
+        "runtime": 1,
+        "other": 1,
+        "operator_ui": 2,
+        "docs": 1
+      },
+      "focus": "операторский интерфейс и управляющий контур и рантайм, запуск, офлайн-развёртывание и инсталляция",
+      "summary": "2026-04-06 работа была сосредоточена на направлении «операторский интерфейс и управляющий контур и рантайм, запуск, офлайн-развёртывание и инсталляция». По истории коммитов видно, что в этот день добавлялись новые возможности и связывались крупные части системы. Особенно хорошо это видно по коммитам 989147d — feat(operator): add job cancel and config pickers; eb2becd — feat(operator-ui): apply panel review refresh.",
+      "highlights": [
+        {
+          "sha": "989147d",
+          "subject": "feat(operator): add job cancel and config pickers"
+        },
+        {
+          "sha": "eb2becd",
+          "subject": "feat(operator-ui): apply panel review refresh"
+        },
+        {
+          "sha": "766a6d2",
+          "subject": "refactor(runtime): make preload steps opt-in"
+        }
+      ]
+    },
+    {
+      "date": "2026-04-07",
+      "commit_count": 2,
+      "types": {
+        "docs": 1,
+        "feat": 1
+      },
+      "themes": {
+        "docs": 1,
+        "openwebui": 1,
+        "migration": 1
+      },
+      "focus": "документация и фиксация правил эксплуатации и миграция и стабилизация `Open WebUI`",
+      "summary": "2026-04-07 работа была сосредоточена на направлении «документация и фиксация правил эксплуатации и миграция и стабилизация `Open WebUI`». По истории коммитов видно, что в этот день добавлялись новые возможности и связывались крупные части системы. Особенно хорошо это видно по коммитам 062d6e9 — docs(repo): relocate forms and research artifacts; 2b5ea85 — feat(migration): add openwebui tool server eval contour.",
+      "highlights": [
+        {
+          "sha": "062d6e9",
+          "subject": "docs(repo): relocate forms and research artifacts"
+        },
+        {
+          "sha": "2b5ea85",
+          "subject": "feat(migration): add openwebui tool server eval contour"
+        }
+      ]
+    },
+    {
+      "date": "2026-04-08",
+      "commit_count": 8,
+      "types": {
+        "fix": 2,
+        "other": 1,
+        "docs": 2,
+        "feat": 2,
+        "chore": 1
+      },
+      "themes": {
+        "runtime": 2,
+        "other": 1,
+        "ums": 1,
+        "migration": 2,
+        "docs": 3,
+        "openwebui": 3,
+        "operator_ui": 1,
+        "chainlit": 1,
+        "rag": 1
+      },
+      "focus": "документация и фиксация правил эксплуатации и миграция и стабилизация `Open WebUI`",
+      "summary": "2026-04-08 работа была сосредоточена на направлении «документация и фиксация правил эксплуатации и миграция и стабилизация `Open WebUI`». По истории коммитов видно, что в этот день добавлялись новые возможности и связывались крупные части системы. Особенно хорошо это видно по коммитам ca7ccc0 — fix(legacy-ui): align open webui tool server contract; 1b02d0e — fix(runtime): harden env loading across operator scripts.",
+      "highlights": [
+        {
+          "sha": "ca7ccc0",
+          "subject": "fix(legacy-ui): align open webui tool server contract"
+        },
+        {
+          "sha": "1b02d0e",
+          "subject": "fix(runtime): harden env loading across operator scripts"
+        },
+        {
+          "sha": "86eb8ca",
+          "subject": "chore(cleanup): archive legacy windows bootstrap and remove stale rag smoke script"
+        }
+      ]
+    },
+    {
+      "date": "2026-04-09",
+      "commit_count": 1,
+      "types": {
+        "fix": 1
+      },
+      "themes": {
+        "openwebui": 1,
+        "migration": 1,
+        "docs": 1
+      },
+      "focus": "миграция и стабилизация `Open WebUI` и архитектурная миграция и фиксация целевого контура",
+      "summary": "2026-04-09 работа была сосредоточена на направлении «миграция и стабилизация `Open WebUI` и архитектурная миграция и фиксация целевого контура». По истории коммитов видно, что в этот день основной упор делался на стабилизацию уже внедрённых решений и снятие регрессий. Особенно хорошо это видно по коммитам 845096f — fix(openwebui): stabilize bootstrap and capture split plan.",
+      "highlights": [
+        {
+          "sha": "845096f",
+          "subject": "fix(openwebui): stabilize bootstrap and capture split plan"
+        }
+      ]
+    },
+    {
+      "date": "2026-04-10",
+      "commit_count": 1,
+      "types": {
+        "fix": 1
+      },
+      "themes": {
+        "openwebui": 1,
+        "runtime": 1
+      },
+      "focus": "миграция и стабилизация `Open WebUI` и рантайм, запуск, офлайн-развёртывание и инсталляция",
+      "summary": "2026-04-10 работа была сосредоточена на направлении «миграция и стабилизация `Open WebUI` и рантайм, запуск, офлайн-развёртывание и инсталляция». По истории коммитов видно, что в этот день основной упор делался на стабилизацию уже внедрённых решений и снятие регрессий. Особенно хорошо это видно по коммитам 54db4a3 — fix(openwebui): enforce explicit runtime boundaries.",
+      "highlights": [
+        {
+          "sha": "54db4a3",
+          "subject": "fix(openwebui): enforce explicit runtime boundaries"
+        }
+      ]
+    },
+    {
+      "date": "2026-04-11",
+      "commit_count": 10,
+      "types": {
+        "feat": 6,
+        "fix": 1,
+        "test": 1,
+        "refactor": 1,
+        "docs": 1
+      },
+      "themes": {
+        "other": 5,
+        "runtime": 2,
+        "ums": 2,
+        "openwebui": 3,
+        "rag": 1,
+        "migration": 1,
+        "docs": 1
+      },
+      "focus": "общая стабилизация и организационные правки и миграция и стабилизация `Open WebUI`",
+      "summary": "2026-04-11 работа была сосредоточена на направлении «общая стабилизация и организационные правки и миграция и стабилизация `Open WebUI`». По истории коммитов видно, что в этот день добавлялись новые возможности и связывались крупные части системы. Особенно хорошо это видно по коммитам 71c9c51 — feat(openwebui): reconcile bootstrap drift and native function-calling defaults; 674ea79 — feat(openapi): allow unauthenticated OpenAPI schema probe for browser.",
+      "highlights": [
+        {
+          "sha": "71c9c51",
+          "subject": "feat(openwebui): reconcile bootstrap drift and native function-calling defaults"
+        },
+        {
+          "sha": "674ea79",
+          "subject": "feat(openapi): allow unauthenticated OpenAPI schema probe for browser"
+        },
+        {
+          "sha": "8c2cab8",
+          "subject": "feat(scripts): add Open WebUI workspace tool management and follow-up diagnostics"
+        }
+      ]
+    },
+    {
+      "date": "2026-04-12",
+      "commit_count": 3,
+      "types": {
+        "feat": 2,
+        "docs": 1
+      },
+      "themes": {
+        "runtime": 1,
+        "openwebui": 2,
+        "migration": 1,
+        "docs": 1
+      },
+      "focus": "миграция и стабилизация `Open WebUI` и рантайм, запуск, офлайн-развёртывание и инсталляция",
+      "summary": "2026-04-12 работа была сосредоточена на направлении «миграция и стабилизация `Open WebUI` и рантайм, запуск, офлайн-развёртывание и инсталляция». По истории коммитов видно, что в этот день добавлялись новые возможности и связывались крупные части системы. Особенно хорошо это видно по коммитам 231fe2a — feat(openwebui): stabilize bootstrap ownership and deep-job contour; 032fc5c — feat(runtime): consolidate native env flow and busy handling.",
+      "highlights": [
+        {
+          "sha": "231fe2a",
+          "subject": "feat(openwebui): stabilize bootstrap ownership and deep-job contour"
+        },
+        {
+          "sha": "032fc5c",
+          "subject": "feat(runtime): consolidate native env flow and busy handling"
+        },
+        {
+          "sha": "f75066a",
+          "subject": "docs(openwebui): align product wording and migration plans"
+        }
+      ]
+    }
+  ]
+}
