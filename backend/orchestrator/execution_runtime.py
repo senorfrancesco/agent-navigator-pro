@@ -166,6 +166,12 @@ def _resolve_summary_stage_overrides(
     }
 
 
+def _coerce_summary_metadata(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    return {}
+
+
 def _estimate_prompt_tokens(text: str) -> int:
     return max(1, len(str(text or "")) // 4)
 
@@ -420,7 +426,7 @@ async def _infer_documents_summary_stage(
     effective_settings: Optional[Dict[str, Any]],
 ) -> tuple[str, Dict[str, Any]]:
     inc_metric_counter(
-        "agent_nav_fallback_events_total",
+        "llm_tools_platform_fallback_events_total",
         labels={
             "component": "documents_summary",
             "fallback": f"documents_summary_{stage}_attempt",
@@ -601,6 +607,16 @@ def _summarize_model_execution_events(events: List[Dict[str, Any]]) -> Optional[
     }
 
 
+def _normalize_model_execution_payload(value: Any) -> Optional[Dict[str, Any]]:
+    if isinstance(value, dict):
+        return copy.deepcopy(value)
+    if isinstance(value, list):
+        return _summarize_model_execution_events(
+            [event for event in value if isinstance(event, dict)]
+        )
+    return None
+
+
 def _extract_model_text(response: Any) -> str:
     if not isinstance(response, dict):
         return str(response).strip()
@@ -674,7 +690,7 @@ async def _infer_with_model_failover(
                     exc_info=True,
                 )
                 inc_metric_counter(
-                    "agent_nav_fallback_events_total",
+                    "llm_tools_platform_fallback_events_total",
                     labels={
                         "component": "model_execution",
                         "fallback": "model_failover_retry",
@@ -1474,10 +1490,10 @@ async def _execute_compare(
         "coverage_signals": len(final_state.get("analysis_results") or []),
         "parsed_items": len(final_state.get("matches") or []),
     }
-    summary_metadata = final_state.get("summary_metadata") or {}
-    model_execution = final_state.get("model_execution") or _summarize_model_execution_events(
-        _collect_model_execution_events(deps)
-    )
+    summary_metadata = _coerce_summary_metadata(final_state.get("summary_metadata"))
+    model_execution = _normalize_model_execution_payload(final_state.get("model_execution"))
+    if model_execution is None:
+        model_execution = _summarize_model_execution_events(_collect_model_execution_events(deps))
     if report:
         await deps.attach_and_register_report(report)
         execution_metadata = {
@@ -1532,6 +1548,7 @@ async def _execute_equipment(
     history: List[Dict[str, Any]],
     effective_settings: Optional[Dict[str, Any]],
     deps: ExecutionDependencies,
+    strict_tool_contract: bool = False,
 ) -> Dict[str, Any]:
     from orchestrator.workflows.equipment import create_equipment_graph
 
@@ -1539,6 +1556,15 @@ async def _execute_equipment(
     if error_message:
         available_docs_count = max(len(new_files or []), len(session_docs or {}))
         if available_docs_count < 2:
+            if strict_tool_contract and available_docs_count > 0:
+                return {
+                    "assistant_message": (
+                        "Для одного загруженного документа инструмент анализа оборудования не подходит. "
+                        "Используйте отдельный инструмент анализа документа или добавьте второй документ для сравнения."
+                    ),
+                    "execution_metadata": {"status": "failed", "reason": "equipment_requires_two_documents"},
+                    "quality_signals": {"structured_output_ok": False, "coverage_signals": 0, "parsed_items": 0},
+                }
             fallback_settings = dict(effective_settings or {})
             fallback_settings["custom_system_prompt"] = str(
                 fallback_settings.get("custom_system_prompt") or EQUIPMENT_TOOL_FALLBACK_SYSTEM_PROMPT
@@ -1588,10 +1614,10 @@ async def _execute_equipment(
         "coverage_signals": len(final_state.get("analysis_results") or []),
         "parsed_items": len(final_state.get("items_1") or []) + len(final_state.get("items_2") or []),
     }
-    summary_metadata = final_state.get("summary_metadata") or {}
-    model_execution = final_state.get("model_execution") or _summarize_model_execution_events(
-        _collect_model_execution_events(deps)
-    )
+    summary_metadata = _coerce_summary_metadata(final_state.get("summary_metadata"))
+    model_execution = _normalize_model_execution_payload(final_state.get("model_execution"))
+    if model_execution is None:
+        model_execution = _summarize_model_execution_events(_collect_model_execution_events(deps))
     if report:
         await deps.attach_and_register_report(report)
         execution_metadata = {
@@ -1618,6 +1644,7 @@ async def _execute_equipment(
 
 async def _execute_document_analysis(
     *,
+    query: str,
     new_files: List[Dict[str, Any]],
     session_docs: Dict[str, Any],
     effective_settings: Optional[Dict[str, Any]],
@@ -1630,12 +1657,22 @@ async def _execute_document_analysis(
     if error_message:
         return {"assistant_message": error_message}
 
+    selected_doc = {}
+    for name, info in (session_docs or {}).items():
+        if not isinstance(info, dict):
+            continue
+        if str(name) == str(file_entry.get("name") or "") or str(info.get("path") or "") == str(file_entry.get("path") or ""):
+            selected_doc = info
+            break
+
     workflow = create_analysis_graph()
     final_state = await _run_graph(
         workflow,
         {
             "input_path": deps.to_host_path(file_entry["path"]),
             "doc_name": file_entry["name"],
+            "analysis_goal": str(query or "").strip(),
+            "prefetched_full_text": str((selected_doc or {}).get("text") or ""),
             "doc_type": "",
             "doc_metadata": {},
             "items": [],
@@ -1659,10 +1696,10 @@ async def _execute_document_analysis(
         "coverage_signals": len(final_state.get("summary") or ""),
         "parsed_items": len(final_state.get("items") or []),
     }
-    summary_metadata = final_state.get("summary_metadata") or {}
-    model_execution = final_state.get("model_execution") or _summarize_model_execution_events(
-        _collect_model_execution_events(deps)
-    )
+    summary_metadata = _coerce_summary_metadata(final_state.get("summary_metadata"))
+    model_execution = _normalize_model_execution_payload(final_state.get("model_execution"))
+    if model_execution is None:
+        model_execution = _summarize_model_execution_events(_collect_model_execution_events(deps))
     if report:
         await deps.attach_and_register_report(report)
         execution_metadata = {
@@ -1793,7 +1830,7 @@ async def _execute_documents_summary(
                 _store_cached_documents_summary_chunk(cache_key, chunk_summary.strip())
             else:
                 inc_metric_counter(
-                    "agent_nav_fallback_events_total",
+                    "llm_tools_platform_fallback_events_total",
                     labels={
                         "component": "documents_summary",
                         "fallback": "documents_summary_chunk_cache_hit",
@@ -1943,7 +1980,7 @@ async def _execute_documents_summary(
                     )
                     if shadow_trace["shadow_baseline_strategy"] != shadow_trace["executed_strategy"]:
                         inc_metric_counter(
-                            "agent_nav_summary_strategy_shadow_diff_total",
+                            "llm_tools_platform_summary_strategy_shadow_diff_total",
                             labels={
                                 "component": "documents_summary",
                                 "executed_strategy": shadow_trace["executed_strategy"],
@@ -1951,7 +1988,7 @@ async def _execute_documents_summary(
                             },
                         )
                 inc_metric_counter(
-                    "agent_nav_summary_strategy_total",
+                    "llm_tools_platform_summary_strategy_total",
                     labels={
                         "component": "documents_summary",
                         "strategy": str(strategy_meta["strategy"]),
@@ -2094,7 +2131,7 @@ async def _execute_documents_summary(
             )
         except Exception as exc:
             inc_metric_counter(
-                "agent_nav_fallback_events_total",
+                "llm_tools_platform_fallback_events_total",
                 labels={
                     "component": "documents_summary",
                     "fallback": "documents_summary_merge_degraded",
@@ -2178,7 +2215,7 @@ async def _execute_documents_summary(
                 degraded_events.append(stage_meta)
         except Exception as exc:
             inc_metric_counter(
-                "agent_nav_fallback_events_total",
+                "llm_tools_platform_fallback_events_total",
                 labels={
                     "component": "documents_summary",
                     "fallback": "documents_summary_global_degraded",
@@ -2398,7 +2435,7 @@ async def _execute_doc_question(
             )
             logger.warning("RAG retrieve failed in doc_question path: %s", exc, exc_info=True)
             inc_metric_counter(
-                "agent_nav_fallback_events_total",
+                "llm_tools_platform_fallback_events_total",
                 labels={"component": "doc_question", "fallback": "rag_exception", "source": "execution_runtime"},
             )
             rag_result = None
@@ -2428,7 +2465,7 @@ async def _execute_doc_question(
 
     if rag_result is None and not sources:
         inc_metric_counter(
-            "agent_nav_fallback_events_total",
+            "llm_tools_platform_fallback_events_total",
             labels={"component": "doc_question", "fallback": "no_sources", "source": "execution_runtime"},
         )
         return {
@@ -2790,9 +2827,11 @@ async def execute_orchestration(
                     history=history,
                     effective_settings=effective_settings,
                     deps=deps,
+                    strict_tool_contract=str(request.get("execution_surface") or "") == "explicit_tool",
                 )
             elif executor == "document_analysis":
                 result = await _execute_document_analysis(
+                    query=request.get("message", ""),
                     new_files=attachments_meta,
                     session_docs=session_docs,
                     effective_settings=effective_settings,

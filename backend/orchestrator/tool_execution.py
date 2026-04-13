@@ -15,6 +15,16 @@ _ACTIVE_TOOL_JOB_TASKS: Dict[str, asyncio.Task[Any]] = {}
 _EXPLICIT_TOOL_JOB_START_DELAY_ENV = "OPENWEBUI_EXPLICIT_TOOL_JOB_START_DELAY_S"
 
 
+def _resolve_document_context_count(request_payload: Dict[str, Any]) -> int:
+    counts = [
+        int(request_payload.get("file_count") or 0),
+        len(request_payload.get("active_doc_ids") or []),
+        len(request_payload.get("session_docs") or {}),
+        len(request_payload.get("attachments_meta") or []),
+    ]
+    return max(counts)
+
+
 def apply_tool_contract_to_payload(request_payload: Dict[str, Any]) -> Optional[ToolDefinition]:
     requested_tool = str(request_payload.get("requested_tool") or "").strip()
     if not requested_tool or not is_known_tool(requested_tool):
@@ -30,6 +40,8 @@ def apply_tool_contract_to_payload(request_payload: Dict[str, Any]) -> Optional[
     request_payload["execution_surface"] = "explicit_tool"
     request_payload["runtime_mode"] = "specialized_tasks"
 
+    document_context_count = _resolve_document_context_count(request_payload)
+
     if tool_definition.name == "ask_document" and not request_payload.get("rag_scope"):
         if str(request_payload.get("knowledge_collection_id") or "").strip():
             request_payload["rag_scope"] = "knowledge_base_rag"
@@ -38,6 +50,11 @@ def apply_tool_contract_to_payload(request_payload: Dict[str, Any]) -> Optional[
             or int(request_payload.get("file_count") or 0) > 0
             or bool(request_payload.get("active_doc_ids"))
         ):
+            request_payload["rag_scope"] = "session_rag"
+
+    if tool_definition.name == "analyze_equipment_deep" and document_context_count == 1:
+        request_payload["forced_route"] = "document_question"
+        if not request_payload.get("rag_scope"):
             request_payload["rag_scope"] = "session_rag"
 
     return tool_definition
@@ -175,6 +192,39 @@ def cancel_tool_job(job_id: str) -> ToolJobRecord:
     return updated_job
 
 
+def force_tool_job_transition(
+    job_id: str,
+    *,
+    status: str,
+    response: Optional[Dict[str, Any]] = None,
+    error_summary: Optional[str] = None,
+) -> ToolJobRecord:
+    store = get_tool_job_store()
+    job = store.get(job_id)
+    if job is None:
+        raise KeyError(job_id)
+
+    task = _ACTIVE_TOOL_JOB_TASKS.pop(job_id, None)
+    if task is not None and not task.done():
+        task.cancel()
+
+    normalized_status = str(status).strip().lower()
+    if normalized_status == "running":
+        return store.mark_running(job_id)
+    if normalized_status == "cancelling":
+        return store.mark_cancelling(job_id)
+    if normalized_status == "completed":
+        payload = copy.deepcopy(response or {})
+        if not payload:
+            payload = {"assistant_message": "Synthetic completed result"}
+        return store.finish_completed(job_id, payload)
+    if normalized_status == "failed":
+        return store.finish_failed(job_id, error_summary or "synthetic-failure")
+    if normalized_status == "cancelled":
+        return store.finish_cancelled(job_id, error_summary=error_summary or "synthetic-cancelled")
+    raise ValueError(f"unsupported-tool-job-status:{status}")
+
+
 def reconcile_incomplete_tool_jobs() -> int:
     _ACTIVE_TOOL_JOB_TASKS.clear()
     return get_tool_job_store().reconcile_incomplete_jobs()
@@ -211,13 +261,21 @@ def submit_async_tool_job(
             response = await execute_fn(payload_copy, deps=deps)
         except asyncio.CancelledError:
             current_job = store.get(job.job_id)
+            if current_job is not None and current_job.status in {"completed", "failed", "cancelled"}:
+                return
             if current_job is not None and current_job.status == "cancelling":
                 store.finish_cancelled(job.job_id)
             else:
                 store.finish_failed(job.job_id, "interrupted:task-cancelled", current_stage="interrupted")
             raise
         except Exception as exc:
+            current_job = store.get(job.job_id)
+            if current_job is not None and current_job.status in {"completed", "failed", "cancelled"}:
+                return
             store.finish_failed(job.job_id, str(exc))
+            return
+        current_job = store.get(job.job_id)
+        if current_job is not None and current_job.status in {"completed", "failed", "cancelled"}:
             return
         terminal_status = _resolve_async_terminal_status(response)
         if terminal_status in {"busy", "failed"}:

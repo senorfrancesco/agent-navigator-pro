@@ -110,6 +110,8 @@ async def _infer_document_analysis_with_failover(
 class DocumentAnalysisState(TypedDict):
     input_path: str
     doc_name: str
+    analysis_goal: Optional[str]
+    prefetched_full_text: str
     doc_type: str                      # "tz"|"smeta"|"kp"|"legal"|"other"
     doc_metadata: Dict[str, Any]       # pages, chars, tables_count, format
     items: List[Dict[str, Any]]        # Извлечённые позиции
@@ -186,21 +188,39 @@ def _load_document_type_keywords() -> Dict[str, List[str]]:
 
 def _extract_llm_content(response: Dict[str, Any]) -> str:
     """Normalize common UMS/LLM response shapes to plain text."""
+
+    def _normalize_content(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, list):
+            parts: List[str] = []
+            for item in value:
+                normalized = _normalize_content(item)
+                if normalized:
+                    parts.append(normalized)
+            return "\n".join(parts).strip()
+        if isinstance(value, dict):
+            for key in ("text", "message", "delta", "content"):
+                normalized = _normalize_content(value.get(key))
+                if normalized:
+                    return normalized
+            return ""
+        return str(value).strip()
+
     if not isinstance(response, dict):
         return str(response).strip()
 
     choices = response.get("choices")
     if isinstance(choices, list) and choices:
-        choice = choices[0] or {}
-        return (
-            choice.get("text", "")
-            or choice.get("message", {}).get("content", "")
-            or choice.get("delta", {}).get("content", "")
-        ).strip()
+        normalized_choice = _normalize_content(choices[0])
+        if normalized_choice:
+            return normalized_choice
 
-    content = response.get("content")
-    if isinstance(content, str):
-        return content.strip()
+    normalized_content = _normalize_content(response.get("content"))
+    if normalized_content:
+        return normalized_content
 
     return str(response).strip()
 
@@ -230,6 +250,18 @@ def _build_summary_chunk_prompt(type_prompt: str, chunk: str, index: int, total:
 {truncate_text(chunk, MAX_TEXT_FOR_LLM)}<|im_end|>
 <|im_start|>assistant
 """
+
+
+def _merge_analysis_goal(type_prompt: str, analysis_goal: Optional[str]) -> str:
+    goal = str(analysis_goal or "").strip()
+    if not goal:
+        return type_prompt
+    return (
+        f"{type_prompt}\n\n"
+        "Дополнительная цель анализа:\n"
+        f"- {goal}\n"
+        "Сохраняй акцент на этой цели и не подменяй её общим обзором."
+    )
 
 
 def _get_runtime_context(state: DocumentAnalysisState) -> Dict[str, Any]:
@@ -632,7 +664,8 @@ async def classify_and_load_node(state: DocumentAnalysisState) -> dict:
 
     print(f"[DocAnalysis] Loading: {doc_name}")
 
-    full_text = ""
+    prefetched_full_text = str(state.get("prefetched_full_text") or "").strip()
+    full_text = prefetched_full_text
     pages = 0
     tables_count = 0
 
@@ -656,14 +689,19 @@ async def classify_and_load_node(state: DocumentAnalysisState) -> dict:
         if data.get("status") == "error":
             errors.append(f"Document load error: {data.get('error')}")
         else:
-            full_text = data.get("text", "")
+            loaded_text = str(data.get("text") or "").strip()
+            if loaded_text:
+                full_text = loaded_text
     except Exception as e:
         logger.warning("Document analysis load_document fallback: %s", e, exc_info=True)
         inc_metric_counter(
-            "agent_nav_fallback_events_total",
+            "llm_tools_platform_fallback_events_total",
             labels={"component": "document_analysis", "fallback": "load_document_failed", "source": "workflow"},
         )
-        errors.append(f"Failed to load document: {e}")
+        if prefetched_full_text:
+            errors.append("Document server недоступен; анализ выполнен по извлечённому тексту из чата.")
+        else:
+            errors.append(f"Failed to load document: {e}")
 
     # Количество страниц (PDF)
     if ext == ".pdf":
@@ -686,10 +724,13 @@ async def classify_and_load_node(state: DocumentAnalysisState) -> dict:
         except Exception as e:
             logger.warning("Document analysis load_pages fallback: %s", e, exc_info=True)
             inc_metric_counter(
-                "agent_nav_fallback_events_total",
+                "llm_tools_platform_fallback_events_total",
                 labels={"component": "document_analysis", "fallback": "load_pages_failed", "source": "workflow"},
             )
-            errors.append(f"Failed to load pages: {e}")
+            if prefetched_full_text:
+                errors.append("Не удалось определить страницы документа; анализ продолжен по извлечённому тексту.")
+            else:
+                errors.append(f"Failed to load pages: {e}")
 
     # Количество таблиц
     try:
@@ -712,7 +753,7 @@ async def classify_and_load_node(state: DocumentAnalysisState) -> dict:
     except Exception:
         logger.warning("Document analysis extract_tables degraded path", exc_info=True)
         inc_metric_counter(
-            "agent_nav_fallback_events_total",
+            "llm_tools_platform_fallback_events_total",
             labels={"component": "document_analysis", "fallback": "extract_tables_failed", "source": "workflow"},
         )
         pass  # Таблицы опциональны
@@ -755,7 +796,7 @@ async def extract_positions_node(state: DocumentAnalysisState) -> dict:
     except Exception as e:
         logger.warning("Document analysis table extraction fallback: %s", e, exc_info=True)
         inc_metric_counter(
-            "agent_nav_fallback_events_total",
+            "llm_tools_platform_fallback_events_total",
             labels={"component": "document_analysis", "fallback": "table_extract_failed", "source": "workflow"},
         )
         errors.append(f"Table extraction failed: {e}")
@@ -789,7 +830,7 @@ async def extract_positions_node(state: DocumentAnalysisState) -> dict:
         except Exception as e:
             logger.warning("Document analysis llm extraction fallback: %s", e, exc_info=True)
             inc_metric_counter(
-                "agent_nav_fallback_events_total",
+                "llm_tools_platform_fallback_events_total",
                 labels={"component": "document_analysis", "fallback": "llm_extract_failed", "source": "workflow"},
             )
             errors.append(f"LLM extraction failed: {e}")
@@ -863,7 +904,10 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
     if not full_text.strip():
         return {"summary": "Текст документа пуст.", "errors": errors, "summary_metadata": summary_metadata}
 
-    type_prompt = _SUMMARY_PROMPTS.get(doc_type, _SUMMARY_PROMPTS["other"])
+    type_prompt = _merge_analysis_goal(
+        _SUMMARY_PROMPTS.get(doc_type, _SUMMARY_PROMPTS["other"]),
+        state.get("analysis_goal"),
+    )
     summary_policy = _get_summary_policy(state)
     shadow_mode_enabled = _is_summary_shadow_mode_enabled()
 
@@ -920,7 +964,7 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
             print(f"    [DocAnalysis] Chunk {idx+1} failed: {e}")
             logger.warning("Document analysis summarize chunk fallback idx=%s: %s", idx + 1, e, exc_info=True)
             inc_metric_counter(
-                "agent_nav_fallback_events_total",
+                "llm_tools_platform_fallback_events_total",
                 labels={"component": "document_analysis", "fallback": "summarize_chunk_failed", "source": "workflow"},
             )
             errors.append(f"Summarize chunk {idx+1} failed: {e}")
@@ -1023,7 +1067,7 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
                 shadow_decisions.append(dict(shadow_trace))
                 if shadow_trace["shadow_baseline_strategy"] != shadow_trace["executed_strategy"]:
                     inc_metric_counter(
-                        "agent_nav_summary_strategy_shadow_diff_total",
+                        "llm_tools_platform_summary_strategy_shadow_diff_total",
                         labels={
                             "component": "document_analysis",
                             "executed_strategy": shadow_trace["executed_strategy"],
@@ -1086,7 +1130,7 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
                     len(reduce_items),
                 )
             inc_metric_counter(
-                "agent_nav_summary_strategy_total",
+                "llm_tools_platform_summary_strategy_total",
                 labels={
                     "component": "document_analysis",
                     "strategy": str(strategy_meta["strategy"]),
@@ -1144,7 +1188,7 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
             except Exception as e:
                 logger.warning("Document analysis reduce summarization fallback: %s", e, exc_info=True)
                 inc_metric_counter(
-                    "agent_nav_fallback_events_total",
+                    "llm_tools_platform_fallback_events_total",
                     labels={"component": "document_analysis", "fallback": "reduce_summarization_failed", "source": "workflow"},
                 )
                 errors.append(f"Reduce summarization failed: {e}")
@@ -1198,7 +1242,7 @@ async def summarize_node(state: DocumentAnalysisState) -> dict:
             except Exception as e:
                 logger.warning("Document analysis final synthesis degraded: %s", e, exc_info=True)
                 inc_metric_counter(
-                    "agent_nav_fallback_events_total",
+                    "llm_tools_platform_fallback_events_total",
                     labels={"component": "document_analysis", "fallback": "reduce_summarization_failed", "source": "workflow"},
                 )
                 errors.append(f"Reduce summarization failed: {e}")

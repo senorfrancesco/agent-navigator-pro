@@ -13,6 +13,7 @@ from orchestrator.execution_runtime import (
     _DOCUMENTS_SUMMARY_CACHE,
     _extract_quality_signals_from_result,
     _execute_document_analysis,
+    _execute_equipment,
     _execute_documents_summary,
     _run_graph,
     execute_orchestration,
@@ -98,6 +99,11 @@ def _build_minimal_deps() -> ExecutionDependencies:
         clear_progress_box=AsyncMock(),
         is_cancelled=lambda: False,
     )
+
+
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+_REQ_PDF = os.path.join(_REPO_ROOT, "documents", "Requirements.pdf")
+_QUOTE_PDF = os.path.join(_REPO_ROOT, "documents", "Quotation_12.pdf")
 
 
 def test_execute_orchestration_adds_state_ref_and_pending_action_metadata():
@@ -882,7 +888,7 @@ def test_execute_orchestration_doc_question_records_rag_exception_fallback_metri
 
     assert "не удалось получить проверяемые источники" in response["assistant_message"].lower()
     metrics = render_metrics_text()
-    assert "agent_nav_fallback_events_total" in metrics
+    assert "llm_tools_platform_fallback_events_total" in metrics
     assert 'component="doc_question"' in metrics
     assert 'fallback="rag_exception"' in metrics
 
@@ -1478,7 +1484,7 @@ def test_execute_documents_summary_shadow_mode_records_trace_and_diff_metric(mon
     assert metadata["reduce_decisions"][0]["shadow_baseline_strategy"] == "hierarchical_merge"
 
     metrics = render_metrics_text()
-    assert 'agent_nav_summary_strategy_shadow_diff_total{component="documents_summary"' in metrics
+    assert 'llm_tools_platform_summary_strategy_shadow_diff_total{component="documents_summary"' in metrics
     assert " 1.0" in metrics
 
 
@@ -1504,7 +1510,7 @@ def test_execute_documents_summary_shadow_mode_does_not_increment_metric_when_st
     )
 
     metrics = render_metrics_text()
-    assert "agent_nav_summary_strategy_shadow_diff_total" not in metrics
+    assert "llm_tools_platform_summary_strategy_shadow_diff_total" not in metrics
 
 
 def test_execute_documents_summary_updates_progress_with_partial_results():
@@ -1744,6 +1750,7 @@ def test_execute_document_analysis_surfaces_partial_summary_metadata():
          })):
         result = asyncio.run(
             _execute_document_analysis(
+                query="Сделай глубокий анализ документа.",
                 new_files=[{"name": "big.pdf", "path": "/tmp/big.pdf"}],
                 session_docs={},
                 effective_settings={"runtime_budget_metadata": {"tier": 1}},
@@ -1755,4 +1762,180 @@ def test_execute_document_analysis_surfaces_partial_summary_metadata():
     assert result["execution_metadata"]["degraded"] is True
     assert result["execution_metadata"]["completed_stages"] == ["chunk_summary", "group_merge"]
     assert result["execution_metadata"]["final_synthesis_status"] == "failed"
+    deps.attach_and_register_report.assert_awaited_once()
+
+
+def test_execute_document_analysis_passes_prefetched_text_and_analysis_goal_to_workflow():
+    deps = _build_minimal_deps()
+    captured_state = {}
+
+    async def _fake_run_graph(_workflow, state):
+        captured_state.update(state)
+        return {
+            "final_report": "# Report\n\nok",
+            "errors": [],
+            "summary_metadata": {
+                "degraded": False,
+                "completed_stages": ["classify_and_load", "summarize"],
+                "final_synthesis_status": "completed",
+            },
+        }
+
+    with patch("orchestrator.workflows.document_analysis.create_analysis_graph", return_value=SimpleNamespace()), \
+         patch("orchestrator.execution_runtime._run_graph", new=AsyncMock(side_effect=_fake_run_graph)):
+        result = asyncio.run(
+            _execute_document_analysis(
+                query="Сфокусируйся на процессорах и памяти.",
+                new_files=[{"name": "big.pdf", "path": "/tmp/big.pdf"}],
+                session_docs={
+                    "big.pdf": {
+                        "path": "/tmp/big.pdf",
+                        "text": "Требование: 2 процессора, 128 ГБ RAM",
+                    }
+                },
+                effective_settings={"runtime_budget_metadata": {"tier": 1}},
+                deps=deps,
+            )
+        )
+
+    assert captured_state["analysis_goal"] == "Сфокусируйся на процессорах и памяти."
+    assert captured_state["prefetched_full_text"] == "Требование: 2 процессора, 128 ГБ RAM"
+    assert result["execution_metadata"]["status"] == "completed"
+
+
+def test_execute_document_analysis_summarizes_model_execution_event_list():
+    deps = _build_minimal_deps()
+
+    with patch("orchestrator.workflows.document_analysis.create_analysis_graph", return_value=SimpleNamespace()), \
+         patch("orchestrator.execution_runtime._run_graph", new=AsyncMock(return_value={
+             "final_report": "# Report\n\nok",
+             "errors": [],
+             "summary_metadata": {
+                 "degraded": False,
+                 "completed_stages": ["classify_and_load", "extract", "summarize", "report"],
+                 "final_synthesis_status": "completed",
+             },
+             "model_execution": [
+                 {
+                     "role_key": "llm.document_analysis",
+                     "primary_model_id": "qwen-14b-llm",
+                     "fallback_model_id": "qwen-7b",
+                     "used_model_id": "qwen-14b-llm",
+                     "fallback_used": False,
+                     "attempt_count": 1,
+                     "status": "completed",
+                 },
+                 {
+                     "role_key": "llm.document_analysis",
+                     "primary_model_id": "qwen-14b-llm",
+                     "fallback_model_id": "qwen-7b",
+                     "used_model_id": "qwen-7b",
+                     "fallback_used": True,
+                     "attempt_count": 2,
+                     "status": "fallback_completed",
+                 },
+             ],
+         })):
+        result = asyncio.run(
+            _execute_document_analysis(
+                query="Сделай глубокий анализ документа.",
+                new_files=[{"name": "big.pdf", "path": "/tmp/big.pdf"}],
+                session_docs={},
+                effective_settings={"runtime_budget_metadata": {"tier": 1}},
+                deps=deps,
+            )
+        )
+
+    assert isinstance(result["model_execution"], dict)
+    assert result["model_execution"]["fallback_used"] is True
+    assert result["model_execution"]["attempt_count"] == 3
+    assert result["model_execution"]["events"][0]["role_key"] == "llm.document_analysis"
+
+
+def test_execute_equipment_tolerates_non_dict_summary_metadata():
+    deps = _build_minimal_deps()
+
+    with patch("orchestrator.workflows.equipment.create_equipment_graph", return_value=SimpleNamespace()), \
+         patch("orchestrator.execution_runtime._run_graph", new=AsyncMock(return_value={
+             "final_report": "# Equipment Report\n\nok",
+             "errors": [],
+             "analysis_results": [{"result": "PASS"}],
+             "items_1": [{"name": "ТЗ"}],
+             "items_2": [{"name": "КП"}],
+             "summary_metadata": [],
+         })):
+        result = asyncio.run(
+            _execute_equipment(
+                query="Сравни ТЗ и КП",
+                new_files=[
+                    {"name": "req.pdf", "path": "/tmp/req.pdf"},
+                    {"name": "quote.pdf", "path": "/tmp/quote.pdf"},
+                ],
+                session_docs={
+                    "req.pdf": {"path": "/tmp/req.pdf", "text": "техническое задание"},
+                    "quote.pdf": {"path": "/tmp/quote.pdf", "text": "коммерческое предложение"},
+                },
+                history=[],
+                effective_settings={},
+                deps=deps,
+            )
+        )
+
+    assert result["execution_metadata"]["status"] == "completed"
+    assert result["execution_metadata"]["degraded"] is False
+    assert result["execution_metadata"]["completed_stages"] == []
+    assert result["execution_metadata"]["final_synthesis_status"] == "unknown"
+    deps.attach_and_register_report.assert_awaited_once()
+
+
+def test_execute_equipment_explicit_tool_rejects_single_document_instead_of_fallback_chat():
+    deps = _build_minimal_deps()
+
+    with patch("orchestrator.execution_runtime._execute_general_chat", new=AsyncMock()) as fallback_chat:
+        result = asyncio.run(
+            _execute_equipment(
+                query="Разбери один загруженный документ по оборудованию.",
+                new_files=[
+                    {"name": "Requirements.pdf", "path": "/tmp/Requirements.pdf"},
+                ],
+                session_docs={
+                    "Requirements.pdf": {"path": "/tmp/Requirements.pdf", "text": "Техническое задание"},
+                },
+                history=[],
+                effective_settings={},
+                deps=deps,
+                strict_tool_contract=True,
+            )
+        )
+
+    fallback_chat.assert_not_awaited()
+    assert result["execution_metadata"]["status"] == "failed"
+    assert result["execution_metadata"]["reason"] == "equipment_requires_two_documents"
+    assert "Используйте отдельный инструмент анализа документа" in result["assistant_message"]
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not (os.path.exists(_REQ_PDF) and os.path.exists(_QUOTE_PDF)), reason="equipment PDF fixtures not found")
+def test_execute_equipment_real_pdfs_requirements_vs_quotation():
+    deps = _build_minimal_deps()
+
+    result = asyncio.run(
+        _execute_equipment(
+            query="Сравни требования из Requirements.pdf с предложением из Quotation_12.pdf. Сфокусируйся на процессорах, памяти, накопителях и пропущенных обязательных характеристиках.",
+            new_files=[
+                {"name": "Requirements.pdf", "path": _REQ_PDF},
+                {"name": "Quotation_12.pdf", "path": _QUOTE_PDF},
+            ],
+            session_docs={
+                "Requirements.pdf": {"path": _REQ_PDF, "text": ""},
+                "Quotation_12.pdf": {"path": _QUOTE_PDF, "text": ""},
+            },
+            history=[],
+            effective_settings={},
+            deps=deps,
+        )
+    )
+
+    assert result["execution_metadata"]["status"] in {"completed", "degraded"}
+    assert "assistant_message" in result
     deps.attach_and_register_report.assert_awaited_once()

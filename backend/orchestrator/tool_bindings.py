@@ -17,6 +17,11 @@ BindingEntrypointType = Literal["direct_action", "prompt_shortcut", "followup_ac
 BindingResultMode = Literal["inline", "accepted_job", "rich_card"]
 OPENWEBUI_DEFAULT_MODEL = "raw.qwen-14b-llm"
 OPENWEBUI_DEFAULT_FUNCTION_CALLING = "native"
+OPENWEBUI_DEFAULT_RAG_EMBEDDING_MODEL = "labse-embedding"
+OPENWEBUI_DEFAULT_RAG_EMBEDDING_BASE_URL = "http://host.docker.internal:8090/v1"
+OPENWEBUI_QDRANT_URI = "http://host.docker.internal:6333"
+OPENWEBUI_QDRANT_COLLECTION_PREFIX = "anp-openwebui"
+BACKEND_QDRANT_COLLECTION_NAME_SOURCE = "backend_env:QDRANT_COLLECTION_NAME"
 
 
 @dataclass(frozen=True)
@@ -67,7 +72,7 @@ def _deferred_binding_description(tool_name: ToolName) -> str:
 
 def _prompt_binding_description(tool_name: ToolName) -> str:
     tool = _tool(tool_name)
-    return f"Shortcut для explicit вызова `{tool.name}`. Использовать, когда: {tool.use_when}"
+    return f"Команда для явного вызова `{tool.name}`. Использовать, когда: {tool.use_when}"
 
 
 def _tool_catalog_entries(definitions: Iterable[ToolDefinition]) -> list[dict[str, Any]]:
@@ -262,7 +267,7 @@ def build_openwebui_binding_export(*, backend_base_url: str) -> Dict[str, Any]:
     deferred_tools = _tool_catalog_entries(list_openwebui_deferred_tool_definitions())
     return {
         "toolServer": {
-            "name": "Agent Navigator OpenAPI Tool Server",
+            "name": "llm-tools-platform OpenAPI Tool Server",
             "baseUrl": f"{normalized_base_url}/tool-server",
             "browserReachableBaseUrl": f"{normalized_base_url}/tool-server",
             "containerReachableBaseUrl": f"{container_base_url}/tool-server",
@@ -275,6 +280,68 @@ def build_openwebui_binding_export(*, backend_base_url: str) -> Dict[str, Any]:
             "defaultFunctionCalling": OPENWEBUI_DEFAULT_FUNCTION_CALLING,
             "toolServerAuthSource": "backend_env:OPENAPI_TOOL_SERVER_TOKEN",
             "toolServerTokenPlaceholder": "SET_OPENAPI_TOOL_SERVER_TOKEN",
+            "rag": {
+                "vectorDb": "qdrant",
+                "embeddingEngine": "openai",
+                "embeddingModel": OPENWEBUI_DEFAULT_RAG_EMBEDDING_MODEL,
+                "embeddingOpenAIBaseUrl": OPENWEBUI_DEFAULT_RAG_EMBEDDING_BASE_URL,
+                "rerankingEngine": "",
+            },
+        },
+        "knowledgeConfig": {
+            "bootstrapMode": "manual_checklist",
+            "nativeKnowledgeEnabled": True,
+            "sessionFlow": "backend_owned_qdrant",
+            "knowledgeFlow": "openwebui_native_qdrant",
+            "embeddingModel": OPENWEBUI_DEFAULT_RAG_EMBEDDING_MODEL,
+            "rerankingEnabled": False,
+        },
+        "qdrantConfig": {
+            "provider": "qdrant",
+            "uri": OPENWEBUI_QDRANT_URI,
+            "collectionPrefix": OPENWEBUI_QDRANT_COLLECTION_PREFIX,
+            "multitenancy": True,
+            "backendCollectionNameSource": BACKEND_QDRANT_COLLECTION_NAME_SOURCE,
+            "ownership": "shared_server_separate_namespaces",
+        },
+        "manualChecklist": {
+            "sessionRag": [
+                "Проверьте, что backend запущен с `KB_BACKEND=qdrant` и `QDRANT_COLLECTION_NAME=rag_chunks_v1`.",
+                "Загрузите файл прямо в чат `Open WebUI`, а не в раздел `Knowledge`.",
+                "Задайте следующий вопрос по тому же файлу и проверьте, что backend использует session-область `Qdrant`.",
+            ],
+            "knowledgeQdrant": [
+                "Откройте `Admin Settings -> Documents` и включите `Qdrant` как внешнюю векторную базу.",
+                "Укажите `QDRANT_URI`, префикс коллекций и multitenancy mode в runtime-конфиге `Open WebUI`.",
+                "Настройте внешний embedding engine `openai` и модель `labse-embedding`, затем выполните `Reindex Knowledge Base`.",
+            ],
+            "verification": [
+                "Проверьте, что session-файлы не появляются как native `Knowledge` objects автоматически.",
+                "Проверьте, что native `Knowledge` создаёт отдельные коллекции с префиксом `anp-openwebui`.",
+                "Убедитесь, что обычный chat upload и native `Knowledge` не смешивают backend и UI-owned collection policy.",
+            ],
+        },
+        "preflightRequirements": {
+            "requiredServices": ["agent-api", "open-webui", "qdrant", "ums"],
+            "backendEnv": [
+                "OPENAPI_TOOL_SERVER_TOKEN",
+                "KB_BACKEND",
+                "QDRANT_URL",
+                "QDRANT_COLLECTION_NAME",
+            ],
+            "openWebUIRuntimeEnv": [
+                "VECTOR_DB",
+                "QDRANT_URI",
+                "ENABLE_QDRANT_MULTITENANCY_MODE",
+                "QDRANT_COLLECTION_PREFIX",
+                "RAG_EMBEDDING_ENGINE",
+                "RAG_OPENAI_API_BASE_URL",
+                "RAG_EMBEDDING_MODEL",
+            ],
+            "manualOnly": [
+                "native_openwebui_knowledge_connection",
+                "knowledge_reindex",
+            ],
         },
         "ownership": {
             "backendOwned": {
@@ -283,12 +350,14 @@ def build_openwebui_binding_export(*, backend_base_url: str) -> Dict[str, Any]:
                 "actionFunctionFields": ["id", "name", "content", "meta.description", "meta.manifest.target_models"],
                 "promptFields": ["command", "content", "meta.binding_id"],
                 "modelConfigFields": ["DEFAULT_MODELS", "DEFAULT_MODEL_PARAMS.function_calling"],
+                "qdrantInfraFields": ["uri", "backendCollectionNameSource"],
             },
             "openWebUIOwned": {
                 "toolServerConnection": [],
                 "workspaceToolFields": [],
                 "actionFunctionFields": ["is_active", "is_global"],
                 "promptFields": ["name", "meta.description", "tags", "access_grants", "is_production"],
+                "knowledgeFields": ["vectorDb", "collectionPrefix", "multitenancy", "embeddingEngine", "embeddingModel"],
             },
             "deferred": [
                 "knowledge",
@@ -319,18 +388,18 @@ def build_openwebui_binding_export(*, backend_base_url: str) -> Dict[str, Any]:
         ],
         "actionFunctions": _build_openwebui_action_functions(container_tool_server_base_url=f"{container_base_url}/tool-server"),
         "importChecklist": [
-            "1. Материализуйте только named tools `equipment_fast_tool` и `equipment_deep_tool` из export bundle как thin Python wrappers без доменной логики в Open WebUI.",
+            "1. Создайте только именованные tools `equipment_fast_tool` и `equipment_deep_tool` из export bundle как тонкие Python-обёртки без доменной логики в `Open WebUI`.",
             "2. Добавьте `Workspace Prompts` `/hw_fast` и `/hw_deep` из export bundle без изменения команд.",
             "3. Импортируйте `Action Functions` и привяжите их только к raw-model provider (`raw.*`).",
             "4. В `Valves` каждого local tool и Action Function вставьте актуальный `OPENAPI_TOOL_SERVER_TOKEN` из backend `.env`.",
-            "5. Для deep job flow проверьте `equipment_deep_action`, затем `tool_job_refresh_action` и `tool_job_cancel_action`.",
-            "6. Не materialize’ьте `Agent Navigator OpenAPI Tool Server` в chat picker для default contour; transport layer уже вызывается из wrappers/actions.",
+            "5. Для пути с глубокой задачей проверьте `equipment_deep_action`, затем `tool_job_refresh_action` и `tool_job_cancel_action`.",
+            "6. Не добавляйте `llm-tools-platform OpenAPI Tool Server` в список выбора чата по умолчанию; транспортный слой уже вызывается из wrappers и actions.",
         ],
         "notes": [
-            "Action Functions в Open WebUI остаются admin-managed glue layer поверх backend-owned tool server.",
-            "Workspace > Tools остаётся primary explicit picker только для enabled product tools; prompts и actions являются secondary UX layers.",
-            "Transport-level `Agent Navigator OpenAPI Tool Server` остаётся debug/reference entry, а не default chat-visible инструмент.",
-            "Document/compare tools остаются deferred до завершения backend-owned upload/document binding и multi-document context.",
+            "Action Functions в `Open WebUI` остаются управляемым администратором связующим слоем поверх backend-owned tool server.",
+            "Раздел `Workspace > Tools` остаётся основным явным списком выбора только для включённых product tools; prompts и actions являются дополнительными пользовательскими слоями.",
+            "Транспортный `llm-tools-platform OpenAPI Tool Server` остаётся отладочной и справочной точкой входа, а не chat-visible инструментом по умолчанию.",
+            "Document и compare tools остаются deferred до завершения backend-owned upload/document binding и multi-document context.",
         ],
     }
 
@@ -490,12 +559,24 @@ def _build_openwebui_workspace_tool_code(
     is_async = result_mode == "accepted_job"
     payload_line = '"job_mode": "force_async",' if is_async else ""
     tool = _tool(tool_name)
+    document_tool_name: ToolName = "analyze_document_deep" if is_async else "analyze_document_fast"
+    document_action_label = _tool(document_tool_name).label
+    document_default_prompt = (
+        "Сделай глубокий анализ загруженного документа."
+        if is_async
+        else "Сделай быстрый анализ загруженного документа."
+    )
+    pair_default_prompt = (
+        "Сделай глубокое сравнение загруженных документов."
+        if is_async
+        else "Сравни загруженные документы по ключевым различиям."
+    )
     if not is_async:
         return dedent(
             f'''
             """
             title: {action_label}
-            author: Agent Navigator
+            author: llm-tools-platform
             version: 1.0.0
             requirements:
             """
@@ -504,6 +585,21 @@ def _build_openwebui_workspace_tool_code(
             import json
             import urllib.request
             from pydantic import BaseModel
+
+            def _content_to_text(content):
+                if isinstance(content, str):
+                    return content.strip()
+                if isinstance(content, list):
+                    chunks = []
+                    for item in content:
+                        if isinstance(item, dict) and item.get("type") == "text":
+                            value = str(item.get("text", "")).strip()
+                            if value:
+                                chunks.append(value)
+                    return "\\n".join(chunks).strip()
+                if isinstance(content, dict):
+                    return str(content.get("content", "")).strip()
+                return ""
 
             async def _request_json(method, url, token, payload=None):
                 def _do_request():
@@ -522,6 +618,196 @@ def _build_openwebui_workspace_tool_code(
 
                 return await asyncio.to_thread(_do_request)
 
+            def _load_chat_messages(chat_id):
+                if not chat_id:
+                    return {{}}
+                try:
+                    from open_webui.models.chats import Chats
+                except Exception:
+                    return {{}}
+                try:
+                    chat_record = Chats.get_chat_by_id(chat_id)
+                except Exception:
+                    return {{}}
+                payload = getattr(chat_record, "chat", None)
+                if not isinstance(payload, dict):
+                    return {{}}
+                history = payload.get("history")
+                if not isinstance(history, dict):
+                    return {{}}
+                messages = history.get("messages")
+                if not isinstance(messages, dict):
+                    return {{}}
+                return messages
+
+            def _select_latest_user_message(messages):
+                candidates = []
+                for message in (messages or {{}}).values():
+                    if not isinstance(message, dict):
+                        continue
+                    if str(message.get("role") or "").strip() != "user":
+                        continue
+                    timestamp = message.get("timestamp")
+                    try:
+                        order_key = int(timestamp)
+                    except Exception:
+                        order_key = -1
+                    candidates.append((order_key, message))
+                if not candidates:
+                    return {{}}
+                candidates.sort(key=lambda item: item[0])
+                return candidates[-1][1]
+
+            def _iter_tool_sources(messages):
+                for message in (messages or {{}}).values():
+                    if not isinstance(message, dict):
+                        continue
+                    sources = message.get("sources")
+                    if not isinstance(sources, list):
+                        continue
+                    for item in sources:
+                        if isinstance(item, dict):
+                            yield item
+
+            def _collect_document_context(chat_id):
+                messages = _load_chat_messages(chat_id)
+                user_message = _select_latest_user_message(messages)
+                session_docs = {{}}
+                attachments_meta = []
+                document_refs = []
+                seen_names = set()
+
+                for file_entry in user_message.get("files") or []:
+                    if not isinstance(file_entry, dict):
+                        continue
+                    file_info = file_entry.get("file") or {{}}
+                    if not isinstance(file_info, dict):
+                        file_info = {{}}
+                    name = str(
+                        file_entry.get("name")
+                        or file_info.get("filename")
+                        or (file_info.get("meta") or {{}}).get("name")
+                        or ""
+                    ).strip()
+                    path = str(file_info.get("path") or "").strip()
+                    file_id = str(file_entry.get("id") or file_info.get("id") or "").strip()
+                    if not name or not path or name in seen_names:
+                        continue
+                    seen_names.add(name)
+                    session_docs[name] = {{
+                        "path": path,
+                        "text": "",
+                        "document_id": file_id or name,
+                        "display_name": name,
+                        "source_origin": "open_webui_workspace_tool",
+                    }}
+                    attachments_meta.append({{
+                        "name": name,
+                        "path": path,
+                        "text": "",
+                    }})
+                    document_ref = {{"label": name}}
+                    if file_id:
+                        document_ref["file_id"] = file_id
+                    document_ref["file_path"] = path
+                    document_refs.append(document_ref)
+
+                source_text_by_name = {{}}
+                source_text_by_id = {{}}
+                for item in _iter_tool_sources(messages):
+                    source = item.get("source") or {{}}
+                    if not isinstance(source, dict) or source.get("type") != "file":
+                        continue
+                    file_info = source.get("file") or {{}}
+                    if not isinstance(file_info, dict):
+                        file_info = {{}}
+                    name = str(
+                        source.get("name")
+                        or file_info.get("filename")
+                        or (file_info.get("meta") or {{}}).get("name")
+                        or ""
+                    ).strip()
+                    file_id = str(source.get("id") or file_info.get("id") or "").strip()
+                    chunks = item.get("document") or []
+                    if isinstance(chunks, list):
+                        text = "\\n\\n".join(
+                            str(chunk).strip()
+                            for chunk in chunks
+                            if str(chunk).strip()
+                        ).strip()
+                    else:
+                        text = _content_to_text(chunks)
+                    if not text:
+                        continue
+                    if name:
+                        source_text_by_name[name] = text
+                    if file_id:
+                        source_text_by_id[file_id] = text
+
+                for document_ref in document_refs:
+                    name = str(document_ref.get("label") or "").strip()
+                    file_id = str(document_ref.get("file_id") or "").strip()
+                    text = source_text_by_id.get(file_id) or source_text_by_name.get(name) or ""
+                    if not name or name not in session_docs:
+                        continue
+                    session_docs[name]["text"] = text
+
+                for item in attachments_meta:
+                    name = str(item.get("name") or "").strip()
+                    if name and name in session_docs:
+                        item["text"] = str((session_docs.get(name) or {{}}).get("text") or "")
+
+                return {{
+                    "messages": messages,
+                    "document_refs": document_refs,
+                    "user_inputs": {{
+                        "session_docs": session_docs,
+                        "attachments_meta": attachments_meta,
+                    }},
+                    "latest_user_text": _content_to_text(user_message.get("content")),
+                }}
+
+            def _select_tool_request(query, document_context):
+                prompt = str(query or "").strip() or str(document_context.get("latest_user_text") or "").strip()
+                document_refs = document_context.get("document_refs") or []
+                user_inputs = document_context.get("user_inputs") or {{}}
+                doc_count = len(document_refs)
+
+                if doc_count == 1:
+                    return {{
+                        "tool_name": "{document_tool_name}",
+                        "payload": {{
+                            "analysis_goal": prompt or "{document_default_prompt}",
+                            "document_refs": document_refs,
+                            "user_inputs": user_inputs,
+                            {payload_line}
+                        }},
+                    }}
+
+                if doc_count >= 2:
+                    return {{
+                        "tool_name": "{tool_name}",
+                        "payload": {{
+                            "equipment_query": prompt or "{pair_default_prompt}",
+                            "document_refs": document_refs,
+                            "user_inputs": user_inputs,
+                            {payload_line}
+                        }},
+                    }}
+
+                if not prompt:
+                    return {{
+                        "error": "Не удалось определить пользовательский запрос для `{action_label}`."
+                    }}
+
+                return {{
+                    "tool_name": "{tool_name}",
+                    "payload": {{
+                        "equipment_query": prompt,
+                        {payload_line}
+                    }},
+                }}
+
             class Tools:
                 class Valves(BaseModel):
                     tool_server_base_url: str = "{container_tool_server_base_url}"
@@ -531,7 +817,7 @@ def _build_openwebui_workspace_tool_code(
                 def __init__(self):
                     self.valves = self.Valves()
 
-                async def {method_name}(self, query: str) -> str:
+                async def {method_name}(self, query: str, __chat_id__=None) -> str:
                     """
                     {tool.summary}
 
@@ -540,14 +826,15 @@ def _build_openwebui_workspace_tool_code(
                     :param query: {tool.input_summary}
                     :return: {tool.output_summary}
                     """
-                    payload = {{
-                        "equipment_query": query,
-                        {payload_line}
-                    }}
+                    routed = _select_tool_request(query, _collect_document_context(__chat_id__))
+                    if routed.get("error"):
+                        return routed["error"]
+                    target_tool_name = str(routed.get("tool_name") or "{tool_name}")
+                    payload = dict(routed.get("payload") or {{}})
                     payload = {{key: value for key, value in payload.items() if value is not None and value != ""}}
                     response = await _request_json(
                         "POST",
-                        f"{{self.valves.tool_server_base_url}}/tools/{tool_name}",
+                        f"{{self.valves.tool_server_base_url}}/tools/{{target_tool_name}}",
                         self.valves.tool_server_token,
                         payload,
                     )
@@ -559,7 +846,7 @@ def _build_openwebui_workspace_tool_code(
         '''
         """
         title: __ACTION_LABEL__
-        author: Agent Navigator
+        author: llm-tools-platform
         version: 1.0.0
         requirements:
         """
@@ -660,13 +947,28 @@ def _build_openwebui_workspace_tool_code(
             except Exception:
                 return None
 
-        def _build_tool_job(job_id, status_url, status):
+        def _build_tool_job(job_id, status_url, status, tool_name):
             return {
                 "job_id": job_id,
                 "status_url": status_url,
-                "tool_name": "__TOOL_NAME__",
+                "tool_name": tool_name,
                 "status": status,
             }
+
+        def _content_to_text(content):
+            if isinstance(content, str):
+                return content.strip()
+            if isinstance(content, list):
+                chunks = []
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        value = str(item.get("text", "")).strip()
+                        if value:
+                            chunks.append(value)
+                return "\\n".join(chunks).strip()
+            if isinstance(content, dict):
+                return str(content.get("content", "")).strip()
+            return ""
 
         def _status_url_candidates(status_url):
             normalized = str(status_url or "").strip()
@@ -755,16 +1057,211 @@ def _build_openwebui_workspace_tool_code(
 
             return best_id or fallback_id
 
-        def _persist_terminal_message(chat_id, message_id, *, content, job_id, status_url, status, result_message_id=None, actions_disabled=True):
+        def _select_latest_user_message(messages):
+            candidates = []
+            for message in (messages or {}).values():
+                if not isinstance(message, dict):
+                    continue
+                if str(message.get("role") or "").strip() != "user":
+                    continue
+                timestamp = message.get("timestamp")
+                try:
+                    order_key = int(timestamp)
+                except Exception:
+                    order_key = -1
+                candidates.append((order_key, message))
+            if not candidates:
+                return {}
+            candidates.sort(key=lambda item: item[0])
+            return candidates[-1][1]
+
+        def _iter_tool_sources(messages):
+            for message in (messages or {}).values():
+                if not isinstance(message, dict):
+                    continue
+                sources = message.get("sources")
+                if not isinstance(sources, list):
+                    continue
+                for item in sources:
+                    if isinstance(item, dict):
+                        yield item
+
+        def _collect_document_context(chat_id):
+            messages = _load_chat_messages(chat_id)
+            user_message = _select_latest_user_message(messages)
+            session_docs = {}
+            attachments_meta = []
+            document_refs = []
+            seen_names = set()
+
+            for file_entry in user_message.get("files") or []:
+                if not isinstance(file_entry, dict):
+                    continue
+                file_info = file_entry.get("file") or {}
+                if not isinstance(file_info, dict):
+                    file_info = {}
+                name = str(
+                    file_entry.get("name")
+                    or file_info.get("filename")
+                    or (file_info.get("meta") or {}).get("name")
+                    or ""
+                ).strip()
+                path = str(file_info.get("path") or "").strip()
+                file_id = str(file_entry.get("id") or file_info.get("id") or "").strip()
+                if not name or not path or name in seen_names:
+                    continue
+                seen_names.add(name)
+                session_docs[name] = {
+                    "path": path,
+                    "text": "",
+                    "document_id": file_id or name,
+                    "display_name": name,
+                    "source_origin": "open_webui_workspace_tool",
+                }
+                attachments_meta.append(
+                    {
+                        "name": name,
+                        "path": path,
+                        "text": "",
+                    }
+                )
+                document_ref = {"label": name}
+                if file_id:
+                    document_ref["file_id"] = file_id
+                document_ref["file_path"] = path
+                document_refs.append(document_ref)
+
+            source_text_by_name = {}
+            source_text_by_id = {}
+            for item in _iter_tool_sources(messages):
+                source = item.get("source") or {}
+                if not isinstance(source, dict) or source.get("type") != "file":
+                    continue
+                file_info = source.get("file") or {}
+                if not isinstance(file_info, dict):
+                    file_info = {}
+                name = str(
+                    source.get("name")
+                    or file_info.get("filename")
+                    or (file_info.get("meta") or {}).get("name")
+                    or ""
+                ).strip()
+                file_id = str(source.get("id") or file_info.get("id") or "").strip()
+                chunks = item.get("document") or []
+                if isinstance(chunks, list):
+                    text = "\\n\\n".join(
+                        str(chunk).strip()
+                        for chunk in chunks
+                        if str(chunk).strip()
+                    ).strip()
+                else:
+                    text = _content_to_text(chunks)
+                if not text:
+                    continue
+                if name:
+                    source_text_by_name[name] = text
+                if file_id:
+                    source_text_by_id[file_id] = text
+
+            for document_ref in document_refs:
+                name = str(document_ref.get("label") or "").strip()
+                file_id = str(document_ref.get("file_id") or "").strip()
+                text = source_text_by_id.get(file_id) or source_text_by_name.get(name) or ""
+                if not name or name not in session_docs:
+                    continue
+                session_docs[name]["text"] = text
+
+            for item in attachments_meta:
+                name = str(item.get("name") or "").strip()
+                if name and name in session_docs:
+                    item["text"] = str((session_docs.get(name) or {}).get("text") or "")
+
+            return {
+                "document_refs": document_refs,
+                "user_inputs": {
+                    "session_docs": session_docs,
+                    "attachments_meta": attachments_meta,
+                },
+                "latest_user_text": _content_to_text(user_message.get("content")),
+            }
+
+        def _select_tool_request(query, chat_id):
+            document_context = _collect_document_context(chat_id)
+            document_refs = document_context.get("document_refs") or []
+            user_inputs = document_context.get("user_inputs") or {}
+            prompt = str(query or "").strip() or str(document_context.get("latest_user_text") or "").strip()
+
+            if len(document_refs) == 1:
+                return {
+                    "tool_name": "__DOCUMENT_TOOL_NAME__",
+                    "action_label": "__DOCUMENT_ACTION_LABEL__",
+                    "payload": {
+                        "analysis_goal": prompt or "__DOCUMENT_DEFAULT_PROMPT__",
+                        "document_refs": document_refs,
+                        "user_inputs": user_inputs,
+                        "job_mode": "force_async",
+                    },
+                }
+
+            if len(document_refs) >= 2:
+                return {
+                    "tool_name": "__TOOL_NAME__",
+                    "action_label": "__ACTION_LABEL__",
+                    "payload": {
+                        "equipment_query": prompt or "__PAIR_DEFAULT_PROMPT__",
+                        "document_refs": document_refs,
+                        "user_inputs": user_inputs,
+                        "job_mode": "force_async",
+                    },
+                }
+
+            if not prompt:
+                return {
+                    "error": "Не удалось определить пользовательский запрос для `__ACTION_LABEL__`."
+                }
+
+            return {
+                "tool_name": "__TOOL_NAME__",
+                "action_label": "__ACTION_LABEL__",
+                "payload": {
+                    "equipment_query": prompt,
+                    "job_mode": "force_async",
+                },
+            }
+
+        def _resolve_terminal_content(existing, *, fallback_content):
+            current_content = str((existing or {}).get("content") or "").strip()
+            if (
+                current_content
+                and current_content not in {"Завершено — результат добавлен ниже.", "deep-job отменён."}
+                and not current_content.startswith("deep-job завершён со статусом")
+            ):
+                return current_content
+
+            for status_entry in existing.get("statusHistory") or []:
+                if not isinstance(status_entry, dict):
+                    continue
+                description = str(status_entry.get("description") or "").strip()
+                if description and "job_id:" in description and "status_url:" in description:
+                    return description
+
+            return fallback_content
+
+        def _persist_terminal_message(chat_id, message_id, *, content, job_id, status_url, status, tool_name, result_message_id=None, actions_disabled=True):
             existing = _load_message(chat_id, message_id)
             children_ids = list(existing.get("childrenIds") or [])
+            persisted_content = (
+                _resolve_terminal_content(existing, fallback_content=content)
+                if status in {"completed", "failed", "cancelled"}
+                else content
+            )
             patch = {
                 "id": message_id,
                 "role": existing.get("role", "assistant"),
-                "content": content,
+                "content": persisted_content,
                 "done": True,
                 "childrenIds": children_ids,
-                "tool_job": _build_tool_job(job_id, status_url, status),
+                "tool_job": _build_tool_job(job_id, status_url, status, tool_name),
                 "job_status": status,
                 "actions_disabled": actions_disabled,
             }
@@ -823,10 +1320,10 @@ def _build_openwebui_workspace_tool_code(
             await __event_emitter__({"type": event_type, "data": data})
 
         def _poller_registry(app_state):
-            registry = getattr(app_state, "agent_nav_deep_job_pollers", None)
+            registry = getattr(app_state, "llm_tools_platform_deep_job_pollers", None)
             if not isinstance(registry, dict):
                 registry = {}
-                setattr(app_state, "agent_nav_deep_job_pollers", registry)
+                setattr(app_state, "llm_tools_platform_deep_job_pollers", registry)
             return registry
 
         def _poller_key(chat_id, message_id, job_id):
@@ -852,6 +1349,7 @@ def _build_openwebui_workspace_tool_code(
             job_id,
             status_url,
             status,
+            tool_name,
             result_message_id=None,
             actions_disabled=True,
         ):
@@ -860,13 +1358,14 @@ def _build_openwebui_workspace_tool_code(
                 _persist_terminal_message(
                     chat_id,
                     message_id,
-                    content=content,
-                    job_id=job_id,
-                    status_url=status_url,
-                    status=status,
-                    result_message_id=result_message_id,
-                    actions_disabled=actions_disabled,
-                )
+                        content=content,
+                        job_id=job_id,
+                        status_url=status_url,
+                        status=status,
+                        tool_name=tool_name,
+                        result_message_id=result_message_id,
+                        actions_disabled=actions_disabled,
+                    )
                 if result_message_id:
                     _persist_message(chat_id, result_message_id, {"id": result_message_id})
 
@@ -878,6 +1377,7 @@ def _build_openwebui_workspace_tool_code(
             model_name,
             job_id,
             status_url,
+            tool_name,
             token,
             __event_emitter__,
         ):
@@ -908,6 +1408,7 @@ def _build_openwebui_workspace_tool_code(
                                 job_id=job_id,
                                 status_url=status_url,
                                 status=str(entry.get("job_status") or "accepted"),
+                                tool_name=str(entry.get("tool_name") or tool_name or "__TOOL_NAME__"),
                                 result_message_id=entry.get("result_message_id"),
                                 actions_disabled=False,
                             )
@@ -922,6 +1423,7 @@ def _build_openwebui_workspace_tool_code(
 
                     consecutive_errors = 0
                     job_status = str(status_payload.get("status") or "unknown")
+                    resolved_tool_name = str(entry.get("tool_name") or tool_name or "__TOOL_NAME__")
                     current_message = _load_message(chat_id, target_message_id)
                     if current_message:
                         _persist_message(
@@ -929,7 +1431,7 @@ def _build_openwebui_workspace_tool_code(
                             target_message_id,
                             {
                                 "id": target_message_id,
-                                "tool_job": _build_tool_job(job_id, status_url, job_status),
+                                "tool_job": _build_tool_job(job_id, status_url, job_status, resolved_tool_name),
                                 "job_status": job_status,
                                 "actions_disabled": job_status in {"completed", "failed", "cancelled"},
                             },
@@ -948,7 +1450,7 @@ def _build_openwebui_workspace_tool_code(
                                     "status": job_status,
                                     "job_id": job_id,
                                     "status_url": status_url,
-                                    "tool_name": "__TOOL_NAME__",
+                                    "tool_name": resolved_tool_name,
                                 },
                             )
                         await asyncio.sleep(AUTO_POLL_INTERVAL_SECONDS)
@@ -967,30 +1469,32 @@ def _build_openwebui_workspace_tool_code(
                         entry["result_message_id"] = result_message_id
                         entry["job_status"] = "completed"
                         registry[key] = entry
-                        _persist_terminal_message(
+                        terminal_patch = _persist_terminal_message(
                             chat_id,
                             target_message_id,
                             content="Завершено — результат добавлен ниже.",
                             job_id=job_id,
                             status_url=status_url,
                             status="completed",
+                            tool_name=resolved_tool_name,
                             result_message_id=result_message_id,
                             actions_disabled=True,
                         )
                         await _reapply_terminal_branch(
                             chat_id,
                             target_message_id,
-                            content="Завершено — результат добавлен ниже.",
+                            content=terminal_patch["content"],
                             job_id=job_id,
                             status_url=status_url,
                             status="completed",
+                            tool_name=resolved_tool_name,
                             result_message_id=result_message_id,
                             actions_disabled=True,
                         )
                         await _emit_custom_event(
                             __event_emitter__,
                             "replace",
-                            {"content": "Завершено — результат добавлен ниже."},
+                            {"content": terminal_patch["content"]},
                         )
                         await _emit_custom_event(
                             __event_emitter__,
@@ -1035,27 +1539,29 @@ def _build_openwebui_workspace_tool_code(
                     entry["result_message_id"] = result_message_id
                     entry["job_status"] = job_status
                     registry[key] = entry
-                    _persist_terminal_message(
+                    terminal_patch = _persist_terminal_message(
                         chat_id,
                         target_message_id,
                         content=terminal_content,
                         job_id=job_id,
                         status_url=status_url,
                         status=job_status,
+                        tool_name=resolved_tool_name,
                         result_message_id=result_message_id,
                         actions_disabled=True,
                     )
                     await _reapply_terminal_branch(
                         chat_id,
                         target_message_id,
-                        content=terminal_content,
+                        content=terminal_patch["content"],
                         job_id=job_id,
                         status_url=status_url,
                         status=job_status,
+                        tool_name=resolved_tool_name,
                         result_message_id=result_message_id,
                         actions_disabled=True,
                     )
-                    await _emit_custom_event(__event_emitter__, "replace", {"content": terminal_content})
+                    await _emit_custom_event(__event_emitter__, "replace", {"content": terminal_patch["content"]})
                     await _emit_custom_event(
                         __event_emitter__,
                         "chat:message:new",
@@ -1087,6 +1593,7 @@ def _build_openwebui_workspace_tool_code(
                     job_id=job_id,
                     status_url=status_url,
                     status="accepted",
+                    tool_name=str(entry.get("tool_name") or tool_name or "__TOOL_NAME__"),
                     actions_disabled=False,
                 )
                 await _emit_custom_event(
@@ -1135,15 +1642,17 @@ def _build_openwebui_workspace_tool_code(
                 :param query: __TOOL_INPUT_SUMMARY__
                 :return: __TOOL_OUTPUT_SUMMARY__
                 """
-                payload = {
-                    "equipment_query": query,
-                    "job_mode": "force_async",
-                }
+                routed = _select_tool_request(query, __chat_id__)
+                if routed.get("error"):
+                    return routed["error"]
+                target_tool_name = str(routed.get("tool_name") or "__TOOL_NAME__")
+                target_action_label = str(routed.get("action_label") or "__ACTION_LABEL__")
+                payload = dict(routed.get("payload") or {})
                 payload = {key: value for key, value in payload.items() if value is not None and value != ""}
                 try:
                     response = await _request_json(
                         "POST",
-                        f"{self.valves.tool_server_base_url}/tools/__TOOL_NAME__",
+                        f"{self.valves.tool_server_base_url}/tools/{target_tool_name}",
                         self.valves.tool_server_token,
                         payload,
                     )
@@ -1173,6 +1682,7 @@ def _build_openwebui_workspace_tool_code(
                                 "job_status": "accepted",
                                 "result_message_id": None,
                                 "stop_requested": False,
+                                "tool_name": target_tool_name,
                             }
                             task = asyncio.create_task(
                                 _run_auto_poll(
@@ -1182,6 +1692,7 @@ def _build_openwebui_workspace_tool_code(
                                     model_name=model_name,
                                     job_id=job_id,
                                     status_url=normalized_status_url,
+                                    tool_name=target_tool_name,
                                     token=self.valves.tool_server_token,
                                     __event_emitter__=__event_emitter__,
                                 )
@@ -1190,7 +1701,7 @@ def _build_openwebui_workspace_tool_code(
                             registry[key] = entry
 
                     return (
-                        "Глубокий анализ принят как deep-job.\\n"
+                        f"{target_action_label} принят как deep-job.\\n"
                         f"job_id: {job_id}\\n"
                         f"status_url: {status_url}"
                     )
@@ -1209,6 +1720,10 @@ def _build_openwebui_workspace_tool_code(
         .replace("__PRIORITY__", str(priority))
         .replace("__ACTION_LABEL__", action_label)
         .replace("__TOOL_NAME__", tool_name)
+        .replace("__DOCUMENT_TOOL_NAME__", document_tool_name)
+        .replace("__DOCUMENT_ACTION_LABEL__", document_action_label)
+        .replace("__DOCUMENT_DEFAULT_PROMPT__", document_default_prompt)
+        .replace("__PAIR_DEFAULT_PROMPT__", pair_default_prompt)
         .replace("__DEFAULT_MODEL__", OPENWEBUI_DEFAULT_MODEL)
         .replace("__METHOD_NAME__", method_name)
         .replace("__TOOL_SUMMARY__", tool.summary)
@@ -1226,6 +1741,18 @@ def _build_equipment_action_code(
     force_async: bool,
     priority: int,
 ) -> str:
+    document_tool_name: ToolName = "analyze_document_deep" if force_async else "analyze_document_fast"
+    document_action_label = _tool(document_tool_name).label
+    document_default_prompt = (
+        "Сделай глубокий анализ загруженного документа."
+        if force_async
+        else "Сделай быстрый анализ загруженного документа."
+    )
+    pair_default_prompt = (
+        "Сделай глубокое сравнение загруженных документов."
+        if force_async
+        else "Сравни загруженные документы по ключевым различиям."
+    )
     if not force_async:
         payload_line = '"job_mode": "force_async",' if force_async else ""
         template = dedent(
@@ -1260,6 +1787,130 @@ def _build_equipment_action_code(
                             return text
                 return _content_to_text(body.get("content")) or _content_to_text(body.get("message", {}).get("content"))
 
+            def _iter_tool_sources(body):
+                if not isinstance(body, dict):
+                    return
+                direct_sources = body.get("sources")
+                if isinstance(direct_sources, list):
+                    for item in direct_sources:
+                        if isinstance(item, dict):
+                            yield item
+                messages = body.get("messages") or []
+                for message in messages:
+                    if not isinstance(message, dict):
+                        continue
+                    message_sources = message.get("sources")
+                    if not isinstance(message_sources, list):
+                        continue
+                    for item in message_sources:
+                        if isinstance(item, dict):
+                            yield item
+
+            def _collect_document_context(body):
+                session_docs = {}
+                attachments_meta = []
+                document_refs = []
+                seen_names = set()
+
+                for item in _iter_tool_sources(body):
+                    source = item.get("source") or {}
+                    if not isinstance(source, dict) or source.get("type") != "file":
+                        continue
+                    file_info = source.get("file") or {}
+                    if not isinstance(file_info, dict):
+                        file_info = {}
+                    name = str(
+                        source.get("name")
+                        or file_info.get("filename")
+                        or (file_info.get("meta") or {}).get("name")
+                        or ""
+                    ).strip()
+                    path = str(file_info.get("path") or "").strip()
+                    file_id = str(source.get("id") or file_info.get("id") or "").strip()
+                    chunks = item.get("document") or []
+                    if isinstance(chunks, list):
+                        text = "\\n\\n".join(
+                            str(chunk).strip()
+                            for chunk in chunks
+                            if str(chunk).strip()
+                        ).strip()
+                    else:
+                        text = _content_to_text(chunks)
+
+                    if not name or not path or name in seen_names:
+                        continue
+                    seen_names.add(name)
+                    session_docs[name] = {
+                        "path": path,
+                        "text": text,
+                        "document_id": file_id or name,
+                        "display_name": name,
+                        "source_origin": "open_webui_action",
+                    }
+                    attachments_meta.append(
+                        {
+                            "name": name,
+                            "path": path,
+                            "text": text,
+                        }
+                    )
+                    document_ref = {"label": name}
+                    if file_id:
+                        document_ref["file_id"] = file_id
+                    document_ref["file_path"] = path
+                    document_refs.append(document_ref)
+
+                return {
+                    "document_refs": document_refs,
+                    "user_inputs": {
+                        "session_docs": session_docs,
+                        "attachments_meta": attachments_meta,
+                    },
+                }
+
+            def _select_tool_request(user_text, document_context):
+                document_refs = document_context.get("document_refs") or []
+                user_inputs = document_context.get("user_inputs") or {}
+                doc_count = len(document_refs)
+                prompt = str(user_text or "").strip()
+
+                if doc_count == 1:
+                    return {
+                        "tool_name": "__DOCUMENT_TOOL_NAME__",
+                        "action_label": "__DOCUMENT_ACTION_LABEL__",
+                        "payload": {
+                            "analysis_goal": prompt or "__DOCUMENT_DEFAULT_PROMPT__",
+                            "document_refs": document_refs,
+                            "user_inputs": user_inputs,
+                        },
+                    }
+
+                if doc_count >= 2:
+                    return {
+                        "tool_name": "__TOOL_NAME__",
+                        "action_label": "__ACTION_LABEL__",
+                        "payload": {
+                            "equipment_query": prompt or "__PAIR_DEFAULT_PROMPT__",
+                            "document_refs": document_refs,
+                            "user_inputs": user_inputs,
+                            __PAYLOAD_LINE__
+                        },
+                    }
+
+                if not prompt:
+                    return {
+                        "error": "Не удалось определить последний пользовательский запрос для `__ACTION_LABEL__`."
+                    }
+
+                return {
+                    "tool_name": "__TOOL_NAME__",
+                    "action_label": "__ACTION_LABEL__",
+                    "payload": {
+                        "equipment_query": prompt,
+                        __PAYLOAD_LINE__
+                    },
+                }
+
             async def _request_json(method, url, token, payload=None):
                 def _do_request():
                     data = None if payload is None else json.dumps(payload).encode("utf-8")
@@ -1288,25 +1939,26 @@ def _build_equipment_action_code(
 
                 async def action(self, body: dict, __event_emitter__=None, __event_call__=None, __id__=None):
                     user_text = _extract_last_user_text(body)
-                    if not user_text:
-                        return {"content": "Не удалось определить последний пользовательский запрос для `__ACTION_LABEL__`."}
+                    document_context = _collect_document_context(body)
+                    routed = _select_tool_request(user_text, document_context)
+                    if routed.get("error"):
+                        return {"content": routed["error"]}
+                    target_tool_name = str(routed["tool_name"])
+                    target_action_label = str(routed["action_label"])
+                    payload = dict(routed["payload"] or {})
 
                     if __event_emitter__:
                         await __event_emitter__(
                             {
                                 "type": "status",
-                                "data": {"description": "Запускаю `__TOOL_NAME__` через Agent Navigator Tools..."},
+                                "data": {"description": f"Запускаю `{target_tool_name}` через llm-tools-platform Tools..."},
                             }
                         )
 
-                    payload = {
-                        "equipment_query": user_text,
-                        __PAYLOAD_LINE__
-                    }
                     payload = {key: value for key, value in payload.items() if value is not None and value != ""}
                     response = await _request_json(
                         "POST",
-                        f"{self.valves.tool_server_base_url}/tools/__TOOL_NAME__",
+                        f"{self.valves.tool_server_base_url}/tools/{target_tool_name}",
                         self.valves.tool_server_token,
                         payload,
                     )
@@ -1320,20 +1972,20 @@ def _build_equipment_action_code(
                                     "type": "status",
                                     "data": {
                                         "description": (
-                                            f"`__ACTION_LABEL__` принят как deep-job.\\n"
+                                            f"`{target_action_label}` принят как deep-job.\\n"
                                             f"job_id: {job_id}\\n"
                                             f"status_url: {status_url}"
                                         ),
                                         "status": "accepted",
                                         "job_id": job_id,
                                         "status_url": status_url,
-                                        "tool_name": "__TOOL_NAME__",
+                                        "tool_name": target_tool_name,
                                     },
                                 }
                             )
                         return {
                             "content": (
-                                f"`__ACTION_LABEL__` принят как deep-job.\\n"
+                                f"`{target_action_label}` принят как deep-job.\\n"
                                 f"job_id: {job_id}\\n"
                                 f"status_url: {status_url}"
                             ),
@@ -1342,7 +1994,7 @@ def _build_equipment_action_code(
                             "tool_job": {
                                 "job_id": job_id,
                                 "status_url": status_url,
-                                "tool_name": "__TOOL_NAME__",
+                                "tool_name": target_tool_name,
                                 "status": "accepted",
                             },
                         }
@@ -1357,6 +2009,10 @@ def _build_equipment_action_code(
             .replace("__PRIORITY__", str(priority))
             .replace("__ACTION_LABEL__", action_label)
             .replace("__TOOL_NAME__", tool_name)
+            .replace("__DOCUMENT_TOOL_NAME__", document_tool_name)
+            .replace("__DOCUMENT_ACTION_LABEL__", document_action_label)
+            .replace("__DOCUMENT_DEFAULT_PROMPT__", document_default_prompt)
+            .replace("__PAIR_DEFAULT_PROMPT__", pair_default_prompt)
             .replace("__PAYLOAD_LINE__", payload_line)
         )
 
@@ -1415,6 +2071,131 @@ def _build_equipment_action_code(
                         return text
             return _content_to_text(body.get("content")) or _content_to_text(body.get("message", {}).get("content"))
 
+        def _iter_tool_sources(body):
+            if not isinstance(body, dict):
+                return
+            direct_sources = body.get("sources")
+            if isinstance(direct_sources, list):
+                for item in direct_sources:
+                    if isinstance(item, dict):
+                        yield item
+            messages = body.get("messages") or []
+            for message in messages:
+                if not isinstance(message, dict):
+                    continue
+                message_sources = message.get("sources")
+                if not isinstance(message_sources, list):
+                    continue
+                for item in message_sources:
+                    if isinstance(item, dict):
+                        yield item
+
+        def _collect_document_context(body):
+            session_docs = {}
+            attachments_meta = []
+            document_refs = []
+            seen_names = set()
+
+            for item in _iter_tool_sources(body):
+                source = item.get("source") or {}
+                if not isinstance(source, dict) or source.get("type") != "file":
+                    continue
+                file_info = source.get("file") or {}
+                if not isinstance(file_info, dict):
+                    file_info = {}
+                name = str(
+                    source.get("name")
+                    or file_info.get("filename")
+                    or (file_info.get("meta") or {}).get("name")
+                    or ""
+                ).strip()
+                path = str(file_info.get("path") or "").strip()
+                file_id = str(source.get("id") or file_info.get("id") or "").strip()
+                chunks = item.get("document") or []
+                if isinstance(chunks, list):
+                    text = "\\n\\n".join(
+                        str(chunk).strip()
+                        for chunk in chunks
+                        if str(chunk).strip()
+                    ).strip()
+                else:
+                    text = _content_to_text(chunks)
+
+                if not name or not path or name in seen_names:
+                    continue
+                seen_names.add(name)
+                session_docs[name] = {
+                    "path": path,
+                    "text": text,
+                    "document_id": file_id or name,
+                    "display_name": name,
+                    "source_origin": "open_webui_action",
+                }
+                attachments_meta.append(
+                    {
+                        "name": name,
+                        "path": path,
+                        "text": text,
+                    }
+                )
+                document_ref = {"label": name}
+                if file_id:
+                    document_ref["file_id"] = file_id
+                document_ref["file_path"] = path
+                document_refs.append(document_ref)
+
+            return {
+                "document_refs": document_refs,
+                "user_inputs": {
+                    "session_docs": session_docs,
+                    "attachments_meta": attachments_meta,
+                },
+            }
+
+        def _select_tool_request(user_text, document_context):
+            document_refs = document_context.get("document_refs") or []
+            user_inputs = document_context.get("user_inputs") or {}
+            doc_count = len(document_refs)
+            prompt = str(user_text or "").strip()
+
+            if doc_count == 1:
+                return {
+                    "tool_name": "__DOCUMENT_TOOL_NAME__",
+                    "action_label": "__DOCUMENT_ACTION_LABEL__",
+                    "payload": {
+                        "analysis_goal": prompt or "__DOCUMENT_DEFAULT_PROMPT__",
+                        "document_refs": document_refs,
+                        "user_inputs": user_inputs,
+                        "job_mode": "force_async",
+                    },
+                }
+
+            if doc_count >= 2:
+                return {
+                    "tool_name": "__TOOL_NAME__",
+                    "action_label": "__ACTION_LABEL__",
+                    "payload": {
+                        "equipment_query": prompt or "__PAIR_DEFAULT_PROMPT__",
+                        "document_refs": document_refs,
+                        "user_inputs": user_inputs,
+                        "job_mode": "force_async",
+                    },
+                }
+
+            if not prompt:
+                return {
+                    "error": "Не удалось определить последний пользовательский запрос для `__ACTION_LABEL__`."
+                }
+
+            return {
+                "tool_name": "__TOOL_NAME__",
+                "action_label": "__ACTION_LABEL__",
+                "payload": {
+                    "equipment_query": prompt,
+                    "job_mode": "force_async",
+                },
+            }
+
         async def _request_json(method, url, token, payload=None):
             def _do_request():
                 data = None if payload is None else json.dumps(payload).encode("utf-8")
@@ -1470,13 +2251,36 @@ def _build_equipment_action_code(
                 "status": status,
             }
 
+        def _resolve_terminal_content(existing, *, fallback_content):
+            current_content = str((existing or {}).get("content") or "").strip()
+            if (
+                current_content
+                and current_content not in {"Завершено — результат добавлен ниже.", "deep-job отменён."}
+                and not current_content.startswith("deep-job завершён со статусом")
+            ):
+                return current_content
+
+            for status_entry in existing.get("statusHistory") or []:
+                if not isinstance(status_entry, dict):
+                    continue
+                description = str(status_entry.get("description") or "").strip()
+                if description and "job_id:" in description and "status_url:" in description:
+                    return description
+
+            return fallback_content
+
         def _persist_job_state(chat_id, message_id, *, content, job_id, status_url, status, result_message_id=None, actions_disabled=False):
             existing = _load_message(chat_id, message_id)
             children_ids = list(existing.get("childrenIds") or [])
+            persisted_content = (
+                _resolve_terminal_content(existing, fallback_content=content)
+                if status in {"completed", "failed", "cancelled"}
+                else content
+            )
             patch = {
                 "id": message_id,
                 "role": existing.get("role", "assistant"),
-                "content": content,
+                "content": persisted_content,
                 "done": True,
                 "childrenIds": children_ids,
                 "tool_job": _build_tool_job(job_id, status_url, status),
@@ -1538,10 +2342,10 @@ def _build_equipment_action_code(
             await __event_emitter__({"type": event_type, "data": data})
 
         def _poller_registry(app_state):
-            registry = getattr(app_state, "agent_nav_deep_job_pollers", None)
+            registry = getattr(app_state, "llm_tools_platform_deep_job_pollers", None)
             if not isinstance(registry, dict):
                 registry = {}
-                setattr(app_state, "agent_nav_deep_job_pollers", registry)
+                setattr(app_state, "llm_tools_platform_deep_job_pollers", registry)
             return registry
 
         def _poller_key(chat_id, message_id, job_id):
@@ -1666,7 +2470,7 @@ def _build_equipment_action_code(
                         entry["result_message_id"] = result_message_id
                         entry["job_status"] = "completed"
                         registry[key] = entry
-                        _persist_job_state(
+                        terminal_patch = _persist_job_state(
                             chat_id,
                             message_id,
                             content="Завершено — результат добавлен ниже.",
@@ -1679,7 +2483,7 @@ def _build_equipment_action_code(
                         await _reapply_terminal_branch(
                             chat_id,
                             message_id,
-                            content="Завершено — результат добавлен ниже.",
+                            content=terminal_patch["content"],
                             job_id=job_id,
                             status_url=status_url,
                             status="completed",
@@ -1689,7 +2493,7 @@ def _build_equipment_action_code(
                         await _emit_custom_event(
                             __event_emitter__,
                             "replace",
-                            {"content": "Завершено — результат добавлен ниже."},
+                            {"content": terminal_patch["content"]},
                         )
                         await _emit_custom_event(
                             __event_emitter__,
@@ -1734,7 +2538,7 @@ def _build_equipment_action_code(
                     entry["result_message_id"] = result_message_id
                     entry["job_status"] = job_status
                     registry[key] = entry
-                    _persist_job_state(
+                    terminal_patch = _persist_job_state(
                         chat_id,
                         message_id,
                         content=terminal_content,
@@ -1747,14 +2551,14 @@ def _build_equipment_action_code(
                     await _reapply_terminal_branch(
                         chat_id,
                         message_id,
-                        content=terminal_content,
+                        content=terminal_patch["content"],
                         job_id=job_id,
                         status_url=status_url,
                         status=job_status,
                         result_message_id=result_message_id,
                         actions_disabled=True,
                     )
-                    await _emit_custom_event(__event_emitter__, "replace", {"content": terminal_content})
+                    await _emit_custom_event(__event_emitter__, "replace", {"content": terminal_patch["content"]})
                     await _emit_custom_event(
                         __event_emitter__,
                         "chat:message:new",
@@ -1819,17 +2623,17 @@ def _build_equipment_action_code(
 
             async def action(self, body: dict, __event_emitter__=None, __event_call__=None, __id__=None, __request__=None):
                 user_text = _extract_last_user_text(body)
-                if not user_text:
-                    return {"content": "Не удалось определить последний пользовательский запрос для `__ACTION_LABEL__`."}
-
-                payload = {
-                    "equipment_query": user_text,
-                    "job_mode": "force_async",
-                }
+                document_context = _collect_document_context(body)
+                routed = _select_tool_request(user_text, document_context)
+                if routed.get("error"):
+                    return {"content": routed["error"]}
+                target_tool_name = str(routed["tool_name"])
+                target_action_label = str(routed["action_label"])
+                payload = dict(routed["payload"] or {})
                 try:
                     response = await _request_json(
                         "POST",
-                        f"{self.valves.tool_server_base_url}/tools/__TOOL_NAME__",
+                        f"{self.valves.tool_server_base_url}/tools/{target_tool_name}",
                         self.valves.tool_server_token,
                         payload,
                     )
@@ -1853,7 +2657,7 @@ def _build_equipment_action_code(
                             )
                         }
                     accepted_content = (
-                        f"`__ACTION_LABEL__` принят как deep-job.\\n"
+                        f"`{target_action_label}` принят как deep-job.\\n"
                         f"job_id: {job_id}\\n"
                         f"status_url: {status_url}"
                     )
@@ -1866,7 +2670,7 @@ def _build_equipment_action_code(
                                     "status": "accepted",
                                     "job_id": job_id,
                                     "status_url": status_url,
-                                    "tool_name": "__TOOL_NAME__",
+                                    "tool_name": target_tool_name,
                                 },
                             }
                         )
@@ -1925,7 +2729,12 @@ def _build_equipment_action_code(
                         "job_id": job_id,
                         "status_url": status_url,
                         "job_status": "accepted",
-                        "tool_job": _build_tool_job(job_id, status_url, "accepted"),
+                        "tool_job": {
+                            "job_id": job_id,
+                            "status_url": status_url,
+                            "tool_name": target_tool_name,
+                            "status": "accepted",
+                        },
                     }
 
                 assistant_message = str(response.get("assistant_message") or "").strip()
@@ -1944,6 +2753,10 @@ def _build_equipment_action_code(
         .replace("__PRIORITY__", str(priority))
         .replace("__ACTION_LABEL__", action_label)
         .replace("__TOOL_NAME__", tool_name)
+        .replace("__DOCUMENT_TOOL_NAME__", document_tool_name)
+        .replace("__DOCUMENT_ACTION_LABEL__", document_action_label)
+        .replace("__DOCUMENT_DEFAULT_PROMPT__", document_default_prompt)
+        .replace("__PAIR_DEFAULT_PROMPT__", pair_default_prompt)
         .replace("__DEFAULT_MODEL__", OPENWEBUI_DEFAULT_MODEL)
     )
 
@@ -2168,6 +2981,24 @@ def _build_tool_job_refresh_action_code(*, container_tool_server_base_url: str) 
                 "status": status,
             }
 
+        def _resolve_terminal_content(existing, *, fallback_content):
+            current_content = str((existing or {}).get("content") or "").strip()
+            if (
+                current_content
+                and current_content not in {"Завершено — результат добавлен ниже.", "deep-job отменён."}
+                and not current_content.startswith("deep-job завершён со статусом")
+            ):
+                return current_content
+
+            for status_entry in existing.get("statusHistory") or []:
+                if not isinstance(status_entry, dict):
+                    continue
+                description = str(status_entry.get("description") or "").strip()
+                if description and "job_id:" in description and "status_url:" in description:
+                    return description
+
+            return fallback_content
+
         def _create_result_message(chat_id, accepted_message_id, *, model_name, job_id, result_payload):
             accepted = _load_message(chat_id, accepted_message_id)
             existing_result_id = str(accepted.get("result_message_id") or "").strip()
@@ -2336,12 +3167,17 @@ def _build_tool_job_refresh_action_code(*, container_tool_server_base_url: str) 
                         job_id=job_id,
                         result_payload=result_payload,
                     )
+                    existing_message = _load_message(context["chat_id"], context["message_id"])
+                    persisted_content = _resolve_terminal_content(
+                        existing_message,
+                        fallback_content="Завершено — результат добавлен ниже.",
+                    )
                     _persist_message(
                         context["chat_id"],
                         context["message_id"],
                         {
                             "id": context["message_id"],
-                            "content": "Завершено — результат добавлен ниже.",
+                            "content": persisted_content,
                             "tool_job": tool_job,
                             "job_status": "completed",
                             "result_message_id": result_message_id,
@@ -2350,7 +3186,7 @@ def _build_tool_job_refresh_action_code(*, container_tool_server_base_url: str) 
                         },
                     )
                     _persist_message(context["chat_id"], result_message_id, {"id": result_message_id})
-                    await _emit_custom_event(__event_emitter__, "replace", {"content": "Завершено — результат добавлен ниже."})
+                    await _emit_custom_event(__event_emitter__, "replace", {"content": persisted_content})
                     await _emit_custom_event(
                         __event_emitter__,
                         "chat:message:new",
@@ -2596,10 +3432,10 @@ def _build_tool_job_cancel_action_code(*, container_tool_server_base_url: str) -
                 return None
 
         def _poller_registry(app_state):
-            registry = getattr(app_state, "agent_nav_deep_job_pollers", None)
+            registry = getattr(app_state, "llm_tools_platform_deep_job_pollers", None)
             if not isinstance(registry, dict):
                 registry = {}
-                setattr(app_state, "agent_nav_deep_job_pollers", registry)
+                setattr(app_state, "llm_tools_platform_deep_job_pollers", registry)
             return registry
 
         def _poller_key(chat_id, message_id, job_id):
@@ -2612,6 +3448,24 @@ def _build_tool_job_cancel_action_code(*, container_tool_server_base_url: str) -
                 "tool_name": tool_name,
                 "status": status,
             }
+
+        def _resolve_terminal_content(existing, *, fallback_content):
+            current_content = str((existing or {}).get("content") or "").strip()
+            if (
+                current_content
+                and current_content not in {"Завершено — результат добавлен ниже.", "deep-job отменён."}
+                and not current_content.startswith("deep-job завершён со статусом")
+            ):
+                return current_content
+
+            for status_entry in existing.get("statusHistory") or []:
+                if not isinstance(status_entry, dict):
+                    continue
+                description = str(status_entry.get("description") or "").strip()
+                if description and "job_id:" in description and "status_url:" in description:
+                    return description
+
+            return fallback_content
 
         def _create_result_message(chat_id, accepted_message_id, *, model_name, job_id, result_payload):
             accepted = _load_message(chat_id, accepted_message_id)
@@ -2704,12 +3558,17 @@ def _build_tool_job_cancel_action_code(*, container_tool_server_base_url: str) -
                         job_id=job_id,
                         result_payload=result_payload,
                     )
+                    existing_message = _load_message(context["chat_id"], context["message_id"])
+                    persisted_content = _resolve_terminal_content(
+                        existing_message,
+                        fallback_content="Завершено — результат добавлен ниже.",
+                    )
                     _persist_message(
                         context["chat_id"],
                         context["message_id"],
                         {
                             "id": context["message_id"],
-                            "content": "Завершено — результат добавлен ниже.",
+                            "content": persisted_content,
                             "tool_job": tool_job,
                             "job_status": "completed",
                             "result_message_id": result_message_id,
@@ -2718,7 +3577,7 @@ def _build_tool_job_cancel_action_code(*, container_tool_server_base_url: str) -
                         },
                     )
                     _persist_message(context["chat_id"], result_message_id, {"id": result_message_id})
-                    await _emit_custom_event(__event_emitter__, "replace", {"content": "Завершено — результат добавлен ниже."})
+                    await _emit_custom_event(__event_emitter__, "replace", {"content": persisted_content})
                     await _emit_custom_event(
                         __event_emitter__,
                         "chat:message:new",
@@ -2748,12 +3607,14 @@ def _build_tool_job_cancel_action_code(*, container_tool_server_base_url: str) -
                     if extra:
                         content = content + f"\\nerror: {extra}"
                     if context.get("chat_id") and context.get("message_id"):
+                        existing_message = _load_message(context["chat_id"], context["message_id"])
+                        persisted_content = _resolve_terminal_content(existing_message, fallback_content=content)
                         _persist_message(
                             context["chat_id"],
                             context["message_id"],
                             {
                                 "id": context["message_id"],
-                                "content": content if job_status != "completed" else "Завершено — результат добавлен ниже.",
+                                "content": persisted_content,
                                 "tool_job": tool_job,
                                 "job_status": job_status,
                                 "actions_disabled": True,

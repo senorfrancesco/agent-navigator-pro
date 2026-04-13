@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Type
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
@@ -45,7 +46,7 @@ def _tool_server_enabled() -> bool:
 
 
 def _tool_server_token() -> str:
-    return str(os.getenv("OPENAPI_TOOL_SERVER_TOKEN") or "agent-navigator-tool-server-dev-token").strip()
+    return str(os.getenv("OPENAPI_TOOL_SERVER_TOKEN") or "llm-tools-platform-tool-server-dev-token").strip()
 
 
 def _allowed_origins() -> set[str]:
@@ -87,17 +88,7 @@ def _require_tool_server_schema_access(request: Request) -> None:
 
 
 def _extract_ref_identity(document_ref: DocumentRef) -> Optional[str]:
-    for candidate in (
-        document_ref.document_id,
-        document_ref.upload_id,
-        document_ref.file_id,
-        document_ref.version_id,
-        document_ref.session_file_ref,
-        document_ref.file_path,
-    ):
-        if candidate:
-            return str(candidate)
-    return None
+    return document_ref.resolved_identity()
 
 
 def _build_tool_message(tool_request: ToolRequest) -> str:
@@ -118,9 +109,120 @@ def _build_tool_message(tool_request: ToolRequest) -> str:
     return str(tool_request.user_inputs.get("message") or "")
 
 
+def _resolve_host_uploads_dir() -> Optional[str]:
+    for candidate in (
+        str(os.getenv("HOST_UPLOADS_DIR") or "").strip(),
+        str(os.getenv("UPLOADS_DIR") or "").strip(),
+    ):
+        if candidate:
+            return candidate
+    repo_default = Path(__file__).resolve().parents[1] / "open_webui_uploads"
+    return str(repo_default)
+
+
+def _normalize_upload_path(path: Any) -> Any:
+    normalized = str(path or "").strip()
+    if not normalized:
+        return path
+    if os.path.exists(normalized):
+        return normalized
+
+    host_uploads_dir = _resolve_host_uploads_dir()
+    if not host_uploads_dir:
+        return normalized
+
+    for container_root in (
+        str(os.getenv("OPENWEBUI_UPLOADS_CONTAINER_DIR") or "/app/backend/data/uploads").strip(),
+        "/app/uploads",
+    ):
+        if not container_root:
+            continue
+        normalized_root = os.path.normpath(container_root)
+        normalized_path = os.path.normpath(normalized)
+        if normalized_path == normalized_root or normalized_path.startswith(normalized_root + os.sep):
+            relative = os.path.relpath(normalized_path, normalized_root)
+            return os.path.normpath(os.path.join(host_uploads_dir, relative))
+    return normalized
+
+
+def _normalize_session_docs(raw_session_docs: Any) -> Dict[str, Any]:
+    if not isinstance(raw_session_docs, dict):
+        return {}
+    normalized: Dict[str, Any] = {}
+    for name, info in raw_session_docs.items():
+        if not isinstance(info, dict):
+            continue
+        normalized[str(name)] = {
+            **info,
+            "path": _normalize_upload_path(info.get("path")),
+        }
+    return normalized
+
+
+def _normalize_attachments_meta(raw_attachments_meta: Any) -> List[Dict[str, Any]]:
+    if not isinstance(raw_attachments_meta, list):
+        return []
+    normalized: List[Dict[str, Any]] = []
+    for item in raw_attachments_meta:
+        if not isinstance(item, dict):
+            continue
+        normalized.append(
+            {
+                **item,
+                "path": _normalize_upload_path(item.get("path")),
+            }
+        )
+    return normalized
+
+
+def _normalize_document_refs(document_refs: List[DocumentRef]) -> List[DocumentRef]:
+    normalized_refs: List[DocumentRef] = []
+    for item in document_refs:
+        payload = item.model_dump()
+        payload["file_path"] = _normalize_upload_path(payload.get("file_path"))
+        normalized_refs.append(DocumentRef(**payload))
+    return normalized_refs
+
+
+def _build_document_ref_bindings(document_refs: List[DocumentRef]) -> List[Dict[str, Any]]:
+    bindings: List[Dict[str, Any]] = []
+    for item in document_refs:
+        bindings.append(
+            {
+                "label": item.label,
+                "document_id": item.document_id,
+                "upload_id": item.upload_id,
+                "file_id": item.file_id,
+                "version_id": item.version_id,
+                "session_file_ref": item.session_file_ref,
+                "file_path": item.file_path,
+                "resolved_identity": item.resolved_identity(),
+                "resolved_identity_kind": item.resolved_identity_kind(),
+                "has_canonical_identity": item.has_canonical_identity(),
+            }
+        )
+    return bindings
+
+
 def _build_orchestration_payload(tool_request: ToolRequest) -> Dict[str, Any]:
-    active_doc_ids = [ref_id for ref_id in (_extract_ref_identity(item) for item in tool_request.document_refs) if ref_id]
+    normalized_document_refs = _normalize_document_refs(tool_request.document_refs)
+    active_doc_ids = [ref_id for ref_id in (_extract_ref_identity(item) for item in normalized_document_refs) if ref_id]
+    active_canonical_doc_ids = [
+        ref_id for ref_id in (item.canonical_identity() for item in normalized_document_refs) if ref_id
+    ]
+    ui_state = dict(tool_request.ui_hints or {})
+    if normalized_document_refs:
+        ui_state.update(
+            {
+                "document_ref_bindings": _build_document_ref_bindings(normalized_document_refs),
+                "active_canonical_doc_ids": active_canonical_doc_ids,
+                "has_canonical_document_refs": bool(active_canonical_doc_ids),
+                "document_ref_resolution_mode": "canonical_preferred",
+            }
+        )
     user_inputs = dict(tool_request.user_inputs or {})
+    user_inputs["session_docs"] = _normalize_session_docs(user_inputs.get("session_docs"))
+    user_inputs["attachments_meta"] = _normalize_attachments_meta(user_inputs.get("attachments_meta"))
     payload: Dict[str, Any] = {
         "message": _build_tool_message(tool_request),
         "requested_tool": tool_request.tool_name,
@@ -131,6 +233,7 @@ def _build_orchestration_payload(tool_request: ToolRequest) -> Dict[str, Any]:
         "active_doc_ids": active_doc_ids,
         "file_count": len(active_doc_ids),
         "has_session_docs": bool(active_doc_ids),
+        "ui_state": ui_state or None,
     }
 
     for key in (
@@ -247,7 +350,7 @@ def _tool_only_routes(app: FastAPI) -> List[APIRoute]:
 
 def _build_tool_server_openapi(app: FastAPI) -> Dict[str, Any]:
     return get_openapi(
-        title="Agent Navigator OpenAPI Tool Server",
+        title="llm-tools-platform OpenAPI Tool Server",
         version=str(app.version),
         description="Tool-only OpenAPI surface for Open WebUI integration.",
         routes=_tool_only_routes(app),
@@ -260,7 +363,7 @@ def _build_tool_server_config_payload() -> Dict[str, Any]:
             "system": False,
         },
         "server": {
-            "name": "Agent Navigator OpenAPI Tool Server",
+            "name": "llm-tools-platform OpenAPI Tool Server",
         },
         "toolUx": summarize_tool_binding_catalog(),
     }

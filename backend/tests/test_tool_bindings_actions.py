@@ -127,6 +127,424 @@ async def test_equipment_deep_action_returns_structured_job_context(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_equipment_deep_action_forwards_chat_document_context(monkeypatch):
+    export = build_openwebui_binding_export(backend_base_url="http://127.0.0.1:18000")
+    action_payload = next(item for item in export["actionFunctions"] if item["action_id"] == "equipment_deep_action")
+    namespace = _load_action_namespace(action_payload["pythonCode"])
+    action = namespace["Action"]()
+
+    captured: dict[str, dict] = {}
+
+    def fake_urlopen(request, timeout=45):
+        assert request.full_url.endswith("/tools/analyze_equipment_deep")
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return _FakeHTTPResponse(
+            {
+                "status": "accepted",
+                "job_id": "job-docs-1",
+                "status_url": "/tool-server/tool-jobs/job-docs-1",
+            }
+        )
+
+    monkeypatch.setattr(namespace["urllib"].request, "urlopen", fake_urlopen)
+
+    response = await action.action(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Сравни ТЗ и КП по процессорам и памяти.",
+                },
+                {
+                    "role": "assistant",
+                    "sources": [
+                        {
+                            "source": {
+                                "type": "file",
+                                "id": "file-req-1",
+                                "name": "Requirements.pdf",
+                                "file": {
+                                    "id": "file-req-1",
+                                    "filename": "Requirements.pdf",
+                                    "path": "/app/backend/data/uploads/req.pdf",
+                                    "meta": {"name": "Requirements.pdf"},
+                                },
+                            },
+                            "document": ["Требование: CPU 8 ядер", "Память 32 ГБ DDR5"],
+                        },
+                        {
+                            "source": {
+                                "type": "file",
+                                "id": "file-quote-1",
+                                "name": "Quotation_12.pdf",
+                                "file": {
+                                    "id": "file-quote-1",
+                                    "filename": "Quotation_12.pdf",
+                                    "path": "/app/backend/data/uploads/quote.pdf",
+                                    "meta": {"name": "Quotation_12.pdf"},
+                                },
+                            },
+                            "document": ["Предложение: CPU 2 x Xeon Silver", "Память 32 ГБ DDR4"],
+                        },
+                    ],
+                },
+            ]
+        }
+    )
+
+    payload = captured["payload"]
+    assert payload["equipment_query"] == "Сравни ТЗ и КП по процессорам и памяти."
+    assert payload["document_refs"] == [
+        {"label": "Requirements.pdf", "file_id": "file-req-1", "file_path": "/app/backend/data/uploads/req.pdf"},
+        {"label": "Quotation_12.pdf", "file_id": "file-quote-1", "file_path": "/app/backend/data/uploads/quote.pdf"},
+    ]
+    assert payload["user_inputs"]["attachments_meta"] == [
+        {
+            "name": "Requirements.pdf",
+            "path": "/app/backend/data/uploads/req.pdf",
+            "text": "Требование: CPU 8 ядер\n\nПамять 32 ГБ DDR5",
+        },
+        {
+            "name": "Quotation_12.pdf",
+            "path": "/app/backend/data/uploads/quote.pdf",
+            "text": "Предложение: CPU 2 x Xeon Silver\n\nПамять 32 ГБ DDR4",
+        },
+    ]
+    assert payload["user_inputs"]["session_docs"]["Requirements.pdf"]["document_id"] == "file-req-1"
+    assert payload["user_inputs"]["session_docs"]["Quotation_12.pdf"]["document_id"] == "file-quote-1"
+    assert response["job_id"] == "job-docs-1"
+
+
+@pytest.mark.asyncio
+async def test_equipment_deep_action_routes_single_document_to_document_deep(monkeypatch):
+    export = build_openwebui_binding_export(backend_base_url="http://127.0.0.1:18000")
+    action_payload = next(item for item in export["actionFunctions"] if item["action_id"] == "equipment_deep_action")
+    namespace = _load_action_namespace(action_payload["pythonCode"])
+    action = namespace["Action"]()
+
+    captured: dict[str, dict] = {}
+
+    def fake_urlopen(request, timeout=45):
+        captured["url"] = request.full_url
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return _FakeHTTPResponse(
+            {
+                "status": "accepted",
+                "job_id": "job-doc-single-1",
+                "status_url": "/tool-server/tool-jobs/job-doc-single-1",
+            }
+        )
+
+    monkeypatch.setattr(namespace["urllib"].request, "urlopen", fake_urlopen)
+
+    response = await action.action(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Сфокусируйся на процессорах, памяти и обязательных требованиях.",
+                },
+                {
+                    "role": "assistant",
+                    "sources": [
+                        {
+                            "source": {
+                                "type": "file",
+                                "id": "file-req-1",
+                                "name": "Requirements.pdf",
+                                "file": {
+                                    "id": "file-req-1",
+                                    "filename": "Requirements.pdf",
+                                    "path": "/app/backend/data/uploads/req.pdf",
+                                    "meta": {"name": "Requirements.pdf"},
+                                },
+                            },
+                            "document": ["Требование: CPU 8 ядер", "Память 32 ГБ DDR5"],
+                        }
+                    ],
+                },
+            ]
+        }
+    )
+
+    assert captured["url"].endswith("/tools/analyze_document_deep")
+    assert captured["payload"]["analysis_goal"] == "Сфокусируйся на процессорах, памяти и обязательных требованиях."
+    assert captured["payload"]["document_refs"] == [
+        {"label": "Requirements.pdf", "file_id": "file-req-1", "file_path": "/app/backend/data/uploads/req.pdf"},
+    ]
+    assert captured["payload"]["user_inputs"]["session_docs"]["Requirements.pdf"]["document_id"] == "file-req-1"
+    assert captured["payload"]["user_inputs"]["attachments_meta"][0]["name"] == "Requirements.pdf"
+    assert response["job_id"] == "job-doc-single-1"
+    assert response["tool_job"]["tool_name"] == "analyze_document_deep"
+    assert "Глубокий анализ документа" in response["content"]
+
+
+@pytest.mark.asyncio
+async def test_equipment_deep_action_uses_default_document_goal_when_user_text_missing(monkeypatch):
+    export = build_openwebui_binding_export(backend_base_url="http://127.0.0.1:18000")
+    action_payload = next(item for item in export["actionFunctions"] if item["action_id"] == "equipment_deep_action")
+    namespace = _load_action_namespace(action_payload["pythonCode"])
+    action = namespace["Action"]()
+
+    captured: dict[str, dict] = {}
+
+    def fake_urlopen(request, timeout=45):
+        captured["url"] = request.full_url
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return _FakeHTTPResponse(
+            {
+                "status": "accepted",
+                "job_id": "job-doc-default-1",
+                "status_url": "/tool-server/tool-jobs/job-doc-default-1",
+            }
+        )
+
+    monkeypatch.setattr(namespace["urllib"].request, "urlopen", fake_urlopen)
+
+    response = await action.action(
+        {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "sources": [
+                        {
+                            "source": {
+                                "type": "file",
+                                "id": "file-req-1",
+                                "name": "Requirements.pdf",
+                                "file": {
+                                    "id": "file-req-1",
+                                    "filename": "Requirements.pdf",
+                                    "path": "/app/backend/data/uploads/req.pdf",
+                                    "meta": {"name": "Requirements.pdf"},
+                                },
+                            },
+                            "document": ["Требование: CPU 8 ядер", "Память 32 ГБ DDR5"],
+                        }
+                    ],
+                },
+            ]
+        }
+    )
+
+    assert captured["url"].endswith("/tools/analyze_document_deep")
+    assert captured["payload"]["analysis_goal"] == "Сделай глубокий анализ загруженного документа."
+    assert response["job_id"] == "job-doc-default-1"
+
+
+@pytest.mark.asyncio
+async def test_equipment_deep_action_uses_last_user_message_as_equipment_query(monkeypatch):
+    export = build_openwebui_binding_export(backend_base_url="http://127.0.0.1:18000")
+    action_payload = next(item for item in export["actionFunctions"] if item["action_id"] == "equipment_deep_action")
+    namespace = _load_action_namespace(action_payload["pythonCode"])
+    action = namespace["Action"]()
+
+    captured: dict[str, dict] = {}
+
+    def fake_urlopen(request, timeout=45):
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return _FakeHTTPResponse(
+            {
+                "status": "accepted",
+                "job_id": "job-last-user-1",
+                "status_url": "/tool-server/tool-jobs/job-last-user-1",
+            }
+        )
+
+    monkeypatch.setattr(namespace["urllib"].request, "urlopen", fake_urlopen)
+
+    response = await action.action(
+        {
+            "messages": [
+                {"role": "user", "content": "Первый общий запрос"},
+                {"role": "assistant", "content": "Промежуточный ответ"},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Сфокусируйся на процессорах и памяти."},
+                        {"type": "text", "text": "Отдельно выдели обязательные формулировки."},
+                    ],
+                },
+            ]
+        }
+    )
+
+    assert captured["payload"]["equipment_query"] == (
+        "Сфокусируйся на процессорах и памяти.\n"
+        "Отдельно выдели обязательные формулировки."
+    )
+    assert response["job_id"] == "job-last-user-1"
+    assert response["status_url"] == "/tool-server/tool-jobs/job-last-user-1"
+
+
+@pytest.mark.asyncio
+async def test_equipment_deep_workspace_tool_forwards_exact_prompt_as_equipment_query(monkeypatch):
+    export = build_openwebui_binding_export(backend_base_url="http://127.0.0.1:18000")
+    tool_payload = next(item for item in export["workspaceTools"] if item["tool_id"] == "equipment_deep_tool")
+    namespace = _load_action_namespace(tool_payload["pythonCode"])
+    tools = namespace["Tools"]()
+
+    captured: dict[str, dict] = {}
+
+    def fake_urlopen(request, timeout=45):
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return _FakeHTTPResponse(
+            {
+                "status": "accepted",
+                "job_id": "job-tool-query-1",
+                "status_url": "/tool-server/tool-jobs/job-tool-query-1",
+            }
+        )
+
+    monkeypatch.setattr(namespace["urllib"].request, "urlopen", fake_urlopen)
+
+    response = await tools.analyze_equipment_deep(
+        "Сравни только диски и объём памяти для этой конфигурации."
+    )
+
+    assert captured["payload"] == {
+        "equipment_query": "Сравни только диски и объём памяти для этой конфигурации.",
+        "job_mode": "force_async",
+    }
+    assert "job_id: job-tool-query-1" in response
+
+
+@pytest.mark.asyncio
+async def test_equipment_deep_workspace_tool_routes_single_chat_file_to_document_deep(monkeypatch):
+    export = build_openwebui_binding_export(backend_base_url="http://127.0.0.1:18000")
+    tool_payload = next(item for item in export["workspaceTools"] if item["tool_id"] == "equipment_deep_tool")
+    namespace = _load_action_namespace(tool_payload["pythonCode"])
+    tools = namespace["Tools"]()
+    chat_store = {
+        "chat-doc-deep-1": {
+            "history": {
+                "messages": {
+                    "user-doc-1": {
+                        "id": "user-doc-1",
+                        "role": "user",
+                        "timestamp": 100,
+                        "content": "Сфокусируйся на процессорах и памяти.",
+                        "files": [
+                            {
+                                "id": "file-req-1",
+                                "name": "Requirements.pdf",
+                                "file": {
+                                    "id": "file-req-1",
+                                    "filename": "Requirements.pdf",
+                                    "path": "/app/backend/data/uploads/req.pdf",
+                                    "meta": {"name": "Requirements.pdf"},
+                                },
+                            }
+                        ],
+                    }
+                }
+            }
+        }
+    }
+    _install_fake_openwebui_modules(monkeypatch, chat_store=chat_store)
+
+    captured: dict[str, dict] = {}
+
+    def fake_urlopen(request, timeout=45):
+        captured["url"] = request.full_url
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return _FakeHTTPResponse(
+            {
+                "status": "accepted",
+                "job_id": "job-doc-from-workspace-1",
+                "status_url": "/tool-server/tool-jobs/job-doc-from-workspace-1",
+            }
+        )
+
+    monkeypatch.setattr(namespace["urllib"].request, "urlopen", fake_urlopen)
+
+    response = await tools.analyze_equipment_deep(
+        "",
+        __chat_id__="chat-doc-deep-1",
+    )
+
+    assert captured["url"].endswith("/tools/analyze_document_deep")
+    assert captured["payload"]["analysis_goal"] == "Сфокусируйся на процессорах и памяти."
+    assert captured["payload"]["document_refs"] == [
+        {"label": "Requirements.pdf", "file_id": "file-req-1", "file_path": "/app/backend/data/uploads/req.pdf"}
+    ]
+    assert captured["payload"]["user_inputs"]["session_docs"]["Requirements.pdf"]["path"] == "/app/backend/data/uploads/req.pdf"
+    assert "Глубокий анализ документа принят как deep-job." in response
+
+
+@pytest.mark.asyncio
+async def test_equipment_fast_workspace_tool_routes_two_chat_files_to_equipment_fast(monkeypatch):
+    export = build_openwebui_binding_export(backend_base_url="http://127.0.0.1:18000")
+    tool_payload = next(item for item in export["workspaceTools"] if item["tool_id"] == "equipment_fast_tool")
+    namespace = _load_action_namespace(tool_payload["pythonCode"])
+    tools = namespace["Tools"]()
+    chat_store = {
+        "chat-pair-fast-1": {
+            "history": {
+                "messages": {
+                    "user-pair-1": {
+                        "id": "user-pair-1",
+                        "role": "user",
+                        "timestamp": 200,
+                        "content": "Сравни требования и предложение по процессорам и памяти.",
+                        "files": [
+                            {
+                                "id": "file-req-1",
+                                "name": "Requirements.pdf",
+                                "file": {
+                                    "id": "file-req-1",
+                                    "filename": "Requirements.pdf",
+                                    "path": "/app/backend/data/uploads/req.pdf",
+                                    "meta": {"name": "Requirements.pdf"},
+                                },
+                            },
+                            {
+                                "id": "file-quote-1",
+                                "name": "Quotation_12.pdf",
+                                "file": {
+                                    "id": "file-quote-1",
+                                    "filename": "Quotation_12.pdf",
+                                    "path": "/app/backend/data/uploads/quote.pdf",
+                                    "meta": {"name": "Quotation_12.pdf"},
+                                },
+                            },
+                        ],
+                    }
+                }
+            }
+        }
+    }
+    _install_fake_openwebui_modules(monkeypatch, chat_store=chat_store)
+
+    captured: dict[str, dict] = {}
+
+    def fake_urlopen(request, timeout=45):
+        captured["url"] = request.full_url
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return _FakeHTTPResponse(
+            {
+                "status": "completed",
+                "assistant_message": "Сравнение выполнено.",
+            }
+        )
+
+    monkeypatch.setattr(namespace["urllib"].request, "urlopen", fake_urlopen)
+
+    response = await tools.analyze_equipment_fast(
+        "",
+        __chat_id__="chat-pair-fast-1",
+    )
+
+    assert captured["url"].endswith("/tools/analyze_equipment_fast")
+    assert captured["payload"]["equipment_query"] == "Сравни требования и предложение по процессорам и памяти."
+    assert captured["payload"]["document_refs"] == [
+        {"label": "Requirements.pdf", "file_id": "file-req-1", "file_path": "/app/backend/data/uploads/req.pdf"},
+        {"label": "Quotation_12.pdf", "file_id": "file-quote-1", "file_path": "/app/backend/data/uploads/quote.pdf"},
+    ]
+    assert response == "Сравнение выполнено."
+
+
+@pytest.mark.asyncio
 async def test_equipment_deep_action_autopolls_completed_job_and_persists_result_message(monkeypatch):
     export = build_openwebui_binding_export(backend_base_url="http://127.0.0.1:18000")
     action_payload = next(item for item in export["actionFunctions"] if item["action_id"] == "equipment_deep_action")
@@ -191,7 +609,7 @@ async def test_equipment_deep_action_autopolls_completed_job_and_persists_result
     async def fake_event_emitter(payload):
         emitted_events.append(payload)
 
-    fake_request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(agent_nav_deep_job_pollers={})))
+    fake_request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(llm_tools_platform_deep_job_pollers={})))
     monkeypatch.setattr(namespace["urllib"].request, "urlopen", fake_urlopen)
 
     response = await action.action(
@@ -210,7 +628,7 @@ async def test_equipment_deep_action_autopolls_completed_job_and_persists_result
         __request__=fake_request,
     )
 
-    pollers = getattr(fake_request.app.state, "agent_nav_deep_job_pollers", {})
+    pollers = getattr(fake_request.app.state, "llm_tools_platform_deep_job_pollers", {})
     assert pollers
     poller_entry = next(iter(pollers.values()))
     poller_task = poller_entry["task"] if isinstance(poller_entry, dict) else poller_entry
@@ -222,7 +640,11 @@ async def test_equipment_deep_action_autopolls_completed_job_and_persists_result
     assert accepted_message["job_status"] == "completed"
     assert accepted_message["actions_disabled"] is True
     assert accepted_message["tool_job"]["status"] == "completed"
-    assert "Завершено" in accepted_message["content"]
+    assert accepted_message["content"] == (
+        "`Глубокий анализ оборудования` принят как deep-job.\n"
+        "job_id: job-auto-1\n"
+        "status_url: /tool-server/tool-jobs/job-auto-1"
+    )
     assert result_message_id
 
     result_message = chat_store["chat-deep-1"]["history"]["messages"][result_message_id]
@@ -236,7 +658,16 @@ async def test_equipment_deep_action_autopolls_completed_job_and_persists_result
 
     assert ("GET", "http://host.docker.internal:18000/tool-server/tool-jobs/job-auto-1") in calls
     assert ("GET", "http://host.docker.internal:18000/tool-server/tool-jobs/job-auto-1/result") in calls
-    assert any(event["type"] == "replace" and "Завершено" in event["data"]["content"] for event in emitted_events)
+    assert any(
+        event["type"] == "replace"
+        and event["data"]["content"]
+        == (
+            "`Глубокий анализ оборудования` принят как deep-job.\n"
+            "job_id: job-auto-1\n"
+            "status_url: /tool-server/tool-jobs/job-auto-1"
+        )
+        for event in emitted_events
+    )
     assert any(event["type"] == "chat:message:new" for event in emitted_events)
     assert any(
         event["type"] == "chat:message:meta"
@@ -312,7 +743,7 @@ async def test_equipment_deep_workspace_tool_autopolls_completed_job_and_persist
     async def fake_event_emitter(payload):
         emitted_events.append(payload)
 
-    fake_request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(agent_nav_deep_job_pollers={})))
+    fake_request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(llm_tools_platform_deep_job_pollers={})))
     monkeypatch.setattr(namespace["urllib"].request, "urlopen", fake_urlopen)
 
     response = await tools.analyze_equipment_deep(
@@ -324,7 +755,7 @@ async def test_equipment_deep_workspace_tool_autopolls_completed_job_and_persist
         __model__=SimpleNamespace(id="raw.qwen-14b-llm"),
     )
 
-    pollers = getattr(fake_request.app.state, "agent_nav_deep_job_pollers", {})
+    pollers = getattr(fake_request.app.state, "llm_tools_platform_deep_job_pollers", {})
     assert pollers
     poller_entry = next(iter(pollers.values()))
     poller_task = poller_entry["task"] if isinstance(poller_entry, dict) else poller_entry
@@ -336,7 +767,7 @@ async def test_equipment_deep_workspace_tool_autopolls_completed_job_and_persist
     assert accepted_message["job_status"] == "completed"
     assert accepted_message["actions_disabled"] is True
     assert accepted_message["tool_job"]["status"] == "completed"
-    assert "Завершено" in accepted_message["content"]
+    assert accepted_message["content"] == "Исходный accepted bubble"
     assert result_message_id
 
     result_message = chat_store["chat-deep-tool-1"]["history"]["messages"][result_message_id]
@@ -351,7 +782,10 @@ async def test_equipment_deep_workspace_tool_autopolls_completed_job_and_persist
     assert ("POST", "http://host.docker.internal:18000/tool-server/tools/analyze_equipment_deep") in calls
     assert ("GET", "http://host.docker.internal:18000/tool-server/tool-jobs/job-tool-auto-1") in calls
     assert ("GET", "http://host.docker.internal:18000/tool-server/tool-jobs/job-tool-auto-1/result") in calls
-    assert any(event["type"] == "replace" and "Завершено" in event["data"]["content"] for event in emitted_events)
+    assert any(
+        event["type"] == "replace" and event["data"]["content"] == "Исходный accepted bubble"
+        for event in emitted_events
+    )
     assert any(event["type"] == "chat:message:new" for event in emitted_events)
     assert any(
         event["type"] == "chat:message:meta"
@@ -372,7 +806,7 @@ async def test_equipment_deep_workspace_tool_rejects_accepted_without_job_contex
         assert request.full_url.endswith("/tools/analyze_equipment_deep")
         return _FakeHTTPResponse({"status": "accepted"})
 
-    fake_request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(agent_nav_deep_job_pollers={})))
+    fake_request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(llm_tools_platform_deep_job_pollers={})))
     monkeypatch.setattr(namespace["urllib"].request, "urlopen", fake_urlopen)
 
     response = await tools.analyze_equipment_deep(
@@ -386,7 +820,7 @@ async def test_equipment_deep_workspace_tool_rejects_accepted_without_job_contex
     assert "Не удалось запустить deep-job" in response
     assert "`job_id`" in response
     assert "`status_url`" in response
-    assert not getattr(fake_request.app.state, "agent_nav_deep_job_pollers", {})
+    assert not getattr(fake_request.app.state, "llm_tools_platform_deep_job_pollers", {})
 
 
 @pytest.mark.asyncio
@@ -449,7 +883,7 @@ async def test_equipment_deep_workspace_tool_failed_job_emits_reload_meta_and_pe
     async def fake_event_emitter(payload):
         emitted_events.append(payload)
 
-    fake_request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(agent_nav_deep_job_pollers={})))
+    fake_request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(llm_tools_platform_deep_job_pollers={})))
     monkeypatch.setattr(namespace["urllib"].request, "urlopen", fake_urlopen)
 
     response = await tools.analyze_equipment_deep(
@@ -461,7 +895,7 @@ async def test_equipment_deep_workspace_tool_failed_job_emits_reload_meta_and_pe
         __model__=SimpleNamespace(id="raw.qwen-14b-llm"),
     )
 
-    pollers = getattr(fake_request.app.state, "agent_nav_deep_job_pollers", {})
+    pollers = getattr(fake_request.app.state, "llm_tools_platform_deep_job_pollers", {})
     assert pollers
     poller_entry = next(iter(pollers.values()))
     poller_task = poller_entry["task"] if isinstance(poller_entry, dict) else poller_entry
@@ -474,8 +908,7 @@ async def test_equipment_deep_workspace_tool_failed_job_emits_reload_meta_and_pe
     assert accepted_message["tool_job"]["status"] == "failed"
     result_message_id = accepted_message.get("result_message_id")
     assert result_message_id
-    assert "deep-job завершён со статусом failed." in accepted_message["content"]
-    assert "Модель занята предыдущим тяжёлым запросом." in accepted_message["content"]
+    assert accepted_message["content"] == "Исходный accepted bubble"
     assert accepted_message["childrenIds"] == [result_message_id]
 
     result_message = chat_store["chat-deep-tool-failed-1"]["history"]["messages"][result_message_id]
@@ -555,7 +988,7 @@ async def test_equipment_deep_workspace_tool_failed_job_waits_for_openwebui_mess
     async def fake_event_emitter(payload):
         emitted_events.append(payload)
 
-    fake_request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(agent_nav_deep_job_pollers={})))
+    fake_request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(llm_tools_platform_deep_job_pollers={})))
     monkeypatch.setattr(namespace["urllib"].request, "urlopen", fake_urlopen)
 
     response = await tools.analyze_equipment_deep(
@@ -580,7 +1013,7 @@ async def test_equipment_deep_workspace_tool_failed_job_waits_for_openwebui_mess
         )
 
     overwrite_task = asyncio.create_task(late_openwebui_persist())
-    pollers = getattr(fake_request.app.state, "agent_nav_deep_job_pollers", {})
+    pollers = getattr(fake_request.app.state, "llm_tools_platform_deep_job_pollers", {})
     assert pollers
     poller_entry = next(iter(pollers.values()))
     poller_task = poller_entry["task"] if isinstance(poller_entry, dict) else poller_entry
@@ -595,8 +1028,7 @@ async def test_equipment_deep_workspace_tool_failed_job_waits_for_openwebui_mess
     assert accepted_message["actions_disabled"] is True
     assert accepted_message["tool_job"]["status"] == "failed"
     assert result_message_id
-    assert "deep-job завершён со статусом failed." in accepted_message["content"]
-    assert "Модель занята предыдущим тяжёлым запросом." in accepted_message["content"]
+    assert accepted_message["content"] == "Старый accepted из Open WebUI"
     assert accepted_message["childrenIds"] == [result_message_id]
     assert chat_store["chat-deep-tool-settle-1"]["history"]["currentId"] == result_message_id
 
@@ -678,7 +1110,7 @@ async def test_equipment_deep_workspace_tool_resolves_visible_accepted_bubble_fr
     async def fake_event_emitter(payload):
         emitted_events.append(payload)
 
-    fake_request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(agent_nav_deep_job_pollers={})))
+    fake_request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(llm_tools_platform_deep_job_pollers={})))
     monkeypatch.setattr(namespace["urllib"].request, "urlopen", fake_urlopen)
 
     response = await tools.analyze_equipment_deep(
@@ -690,7 +1122,7 @@ async def test_equipment_deep_workspace_tool_resolves_visible_accepted_bubble_fr
         __model__=SimpleNamespace(id="raw.qwen-14b-llm"),
     )
 
-    pollers = getattr(fake_request.app.state, "agent_nav_deep_job_pollers", {})
+    pollers = getattr(fake_request.app.state, "llm_tools_platform_deep_job_pollers", {})
     assert pollers
     poller_entry = next(iter(pollers.values()))
     poller_task = poller_entry["task"] if isinstance(poller_entry, dict) else poller_entry
@@ -1201,7 +1633,7 @@ async def test_refresh_action_does_not_duplicate_result_message_when_it_is_alrea
             "job_status": "completed",
             "result_message_id": result_message_id,
         },
-        __request__=SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(agent_nav_deep_job_pollers={}))),
+        __request__=SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(llm_tools_platform_deep_job_pollers={}))),
     )
 
     assert response["job_status"] == "completed"

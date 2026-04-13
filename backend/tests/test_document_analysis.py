@@ -50,6 +50,8 @@ def base_state() -> DocumentAnalysisState:
     return {
         "input_path": "/tmp/test.pdf",
         "doc_name": "test.pdf",
+        "analysis_goal": None,
+        "prefetched_full_text": "",
         "doc_type": "",
         "doc_metadata": {},
         "items": [],
@@ -239,10 +241,10 @@ class TestClassifyAndLoadNode:
 
             result = await classify_and_load_node(base_state)
         assert result["doc_type"] == "tz"
-        assert result["full_text"] == tz_text
+        assert result["full_text"] == tz_text.strip()
         assert result["doc_metadata"]["pages"] == 5
         assert result["doc_metadata"]["tables_count"] == 2
-        assert result["doc_metadata"]["chars"] == len(tz_text)
+        assert result["doc_metadata"]["chars"] == len(tz_text.strip())
 
     @pytest.mark.asyncio
     async def test_metadata_extraction(self, base_state, smeta_text):
@@ -283,6 +285,25 @@ class TestClassifyAndLoadNode:
         assert "tables_count" in meta
         assert "format" in meta
         assert meta["format"] == "PDF"
+
+    @pytest.mark.asyncio
+    async def test_uses_prefetched_text_when_document_server_unavailable(self, base_state, tz_text):
+        base_state["prefetched_full_text"] = tz_text
+
+        async def mock_post(url, **kwargs):
+            raise RuntimeError("document server unreachable")
+
+        with patch("orchestrator.workflows.document_analysis.get_shared_client") as mock_get_client:
+            client_instance = AsyncMock()
+            client_instance.post = AsyncMock(side_effect=mock_post)
+            mock_get_client.return_value = client_instance
+
+            result = await classify_and_load_node(base_state)
+
+        assert result["full_text"] == tz_text.strip()
+        assert result["doc_type"] == "tz"
+        assert result["doc_metadata"]["chars"] == len(tz_text.strip())
+        assert "Document server недоступен" in "\n".join(result["errors"])
 
 
 # ============================================================================
@@ -336,7 +357,7 @@ class TestExtractPositionsNode:
 
         assert any("LLM extraction failed" in error for error in result["errors"])
         metrics = render_metrics_text()
-        assert "agent_nav_fallback_events_total" in metrics
+        assert "llm_tools_platform_fallback_events_total" in metrics
         assert 'component="document_analysis"' in metrics
         assert 'fallback="llm_extract_failed"' in metrics
 
@@ -449,6 +470,48 @@ class TestExtractPositionsNode:
         assert len(result["items"]) == 1
         assert result["model_execution"][0]["used_model_id"] == "qwen-14b-llm"
 
+    @pytest.mark.asyncio
+    async def test_extract_positions_tolerates_malformed_raw_specs_in_polisher(self, base_state):
+        bad_items = [
+            {
+                "name": "Сервер 1",
+                "specs": "",
+                "quantity": "1",
+                "price": "",
+                "unit": "",
+                "source": "table",
+                "page": 1,
+                "raw_specs": [["CPU", "Xeon", ""]],
+            },
+            {
+                "name": "Сервер 2",
+                "specs": "",
+                "quantity": "1",
+                "price": "",
+                "unit": "",
+                "source": "table",
+                "page": 1,
+                "raw_specs": [{"p": "RAM", "v": "64", "u": "GB"}],
+            },
+        ]
+
+        with patch(
+            "orchestrator.workflows.document_analysis._extract_tables_from_doc",
+            new_callable=AsyncMock,
+        ) as mock_tables, patch(
+            "orchestrator.workflows.document_analysis._extract_items_llm",
+            new_callable=AsyncMock,
+        ) as mock_llm:
+            mock_tables.return_value = bad_items
+            mock_llm.return_value = []
+
+            result = await extract_positions_node(base_state)
+
+        assert len(result["items"]) == 2
+        assert result["items"][0]["name"] == "Сервер 1"
+        assert result["items"][1]["name"] == "Сервер 2"
+        assert result["errors"] == []
+
 
 # ============================================================================
 # Tests: summarize_node
@@ -500,6 +563,26 @@ class TestSummarizeNode:
         assert "сроки поставки" in prompt.lower() or "гарантия" in prompt.lower()
 
     @pytest.mark.asyncio
+    async def test_summarize_includes_analysis_goal_in_prompt(self, base_state, tz_text):
+        base_state["full_text"] = tz_text
+        base_state["doc_type"] = "tz"
+        base_state["analysis_goal"] = "Сфокусируйся на процессорах и памяти."
+
+        with patch("orchestrator.workflows.document_analysis._chunk_text", new_callable=AsyncMock) as mock_chunk, \
+             patch("orchestrator.workflows.document_analysis.ums_client") as mock_ums:
+            mock_chunk.return_value = [tz_text]
+            mock_ums.async_infer = AsyncMock(return_value={
+                "content": "- Процессоры: не менее 8 ядер\n- Память: не менее 32 ГБ"
+            })
+
+            result = await summarize_node(base_state)
+
+        assert "процессоры" in result["summary"].lower()
+        call_args = mock_ums.async_infer.call_args
+        prompt = call_args[1]["prompt"] if "prompt" in call_args[1] else call_args[0][1]["prompt"]
+        assert "сфокусируйся на процессорах и памяти" in prompt.lower()
+
+    @pytest.mark.asyncio
     async def test_summarize_smeta_prompt(self, base_state, smeta_text):
         base_state["full_text"] = smeta_text
         base_state["doc_type"] = "smeta"
@@ -533,7 +616,7 @@ class TestSummarizeNode:
         assert "errors" in result
         assert any("failed" in e.lower() or "timeout" in e.lower() for e in result["errors"])
         metrics = render_metrics_text()
-        assert "agent_nav_fallback_events_total" in metrics
+        assert "llm_tools_platform_fallback_events_total" in metrics
         assert 'component="document_analysis"' in metrics
         assert 'fallback="summarize_chunk_failed"' in metrics
 
@@ -547,6 +630,30 @@ class TestSummarizeNode:
             mock_chunk.return_value = [tz_text]
             mock_ums.async_infer = AsyncMock(return_value={
                 "choices": [{"text": "- Срок поставки: 20 рабочих дней\n- Гарантия: 36 месяцев"}]
+            })
+
+            result = await summarize_node(base_state)
+
+        assert "20 рабочих дней" in result["summary"]
+        assert "36 месяцев" in result["summary"]
+
+    @pytest.mark.asyncio
+    async def test_summarize_accepts_choices_message_parts_shape(self, base_state, tz_text):
+        base_state["full_text"] = tz_text
+        base_state["doc_type"] = "tz"
+
+        with patch("orchestrator.workflows.document_analysis._chunk_text", new_callable=AsyncMock) as mock_chunk, \
+             patch("orchestrator.workflows.document_analysis.ums_client") as mock_ums:
+            mock_chunk.return_value = [tz_text]
+            mock_ums.async_infer = AsyncMock(return_value={
+                "choices": [
+                    {
+                        "message": [
+                            {"type": "text", "text": "- Срок поставки: 20 рабочих дней"},
+                            {"type": "text", "text": "- Гарантия: 36 месяцев"},
+                        ]
+                    }
+                ]
             })
 
             result = await summarize_node(base_state)
@@ -581,7 +688,7 @@ class TestSummarizeNode:
         assert "10 дней" in result["summary"]
         assert any("Reduce summarization failed" in error for error in result["errors"])
         metrics = render_metrics_text()
-        assert "agent_nav_fallback_events_total" in metrics
+        assert "llm_tools_platform_fallback_events_total" in metrics
         assert 'component="document_analysis"' in metrics
         assert 'fallback="reduce_summarization_failed"' in metrics
 
@@ -856,7 +963,7 @@ class TestSummarizeNode:
         assert metadata["reduce_decisions"][0]["shadow_baseline_strategy"] == "hierarchical_merge"
 
         metrics = render_metrics_text()
-        assert 'agent_nav_summary_strategy_shadow_diff_total{component="document_analysis"' in metrics
+        assert 'llm_tools_platform_summary_strategy_shadow_diff_total{component="document_analysis"' in metrics
         assert " 1.0" in metrics
 
     @pytest.mark.asyncio
@@ -883,7 +990,7 @@ class TestSummarizeNode:
             await summarize_node(base_state)
 
         metrics = render_metrics_text()
-        assert "agent_nav_summary_strategy_shadow_diff_total" not in metrics
+        assert "llm_tools_platform_summary_strategy_shadow_diff_total" not in metrics
 
     @pytest.mark.asyncio
     async def test_summarize_honors_cancel_flag_between_chunks(self, base_state):

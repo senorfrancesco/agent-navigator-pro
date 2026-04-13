@@ -32,7 +32,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from services.model_manager.ums_client import ums_client
+from services.model_manager.ums_client import create_ums_embed_fn, ums_client
 from services.model_manager.model_selection import resolve_execution_plan, resolve_model_selection
 from services.model_manager.models_config import get_all_models
 from services.observability import (
@@ -41,6 +41,8 @@ from services.observability import (
     render_metrics_text,
 )
 from orchestrator.shared.http_client import get_shared_client
+from orchestrator.document_binding_store import get_document_binding_store
+from orchestrator.knowledge_base_ingestion import ingest_text_source_sync
 from orchestrator.knowledge_base_store import get_knowledge_base_store
 from orchestrator.execution_runtime import (
     ExecutionDependencies,
@@ -56,6 +58,7 @@ from orchestrator.tool_execution import (
     build_accepted_tool_job_response,
     build_tool_job_status_response,
     cancel_tool_job,
+    force_tool_job_transition,
     get_tool_job_result,
     get_tool_job_store,
     inject_tool_contract_metadata,
@@ -91,7 +94,7 @@ async def app_lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Agent Navigator Pro Orchestrator", version="2.3.0", lifespan=app_lifespan)
+app = FastAPI(title="llm-tools-platform Orchestrator", version="2.3.0", lifespan=app_lifespan)
 logger = logging.getLogger("agent_api")
 
 app.add_middleware(
@@ -124,6 +127,12 @@ if _OPERATOR_UI_DIR.exists():
     app.mount("/operator-ui", StaticFiles(directory=str(_OPERATOR_UI_DIR), html=True), name="operator-ui")
 if _OPERATOR_ASSETS_DIR.exists():
     app.mount("/operator-assets", StaticFiles(directory=str(_OPERATOR_ASSETS_DIR)), name="operator-assets")
+
+
+class ToolJobTransitionPayload(BaseModel):
+    status: Literal["running", "cancelling", "completed", "failed", "cancelled"]
+    response: Optional[Dict[str, Any]] = None
+    error_summary: Optional[str] = None
 
 
 def _get_request_trace_id(request: Request) -> str:
@@ -182,6 +191,7 @@ class OrchestrationRequest(BaseModel):
     history: Optional[List[Dict[str, Any]]] = None
     pending_action: Optional[Dict[str, Any]] = None
     active_doc_ids: Optional[List[str]] = None
+    document_bindings: Optional[List[Dict[str, Any]]] = None
     attachments_meta: Optional[List[Dict[str, Any]]] = None
     runtime_mode: Literal["auto", "chat_only", "specialized_tasks"] = "auto"
     assistant_mode: Optional[Literal["general_chat", "coding", "agentic", "specific_tasks", "rag_qa"]] = None
@@ -246,6 +256,184 @@ def _collect_request_control_plane(request: OrchestrationRequest) -> Dict[str, A
     return raw_control_plane
 
 
+def _serialize_document_binding(binding: Any) -> Dict[str, Any]:
+    return {
+        "document_id": str(binding.document_id),
+        "version_id": str(binding.version_id),
+        "thread_id": binding.thread_id,
+        "upload_id": binding.upload_id,
+        "file_id": binding.file_id,
+        "display_name": str(binding.display_name),
+        "path": binding.storage_path,
+        "source_scope": str(binding.source_scope),
+        "ingestion_status": str(binding.ingestion_status),
+        "resolved_identity": str(binding.resolved_identity),
+        "resolved_identity_kind": str(binding.resolved_identity_kind),
+        "expires_at": binding.expires_at,
+        "is_active": bool(binding.is_active),
+    }
+
+
+def _binding_has_identity(binding: Dict[str, Any]) -> bool:
+    for key in ("document_id", "version_id", "upload_id", "file_id", "file_path", "path"):
+        value = binding.get(key)
+        if value is None:
+            continue
+        if str(value).strip():
+            return True
+    return False
+
+
+def _collect_document_binding_inputs(request: OrchestrationRequest) -> List[Dict[str, Any]]:
+    if request.document_bindings:
+        return [
+            dict(item)
+            for item in request.document_bindings
+            if isinstance(item, dict) and _binding_has_identity(item)
+        ]
+    ui_state = request.ui_state if isinstance(request.ui_state, dict) else {}
+    ui_bindings = ui_state.get("document_ref_bindings")
+    if isinstance(ui_bindings, list) and ui_bindings:
+        return [dict(item) for item in ui_bindings if isinstance(item, dict) and _binding_has_identity(item)]
+
+    bindings: List[Dict[str, Any]] = []
+    for name, info in (request.session_docs or {}).items():
+        if not isinstance(info, dict):
+            continue
+        candidate = {
+            "label": str(info.get("display_name") or name),
+            "document_id": info.get("document_id"),
+            "version_id": info.get("version_id"),
+            "upload_id": info.get("upload_id"),
+            "file_id": info.get("file_id"),
+            "file_path": info.get("path"),
+            "ingestion_status": info.get("ingestion_status"),
+        }
+        if _binding_has_identity(candidate):
+            bindings.append(candidate)
+    return bindings
+
+
+def _merge_session_docs_with_bindings(
+    session_docs: Dict[str, Any],
+    document_bindings: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    if not session_docs:
+        return session_docs
+    docs_by_path = {}
+    docs_by_label = {}
+    docs_by_identity = {}
+    for binding in document_bindings:
+        if binding.get("path"):
+            docs_by_path[str(binding["path"])] = binding
+        if binding.get("display_name"):
+            docs_by_label[str(binding["display_name"])] = binding
+        for key in ("resolved_identity", "document_id", "upload_id", "file_id", "version_id"):
+            if binding.get(key):
+                docs_by_identity[str(binding[key])] = binding
+
+    normalized: Dict[str, Any] = {}
+    for name, info in session_docs.items():
+        if not isinstance(info, dict):
+            continue
+        match = None
+        for candidate in (
+            info.get("document_id"),
+            info.get("upload_id"),
+            info.get("file_id"),
+            info.get("version_id"),
+            info.get("path"),
+            info.get("display_name"),
+            name,
+        ):
+            if candidate is None:
+                continue
+            text_candidate = str(candidate)
+            match = (
+                docs_by_identity.get(text_candidate)
+                or docs_by_path.get(text_candidate)
+                or docs_by_label.get(text_candidate)
+            )
+            if match is not None:
+                break
+        updated = dict(info)
+        if match is not None:
+            updated["document_id"] = match.get("document_id")
+            updated["version_id"] = match.get("version_id")
+            updated["display_name"] = match.get("display_name") or updated.get("display_name") or name
+            updated["path"] = match.get("path") or updated.get("path")
+            updated["thread_id"] = match.get("thread_id") or updated.get("thread_id")
+            updated["expires_at"] = match.get("expires_at") or updated.get("expires_at")
+            updated["source_scope"] = match.get("source_scope") or updated.get("source_scope")
+            updated["ingestion_status"] = match.get("ingestion_status") or updated.get("ingestion_status")
+        normalized[str(name)] = updated
+    return normalized
+
+
+def _prune_expired_document_context() -> int:
+    binding_store = get_document_binding_store()
+    expired = list(binding_store.list_expired_bindings_sync())
+    if not expired:
+        return 0
+    kb_store = get_knowledge_base_store()
+    for binding in expired:
+        if not binding.thread_id:
+            continue
+        try:
+            kb_store.delete_chunks_sync(
+                collection_id=f"session:{binding.thread_id}",
+                filters={
+                    "source_scope": "session",
+                    "thread_id": binding.thread_id,
+                    "document_version_id": binding.version_id,
+                },
+            )
+        except Exception:
+            logger.warning("Failed to delete expired session chunks for %s", binding.version_id, exc_info=True)
+    return binding_store.prune_expired_bindings_sync()
+
+
+def _materialize_request_document_context(request: OrchestrationRequest) -> None:
+    _prune_expired_document_context()
+    binding_inputs = _collect_document_binding_inputs(request)
+    binding_store = get_document_binding_store()
+    resolved = []
+    if binding_inputs:
+        for item in binding_inputs:
+            resolved.append(
+                binding_store.register_document_binding_sync(
+                    thread_id=request.thread_id,
+                    binding=item,
+                    source_scope=str(item.get("source_scope") or "session"),
+                )
+            )
+    elif request.thread_id:
+        resolved = binding_store.list_thread_bindings_sync(request.thread_id, active_only=True)
+
+    if not resolved:
+        return
+
+    serialized = [_serialize_document_binding(item) for item in resolved]
+    request.document_bindings = serialized
+    request.active_doc_ids = [str(item["document_id"]) for item in serialized]
+    request.has_session_docs = request.has_session_docs or bool(serialized)
+    request.session_docs = _merge_session_docs_with_bindings(request.session_docs or {}, serialized)
+
+    ui_state = dict(request.ui_state or {})
+    ui_state["document_bindings"] = serialized
+    ui_state["documents_by_id"] = {
+        str(item["document_id"]): {
+            "document_id": item["document_id"],
+            "display_name": item["display_name"],
+            "version": 1,
+            "path": item["path"],
+            "source_origin": item["source_scope"],
+        }
+        for item in serialized
+    }
+    request.ui_state = ui_state
+
+
 def _collect_request_control_plane_with_payload_overrides(
     request: OrchestrationRequest,
     request_payload: Dict[str, Any],
@@ -270,7 +458,7 @@ def _collect_request_control_plane_with_payload_overrides(
 
 def _build_api_prompt(query: str, history: List[Dict[str, Any]], system_msg: str = "") -> str:
     if not system_msg:
-        system_msg = "Ты помощник Agent Navigator. Помогай пользователю."
+        system_msg = "Ты помощник llm-tools-platform. Помогай пользователю."
     prompt = f"<|im_start|>system\n{system_msg}<|im_end|>\n"
     for msg in history[-10:]:
         role = str(msg.get("role", "user"))
@@ -386,7 +574,7 @@ def _infer_with_model_failover(
                     exc_info=True,
                 )
                 inc_metric_counter(
-                    "agent_nav_fallback_events_total",
+                    "llm_tools_platform_fallback_events_total",
                     labels={
                         "component": "agent_api",
                         "fallback": "model_failover_retry",
@@ -426,11 +614,63 @@ def _create_failover_embed_fn(
 
 def _build_api_execution_dependencies(request: OrchestrationRequest, effective_settings: Dict[str, Any]) -> ExecutionDependencies:
     session_docs = request.session_docs or {}
+    document_bindings = list(request.document_bindings or [])
     retrieval_embed_fn: Optional[Any] = None
     model_execution_events: List[Dict[str, Any]] = []
 
+    def _build_document_binding_doc_list() -> List[Dict[str, Any]]:
+        if not document_bindings:
+            return []
+        docs: List[Dict[str, Any]] = []
+        by_identity = {}
+        by_path = {}
+        for name, info in session_docs.items():
+            if not isinstance(info, dict):
+                continue
+            if info.get("document_id"):
+                by_identity[str(info["document_id"])] = (name, info)
+            if info.get("path"):
+                by_path[str(info["path"])] = (name, info)
+        for index, binding in enumerate(document_bindings, start=1):
+            session_name = str(binding.get("display_name") or "")
+            session_info = {}
+            matched = by_identity.get(str(binding.get("resolved_identity") or "")) or by_identity.get(
+                str(binding.get("document_id") or "")
+            ) or by_path.get(str(binding.get("path") or ""))
+            if matched is not None:
+                session_name, session_info = matched
+            docs.append(
+                {
+                    "document_id": str(binding.get("document_id")),
+                    "version_id": str(binding.get("version_id")),
+                    "display_name": str(binding.get("display_name") or session_name or binding.get("document_id")),
+                    "path": binding.get("path"),
+                    "text": str((session_info or {}).get("text") or ""),
+                    "report_generated": bool((session_info or {}).get("report_generated")),
+                    "thread_id": binding.get("thread_id"),
+                    "expires_at": binding.get("expires_at"),
+                    "source_scope": str(binding.get("source_scope") or "session"),
+                    "ingestion_status": str(binding.get("ingestion_status") or "registered"),
+                    "order_index": index,
+                }
+            )
+        return docs
+
     def _docs_list() -> List[Dict[str, Any]]:
-        return _build_session_doc_list(session_docs)
+        return _build_document_binding_doc_list() or _build_session_doc_list(session_docs)
+
+    def _active_doc_ids() -> List[str]:
+        if request.active_doc_ids:
+            return list(request.active_doc_ids)
+        return [str(doc["document_id"]) for doc in _docs_list() if doc.get("document_id")]
+
+    def _active_docs() -> List[Dict[str, Any]]:
+        docs = _docs_list()
+        active_doc_ids = set(_active_doc_ids())
+        if not active_doc_ids:
+            return docs
+        selected = [doc for doc in docs if str(doc.get("document_id")) in active_doc_ids]
+        return selected or docs
 
     def _profile_prompt() -> str:
         custom = (effective_settings.get("custom_system_prompt") or "").strip()
@@ -476,6 +716,91 @@ def _build_api_execution_dependencies(request: OrchestrationRequest, effective_s
             record_model_execution=_record_model_execution,
         )
         return retrieval_embed_fn
+
+    async def _ensure_rag_index_for_doc_ids(doc_ids: List[str], *args: Any, **kwargs: Any) -> bool:
+        if not request.thread_id or not document_bindings:
+            return False
+        embed_fn = _get_retrieval_embed_fn()
+        if embed_fn is None:
+            return False
+
+        docs_by_id = {
+            str(doc.get("document_id")): doc
+            for doc in _docs_list()
+            if doc.get("document_id")
+        }
+        bindings_by_id = {
+            str(binding.get("document_id")): binding
+            for binding in document_bindings
+            if binding.get("document_id")
+        }
+        target_doc_ids = [str(doc_id) for doc_id in (doc_ids or []) if str(doc_id).strip()]
+        if not target_doc_ids:
+            target_doc_ids = list(docs_by_id.keys())
+
+        binding_store = get_document_binding_store()
+        kb_store = get_knowledge_base_store()
+        embedding_model_id = str(
+            effective_settings.get("resolved_retrieval_embedder_model_id")
+            or getattr(resolve_model_selection("legal.embedder"), "resolved_model_id", "")
+            or "labse"
+        )
+        indexed_any = False
+        for doc_id in target_doc_ids:
+            doc = docs_by_id.get(doc_id)
+            binding = bindings_by_id.get(doc_id)
+            if doc is None or binding is None:
+                continue
+            text = str(doc.get("text") or "").strip()
+            if not text:
+                continue
+            if str(doc.get("ingestion_status") or binding.get("ingestion_status") or "").lower() == "indexed":
+                continue
+            await asyncio.to_thread(
+                ingest_text_source_sync,
+                collection_id=f"session:{request.thread_id}",
+                display_name=str(doc.get("display_name") or binding.get("display_name") or doc_id),
+                text=text,
+                store=kb_store,
+                mime_type="text/plain",
+                index_version="session_v1",
+                embedding_model_id=embedding_model_id,
+                chunking_version="session_v1",
+                embed_fn=embed_fn,
+                source_origin="session_upload",
+                content_hash_override=str(binding.get("version_id") or doc_id),
+                base_metadata={
+                    "document_id": doc_id,
+                    "document_version_id": binding.get("version_id"),
+                    "thread_id": request.thread_id,
+                    "source_scope": "session",
+                    "expires_at": binding.get("expires_at"),
+                    "storage_path": binding.get("path"),
+                },
+            )
+            updated_binding = await asyncio.to_thread(
+                binding_store.register_document_binding_sync,
+                thread_id=request.thread_id,
+                binding={
+                    "document_id": binding.get("document_id"),
+                    "version_id": binding.get("version_id"),
+                    "upload_id": binding.get("upload_id"),
+                    "file_id": binding.get("file_id"),
+                    "label": binding.get("display_name"),
+                    "file_path": binding.get("path"),
+                    "ingestion_status": "indexed",
+                },
+                source_scope=str(binding.get("source_scope") or "session"),
+            )
+            serialized_binding = _serialize_document_binding(updated_binding)
+            binding.update(serialized_binding)
+            doc["ingestion_status"] = "indexed"
+            doc["thread_id"] = serialized_binding.get("thread_id")
+            doc["expires_at"] = serialized_binding.get("expires_at")
+            indexed_any = True
+        if indexed_any:
+            request.document_bindings = [dict(item) for item in document_bindings]
+        return indexed_any
 
     def _has_sufficient_evidence(**kwargs: Any) -> bool:
         return has_sufficient_evidence_v1(**kwargs)
@@ -535,13 +860,13 @@ def _build_api_execution_dependencies(request: OrchestrationRequest, effective_s
         has_retrieval_adapter=lambda: _get_retrieval_embed_fn() is not None,
         get_retrieval_embed_fn=_get_retrieval_embed_fn,
         get_knowledge_base_store=get_knowledge_base_store,
-        get_active_doc_ids=lambda: list(request.active_doc_ids or []),
+        get_active_doc_ids=_active_doc_ids,
         get_all_docs=_docs_list,
-        get_active_docs=_docs_list,
+        get_active_docs=_active_docs,
         get_report_docs=lambda: [doc for doc in _docs_list() if doc.get("report_generated")],
         resolve_target_doc_name=lambda query, docs: None,
         is_report_query=lambda query: False,
-        ensure_rag_index_for_doc_ids=_noop_async,
+        ensure_rag_index_for_doc_ids=_ensure_rag_index_for_doc_ids,
         get_rag_pipeline=lambda: None,
         build_sources_from_rag_result=lambda rag_result, rag_pipeline, max_sources=5: [],
         reindex_sources=lambda sources: sources,
@@ -760,7 +1085,7 @@ def _build_openai_compat_request(
     attachments: List[FileAttachment],
     session_docs: Optional[Dict[str, Any]] = None,
 ) -> OrchestrationRequest:
-    target_model = str(data.get("model") or "agent-navigator")
+    target_model = str(data.get("model") or "llm-tools-platform")
     system_prompt = _extract_openai_system_prompt(messages)
     history = _normalize_openai_history(messages, latest_user_query=user_query)
     active_doc_ids = [att.name for att in attachments]
@@ -777,7 +1102,7 @@ def _build_openai_compat_request(
     if system_prompt:
         request_payload["custom_system_prompt"] = system_prompt
 
-    if target_model != "agent-navigator":
+    if target_model != "llm-tools-platform":
         request_payload.update(
             {
                 "assistant_mode": "general_chat",
@@ -865,7 +1190,7 @@ def _list_raw_chat_capable_models() -> List[Dict[str, Any]]:
                 "id": model_id,
                 "object": "model",
                 "created": int(time.time()),
-                "owned_by": "agent-navigator-raw-provider",
+                "owned_by": "llm-tools-platform-raw-provider",
             }
         )
     return payload
@@ -1014,6 +1339,7 @@ def metrics():
 
 async def orchestrate(request: OrchestrationRequest, http_request: Optional[Request] = None):
     request.trace_id = request.trace_id or _resolve_http_trace_id(http_request)
+    _materialize_request_document_context(request)
     payload = request.model_dump(exclude_none=True)
     apply_tool_contract_to_payload(payload)
     payload.setdefault("execution_surface", "agent_mode")
@@ -1036,7 +1362,7 @@ async def orchestrate(request: OrchestrationRequest, http_request: Optional[Requ
     response["effective_settings"] = effective_settings
     inject_tool_contract_metadata(response, payload)
     inc_metric_counter(
-        "agent_nav_agent_api_orchestration_requests_total",
+        "llm_tools_platform_agent_api_orchestration_requests_total",
         labels={"endpoint": "/orchestrate", "result": str(response.get("route") or "unknown")},
     )
     return response
@@ -1049,6 +1375,7 @@ async def orchestrate_route(request: OrchestrationRequest, http_request: Request
 
 async def execute_orchestration_api(request: OrchestrationRequest, http_request: Optional[Request] = None):
     request.trace_id = request.trace_id or _resolve_http_trace_id(http_request)
+    _materialize_request_document_context(request)
     payload = request.model_dump(exclude_none=True)
     apply_tool_contract_to_payload(payload)
     payload.setdefault("execution_surface", "agent_mode")
@@ -1067,7 +1394,7 @@ async def execute_orchestration_api(request: OrchestrationRequest, http_request:
     response = await execute_orchestration(payload, deps=deps)
     inject_tool_contract_metadata(response, payload)
     inc_metric_counter(
-        "agent_nav_agent_api_orchestration_requests_total",
+        "llm_tools_platform_agent_api_orchestration_requests_total",
         labels={"endpoint": "/execute_orchestration", "result": str(response.get("route") or "unknown")},
     )
     return response
@@ -1104,6 +1431,28 @@ async def cancel_tool_job_route(job_id: str):
         raise HTTPException(status_code=404, detail=f"unknown-tool-job:{job_id}") from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return build_tool_job_status_response(job)
+
+
+def _test_mode_enabled() -> bool:
+    return str(os.getenv("LLM_TOOLS_PLATFORM_TEST_MODE", "0")).strip() == "1"
+
+
+@app.post("/debug/test/tool-jobs/{job_id}/transition")
+async def debug_transition_tool_job_route(job_id: str, payload: ToolJobTransitionPayload):
+    if not _test_mode_enabled():
+        raise HTTPException(status_code=404, detail="Not Found")
+    try:
+        job = force_tool_job_transition(
+            job_id,
+            status=payload.status,
+            response=payload.response,
+            error_summary=payload.error_summary,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"unknown-tool-job:{job_id}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return build_tool_job_status_response(job)
 
 
@@ -1160,7 +1509,7 @@ async def raw_openai_completions(request: Request):
 @app.get("/v1/models")
 def list_models():
     """Возвращает динамический список доступных GGUF моделей."""
-    models = [{"id": "agent-navigator", "object": "model", "created": int(time.time()), "owned_by": "agent-navigator-pro"}]
+    models = [{"id": "llm-tools-platform", "object": "model", "created": int(time.time()), "owned_by": "llm-tools-platform"}]
     try:
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         models_dir = os.path.join(base_dir, 'models', 'gguf')
@@ -1178,7 +1527,7 @@ async def openai_completions(request: Request):
     data = await request.json()
     stream_mode = bool(data.get("stream", True))
     messages = data.get("messages", [])
-    target_model = data.get("model", "agent-navigator")
+    target_model = data.get("model", "llm-tools-platform")
     user_query = _extract_latest_user_query(messages)
     found_files = _discover_openai_attachments(user_query)
     dedup_key = _compute_openai_dedup_key(target_model=target_model, user_query=user_query, attachments=found_files)
@@ -1192,8 +1541,8 @@ async def openai_completions(request: Request):
             dedup_key,
         )
         inc_metric_counter(
-            "agent_nav_agent_api_openai_dedup_hits_total",
-            labels={"model_family": "agent-navigator" if target_model == "agent-navigator" else "direct"},
+            "llm_tools_platform_agent_api_openai_dedup_hits_total",
+            labels={"model_family": "llm-tools-platform" if target_model == "llm-tools-platform" else "direct"},
         )
         if not stream_mode:
             return _build_openai_chat_completion_response(target_model=target_model, text="")
@@ -1218,10 +1567,10 @@ async def openai_completions(request: Request):
                 session_docs=session_docs,
             )
             effective_settings = resolve_effective_settings(_collect_request_control_plane(compat_request))
-            if target_model != "agent-navigator":
+            if target_model != "llm-tools-platform":
                 effective_settings["resolved_model_id"] = target_model
             payload = compat_request.model_dump(exclude_none=True)
-            payload["execution_surface"] = "agent_mode" if target_model == "agent-navigator" else "compat_chat"
+            payload["execution_surface"] = "agent_mode" if target_model == "llm-tools-platform" else "compat_chat"
             payload["idempotency_key"] = dedup_key
             payload["runtime_mode"] = resolve_request_runtime_mode(payload, effective_settings)
             payload["effective_settings"] = effective_settings
@@ -1246,10 +1595,10 @@ async def openai_completions(request: Request):
                 session_docs=session_docs,
             )
             effective_settings = resolve_effective_settings(_collect_request_control_plane(compat_request))
-            if target_model != "agent-navigator":
+            if target_model != "llm-tools-platform":
                 effective_settings["resolved_model_id"] = target_model
             payload = compat_request.model_dump(exclude_none=True)
-            payload["execution_surface"] = "agent_mode" if target_model == "agent-navigator" else "compat_chat"
+            payload["execution_surface"] = "agent_mode" if target_model == "llm-tools-platform" else "compat_chat"
             payload["idempotency_key"] = dedup_key
             payload["runtime_mode"] = resolve_request_runtime_mode(payload, effective_settings)
             payload["effective_settings"] = effective_settings

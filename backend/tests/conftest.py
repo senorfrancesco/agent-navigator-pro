@@ -57,6 +57,18 @@ def isolate_tool_job_store(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def isolate_document_binding_store(monkeypatch, tmp_path):
+    from orchestrator import document_binding_store as document_binding_store_module
+
+    db_url = f"sqlite:///{tmp_path / 'document_bindings.db'}"
+    monkeypatch.setenv("ORCHESTRATOR_DOCUMENT_BINDING_DB_URL", db_url)
+    monkeypatch.setattr(document_binding_store_module, "DEFAULT_DOCUMENT_BINDING_DB_URL", db_url, raising=False)
+    monkeypatch.setattr(document_binding_store_module, "_STORE_SINGLETON", None, raising=False)
+    yield
+    monkeypatch.setattr(document_binding_store_module, "_STORE_SINGLETON", None, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def isolate_ums_runtime_state(monkeypatch):
     from services.model_manager import unified_model_server as ums_server
 

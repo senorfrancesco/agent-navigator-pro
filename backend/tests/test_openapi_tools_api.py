@@ -48,7 +48,7 @@ def test_tool_server_config_returns_terminal_compatible_payload(monkeypatch):
     assert response.status_code == 200
     payload = response.json()
     assert payload["features"]["system"] is False
-    assert payload["server"]["name"] == "Agent Navigator OpenAPI Tool Server"
+    assert payload["server"]["name"] == "llm-tools-platform OpenAPI Tool Server"
     assert payload["toolUx"]["enabledToolNames"] == ["analyze_equipment_fast", "analyze_equipment_deep"]
     assert "ask_document" in payload["toolUx"]["deferredToolNames"]
 
@@ -344,3 +344,125 @@ def test_tool_route_accepts_eval_only_file_path(monkeypatch):
     assert response.status_code == 200
     assert response.json()["status"] == "completed"
     assert captured["request"].active_doc_ids == ["/tmp/contract.pdf"]
+
+
+def test_async_tool_route_translates_openwebui_upload_paths(monkeypatch):
+    captured: Dict[str, Any] = {}
+
+    async def fake_execute(orchestration_request, http_request=None):
+        captured["request"] = orchestration_request
+        return {
+            "status": "accepted",
+            "tool_name": "analyze_equipment_deep",
+            "job_id": "job-path-1",
+            "status_url": "/tool-server/tool-jobs/job-path-1",
+            "submitted_at": "2026-04-12T20:00:00Z",
+            "available_actions": [],
+            "execution_metadata": {
+                "requested_tool": "analyze_equipment_deep",
+                "routing_mode": "explicit",
+                "execution_mode": "async",
+            },
+        }
+
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_TOKEN", "tool-secret")
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_ALLOWED_ORIGINS", "http://localhost:3001")
+    monkeypatch.setenv("HOST_UPLOADS_DIR", "/host/uploads")
+    monkeypatch.setenv("OPENWEBUI_UPLOADS_CONTAINER_DIR", "/app/backend/data/uploads")
+    monkeypatch.setattr(agent_api, "execute_orchestration_api", fake_execute)
+
+    client = TestClient(agent_api.app)
+    response = client.post(
+        "/tools/analyze_equipment_deep",
+        headers=_auth_headers(),
+        json={
+            "equipment_query": "Сравни требования и предложение по CPU и памяти.",
+            "document_refs": [
+                {
+                    "file_id": "file-req-1",
+                    "file_path": "/app/backend/data/uploads/req.pdf",
+                    "label": "Requirements.pdf",
+                },
+                {
+                    "file_id": "file-quote-1",
+                    "file_path": "/app/backend/data/uploads/quote.pdf",
+                    "label": "Quotation_12.pdf",
+                },
+            ],
+            "user_inputs": {
+                "session_docs": {
+                    "Requirements.pdf": {
+                        "path": "/app/backend/data/uploads/req.pdf",
+                        "text": "Требование: CPU 8 ядер",
+                    },
+                    "Quotation_12.pdf": {
+                        "path": "/app/backend/data/uploads/quote.pdf",
+                        "text": "Предложение: CPU 2 x Xeon Silver",
+                    },
+                },
+                "attachments_meta": [
+                    {"name": "Requirements.pdf", "path": "/app/backend/data/uploads/req.pdf"},
+                    {"name": "Quotation_12.pdf", "path": "/app/backend/data/uploads/quote.pdf"},
+                ],
+            },
+        },
+    )
+
+    assert response.status_code == 202
+    assert response.json()["job_id"] == "job-path-1"
+    assert captured["request"].active_doc_ids == ["file-req-1", "file-quote-1"]
+    assert captured["request"].session_docs["Requirements.pdf"]["path"] == "/host/uploads/req.pdf"
+    assert captured["request"].session_docs["Quotation_12.pdf"]["path"] == "/host/uploads/quote.pdf"
+    assert captured["request"].attachments_meta[0]["path"] == "/host/uploads/req.pdf"
+    assert captured["request"].attachments_meta[1]["path"] == "/host/uploads/quote.pdf"
+
+
+def test_debug_tool_job_transition_route_is_hidden_when_test_mode_disabled(monkeypatch):
+    monkeypatch.delenv("LLM_TOOLS_PLATFORM_TEST_MODE", raising=False)
+
+    client = TestClient(agent_api.app)
+    response = client.post(
+        "/debug/test/tool-jobs/job-1/transition",
+        json={"status": "completed", "response": {"assistant_message": "ok"}},
+    )
+
+    assert response.status_code == 404
+
+
+def test_debug_tool_job_transition_route_marks_job_completed_and_exposes_result(monkeypatch):
+    monkeypatch.setenv("LLM_TOOLS_PLATFORM_TEST_MODE", "1")
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_TOKEN", "tool-secret")
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_ALLOWED_ORIGINS", "http://localhost:3001")
+
+    store = agent_api.get_tool_job_store()
+    job = store.create_job(
+        tool_name="analyze_equipment_deep",
+        route_prefix="/tool-server",
+        request_payload={"requested_tool": "analyze_equipment_deep"},
+        execution_metadata={"execution_mode": "async"},
+    )
+
+    client = TestClient(agent_api.app)
+    transition = client.post(
+        f"/debug/test/tool-jobs/{job.job_id}/transition",
+        json={
+            "status": "completed",
+            "response": {
+                "assistant_message": "Готовый synthetic deep-job result.",
+                "structured_result": {"summary": "ok"},
+            },
+        },
+    )
+
+    assert transition.status_code == 200
+    assert transition.json()["status"] == "completed"
+    assert transition.json()["job_id"] == job.job_id
+
+    status_response = client.get(f"/tool-server/tool-jobs/{job.job_id}", headers=_auth_headers())
+    assert status_response.status_code == 200
+    assert status_response.json()["status"] == "completed"
+
+    result_response = client.get(f"/tool-server/tool-jobs/{job.job_id}/result", headers=_auth_headers())
+    assert result_response.status_code == 200
+    assert result_response.json()["assistant_message"] == "Готовый synthetic deep-job result."
+    assert result_response.json()["structured_result"] == {"summary": "ok"}

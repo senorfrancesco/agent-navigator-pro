@@ -24,20 +24,45 @@ class DocumentRef(BaseModel):
 
     @model_validator(mode="after")
     def validate_identity(self) -> "DocumentRef":
-        if any(
-            (
-                self.document_id,
-                self.upload_id,
-                self.file_id,
-                self.version_id,
-                self.session_file_ref,
-                self.file_path,
-            )
-        ):
+        if self.resolved_identity():
             return self
         raise ValueError(
             "document ref requires one of document_id, upload_id, file_id, version_id, session_file_ref, file_path"
         )
+
+    def canonical_identity(self) -> Optional[str]:
+        for field_name in ("document_id", "upload_id", "file_id", "version_id"):
+            value = getattr(self, field_name)
+            if value:
+                return str(value)
+        return None
+
+    def compatibility_identity(self) -> Optional[str]:
+        for field_name in ("session_file_ref", "file_path"):
+            value = getattr(self, field_name)
+            if value:
+                return str(value)
+        return None
+
+    def resolved_identity(self) -> Optional[str]:
+        return self.canonical_identity() or self.compatibility_identity()
+
+    def resolved_identity_kind(self) -> Optional[str]:
+        for field_name in (
+            "document_id",
+            "upload_id",
+            "file_id",
+            "version_id",
+            "session_file_ref",
+            "file_path",
+        ):
+            value = getattr(self, field_name)
+            if value:
+                return field_name
+        return None
+
+    def has_canonical_identity(self) -> bool:
+        return self.canonical_identity() is not None
 
 
 class ToolSource(BaseModel):
