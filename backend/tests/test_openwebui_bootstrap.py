@@ -115,9 +115,14 @@ def test_tool_and_function_forms_are_built_from_export_metadata():
             "title": "Быстрый анализ оборудования",
             "description": "desc",
             "targetModels": ["raw.*"],
-            "pythonCode": "token = 'SET_OPENAPI_TOOL_SERVER_TOKEN'\nclass Tools:\n    pass\n",
+            "pythonCode": (
+                "token = 'SET_OPENAPI_TOOL_SERVER_TOKEN'\n"
+                "tool_server_base_url = 'http://host.docker.internal:8000/tool-server'\n"
+                "class Tools:\n    pass\n"
+            ),
         },
         tool_server_token="real-token",
+        tool_server_base_url="http://127.0.0.1:8000/tool-server",
     )
     function_form = bootstrap_openwebui.function_form_from_export(
         {
@@ -145,7 +150,9 @@ def test_tool_and_function_forms_are_built_from_export_metadata():
     assert tool_form["meta"]["manifest"]["target_models"] == ["raw.*"]
     assert "class Tools" in tool_form["content"]
     assert "real-token" in tool_form["content"]
+    assert "http://127.0.0.1:8000/tool-server" in tool_form["content"]
     assert "SET_OPENAPI_TOOL_SERVER_TOKEN" not in tool_form["content"]
+    assert "http://host.docker.internal:8000/tool-server" not in tool_form["content"]
     assert function_form["id"] == "equipment_fast_action"
     assert function_form["meta"]["manifest"]["target_models"] == ["raw.*"]
     assert "class Action" in function_form["content"]
@@ -154,6 +161,60 @@ def test_tool_and_function_forms_are_built_from_export_metadata():
     assert prompt_form["command"] == "/hw_fast"
     assert prompt_form["meta"]["binding_id"] == "equipment.fast.prompt"
     assert prompt_form["is_production"] is True
+
+
+def test_resolve_workspace_tool_server_base_url_uses_browser_url_for_native_runtime():
+    base_url = bootstrap_openwebui.resolve_workspace_tool_server_base_url(
+        {
+            "baseUrl": "http://127.0.0.1:8000/tool-server",
+            "browserReachableBaseUrl": "http://127.0.0.1:8000/tool-server",
+            "containerReachableBaseUrl": "http://host.docker.internal:8000/tool-server",
+        },
+        workspace_tool_runtime="native",
+    )
+
+    assert base_url == "http://127.0.0.1:8000/tool-server"
+
+
+def test_infer_workspace_tool_runtime_detects_run_native_port():
+    runtime = bootstrap_openwebui.infer_workspace_tool_runtime("http://127.0.0.1:8081")
+
+    assert runtime == "native"
+
+
+def test_infer_workspace_tool_runtime_detects_localhost_on_any_port():
+    assert bootstrap_openwebui.infer_workspace_tool_runtime("http://127.0.0.1:8082") == "native"
+    assert bootstrap_openwebui.infer_workspace_tool_runtime("http://localhost:9090") == "native"
+
+
+def test_select_action_functions_excludes_legacy_deep_job_actions_by_default():
+    selected = bootstrap_openwebui.select_action_functions(
+        [
+            {"action_id": "equipment_fast_action"},
+            {"action_id": "equipment_deep_action"},
+            {"action_id": "tool_job_refresh_action"},
+            {"action_id": "tool_job_cancel_action"},
+            {"action_id": "search_action"},
+        ],
+        include_legacy_deep_job_actions=False,
+    )
+
+    assert [item["action_id"] for item in selected] == ["search_action"]
+
+
+def test_select_action_functions_keeps_legacy_deep_job_actions_with_explicit_flag():
+    selected = bootstrap_openwebui.select_action_functions(
+        [
+            {"action_id": "equipment_fast_action"},
+            {"action_id": "search_action"},
+        ],
+        include_legacy_deep_job_actions=True,
+    )
+
+    assert [item["action_id"] for item in selected] == [
+        "equipment_fast_action",
+        "search_action",
+    ]
 
 
 def test_get_prompt_by_command_uses_prompt_list_endpoint(monkeypatch):
@@ -498,6 +559,7 @@ def test_upsert_workspace_tools_preserves_ui_owned_metadata(monkeypatch):
             }
         ],
         tool_server_token="tool-token",
+        tool_server_base_url="http://127.0.0.1:8000/tool-server",
     )
 
     assert summary["updatedIds"] == ["equipment_fast_tool"]
@@ -559,6 +621,7 @@ def test_upsert_workspace_tools_treats_materialized_raw_targets_as_noop(monkeypa
             }
         ],
         tool_server_token="tool-token",
+        tool_server_base_url="http://127.0.0.1:8000/tool-server",
     )
 
     assert summary["updatedIds"] == []
@@ -605,6 +668,7 @@ def test_upsert_workspace_tools_updates_noncanonical_raw_targets(monkeypatch):
             }
         ],
         tool_server_token="tool-token",
+        tool_server_base_url="http://127.0.0.1:8000/tool-server",
     )
 
     assert summary["updatedIds"] == ["equipment_fast_tool"]
@@ -750,6 +814,62 @@ def test_upsert_functions_treats_materialized_raw_targets_as_noop(monkeypatch):
         "equipment_fast_action.meta.manifest.target_models",
     ]
     assert updates == []
+
+
+def test_cleanup_legacy_action_functions_deletes_known_ids_by_default(monkeypatch):
+    client = bootstrap_openwebui.OpenWebUIBootstrapClient(
+        openwebui_base_url="http://127.0.0.1:3001",
+        admin_token="secret-token",
+    )
+    deleted_ids: list[str] = []
+
+    monkeypatch.setattr(
+        client,
+        "get_function_by_id",
+        lambda function_id: {"id": function_id}
+        if function_id in {"equipment_fast_action", "tool_job_refresh_action"}
+        else None,
+    )
+    monkeypatch.setattr(client, "delete_function", lambda function_id: deleted_ids.append(function_id) or {})
+
+    summary = bootstrap_openwebui.cleanup_legacy_action_functions(
+        client,
+        include_legacy_deep_job_actions=False,
+    )
+
+    assert summary == {
+        "action": "updated",
+        "deletedIds": ["equipment_fast_action", "tool_job_refresh_action"],
+    }
+    assert deleted_ids == ["equipment_fast_action", "tool_job_refresh_action"]
+
+
+def test_cleanup_legacy_action_functions_is_noop_with_explicit_compatibility_flag(monkeypatch):
+    client = bootstrap_openwebui.OpenWebUIBootstrapClient(
+        openwebui_base_url="http://127.0.0.1:3001",
+        admin_token="secret-token",
+    )
+
+    monkeypatch.setattr(
+        client,
+        "get_function_by_id",
+        lambda function_id: (_ for _ in ()).throw(AssertionError("compatibility mode should not inspect legacy actions")),
+    )
+    monkeypatch.setattr(
+        client,
+        "delete_function",
+        lambda function_id: (_ for _ in ()).throw(AssertionError("compatibility mode should not delete legacy actions")),
+    )
+
+    summary = bootstrap_openwebui.cleanup_legacy_action_functions(
+        client,
+        include_legacy_deep_job_actions=True,
+    )
+
+    assert summary == {
+        "action": "noop",
+        "deletedIds": [],
+    }
 
 
 def test_bootstrap_openwebui_summary_reports_native_function_calling(monkeypatch):
@@ -1156,8 +1276,139 @@ def test_bootstrap_openwebui_dry_run_reports_planned_changes_without_mutation(mo
     assert result["defaultModel"] == "raw.qwen-14b-llm"
     assert result["driftSummary"]["toolServerCleanup"] == {"action": "dry_run"}
     assert result["driftSummary"]["workspaceTools"]["plannedIds"] == ["equipment_fast_tool"]
-    assert result["driftSummary"]["actionFunctions"]["plannedIds"] == ["equipment_fast_action"]
+    assert result["actionFunctionCount"] == 0
+    assert result["driftSummary"]["actionFunctions"]["plannedIds"] == []
+    assert result["driftSummary"]["legacyActionFunctionCleanup"] == {
+        "action": "dry_run",
+        "plannedIds": list(bootstrap_openwebui.LEGACY_DEEP_JOB_ACTION_FUNCTION_IDS),
+        "deletedIds": [],
+    }
     assert result["driftSummary"]["workspacePrompts"]["plannedIds"] == ["/hw_fast"]
     assert result["preflight"]["backendEnv"]["missing"] == []
     assert result["manualChecklist"]["knowledgeQdrant"] == ["knowledge-step"]
     assert result["knowledgeBootstrapMode"] == "manual_checklist"
+
+
+def test_bootstrap_openwebui_filters_legacy_deep_job_actions_and_reports_cleanup(monkeypatch):
+    monkeypatch.setattr(
+        bootstrap_openwebui,
+        "fetch_binding_export",
+        lambda backend_base_url: {
+            "toolServer": {"name": "llm-tools-platform OpenAPI Tool Server"},
+            "runtimeConfig": {"defaultModel": "raw.qwen-14b-llm", "defaultFunctionCalling": "native"},
+            "knowledgeConfig": {"bootstrapMode": "manual_checklist"},
+            "manualChecklist": {},
+            "preflightRequirements": {},
+            "ownership": {},
+            "workspaceTools": [],
+            "actionFunctions": [
+                {"action_id": "equipment_fast_action"},
+                {"action_id": "tool_job_refresh_action"},
+                {"action_id": "search_action"},
+            ],
+            "workspacePrompts": [],
+        },
+    )
+    monkeypatch.setattr(
+        bootstrap_openwebui,
+        "sign_in",
+        lambda openwebui_base_url, *, email, password: "admin-token",
+    )
+    monkeypatch.setattr(
+        bootstrap_openwebui,
+        "cleanup_tool_server_connections",
+        lambda *args, **kwargs: {"action": "noop", "removedCount": 0, "removedConnectionNames": []},
+    )
+    monkeypatch.setattr(
+        bootstrap_openwebui,
+        "cleanup_user_settings_tool_servers",
+        lambda *args, **kwargs: {"action": "noop", "removedCount": 0, "removedToolServerNames": []},
+    )
+    monkeypatch.setattr(
+        bootstrap_openwebui,
+        "cleanup_fixture_workspace_tools",
+        lambda *args, **kwargs: {"action": "noop", "deletedIds": []},
+    )
+    monkeypatch.setattr(
+        bootstrap_openwebui,
+        "remove_legacy_prompts",
+        lambda client: 0,
+    )
+    monkeypatch.setattr(
+        bootstrap_openwebui,
+        "reconcile_default_model",
+        lambda client, model_id: (
+            {"DEFAULT_MODELS": model_id, "DEFAULT_MODEL_PARAMS": {"function_calling": "native"}},
+            {"action": "noop", "appliedChanges": [], "uiOwnedDriftIgnored": []},
+        ),
+    )
+    monkeypatch.setattr(
+        bootstrap_openwebui,
+        "reconcile_task_config",
+        lambda client: (
+            {"ENABLE_FOLLOW_UP_GENERATION": False},
+            {"action": "noop", "appliedChanges": [], "uiOwnedDriftIgnored": []},
+        ),
+    )
+
+    upsert_calls: list[list[str]] = []
+
+    monkeypatch.setattr(
+        bootstrap_openwebui,
+        "upsert_workspace_tools",
+        lambda *args, **kwargs: {
+            "createdIds": [],
+            "updatedIds": [],
+            "noopIds": [],
+            "appliedChanges": [],
+            "uiOwnedDriftIgnored": [],
+            "materializationDriftIgnored": [],
+        },
+    )
+    monkeypatch.setattr(
+        bootstrap_openwebui,
+        "upsert_functions",
+        lambda client, action_functions, **kwargs: upsert_calls.append(
+            [str(item.get("action_id")) for item in action_functions]
+        )
+        or {
+            "createdIds": [],
+            "updatedIds": [],
+            "noopIds": ["search_action"],
+            "appliedChanges": [],
+            "uiOwnedDriftIgnored": [],
+            "materializationDriftIgnored": [],
+        },
+    )
+    monkeypatch.setattr(
+        bootstrap_openwebui,
+        "cleanup_legacy_action_functions",
+        lambda *args, **kwargs: {"action": "updated", "deletedIds": ["equipment_fast_action"]},
+    )
+    monkeypatch.setattr(
+        bootstrap_openwebui,
+        "upsert_prompts",
+        lambda *args, **kwargs: {
+            "createdIds": [],
+            "updatedIds": [],
+            "noopIds": [],
+            "appliedChanges": [],
+            "uiOwnedDriftIgnored": [],
+            "materializationDriftIgnored": [],
+        },
+    )
+
+    result = bootstrap_openwebui.bootstrap_openwebui(
+        backend_base_url="http://127.0.0.1:8000",
+        openwebui_base_url="http://127.0.0.1:3001",
+        admin_email="admin@example.com",
+        admin_password="secret",
+        tool_server_token="tool-token",
+    )
+
+    assert result["actionFunctionCount"] == 1
+    assert upsert_calls == [["search_action"]]
+    assert result["driftSummary"]["legacyActionFunctionCleanup"] == {
+        "action": "updated",
+        "deletedIds": ["equipment_fast_action"],
+    }

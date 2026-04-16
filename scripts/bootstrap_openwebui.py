@@ -20,10 +20,18 @@ DEFAULT_OPENWEBUI_BASE_URL = "http://127.0.0.1:3001"
 DEFAULT_OPENWEBUI_MODEL = "raw.qwen-14b-llm"
 DEFAULT_FUNCTION_CALLING_MODE = "native"
 DEFAULT_TOOL_SERVER_TOKEN = "llm-tools-platform-tool-server-dev-token"
+DEFAULT_WORKSPACE_TOOL_RUNTIME = "container"
 BOOTSTRAP_CONNECTION_ID = "llm_tools_platform_openapi_tool_server"
 TOOL_SERVER_TOKEN_PLACEHOLDER = "SET_OPENAPI_TOOL_SERVER_TOKEN"
+CONTAINER_TOOL_SERVER_BASE_URL_PLACEHOLDER = "http://host.docker.internal:8000/tool-server"
 LEGACY_PROMPT_COMMANDS = {"/hw-fast", "/hw-deep", "hw-fast", "hw-deep"}
 FIXTURE_WORKSPACE_TOOL_IDS = ("community_sum_tool",)
+LEGACY_DEEP_JOB_ACTION_FUNCTION_IDS = (
+    "equipment_fast_action",
+    "equipment_deep_action",
+    "tool_job_refresh_action",
+    "tool_job_cancel_action",
+)
 MISSING = object()
 TOOL_SERVER_MANAGED_PATHS = (
     "url",
@@ -356,11 +364,66 @@ def inject_tool_server_token(source: str, *, tool_server_token: str) -> str:
     return source.replace(TOOL_SERVER_TOKEN_PLACEHOLDER, tool_server_token)
 
 
-def tool_form_from_export(tool_export: Dict[str, Any], *, tool_server_token: str) -> Dict[str, Any]:
+def infer_workspace_tool_runtime(openwebui_base_url: str) -> str:
+    explicit = str(os.getenv("OPENWEBUI_WORKSPACE_TOOL_RUNTIME") or "").strip().lower()
+    if explicit in {"native", "container"}:
+        return explicit
+
+    parsed = urllib.parse.urlsplit(openwebui_base_url.rstrip("/"))
+    hostname = (parsed.hostname or "").strip().lower()
+    if hostname in {"127.0.0.1", "localhost"}:
+        return "native"
+    return DEFAULT_WORKSPACE_TOOL_RUNTIME
+
+
+def resolve_workspace_tool_server_base_url(
+    tool_server_export: Dict[str, Any],
+    *,
+    workspace_tool_runtime: str,
+) -> str:
+    if workspace_tool_runtime == "native":
+        candidate = str(
+            tool_server_export.get("browserReachableBaseUrl")
+            or tool_server_export.get("baseUrl")
+            or tool_server_export.get("containerReachableBaseUrl")
+            or ""
+        ).strip()
+        if candidate:
+            return candidate
+
+    candidate = str(
+        tool_server_export.get("containerReachableBaseUrl")
+        or tool_server_export.get("baseUrl")
+        or tool_server_export.get("browserReachableBaseUrl")
+        or CONTAINER_TOOL_SERVER_BASE_URL_PLACEHOLDER
+    ).strip()
+    return candidate or CONTAINER_TOOL_SERVER_BASE_URL_PLACEHOLDER
+
+
+def inject_workspace_tool_runtime_config(
+    source: str,
+    *,
+    tool_server_token: str,
+    tool_server_base_url: str,
+) -> str:
+    updated = inject_tool_server_token(source, tool_server_token=tool_server_token)
+    return updated.replace(CONTAINER_TOOL_SERVER_BASE_URL_PLACEHOLDER, tool_server_base_url)
+
+
+def tool_form_from_export(
+    tool_export: Dict[str, Any],
+    *,
+    tool_server_token: str,
+    tool_server_base_url: str = CONTAINER_TOOL_SERVER_BASE_URL_PLACEHOLDER,
+) -> Dict[str, Any]:
     return {
         "id": tool_export["tool_id"],
         "name": tool_export["title"],
-        "content": inject_tool_server_token(tool_export["pythonCode"], tool_server_token=tool_server_token),
+        "content": inject_workspace_tool_runtime_config(
+            tool_export["pythonCode"],
+            tool_server_token=tool_server_token,
+            tool_server_base_url=tool_server_base_url,
+        ),
         "meta": {
             "description": tool_export.get("description", ""),
             "manifest": {"target_models": tool_export.get("targetModels", [])},
@@ -378,6 +441,20 @@ def function_form_from_export(function_export: Dict[str, Any], *, tool_server_to
             "manifest": {"target_models": function_export.get("targetModels", [])},
         },
     }
+
+
+def select_action_functions(
+    action_functions: Iterable[Dict[str, Any]],
+    *,
+    include_legacy_deep_job_actions: bool,
+) -> List[Dict[str, Any]]:
+    selected: List[Dict[str, Any]] = []
+    for function_export in action_functions:
+        action_id = str(function_export.get("action_id") or "").strip()
+        if not include_legacy_deep_job_actions and action_id in LEGACY_DEEP_JOB_ACTION_FUNCTION_IDS:
+            continue
+        selected.append(function_export)
+    return selected
 
 
 def prompt_form_from_export(prompt_export: Dict[str, Any]) -> Dict[str, Any]:
@@ -664,6 +741,9 @@ class OpenWebUIBootstrapClient:
     def update_function(self, function_id: str, form_data: Dict[str, Any]) -> Any:
         return self._request("POST", f"/api/v1/functions/id/{function_id}/update", payload=form_data)
 
+    def delete_function(self, function_id: str) -> Any:
+        return self._request("DELETE", f"/api/v1/functions/id/{function_id}/delete")
+
     def toggle_function_active(self, function_id: str) -> Any:
         return self._request("POST", f"/api/v1/functions/id/{function_id}/toggle")
 
@@ -726,10 +806,15 @@ def upsert_workspace_tools(
     workspace_tools: Iterable[Dict[str, Any]],
     *,
     tool_server_token: str,
+    tool_server_base_url: str,
 ) -> Dict[str, Any]:
     summary = _empty_collection_summary()
     for tool_export in workspace_tools:
-        form_data = tool_form_from_export(tool_export, tool_server_token=tool_server_token)
+        form_data = tool_form_from_export(
+            tool_export,
+            tool_server_token=tool_server_token,
+            tool_server_base_url=tool_server_base_url,
+        )
         existing = client.get_tool_by_id(form_data["id"])
         reconcile = _reconcile_existing_resource(
             resource_id=form_data["id"],
@@ -805,6 +890,31 @@ def upsert_functions(
     return summary
 
 
+def cleanup_legacy_action_functions(
+    client: OpenWebUIBootstrapClient,
+    *,
+    include_legacy_deep_job_actions: bool,
+) -> Dict[str, Any]:
+    if include_legacy_deep_job_actions:
+        return {
+            "action": "noop",
+            "deletedIds": [],
+        }
+
+    deleted_ids: list[str] = []
+    for function_id in LEGACY_DEEP_JOB_ACTION_FUNCTION_IDS:
+        existing = client.get_function_by_id(function_id)
+        if not existing:
+            continue
+        client.delete_function(function_id)
+        deleted_ids.append(function_id)
+
+    return {
+        "action": "updated" if deleted_ids else "noop",
+        "deletedIds": deleted_ids,
+    }
+
+
 def upsert_prompts(client: OpenWebUIBootstrapClient, prompts: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     summary = _empty_collection_summary()
     for prompt_export in prompts:
@@ -858,13 +968,32 @@ def bootstrap_openwebui(
     default_model: str = DEFAULT_OPENWEBUI_MODEL,
     env_values: Dict[str, str] | None = None,
     dry_run: bool = False,
+    include_legacy_deep_job_actions: bool = False,
+    workspace_tool_runtime: str | None = None,
 ) -> Dict[str, Any]:
     export_bundle = fetch_binding_export(backend_base_url)
+    selected_action_functions = select_action_functions(
+        export_bundle.get("actionFunctions", []),
+        include_legacy_deep_job_actions=include_legacy_deep_job_actions,
+    )
     preflight = build_preflight_summary(export_bundle, env_values=env_values)
     warnings = _build_bootstrap_warnings(
         export_bundle=export_bundle,
         preflight=preflight,
         tool_server_token=tool_server_token,
+    )
+    resolved_workspace_tool_runtime = (
+        str(workspace_tool_runtime).strip().lower()
+        if str(workspace_tool_runtime or "").strip()
+        else infer_workspace_tool_runtime(openwebui_base_url)
+    )
+    if resolved_workspace_tool_runtime not in {"native", "container"}:
+        raise ValueError(
+            f"Unsupported workspace tool runtime: {resolved_workspace_tool_runtime}. Expected 'native' or 'container'."
+        )
+    workspace_tool_server_base_url = resolve_workspace_tool_server_base_url(
+        export_bundle["toolServer"],
+        workspace_tool_runtime=resolved_workspace_tool_runtime,
     )
     admin_token = sign_in(openwebui_base_url, email=admin_email, password=admin_password)
     client = OpenWebUIBootstrapClient(openwebui_base_url=openwebui_base_url, admin_token=admin_token)
@@ -882,12 +1011,14 @@ def bootstrap_openwebui(
             "mode": "dry_run",
             "toolServerName": export_bundle["toolServer"]["name"],
             "workspaceToolCount": len(export_bundle.get("workspaceTools", [])),
-            "actionFunctionCount": len(export_bundle.get("actionFunctions", [])),
+            "actionFunctionCount": len(selected_action_functions),
             "promptCount": len(export_bundle.get("workspacePrompts", [])),
             "legacyPromptCleanupCount": 0,
             "defaultModel": effective_default_model,
             "defaultFunctionCalling": str(runtime_config.get("defaultFunctionCalling") or DEFAULT_FUNCTION_CALLING_MODE),
             "taskConfig": {},
+            "workspaceToolRuntime": resolved_workspace_tool_runtime,
+            "workspaceToolServerBaseUrl": workspace_tool_server_base_url,
             "driftSummary": {
                 "toolServerCleanup": {"action": "dry_run"},
                 "userToolServerCleanup": {"action": "dry_run"},
@@ -896,8 +1027,13 @@ def bootstrap_openwebui(
                     item.get("tool_id") for item in export_bundle.get("workspaceTools", [])
                 ),
                 "actionFunctions": _build_dry_run_collection_summary(
-                    item.get("action_id") for item in export_bundle.get("actionFunctions", [])
+                    item.get("action_id") for item in selected_action_functions
                 ),
+                "legacyActionFunctionCleanup": {
+                    "action": "noop" if include_legacy_deep_job_actions else "dry_run",
+                    "plannedIds": [] if include_legacy_deep_job_actions else list(LEGACY_DEEP_JOB_ACTION_FUNCTION_IDS),
+                    "deletedIds": [],
+                },
                 "workspacePrompts": _build_dry_run_collection_summary(
                     item.get("command") or (item.get("openwebui") or {}).get("command")
                     for item in export_bundle.get("workspacePrompts", [])
@@ -924,14 +1060,19 @@ def bootstrap_openwebui(
         tool_server_export=export_bundle["toolServer"],
     )
     workspace_tool_cleanup_summary = cleanup_fixture_workspace_tools(client)
+    legacy_action_cleanup_summary = cleanup_legacy_action_functions(
+        client,
+        include_legacy_deep_job_actions=include_legacy_deep_job_actions,
+    )
     workspace_tools_summary = upsert_workspace_tools(
         client,
         export_bundle.get("workspaceTools", []),
         tool_server_token=tool_server_token,
+        tool_server_base_url=workspace_tool_server_base_url,
     )
     action_functions_summary = upsert_functions(
         client,
-        export_bundle.get("actionFunctions", []),
+        selected_action_functions,
         tool_server_token=tool_server_token,
     )
     workspace_prompts_summary = upsert_prompts(client, export_bundle.get("workspacePrompts", []))
@@ -942,6 +1083,7 @@ def bootstrap_openwebui(
         "toolServerCleanup": tool_server_cleanup_summary,
         "userToolServerCleanup": user_tool_server_cleanup_summary,
         "workspaceToolCleanup": workspace_tool_cleanup_summary,
+        "legacyActionFunctionCleanup": legacy_action_cleanup_summary,
         "workspaceTools": workspace_tools_summary,
         "actionFunctions": action_functions_summary,
         "workspacePrompts": workspace_prompts_summary,
@@ -953,6 +1095,7 @@ def bootstrap_openwebui(
         tool_server_cleanup_summary.get("action") == "noop"
         and user_tool_server_cleanup_summary.get("action") == "noop"
         and workspace_tool_cleanup_summary.get("action") == "noop"
+        and legacy_action_cleanup_summary.get("action") == "noop"
         and not _collection_has_changes(workspace_tools_summary)
         and not _collection_has_changes(action_functions_summary)
         and not _collection_has_changes(workspace_prompts_summary)
@@ -965,12 +1108,14 @@ def bootstrap_openwebui(
         "status": "ok",
         "toolServerName": export_bundle["toolServer"]["name"],
         "workspaceToolCount": len(export_bundle.get("workspaceTools", [])),
-        "actionFunctionCount": len(export_bundle.get("actionFunctions", [])),
+        "actionFunctionCount": len(selected_action_functions),
         "promptCount": len(export_bundle.get("workspacePrompts", [])),
         "legacyPromptCleanupCount": legacy_prompt_cleanup_count,
         "defaultModel": models_config.get("DEFAULT_MODELS"),
         "defaultFunctionCalling": (models_config.get("DEFAULT_MODEL_PARAMS") or {}).get("function_calling"),
         "taskConfig": task_config,
+        "workspaceToolRuntime": resolved_workspace_tool_runtime,
+        "workspaceToolServerBaseUrl": workspace_tool_server_base_url,
         "driftSummary": drift_summary,
         "ownership": ownership,
         "runtimeConfig": runtime_config,
@@ -988,6 +1133,17 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     parser.add_argument("--env-file", default=str(DEFAULT_ENV_PATH))
     parser.add_argument("--default-model", default=DEFAULT_OPENWEBUI_MODEL)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--workspace-tool-runtime",
+        choices=("native", "container"),
+        default=None,
+        help="Какой адрес tool-server вшивать в workspace tools: native для локального run_native Open WebUI, container для контейнерного Open WebUI.",
+    )
+    parser.add_argument(
+        "--include-legacy-deep-job-actions",
+        action="store_true",
+        help="Оставить импорт старых deep-job Action Function для временной совместимости.",
+    )
     return parser.parse_args(argv)
 
 
@@ -1014,6 +1170,8 @@ def main(argv: List[str] | None = None) -> int:
         default_model=str(args.default_model),
         env_values=env_values,
         dry_run=bool(args.dry_run),
+        include_legacy_deep_job_actions=bool(args.include_legacy_deep_job_actions),
+        workspace_tool_runtime=args.workspace_tool_runtime,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
