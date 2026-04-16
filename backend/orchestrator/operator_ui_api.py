@@ -425,6 +425,7 @@ def _build_qdrant_summary(backend_env: Dict[str, Any] | None = None) -> Dict[str
         os.getenv("QDRANT_COLLECTION_NAME") or env_value(env_payload, "QDRANT_COLLECTION_NAME", default="rag_chunks_v1")
     ).strip()
     namespace_prefix = OPENWEBUI_QDRANT_COLLECTION_PREFIX
+    session_handoff_mode = str(os.getenv("OPENWEBUI_SESSION_RAG_HANDOFF", "preferred") or "").strip().lower() or "preferred"
     now_ts = time.time()
 
     summary: Dict[str, Any] = {
@@ -442,6 +443,10 @@ def _build_qdrant_summary(backend_env: Dict[str, Any] | None = None) -> Dict[str
             "reachable": False,
             "collections": [],
             "error": None,
+        },
+        "sessionHandoff": {
+            "mode": session_handoff_mode,
+            "enabled": session_handoff_mode in {"preferred", "required"},
         },
         "namespaces": {
             "separationOk": False,

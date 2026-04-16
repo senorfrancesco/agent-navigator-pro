@@ -89,6 +89,9 @@ class _FakeQdrantClient:
             )
         )
 
+    def delete_collection(self, collection_name):
+        self.collections.pop(collection_name, None)
+
     def upsert(self, collection_name, points):
         bucket = self.collections.setdefault(collection_name, {"vectors_config": None, "points": {}})
         for point in points:
@@ -108,6 +111,15 @@ class _FakeQdrantClient:
                 to_delete.append(point_id)
         for point_id in to_delete:
             bucket["points"].pop(point_id, None)
+
+    def count(self, collection_name, count_filter=None, exact=True):
+        bucket = self.collections.setdefault(collection_name, {"vectors_config": None, "points": {}})
+        total = 0
+        for point in bucket["points"].values():
+            if count_filter is not None and not _matches_filter(point["payload"], count_filter):
+                continue
+            total += 1
+        return SimpleNamespace(count=total)
 
     def query_points(self, collection_name, query, query_filter, limit, with_payload):
         bucket = self.collections.setdefault(collection_name, {"vectors_config": None, "points": {}})
@@ -835,7 +847,7 @@ def test_get_knowledge_base_store_raises_clear_error_when_qdrant_dependencies_mi
         knowledge_base_store_module.get_knowledge_base_store()
 
 
-def test_qdrant_store_rejects_existing_collection_with_dimension_mismatch(monkeypatch, tmp_path):
+def test_qdrant_store_rejects_existing_collection_with_dimension_mismatch_when_knowledge_points_exist(monkeypatch, tmp_path):
     monkeypatch.setattr(
         qdrant_store_module,
         "_load_qdrant_dependencies",
@@ -850,6 +862,24 @@ def test_qdrant_store_rejects_existing_collection_with_dimension_mismatch(monkey
     store._client.create_collection(
         "rag_chunks_v1",
         _FakeVectorParams(size=3, distance="cosine"),
+    )
+    store._client.upsert(
+        "rag_chunks_v1",
+        points=[
+            _FakePointStruct(
+                id="22222222-2222-2222-2222-222222222222",
+                vector=[1.0, 0.0, 0.0],
+                payload={
+                    "chunk_id": "legacy-knowledge-1",
+                    "collection_id": "legal",
+                    "source_id": "legacy-knowledge-source",
+                    "document_id": "doc-kb-1",
+                    "document_version_id": "doc-kb-1",
+                    "display_name": "kb.txt",
+                    "source_scope": "knowledge",
+                },
+            )
+        ],
     )
     source = store.register_source_sync(
         collection_id="legal",
@@ -876,3 +906,77 @@ def test_qdrant_store_rejects_existing_collection_with_dimension_mismatch(monkey
                 }
             ],
         )
+
+
+def test_qdrant_store_recreates_session_only_collection_on_dimension_mismatch(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        qdrant_store_module,
+        "_load_qdrant_dependencies",
+        lambda: (_FakeQdrantClient, _build_fake_models()),
+    )
+
+    store = QdrantKnowledgeBaseStore(
+        db_url=f"sqlite:///{tmp_path}/kb_store.db",
+        qdrant_url="http://fake-qdrant",
+        collection_name="rag_chunks_v1",
+    )
+    store._client.create_collection(
+        "rag_chunks_v1",
+        _FakeVectorParams(size=3, distance="cosine"),
+    )
+    store._client.upsert(
+        "rag_chunks_v1",
+        points=[
+            _FakePointStruct(
+                id="11111111-1111-1111-1111-111111111111",
+                vector=[1.0, 0.0, 0.0],
+                payload={
+                    "chunk_id": "legacy-session-1",
+                    "collection_id": "session:thread-42",
+                    "source_id": "legacy-session-source",
+                    "document_id": "doc-1",
+                    "document_version_id": "ver-1",
+                    "display_name": "contract.txt",
+                    "source_scope": "session",
+                    "thread_id": "thread-42",
+                    "expires_at": 4102444800.0,
+                },
+            )
+        ],
+    )
+
+    source = store.register_source_sync(
+        collection_id="session:thread-42",
+        display_name="contract.txt",
+        content_hash="ver-2",
+        mime_type="text/plain",
+        index_version="session_v1",
+        embedding_model_id="labse",
+        chunking_version="session_v1",
+    )
+    store.replace_chunks_sync(
+        source_id=source.source_id,
+        chunks=[
+            {
+                "chunk_id": "session-chunk-1024",
+                "chunk_index": 0,
+                "text": "Штраф составляет 17 процентов.",
+                "metadata_json": {
+                    "document_id": "doc-2",
+                    "document_version_id": "ver-2",
+                    "thread_id": "thread-42",
+                    "source_scope": "session",
+                    "expires_at": 4102444800.0,
+                },
+                "source_origin": "session_upload",
+                "embedding": np.ones(1024, dtype=np.float32),
+                "embedding_model_id": "labse",
+            }
+        ],
+    )
+
+    bucket = store._client.collections["rag_chunks_v1"]
+    assert bucket["vectors_config"].size == 1024
+    assert len(bucket["points"]) == 1
+    only_payload = next(iter(bucket["points"].values()))["payload"]
+    assert only_payload["chunk_id"] == "session-chunk-1024"

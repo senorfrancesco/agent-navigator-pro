@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
@@ -17,6 +18,7 @@ from orchestrator.knowledge_base_store import (
 
 DEFAULT_QDRANT_URL = os.getenv("QDRANT_URL", "http://127.0.0.1:6333")
 DEFAULT_QDRANT_COLLECTION_NAME = os.getenv("QDRANT_COLLECTION_NAME", "rag_chunks_v1")
+logger = logging.getLogger(__name__)
 
 
 def _load_qdrant_dependencies() -> Tuple[Any, Any]:
@@ -64,10 +66,64 @@ class QdrantKnowledgeBaseStore(SQLiteKnowledgeBaseStore):
             size = getattr(current, "size", None)
         return int(size) if size is not None else None
 
+    def _count_collection_points(self, *, point_filter: Optional[Any] = None) -> int:
+        count_method = getattr(self._client, "count", None)
+        if callable(count_method):
+            response = count_method(
+                collection_name=self.collection_name,
+                count_filter=point_filter,
+                exact=True,
+            )
+            return int(getattr(response, "count", 0) or 0)
+        return 0
+
+    def _count_points_by_scope(self, source_scope: str) -> int:
+        scope_filter = self._models.Filter(
+            must=[
+                self._models.FieldCondition(
+                    key="source_scope",
+                    match=self._models.MatchValue(value=str(source_scope)),
+                )
+            ]
+        )
+        return self._count_collection_points(point_filter=scope_filter)
+
+    def _can_recreate_collection_for_dimension_mismatch(self) -> bool:
+        total_points = self._count_collection_points()
+        if total_points == 0:
+            return True
+        knowledge_points = self._count_points_by_scope("knowledge")
+        session_points = self._count_points_by_scope("session")
+        return knowledge_points == 0 and total_points == session_points
+
+    def _recreate_collection(self, embedding_dim: int) -> None:
+        delete_collection = getattr(self._client, "delete_collection", None)
+        if not callable(delete_collection):
+            raise RuntimeError(
+                f"Qdrant collection `{self.collection_name}` requires recreation, but delete_collection is unavailable."
+            )
+        delete_collection(self.collection_name)
+        self._client.create_collection(
+            self.collection_name,
+            vectors_config=self._models.VectorParams(
+                size=int(embedding_dim),
+                distance=self._models.Distance.COSINE,
+            ),
+        )
+
     def _ensure_collection(self, embedding_dim: int) -> None:
         if self._client.collection_exists(self.collection_name):
             existing_size = self._existing_collection_vector_size()
             if existing_size is not None and existing_size != int(embedding_dim):
+                if self._can_recreate_collection_for_dimension_mismatch():
+                    logger.warning(
+                        "Recreating Qdrant collection %s due to session-only vector size mismatch %s -> %s",
+                        self.collection_name,
+                        existing_size,
+                        int(embedding_dim),
+                    )
+                    self._recreate_collection(int(embedding_dim))
+                    return
                 raise RuntimeError(
                     f"Qdrant collection `{self.collection_name}` expects vector size {existing_size}, "
                     f"but received {int(embedding_dim)}."

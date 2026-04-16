@@ -41,9 +41,11 @@ services:
       retries: 20
       start_period: 20s
     restart: unless-stopped
+    networks:
+      - anp-backend
     depends_on:
       qdrant:
-        condition: service_started
+        condition: service_healthy
       document-server:
         condition: service_healthy
       legal-server:
@@ -87,6 +89,8 @@ services:
       retries: 20
       start_period: 20s
     restart: unless-stopped
+    networks:
+      - anp-backend
 
   legal-server:
     build:
@@ -124,6 +128,8 @@ services:
       retries: 20
       start_period: 20s
     restart: unless-stopped
+    networks:
+      - anp-backend
 
   ums:
     build:
@@ -153,6 +159,8 @@ services:
       retries: 30
       start_period: 30s
     restart: unless-stopped
+    networks:
+      - anp-backend
 
   qdrant:
     image: qdrant/qdrant:latest
@@ -162,7 +170,17 @@ services:
       - "6334:6334"
     volumes:
       - qdrant-data:/qdrant/storage
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - grep -qiE ':18BD .* 0A ' /proc/net/tcp* /proc/net/tcp6*
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
     restart: unless-stopped
+    networks:
+      - anp-backend
 
   # --- Open WebUI ---
   open-webui:
@@ -190,7 +208,7 @@ services:
       - ENABLE_RAG_WEB_SEARCH=False
       - ENABLE_RAG_LOCAL_WEB_FETCH=False
       - VECTOR_DB=qdrant
-      - QDRANT_URI=http://host.docker.internal:6333
+      - QDRANT_URI=http://qdrant:6333
       - ENABLE_QDRANT_MULTITENANCY_MODE=true
       - QDRANT_COLLECTION_PREFIX=anp-openwebui
       - RAG_EMBEDDING_ENGINE=openai
@@ -198,10 +216,13 @@ services:
       - RAG_OPENAI_API_KEY=sk-dummy
       - RAG_EMBEDDING_MODEL=labse-embedding
       - RAG_RERANKING_ENGINE=
+      - OPENWEBUI_SESSION_RAG_HANDOFF=preferred
     restart: always
+    networks:
+      - anp-backend
     depends_on:
       qdrant:
-        condition: service_started
+        condition: service_healthy
       agent-api:
         condition: service_healthy
       ums:
@@ -328,3 +349,7 @@ volumes:
   chainlit-data: {}
   vllm-cache: {}
   qdrant-data: {}
+
+networks:
+  anp-backend:
+    name: llm-tools-platform-backend

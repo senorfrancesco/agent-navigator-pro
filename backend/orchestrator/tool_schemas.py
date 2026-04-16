@@ -210,6 +210,7 @@ class CompletedToolResult(BaseModel):
     structured_result: Dict[str, Any] = Field(default_factory=dict)
     sources: List[ToolSource] = Field(default_factory=list)
     artifacts: List[ToolArtifact] = Field(default_factory=list)
+    embeds: List[Dict[str, Any]] = Field(default_factory=list)
     available_actions: List[ToolAction] = Field(default_factory=list)
     execution_metadata: ExecutionMetadata
 
@@ -220,6 +221,9 @@ class AcceptedToolResult(BaseModel):
     job_id: str
     status_url: str
     submitted_at: str
+    job_status: Optional[Literal["queued", "running", "cancelling", "completed", "failed", "cancelled"]] = None
+    status_text: Optional[str] = None
+    poll_after_ms: Optional[int] = None
     result_preview: Optional[str] = None
     available_actions: List[ToolAction] = Field(default_factory=list)
     execution_metadata: ExecutionMetadata
@@ -234,3 +238,10 @@ class ToolJobStatus(BaseModel):
     completed_at: Optional[str] = None
     result_ref: Optional[str] = None
     error_summary: Optional[str] = None
+    status_text: Optional[str] = None
+    status_history: List[Dict[str, Any]] = Field(default_factory=list)
+    progress: Optional[Dict[str, Any]] = None
+    artifacts: List[Dict[str, Any]] = Field(default_factory=list)
+    sources: List[Dict[str, Any]] = Field(default_factory=list)
+    embeds: List[Dict[str, Any]] = Field(default_factory=list)
+    result_preview: Optional[str] = None

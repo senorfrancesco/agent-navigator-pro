@@ -161,6 +161,7 @@ def test_operator_qdrant_summary_reports_namespace_separation(monkeypatch):
     monkeypatch.setenv("KB_BACKEND", "qdrant")
     monkeypatch.setenv("QDRANT_URL", "http://fake-qdrant:6333")
     monkeypatch.setenv("QDRANT_COLLECTION_NAME", "rag_chunks_v1")
+    monkeypatch.setenv("OPENWEBUI_SESSION_RAG_HANDOFF", "preferred")
     monkeypatch.setattr("orchestrator.operator_ui_api._load_qdrant_client_class", lambda: _FakeQdrantClient)
     _FakeQdrantClient.collections_payloads = {
         "rag_chunks_v1": [
@@ -182,6 +183,7 @@ def test_operator_qdrant_summary_reports_namespace_separation(monkeypatch):
         "anp-openwebui-team-b",
         "rag_chunks_v1",
     ]
+    assert payload["sessionHandoff"] == {"mode": "preferred", "enabled": True}
     assert payload["openWebUI"]["collections"] == ["anp-openwebui-team-a", "anp-openwebui-team-b"]
     assert payload["namespaces"]["separationOk"] is True
     assert payload["namespaces"]["issues"] == []
@@ -199,6 +201,7 @@ def test_operator_qdrant_summary_flags_namespace_collision(monkeypatch):
     monkeypatch.setenv("KB_BACKEND", "qdrant")
     monkeypatch.setenv("QDRANT_URL", "http://fake-qdrant:6333")
     monkeypatch.setenv("QDRANT_COLLECTION_NAME", "anp-openwebui-shared")
+    monkeypatch.setenv("OPENWEBUI_SESSION_RAG_HANDOFF", "off")
     monkeypatch.setattr("orchestrator.operator_ui_api._load_qdrant_client_class", lambda: _FakeQdrantClient)
     _FakeQdrantClient.collections_payloads = {
         "anp-openwebui-shared": [],
@@ -208,6 +211,7 @@ def test_operator_qdrant_summary_flags_namespace_collision(monkeypatch):
     payload = operator_qdrant_summary()
 
     assert payload["namespaces"]["separationOk"] is False
+    assert payload["sessionHandoff"] == {"mode": "off", "enabled": False}
     assert any("backend collection name overlaps" in issue for issue in payload["namespaces"]["issues"])
 
 
@@ -314,7 +318,7 @@ def test_operator_tool_bindings_export_openwebui_returns_manual_import_bundle():
     assert payload["knowledgeConfig"]["sessionFlow"] == "backend_owned_qdrant"
     assert payload["qdrantConfig"] == {
         "provider": "qdrant",
-        "uri": "http://host.docker.internal:6333",
+        "uri": "http://qdrant:6333",
         "collectionPrefix": "anp-openwebui",
         "multitenancy": True,
         "backendCollectionNameSource": "backend_env:QDRANT_COLLECTION_NAME",

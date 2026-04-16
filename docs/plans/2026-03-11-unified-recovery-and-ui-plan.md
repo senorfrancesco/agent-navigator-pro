@@ -838,7 +838,7 @@ Starter cards:
 
 Главная проблема:
 
-- PR переводит `scripts/start_system_test.sh` на вызов `run_all.sh --mode default --check-only`
+- PR переводит `tests/harness/system/start_system_test.sh` на вызов `run_all.sh --mode default --check-only`
 - в текущем [scripts/run_all.sh](../../scripts/run_all.sh) таких флагов нет
 - даже PR `#3` их не вводит
 
@@ -992,7 +992,7 @@ Starter cards:
 | `#3` | `scripts/bootstrap.sh`, `scripts/lib/common.sh`, `scripts/run_all.sh`, `scripts/run_openwebui.sh` | идею общего launcher entrypoint, общие health/wait helpers, вынос повторяющейся shell-логики | `UI profile = chainlit|openwebui` как главный концепт запуска, Docker-first path для dev | `scripts/launcher.sh` или consolidation в [scripts/run_native.sh](../../scripts/run_native.sh) + [scripts/run_container.sh](../../scripts/run_container.sh) |
 | `#4` | `backend/services/model_manager/unified_model_server.py`, `backend/orchestrator/chainlit_app.py`, `TASKS.md` | `effective_context_tokens`, публикацию budget в UMS `/status`, чтение budget из Chainlit/RAG | узкий isolated merge без preflight/unified launcher context | [backend/services/model_manager/unified_model_server.py](../../backend/services/model_manager/unified_model_server.py), [backend/orchestrator/chainlit_app.py](../../backend/orchestrator/chainlit_app.py) |
 | `#5` | `scripts/preflight.py`, `scripts/run_all.sh`, `README.md`, `TASKS.md` | фазную модель `detect|plan|apply|report`, `.env.runtime`, operator-facing UX preflight | private API `TierSelector._build_config()` и отдельный preflight contour без UMS runtime contract | `scripts/runtime_preflight.py` или unified `scripts/preflight.py`, плюс launcher integration |
-| `#6` | `scripts/start_system_test.sh`, `TASKS.md` | fail-fast health-check semantics, idea of thin test wrapper | несуществующие флаги `run_all.sh --mode --check-only`, broken contract | [scripts/start_system_test.sh](../../scripts/start_system_test.sh) после появления real launcher API |
+| `#6` | `tests/harness/system/start_system_test.sh`, `TASKS.md` | fail-fast health-check semantics, idea of thin test wrapper | несуществующие флаги `run_all.sh --mode --check-only`, broken contract | [tests/harness/system/start_system_test.sh](../../tests/harness/system/start_system_test.sh) после появления real launcher API |
 | `#7` | `scripts/preflight.py`, `scripts/run_all.sh`, `docs/preflight_runtime_profile.md`, `backend/services/model_manager/unified_model_server.py`, `backend/orchestrator/chainlit_app.py`, тесты | strongest integrated runtime contour: preflight, budget, UMS status, Chainlit RAG integration, tests | как отдельный final merge без native-first launcher refactor | основной donor для `T4.13/T4.14` в canonical runtime path |
 
 ### Кластер B. Routing / classifier config
@@ -1037,7 +1037,7 @@ Starter cards:
 - [scripts/run_native.sh](../../scripts/run_native.sh)
 - [scripts/run_container.sh](../../scripts/run_container.sh)
 - `scripts/preflight.py` или `scripts/runtime_preflight.py`
-- [scripts/start_system_test.sh](../../scripts/start_system_test.sh)
+- [tests/harness/system/start_system_test.sh](../../tests/harness/system/start_system_test.sh)
 - [backend/services/model_manager/unified_model_server.py](../../backend/services/model_manager/unified_model_server.py)
 - [backend/orchestrator/chainlit_app.py](../../backend/orchestrator/chainlit_app.py)
 

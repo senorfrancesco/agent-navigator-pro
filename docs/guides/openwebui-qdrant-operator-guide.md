@@ -37,7 +37,8 @@ SESSION_RAG_TTL_HOURS="72"
 
 Замечания:
 
-- `QDRANT_URL` в `backend/.env` остаётся адресом хоста; в контейнере `agent-api` он переопределяется на `http://qdrant:6333` через `docker-compose.yaml`, а `Open WebUI` использует `http://host.docker.internal:6333`.
+- `QDRANT_URL` в `backend/.env` остаётся адресом хоста для `run_native`: `http://127.0.0.1:6333`.
+- Контейнерные сервисы используют один Docker-адрес `http://qdrant:6333`; это относится и к `agent-api`, и к `Open WebUI`.
 - Для `Open WebUI` параметры native `Knowledge` задаются через `docker-compose.yaml`, а не через bootstrap серверной части.
 
 ## 3. Запуск контура
@@ -45,7 +46,7 @@ SESSION_RAG_TTL_HOURS="72"
 Поднимите backend и `Qdrant`:
 
 ```bash
-docker compose up -d agent-api document-server legal-server ums
+docker compose up -d qdrant agent-api document-server legal-server ums
 ```
 
 Поднимите `Open WebUI`:
@@ -111,7 +112,7 @@ python scripts/bootstrap_openwebui.py \
 После запуска контейнера `open-webui` уже получает такие runtime-параметры через `docker-compose.yaml`:
 
 - `VECTOR_DB=qdrant`
-- `QDRANT_URI=http://host.docker.internal:6333`
+- `QDRANT_URI=http://qdrant:6333`
 - `ENABLE_QDRANT_MULTITENANCY_MODE=true`
 - `QDRANT_COLLECTION_PREFIX=anp-openwebui`
 - `RAG_EMBEDDING_ENGINE=openai`
@@ -124,7 +125,7 @@ python scripts/bootstrap_openwebui.py \
 1. Войдите в `Open WebUI` под администратором.
 2. Откройте `Admin Settings -> Documents`.
 3. Убедитесь, что векторная база установлена в `Qdrant`.
-4. Убедитесь, что используется `QDRANT_URI=http://host.docker.internal:6333`.
+4. Убедитесь, что используется `QDRANT_URI=http://qdrant:6333`.
 5. Проверьте, что включён `Enable Qdrant Multitenancy Mode`.
 6. Проверьте префикс коллекций `anp-openwebui`.
 7. Проверьте, что движок эмбеддингов установлен в `openai`, а модель — `labse-embedding`.
@@ -134,6 +135,7 @@ python scripts/bootstrap_openwebui.py \
 
 - `Open WebUI` считает `Qdrant` интеграцией, поддерживаемой сообществом. Перед обновлением `Open WebUI` или сменой режима multitenancy снимайте резервную копию и проверяйте схему коллекций.
 - `Reindex Knowledge Base` переносит только native базу знаний. Он не мигрирует backend `session RAG`.
+- Для контейнерного контура не используйте `host.docker.internal:6333` как адрес `Qdrant`; он остаётся только для хостовых сервисов, которым действительно нужен доступ к backend на хосте.
 
 ## 6. Ручная проверка backend `session RAG`
 
