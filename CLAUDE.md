@@ -59,7 +59,7 @@ cd backend/services/model_manager && python unified_model_server.py             
 ### Тесты
 
 ```bash
-./start_system_test.sh                        # Интеграционный тест всех сервисов
+./tests/harness/system/start_system_test.sh   # Интеграционный тест всех сервисов
 cd backend && pytest tests/                   # Unit-тесты
 pytest tests/test_integration_full.py -v      # Конкретный тест
 ```

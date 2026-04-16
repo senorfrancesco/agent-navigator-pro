@@ -12,6 +12,7 @@ from dotenv import set_key
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCRIPTS_DIR = PROJECT_ROOT / "scripts"
+TEST_HARNESS_SYSTEM_DIR = PROJECT_ROOT / "tests" / "harness" / "system"
 
 
 def _run_script(script_name: str, *args: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -1137,7 +1138,7 @@ def test_run_all_never_prints_default_password_hint(tmp_path):
 
 def test_native_and_start_system_test_export_backend_pythonpath_for_service_servers():
     run_native = (SCRIPTS_DIR / "run_native.sh").read_text(encoding="utf-8")
-    start_system_test = (SCRIPTS_DIR / "start_system_test.sh").read_text(encoding="utf-8")
+    start_system_test = (TEST_HARNESS_SYSTEM_DIR / "start_system_test.sh").read_text(encoding="utf-8")
 
     assert "export PYTHONPATH='$BACKEND_DIR' && uvicorn mcp_document_server:app" in run_native
     assert "export PYTHONPATH='$BACKEND_DIR' && uvicorn mcp_legal_server:app" in run_native
@@ -1156,7 +1157,7 @@ def test_openwebui_eval_docs_use_direct_compose_command():
 
 
 def test_start_system_test_contains_executable_tmux_commands():
-    start_system_test = (SCRIPTS_DIR / "start_system_test.sh").read_text(encoding="utf-8")
+    start_system_test = (TEST_HARNESS_SYSTEM_DIR / "start_system_test.sh").read_text(encoding="utf-8")
 
     assert '\ntmux new-session -d -s "$SESSION_NAME" -x 200 -y 50\n' in start_system_test
     assert '\ntmux new-window -t "$SESSION_NAME" -n "agent-api"\n' in start_system_test

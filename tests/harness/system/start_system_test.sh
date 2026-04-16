@@ -2,7 +2,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 BACKEND_DIR="$PROJECT_ROOT/backend"
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
@@ -13,7 +13,7 @@ start_system_test.sh
 в tmux и выполняет базовые health-check'и.
 
 Использование:
-  ./scripts/start_system_test.sh
+  ./tests/harness/system/start_system_test.sh
 
 Флаги:
   У скрипта нет пользовательских CLI-флагов.
@@ -34,7 +34,7 @@ SESSION_NAME="llm-tools-platform"
 CONDA_ENV="base" # Hardcoded for test safety, or derive from .env
 
 echo "Stopping existing tmux/runtime/docker processes..."
-"$SCRIPT_DIR/stop_all.sh" >/dev/null 2>&1 || true
+"$PROJECT_ROOT/scripts/stop_all.sh" >/dev/null 2>&1 || true
 
 tmux new-session -d -s "$SESSION_NAME" -x 200 -y 50
 

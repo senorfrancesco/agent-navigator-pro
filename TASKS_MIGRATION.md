@@ -477,13 +477,13 @@
   - double-bootstrap на живом `Open WebUI` теперь даёт `driftSummary.noOp=true`, пустые `updatedIds` для tools/functions и явный `materializationDriftIgnored` по `meta.manifest.target_models`;
   - targeted verification обновлённого slice: `43 passed`, `python -m py_compile`, `git diff --check`;
   Verification 2026-04-11 (Slice 3):
-  - добавлены verification-only harness files `scripts/openwebui_community_sum_tool.py` и `scripts/manage_openwebui_community_tool.py`; через admin API подтверждены install/status/delete lifecycle для внешнего `Workspace > Tool` без включения fixture в bootstrap-managed bundle;
+  - добавлены verification-only harness files `tests/harness/openwebui/openwebui_community_sum_tool.py` и `tests/harness/openwebui/manage_openwebui_community_tool.py`; через admin API подтверждены install/status/delete lifecycle для внешнего `Workspace > Tool` без включения fixture в bootstrap-managed bundle;
   - coexistence с bootstrap подтверждён: при установленном `community_sum_tool` повторный `python scripts/bootstrap_openwebui.py` остаётся `driftSummary.noOp=true`, managed resources не обновляются, fixture tool остаётся нетронутым и затем удаляется cleanly;
   - visible `Open WebUI` smoke на `raw.qwen-14b-llm` подтвердил, что запросы на внешний tool реально уходят через native contour, а не через наш wrapper path: `POST /api/chat/completions` содержит `tool_ids=[\"community_sum_tool\"]`, а после явной установки `Controls > Вызов функции = Нативно` второй запрос уходит с `params.function_calling=\"native\"`;
   - во время community smoke backend не получает `/tool-server/tools/*`, то есть внешний proof действительно отделён от llm-tools-platform tool-server path;
   - позднее в том же контуре подтверждён exact result `COMMUNITY_TOOL_OK:18`; раннее ощущение “пустого” ответа оказалось latency effect из-за CPU-backed `raw.qwen-14b-llm`, а не интеграционным дефектом native community-tool path.
-  - после этого added authoring slice: появился канонический guide `docs/openwebui-workspace-tools.md`, reusable template `scripts/templates/openwebui_workspace_tool_template.py`, generic helper `scripts/manage_openwebui_tool.py` и repo-level Codex skill `.agents/skills/openwebui-workspace-tools`; `manage_openwebui_community_tool.py` оставлен как thin wrapper/example для smoke fixture.
-  - добавлен отдельный diagnostic harness `scripts/openwebui_followup_payload_harness.py`, который в чистом temporary chat captures first/second `POST /api/chat/completions` и пишет классификацию `state_bug` / `contamination` / `tool_selection_or_runtime` / `success` по request payload и видимому deterministic result;
+  - после этого added authoring slice: появился канонический guide `docs/openwebui-workspace-tools.md`, reusable template `scripts/templates/openwebui_workspace_tool_template.py`, generic helper `scripts/manage_openwebui_tool.py` и repo-level Codex skill `.agents/skills/openwebui-workspace-tools`; `tests/harness/openwebui/manage_openwebui_community_tool.py` оставлен как thin wrapper/example для smoke fixture.
+  - добавлен отдельный diagnostic harness `tests/harness/openwebui/openwebui_followup_payload_harness.py`, который в чистом temporary chat captures first/second `POST /api/chat/completions` и пишет классификацию `state_bug` / `contamination` / `tool_selection_or_runtime` / `success` по request payload и видимому deterministic result;
   Verification 2026-04-13:
   - export bundle расширен блоками `runtimeConfig.rag`, `knowledgeConfig`, `qdrantConfig`, `manualChecklist`, `preflightRequirements`;
   - `bootstrap_openwebui.py` получил `preflight`, `warnings`, `knowledgeBootstrapMode` и режим `--dry-run`;
@@ -514,7 +514,12 @@
   Progress 2026-04-13:
   - добавлена read-only operator summary `GET /operator/rag/qdrant/summary` с разделением backend collection и native `Open WebUI Knowledge` namespace;
   - `operator/state` теперь публикует `qdrantSummary` для UI/diagnostics;
-  - добавлен CLI smoke `python scripts/qdrant_namespace_smoke.py`, который проверяет separation, наличие native `Knowledge` collections и backend `session` points.
+  - добавлен CLI smoke `python tests/harness/openwebui/qdrant_namespace_smoke.py`, который проверяет separation, наличие native `Knowledge` collections и backend `session` points.
+  Progress 2026-04-14:
+  - ordinary chat upload в `Open WebUI` теперь проходит через backend-owned `session RAG`: patch-layer переводит upload path с raw client model на server-side wrapper `llm-tools-platform`, но клиентский `POST /api/chat/completions` остаётся на `raw.qwen-14b-llm`;
+  - источник живого дефекта был в том, что `Open WebUI` использует alias `open_webui.utils.chat.generate_openai_chat_completion`; патч теперь подменяет и `routers.openai`, и этот alias, поэтому обычная chat-загрузка реально доходит до backend wrapper;
+  - `tests/harness/openwebui/openwebui_followup_payload_harness.py` расширен режимами `session`, `knowledge`, `full`, `diagnostic`; diagnostic режим сохраняет `operatorSummary`, `open-webui` logs, `agent-api` docker logs, `tmux` tail и browser console/page errors;
+  - live smoke `--mode session` и `--mode diagnostic` подтверждён: ordinary upload даёт grounded answer с цитатой, в `Qdrant` растёт только `rag_chunks_v1`, а native `Knowledge` остаётся в `anp-openwebui_*`; separation остаётся `true`.
 
 - [ ] M3.9 — Принять финальное решение по роли `ask_document`
   Нужно сделать:
@@ -614,7 +619,7 @@
 - Риск: `Open WebUI` станет вторым decision engine через hidden routing между Knowledge и tools.
   Митигатор: четыре явных режима (`plain model` / `native knowledge` / `explicit tools` / `agent mode`) и запрет hidden backend tool routing вне explicit contours.
 - Risk: follow-up поведение external/community tools в `Open WebUI` легко интерпретировать по тексту ответа неверно.
-  Митигатор: использовать `scripts/openwebui_followup_payload_harness.py` и считать source-of-truth именно второй `POST /api/chat/completions`, а не chat text; contaminated runs с memory/extra tools считаются невалидными.
+  Митигатор: использовать `tests/harness/openwebui/openwebui_followup_payload_harness.py` и считать source-of-truth именно второй `POST /api/chat/completions`, а не chat text; contaminated runs с memory/extra tools считаются невалидными.
 - Workaround: пока tool-server contract не готов, можно использовать OpenAI-compatible path только как временный eval contour.
 - Workaround: `backend/open_webui_uploads` остаётся compatibility-name, даже если фактически обслуживает оба UI.
 - Workaround: первый `accepted job` contract для deep tools опирается на process-local background registry; для shared/multi-process rollout это нужно будет заменить на backend-owned persistent job/result store.

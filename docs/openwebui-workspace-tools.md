@@ -41,7 +41,7 @@
 
 Рабочий deterministic пример:
 
-- [openwebui_community_sum_tool.py](/home/seral/HDD/proj/agent-navigator-pro/scripts/openwebui_community_sum_tool.py)
+- [openwebui_community_sum_tool.py](/home/seral/HDD/proj/agent-navigator-pro/tests/harness/openwebui/openwebui_community_sum_tool.py)
 
 Обязательные части:
 
@@ -88,7 +88,7 @@ class Tools:
 Путь был таким:
 
 1. Написали tool file:
-   [openwebui_community_sum_tool.py](/home/seral/HDD/proj/agent-navigator-pro/scripts/openwebui_community_sum_tool.py)
+   [openwebui_community_sum_tool.py](/home/seral/HDD/proj/agent-navigator-pro/tests/harness/openwebui/openwebui_community_sum_tool.py)
 2. Через admin API импортировали его в `Open WebUI`.
 3. В чате включили tool в picker.
 4. Проверили, что запрос уходит с `tool_ids=["community_sum_tool"]`.
@@ -135,7 +135,7 @@ python scripts/manage_openwebui_tool.py delete --tool-id my_tool
 
 Для compatibility fixture остаётся thin wrapper:
 
-- [manage_openwebui_community_tool.py](/home/seral/HDD/proj/agent-navigator-pro/scripts/manage_openwebui_community_tool.py)
+- [manage_openwebui_community_tool.py](/home/seral/HDD/proj/agent-navigator-pro/tests/harness/openwebui/manage_openwebui_community_tool.py)
 
 Он просто прокидывает дефолты в generic helper.
 
@@ -155,7 +155,7 @@ python scripts/manage_openwebui_tool.py delete --tool-id my_tool
 
 Для follow-up диагностики второго хода есть отдельный harness:
 
-- [openwebui_followup_payload_harness.py](/home/seral/HDD/proj/agent-navigator-pro/scripts/openwebui_followup_payload_harness.py)
+- [openwebui_followup_payload_harness.py](/home/seral/HDD/proj/agent-navigator-pro/tests/harness/openwebui/openwebui_followup_payload_harness.py)
 
 Он делает именно то, что нужно для разбора persistence/state bug:
 
@@ -173,7 +173,7 @@ python scripts/manage_openwebui_tool.py delete --tool-id my_tool
 Пример запуска:
 
 ```bash
-python scripts/openwebui_followup_payload_harness.py \
+python tests/harness/openwebui/openwebui_followup_payload_harness.py \
   --tool-id community_sum_tool \
   --tool-name "Community Sum Tool" \
   --output /tmp/openwebui_followup_payload_harness.json
@@ -192,7 +192,7 @@ python scripts/openwebui_followup_payload_harness.py \
 Для воспроизводимой диагностики второго хода в одном чистом чате используется отдельный harness:
 
 ```bash
-python scripts/openwebui_followup_payload_harness.py
+python tests/harness/openwebui/openwebui_followup_payload_harness.py
 ```
 
 Что делает harness:

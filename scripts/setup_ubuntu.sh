@@ -973,7 +973,7 @@ mkdir -p for_cli
 # Установка прав доступа
 chmod 777 backend/open_webui_uploads
 chmod +x scripts/run_all.sh 2>/dev/null || true
-chmod +x scripts/start_system_test.sh 2>/dev/null || true
+chmod +x tests/harness/system/start_system_test.sh 2>/dev/null || true
 
 echo -e "${GREEN}[OK]${NC} Структура директорий создана"
 

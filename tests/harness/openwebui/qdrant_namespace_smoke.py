@@ -48,6 +48,9 @@ def evaluate_summary(
         issues.append("native Knowledge collections were expected but not detected")
 
     session_count = int(((summary.get("payloads") or {}).get("sessionCount")) or 0)
+    handoff_enabled = bool(((summary.get("sessionHandoff") or {}).get("enabled")))
+    if expect_session_points and not handoff_enabled:
+        issues.append("backend session handoff is disabled in Open WebUI runtime")
     if expect_session_points and session_count <= 0:
         issues.append("backend session points were expected but not detected")
 

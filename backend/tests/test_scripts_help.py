@@ -10,6 +10,7 @@ import pytest
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCRIPTS_DIR = PROJECT_ROOT / "scripts"
+TEST_HARNESS_SYSTEM_DIR = PROJECT_ROOT / "tests" / "harness" / "system"
 
 
 def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -21,6 +22,12 @@ def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         check=False,
     )
+
+
+def _shell_script_path(script_name: str) -> pathlib.Path:
+    if script_name == "start_system_test.sh":
+        return TEST_HARNESS_SYSTEM_DIR / script_name
+    return SCRIPTS_DIR / script_name
 
 
 @pytest.mark.parametrize(
@@ -40,7 +47,7 @@ def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
     ],
 )
 def test_shell_scripts_expose_russian_help(script_name: str, expected: str):
-    result = _run(["bash", str(SCRIPTS_DIR / script_name), "--help"])
+    result = _run(["bash", str(_shell_script_path(script_name)), "--help"])
 
     assert result.returncode == 0
     assert expected in result.stdout
@@ -63,7 +70,7 @@ def test_shell_scripts_expose_russian_help(script_name: str, expected: str):
     ],
 )
 def test_shell_scripts_expose_short_h_help(script_name: str, expected: str):
-    result = _run(["bash", str(SCRIPTS_DIR / script_name), "-h"])
+    result = _run(["bash", str(_shell_script_path(script_name)), "-h"])
 
     assert result.returncode == 0
     assert expected in result.stdout

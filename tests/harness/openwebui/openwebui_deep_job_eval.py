@@ -7,10 +7,13 @@ import os
 import sqlite3
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from collections import defaultdict
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 from typing import Any
 
 from openwebui_deep_job_scenarios import get_scenarios
@@ -18,15 +21,34 @@ from openwebui_deep_job_scenarios import get_scenarios
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 BACKEND_ROOT = REPO_ROOT / "backend"
+BOOTSTRAP_SCRIPT = REPO_ROOT / "scripts" / "bootstrap_openwebui.py"
 if str(REPO_ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
-from bootstrap_openwebui import DEFAULT_ENV_PATH, parse_env_file, get_env_value
+from bootstrap_openwebui import (
+    DEFAULT_ENV_PATH,
+    OpenWebUIBootstrapClient,
+    fetch_binding_export,
+    get_env_value,
+    parse_env_file,
+    sign_in,
+)
 
 
 PLAYWRIGHT_SPEC = REPO_ROOT / "tests" / "e2e" / "openwebui" / "deep-job.spec.ts"
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "output" / "openwebui-deep-job-eval"
 DEFAULT_RAW_RESULTS_NAME = "results.raw.json"
+ACTION_FUNCTION_SYNC_RULES = {
+    "equipment_deep_action": ["/delivery", "_record_terminal_delivery", "statusHistory"],
+    "tool_job_refresh_action": ["/delivery", "_record_terminal_delivery", "statusHistory"],
+    "tool_job_cancel_action": ["statusHistory"],
+}
+NATIVE_BACKEND_PROCESS_MARKERS = {
+    "agent-api": "python agent_api.py",
+    "document-server": "uvicorn mcp_document_server:app",
+    "legal-server": "uvicorn mcp_legal_server:app",
+    "ums": "python services/model_manager/unified_model_server.py",
+}
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -75,6 +97,22 @@ def run_command(cmd: list[str], *, env: dict[str, str], cwd: Path, log_path: Pat
             check=False,
         )
     return process.returncode
+
+
+def run_command_capture(cmd: list[str], *, env: dict[str, str], cwd: Path, log_path: Path) -> tuple[int, str]:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    process = subprocess.run(
+        cmd,
+        cwd=str(cwd),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    output = process.stdout or ""
+    log_path.write_text(output, encoding="utf-8")
+    return process.returncode, output
 
 
 def _raw_sqlite_path_from_url(db_url: str) -> str | None:
@@ -201,6 +239,273 @@ def _extract_effective_prompt_from_request_payload(request_payload: dict[str, An
     return str(request_payload.get("message") or "").strip()
 
 
+def _replace_host(value: str, host: str) -> str:
+    parsed = urlsplit(value)
+    if not parsed.scheme or not parsed.hostname:
+        return value
+    netloc = host
+    if parsed.port is not None:
+        netloc = f"{host}:{parsed.port}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+
+
+def probe_http_endpoint(url: str, *, timeout: float = 10.0) -> dict[str, Any]:
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            payload = response.read(256).decode("utf-8", "ignore")
+            return {
+                "url": url,
+                "ok": True,
+                "status_code": int(getattr(response, "status", 200)),
+                "body_excerpt": payload,
+            }
+    except urllib.error.HTTPError as exc:
+        body = exc.read(256).decode("utf-8", "ignore")
+        return {
+            "url": url,
+            "ok": False,
+            "status_code": int(exc.code),
+            "error": str(exc),
+            "body_excerpt": body,
+        }
+    except Exception as exc:  # pragma: no cover - exercised via integration contour
+        return {
+            "url": url,
+            "ok": False,
+            "status_code": None,
+            "error": str(exc),
+        }
+
+
+def evaluate_native_backend_processes(ps_output: str) -> dict[str, Any]:
+    present: list[str] = []
+    missing: list[str] = []
+    for service_name, marker in NATIVE_BACKEND_PROCESS_MARKERS.items():
+        if marker in ps_output:
+            present.append(service_name)
+        else:
+            missing.append(service_name)
+    return {
+        "status": "ok" if not missing else "failed",
+        "present": present,
+        "missing": missing,
+    }
+
+
+def evaluate_action_function_sync(
+    exported_actions: dict[str, str],
+    installed_actions: dict[str, str],
+) -> dict[str, Any]:
+    drift_function_ids: list[str] = []
+    missing_fragments: dict[str, list[str]] = {}
+    for function_id, required_fragments in ACTION_FUNCTION_SYNC_RULES.items():
+        exported_content = str(exported_actions.get(function_id) or "")
+        installed_content = str(installed_actions.get(function_id) or "")
+        missing = [
+            fragment
+            for fragment in required_fragments
+            if fragment in exported_content and fragment not in installed_content
+        ]
+        if missing:
+            drift_function_ids.append(function_id)
+            missing_fragments[function_id] = missing
+    return {
+        "status": "ok" if not drift_function_ids else "drift",
+        "drift_function_ids": drift_function_ids,
+        "missing_fragments": missing_fragments,
+        "checked_function_ids": list(ACTION_FUNCTION_SYNC_RULES),
+    }
+
+
+def _build_container_probe_urls(backend_base_url: str, env_values: dict[str, str]) -> dict[str, str]:
+    ums_base_url = normalize_base_url(
+        get_env_value("AGENT_API_UMS_URL", env_values, "http://127.0.0.1:8090") or "http://127.0.0.1:8090",
+        "http://127.0.0.1:8090",
+    )
+    return {
+        "agent-api": _replace_host(f"{backend_base_url}/health", "host.docker.internal"),
+        "ums": _replace_host(f"{ums_base_url}/health", "host.docker.internal"),
+    }
+
+
+def run_mixed_runtime_preflight(
+    *,
+    env: dict[str, str],
+    env_values: dict[str, str],
+    cwd: Path,
+    output_dir: Path,
+    openwebui_base_url: str,
+    backend_base_url: str,
+) -> dict[str, Any]:
+    endpoint_checks = [
+        {"name": "openwebui", **probe_http_endpoint(f"{openwebui_base_url}/")},
+        {"name": "agent-api", **probe_http_endpoint(f"{backend_base_url}/health")},
+        {"name": "tool-server-openapi", **probe_http_endpoint(f"{backend_base_url}/tool-server/openapi.json")},
+        {"name": "document-server", **probe_http_endpoint("http://127.0.0.1:8001/health")},
+        {"name": "legal-server", **probe_http_endpoint("http://127.0.0.1:8002/health")},
+        {"name": "ums", **probe_http_endpoint("http://127.0.0.1:8090/health")},
+    ]
+
+    _, ps_output = run_command_capture(
+        ["ps", "-eo", "pid,cmd"],
+        env=env,
+        cwd=cwd,
+        log_path=output_dir / "preflight.processes.log",
+    )
+    process_report = evaluate_native_backend_processes(ps_output)
+
+    container_probe_urls = _build_container_probe_urls(backend_base_url, env_values)
+    probe_code = (
+        "import json, urllib.request\n"
+        f"targets = {json.dumps(container_probe_urls, ensure_ascii=False)}\n"
+        "results = {}\n"
+        "for name, url in targets.items():\n"
+        "    try:\n"
+        "        with urllib.request.urlopen(url, timeout=5) as response:\n"
+        "            results[name] = {'ok': True, 'status_code': getattr(response, 'status', 200), 'url': url}\n"
+        "    except Exception as exc:\n"
+        "        results[name] = {'ok': False, 'error': str(exc), 'url': url}\n"
+        "print(json.dumps(results, ensure_ascii=False))\n"
+    )
+    container_probe_exit, container_probe_output = run_command_capture(
+        [
+            "docker",
+            "compose",
+            "--profile",
+            "legacy",
+            "exec",
+            "-T",
+            "open-webui",
+            "python",
+            "-c",
+            probe_code,
+        ],
+        env=env,
+        cwd=cwd,
+        log_path=output_dir / "preflight.container.log",
+    )
+    try:
+        container_probe = json.loads(container_probe_output.strip() or "{}")
+    except json.JSONDecodeError:
+        container_probe = {
+            "status": "failed",
+            "output": container_probe_output.strip(),
+        }
+    container_probe_status = (
+        "ok"
+        if container_probe_exit == 0
+        and isinstance(container_probe, dict)
+        and container_probe
+        and all(bool(item.get("ok")) for item in container_probe.values() if isinstance(item, dict))
+        else "failed"
+    )
+
+    status = "ok"
+    if any(not bool(item.get("ok")) for item in endpoint_checks):
+        status = "failed"
+    if process_report["status"] != "ok":
+        status = "failed"
+    if container_probe_status != "ok":
+        status = "failed"
+
+    return {
+        "status": status,
+        "endpoints": endpoint_checks,
+        "native_backend_processes": process_report,
+        "openwebui_container_probe": {
+            "status": container_probe_status,
+            "checks": container_probe,
+        },
+    }
+
+
+def run_openwebui_bootstrap(
+    *,
+    env: dict[str, str],
+    cwd: Path,
+    output_dir: Path,
+    env_file: Path,
+    openwebui_base_url: str,
+    backend_base_url: str,
+) -> dict[str, Any]:
+    exit_code, output = run_command_capture(
+        [
+            sys.executable,
+            str(BOOTSTRAP_SCRIPT),
+            "--backend-base-url",
+            backend_base_url,
+            "--openwebui-base-url",
+            openwebui_base_url,
+            "--env-file",
+            str(env_file),
+        ],
+        env=env,
+        cwd=cwd,
+        log_path=output_dir / "bootstrap.log",
+    )
+    payload: dict[str, Any] | None = None
+    if output.strip():
+        try:
+            parsed = json.loads(output)
+            if isinstance(parsed, dict):
+                payload = parsed
+        except json.JSONDecodeError:
+            payload = None
+    return {
+        "status": "ok" if exit_code == 0 else "failed",
+        "exit_code": exit_code,
+        "payload": payload,
+    }
+
+
+def collect_installed_action_functions(
+    *,
+    openwebui_base_url: str,
+    admin_email: str,
+    admin_password: str,
+) -> dict[str, str]:
+    admin_token = sign_in(openwebui_base_url, email=admin_email, password=admin_password)
+    client = OpenWebUIBootstrapClient(openwebui_base_url=openwebui_base_url, admin_token=admin_token)
+    installed: dict[str, str] = {}
+    for function_id in ACTION_FUNCTION_SYNC_RULES:
+        payload = client.get_function_by_id(function_id) or {}
+        installed[function_id] = str(payload.get("content") or "")
+    return installed
+
+
+def collect_exported_action_functions(backend_base_url: str) -> dict[str, str]:
+    export_bundle = fetch_binding_export(backend_base_url)
+    actions = export_bundle.get("actionFunctions") or []
+    exported: dict[str, str] = {}
+    for item in actions:
+        if not isinstance(item, dict):
+            continue
+        function_id = str(item.get("action_id") or "").strip()
+        if not function_id:
+            continue
+        exported[function_id] = str(item.get("pythonCode") or "")
+    return exported
+
+
+def verify_openwebui_action_function_sync(
+    *,
+    backend_base_url: str,
+    openwebui_base_url: str,
+    admin_email: str,
+    admin_password: str,
+) -> dict[str, Any]:
+    exported_actions = collect_exported_action_functions(backend_base_url)
+    installed_actions = collect_installed_action_functions(
+        openwebui_base_url=openwebui_base_url,
+        admin_email=admin_email,
+        admin_password=admin_password,
+    )
+    report = evaluate_action_function_sync(exported_actions, installed_actions)
+    report["exported_actions"] = {key: {"length": len(value)} for key, value in exported_actions.items() if key in ACTION_FUNCTION_SYNC_RULES}
+    report["installed_actions"] = {key: {"length": len(value)} for key, value in installed_actions.items()}
+    return report
+
+
 def result_text(run: dict[str, Any]) -> str:
     final_chat = run.get("final_chat") or {}
     result_message = (final_chat.get("result_message") or {}) if isinstance(final_chat, dict) else {}
@@ -235,6 +540,10 @@ def classify_runs(runs: list[dict[str, Any]]) -> None:
             pair_sensitivity[pair_key] = "sensitive"
 
     for run in runs:
+        if str(run.get("kind") or "") != "matrix":
+            if str(run.get("kind") or "") == "native":
+                run["classification"] = str(run.get("launch_classification") or "n/a")
+            continue
         request_payload = (run.get("tool_job_db") or {}).get("request_payload") or {}
         raw_equipment_query = str(request_payload.get("equipment_query") or "").strip()
         effective_prompt = _extract_effective_prompt_from_request_payload(request_payload)
@@ -308,6 +617,9 @@ def build_summary_markdown(
     pytest_exit: int | None,
     playwright_exit: int | None,
     enriched_runs: list[dict[str, Any]],
+    runtime_preflight: dict[str, Any] | None,
+    bootstrap_report: dict[str, Any] | None,
+    action_sync_report: dict[str, Any] | None,
 ) -> str:
     lines: list[str] = []
     lines.append("# Open WebUI deep-job eval")
@@ -315,6 +627,23 @@ def build_summary_markdown(
     lines.append(f"- Output: `{output_dir}`")
     lines.append(f"- Pytest exit: `{pytest_exit}`" if pytest_exit is not None else "- Pytest exit: `skipped`")
     lines.append(f"- Playwright exit: `{playwright_exit}`" if playwright_exit is not None else "- Playwright exit: `skipped`")
+    lines.append("")
+    lines.append("## Preflight")
+    lines.append("")
+    if runtime_preflight is None:
+        lines.append("- Runtime preflight: `skipped`")
+    else:
+        lines.append(f"- Runtime preflight: `{runtime_preflight.get('status')}`")
+    if bootstrap_report is None:
+        lines.append("- Bootstrap sync: `skipped`")
+    else:
+        lines.append(f"- Bootstrap sync: `{bootstrap_report.get('status')}`")
+    if action_sync_report is None:
+        lines.append("- Action drift check: `skipped`")
+    else:
+        lines.append(f"- Action drift check: `{action_sync_report.get('status')}`")
+        drift_ids = action_sync_report.get("drift_function_ids") or []
+        lines.append(f"- Drifted functions: `{', '.join(drift_ids) if drift_ids else 'none'}`")
     lines.append("")
     lines.append("## Matrix")
     lines.append("")
@@ -338,6 +667,27 @@ def build_summary_markdown(
             )
         )
     lines.append("")
+    native_runs = [run for run in enriched_runs if run.get("kind") == "native"]
+    if native_runs:
+        lines.append("## Native")
+        lines.append("")
+        lines.append("| Scenario | Launch | Tool | Job | Tool job |")
+        lines.append("| --- | --- | --- | --- | --- |")
+        for run in native_runs:
+            tool_job_db = (run.get("tool_job_db") or {}) if isinstance(run.get("tool_job_db"), dict) else {}
+            lines.append(
+                "| {scenario} | {launch} | {tool} | {job} | {tool_job} |".format(
+                    scenario=run.get("scenario_id"),
+                    launch=run.get("launch_classification") or "n/a",
+                    tool=run.get("native_tool_name") or "n/a",
+                    job=run.get("job_id") or "n/a",
+                    tool_job=tool_job_db.get("status") or "missing",
+                )
+            )
+            persisted_output = str(run.get("persisted_function_call_output") or "").strip()
+            if persisted_output:
+                lines.append(f"  - persisted output: `{persisted_output[:240]}`")
+        lines.append("")
     lines.append("## Current Contract")
     lines.append("")
     lines.append("- `equipment_deep_action` получает пользовательский prompt и формирует backend explicit-tool запрос к `/tool-server/tools/analyze_equipment_deep`.")
@@ -402,6 +752,44 @@ def main(argv: list[str]) -> int:
 
     pytest_exit: int | None = None
     playwright_exit: int | None = None
+    runtime_preflight = run_mixed_runtime_preflight(
+        env=common_env,
+        env_values=env_values,
+        cwd=REPO_ROOT,
+        output_dir=output_dir,
+        openwebui_base_url=openwebui_base_url,
+        backend_base_url=backend_base_url,
+    )
+    write_json(output_dir / "runtime-preflight.json", runtime_preflight)
+
+    bootstrap_report: dict[str, Any] | None = None
+    action_sync_report: dict[str, Any] | None = None
+    if runtime_preflight["status"] == "ok":
+        bootstrap_report = run_openwebui_bootstrap(
+            env=common_env,
+            cwd=REPO_ROOT,
+            output_dir=output_dir,
+            env_file=Path(args.env_file).resolve(),
+            openwebui_base_url=openwebui_base_url,
+            backend_base_url=backend_base_url,
+        )
+        write_json(output_dir / "bootstrap.json", bootstrap_report)
+        if bootstrap_report["status"] == "ok":
+            action_sync_report = verify_openwebui_action_function_sync(
+                backend_base_url=backend_base_url,
+                openwebui_base_url=openwebui_base_url,
+                admin_email=str(get_env_value("WEBUI_ADMIN_EMAIL", env_values, "admin@example.com")),
+                admin_password=str(get_env_value("WEBUI_ADMIN_PASSWORD", env_values, "change-me-now")),
+            )
+            write_json(output_dir / "action-function-sync.json", action_sync_report)
+        else:
+            action_sync_report = {"status": "failed", "reason": "bootstrap_failed"}
+            write_json(output_dir / "action-function-sync.json", action_sync_report)
+    else:
+        bootstrap_report = {"status": "skipped", "reason": "runtime_preflight_failed"}
+        action_sync_report = {"status": "skipped", "reason": "runtime_preflight_failed"}
+        write_json(output_dir / "bootstrap.json", bootstrap_report)
+        write_json(output_dir / "action-function-sync.json", action_sync_report)
 
     if not args.skip_pytest:
         pytest_exit = run_command(
@@ -418,19 +806,27 @@ def main(argv: list[str]) -> int:
         )
 
     if not args.skip_playwright:
-        playwright_exit = run_command(
-            [
-                "npm",
-                "run",
-                "test:e2e",
-                "--",
-                str(PLAYWRIGHT_SPEC),
-                "--reporter=list",
-            ],
-            env=common_env,
-            cwd=REPO_ROOT,
-            log_path=output_dir / "playwright.log",
-        )
+        if runtime_preflight["status"] != "ok" or (bootstrap_report or {}).get("status") != "ok" or (action_sync_report or {}).get("status") != "ok":
+            playwright_exit = 1
+            (output_dir / "playwright.log").write_text(
+                "Playwright contour skipped because runtime preflight, bootstrap sync, or action drift check failed.\n",
+                encoding="utf-8",
+            )
+        else:
+            common_env["OPENWEBUI_SKIP_AUTOSYNC"] = "1"
+            playwright_exit = run_command(
+                [
+                    "npm",
+                    "run",
+                    "test:e2e",
+                    "--",
+                    str(PLAYWRIGHT_SPEC),
+                    "--reporter=list",
+                ],
+                env=common_env,
+                cwd=REPO_ROOT,
+                log_path=output_dir / "playwright.log",
+            )
 
     raw_results_path = output_dir / DEFAULT_RAW_RESULTS_NAME
     if raw_results_path.exists():
@@ -448,6 +844,9 @@ def main(argv: list[str]) -> int:
         pytest_exit=pytest_exit,
         playwright_exit=playwright_exit,
         enriched_runs=enriched_runs,
+        runtime_preflight=runtime_preflight,
+        bootstrap_report=bootstrap_report,
+        action_sync_report=action_sync_report,
     )
     (output_dir / "summary.md").write_text(f"{summary_text}\n", encoding="utf-8")
 
