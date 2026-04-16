@@ -619,12 +619,13 @@ async def test_tool_job_failed_status_and_result_contract(monkeypatch):
     assert status is not None
     assert status["status"] == "failed"
     assert status["error_summary"] == "deep-failure"
+    assert status["result_ref"].endswith("/result")
 
-    with pytest.raises(Exception) as exc_info:
-        await get_tool_job_result_route(accepted["job_id"])
+    result = await get_tool_job_result_route(accepted["job_id"])
 
-    assert getattr(exc_info.value, "status_code", None) == 409
-    assert getattr(exc_info.value, "detail", "") == f"job-terminal-without-result:{accepted['job_id']}:failed"
+    assert "deep-failure" in result["assistant_message"]
+    assert result["execution_metadata"]["status"] == "failed"
+    assert result["execution_metadata"]["reason"] == "deep-failure"
 
 
 @pytest.mark.asyncio
@@ -662,12 +663,12 @@ async def test_async_tool_job_busy_response_is_persisted_as_failed(monkeypatch):
     assert status["status"] == "failed"
     assert status["current_stage"] == "busy"
     assert "Модель занята предыдущим тяжёлым запросом" in status["error_summary"]
+    assert status["result_ref"].endswith("/result")
 
-    with pytest.raises(Exception) as exc_info:
-        await get_tool_job_result_route(accepted["job_id"])
+    result = await get_tool_job_result_route(accepted["job_id"])
 
-    assert getattr(exc_info.value, "status_code", None) == 409
-    assert getattr(exc_info.value, "detail", "") == f"job-terminal-without-result:{accepted['job_id']}:failed"
+    assert "Модель занята предыдущим тяжёлым запросом" in result["assistant_message"]
+    assert result["execution_metadata"]["status"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -941,7 +942,11 @@ async def test_execute_orchestration_returns_top_level_control_plane_fields(monk
 
 
 @pytest.mark.asyncio
-async def test_execute_orchestration_api_doc_question_reports_missing_rag_adapter_honestly():
+async def test_execute_orchestration_api_doc_question_reports_missing_rag_adapter_honestly(monkeypatch):
+    monkeypatch.setattr(
+        "orchestrator.agent_api._create_failover_embed_fn",
+        lambda selection, *, record_model_execution=None: None,
+    )
     request = OrchestrationRequest(
         message="Что указано в документе про штраф?",
         assistant_mode="specific_tasks",
@@ -1028,6 +1033,39 @@ def test_api_execution_dependencies_expose_ums_retrieval_adapter(monkeypatch):
     assert deps.has_retrieval_adapter() is True
     assert callable(embed_fn)
     assert getattr(embed_fn(["probe"]), "shape", None) == (1, 3)
+
+
+def test_api_execution_dependencies_fall_back_to_labse_when_primary_retrieval_embedder_unavailable(monkeypatch):
+    request = OrchestrationRequest(message="Что написано в документе про штраф?")
+    effective_settings = {
+        "resolved_retrieval_embedder_model_id": "qwen3-embedding-0.6b",
+        "resolved_retrieval_embedder_resolution": resolve_execution_plan(
+            requested_model_id="qwen3-embedding-0.6b"
+        ),
+        "prompt_profile": "strict-grounded-doc-qa",
+    }
+    seen_model_ids = []
+
+    def fake_create_failover_embed_fn(selection, *, record_model_execution=None):
+        model_id = str(getattr(selection, "resolved_model_id", "") or "")
+        seen_model_ids.append(model_id)
+        if model_id == "qwen3-embedding-0.6b":
+            return None
+        if model_id == "labse-embedding":
+            return _stub_embed_fn
+        return None
+
+    monkeypatch.delenv("LEGAL_EMBEDDER_MODEL", raising=False)
+    monkeypatch.setattr("orchestrator.agent_api._create_failover_embed_fn", fake_create_failover_embed_fn)
+
+    deps = _build_api_execution_dependencies(request, effective_settings)
+    embed_fn = deps.get_retrieval_embed_fn()
+
+    assert deps.has_retrieval_adapter() is True
+    assert callable(embed_fn)
+    assert getattr(embed_fn(["probe"]), "shape", None) == (1, 3)
+    assert seen_model_ids == ["qwen3-embedding-0.6b", "labse-embedding"]
+    assert effective_settings["resolved_retrieval_embedder_model_id"] == "labse-embedding"
 
 
 @pytest.mark.asyncio

@@ -40,3 +40,12 @@ def test_openwebui_deep_job_spec_supports_live_fallback_without_manifest():
     assert "loadManifestForExecution" in spec
     assert "buildLiveModeManifestFallback" in spec
     assert "Requirements.pdf" in spec
+
+
+def test_openwebui_deep_job_spec_runs_preflight_and_bootstrap_sync():
+    spec = (PROJECT_ROOT / "tests" / "e2e" / "openwebui" / "deep-job.spec.ts").read_text(encoding="utf-8")
+
+    assert "runOpenWebUIRuntimePreflight" in spec
+    assert "runOpenWebUIBootstrapSync" in spec
+    assert "assertInstalledActionFunctionsSynced" in spec
+    assert "bootstrap_openwebui.py" in spec

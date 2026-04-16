@@ -14,6 +14,7 @@
     "/api/chat/actions/tool_job_refresh_action",
     "/api/chat/actions/tool_job_cancel_action",
   ]);
+  const CHAT_PERSIST_PATH_RE = /^\/api\/v1\/chats\/([^/]+)$/;
   const RECONCILE_DELAY_MS = 250;
   const PERIODIC_RECONCILE_MS = 2000;
   const STARTUP_RECONCILE_DELAYS_MS = [0, 500, 1500, 3000, 6000];
@@ -23,6 +24,7 @@
   let pollingEnabled = true;
   let lastChatId = null;
   let observedLog = null;
+  const terminalSnapshotByChat = new Map();
   const debugState = {
     reconcileRuns: 0,
     reconcileSuccesses: 0,
@@ -61,6 +63,37 @@
     }
   };
 
+  const chatIdFromPersistPath = (pathname) => {
+    const match = String(pathname || "").match(CHAT_PERSIST_PATH_RE);
+    return match ? decodeURIComponent(match[1]) : null;
+  };
+
+  const requestMethodFromArgs = (input, init) => {
+    if (init?.method) {
+      return String(init.method).toUpperCase();
+    }
+    if (typeof Request !== "undefined" && input instanceof Request && input.method) {
+      return String(input.method).toUpperCase();
+    }
+    return "GET";
+  };
+
+  const safeJsonParse = (raw) => {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  };
+
+  const safeResponseJson = async (response) => {
+    try {
+      return await response.clone().json();
+    } catch {
+      return null;
+    }
+  };
+
   const deepJobMessages = (messages) =>
     Object.entries(messages || {}).filter(([, message]) => {
       if (!message || message.role !== "assistant") {
@@ -81,12 +114,21 @@
     observedLog = log;
   };
 
+  const buttonLabel = (button) =>
+    String(
+      button?.getAttribute?.("aria-label")
+        || button?.getAttribute?.("title")
+        || button?.textContent
+        || button?.innerText
+        || ""
+    ).trim();
+
   const findActionButtons = (container) => {
     if (!container) {
       return [];
     }
     return Array.from(container.querySelectorAll("button")).filter((button) => {
-      const label = (button.textContent || "").trim();
+      const label = buttonLabel(button);
       return label === "Обновить deep-job" || label === "Отменить deep-job";
     });
   };
@@ -110,7 +152,17 @@
     }
     const summary = container.querySelector(".status-description .text-base");
     if (summary) {
-      summary.textContent = `Текущий статус deep-job: ${message.job_status}`;
+      const statusText = String(message?.status_text || "").trim();
+      const statusHistory = Array.isArray(message?.statusHistory)
+        ? message.statusHistory
+        : Array.isArray(message?.status_history)
+          ? message.status_history
+          : [];
+      const latestStatus = statusHistory.length ? statusHistory[statusHistory.length - 1] : null;
+      const historyText = String(
+        latestStatus?.description || latestStatus?.content || latestStatus?.title || ""
+      ).trim();
+      summary.textContent = statusText || historyText || `Текущий статус deep-job: ${message.job_status}`;
     }
   };
 
@@ -191,8 +243,8 @@
     }
   };
 
-  const fetchChatPayload = async (chatId) => {
-    const response = await fetch(`/api/v1/chats/${encodeURIComponent(chatId)}`, {
+  const fetchChatPayload = async (chatId, fetchImpl = window.fetch.bind(window)) => {
+    const response = await fetchImpl(`/api/v1/chats/${encodeURIComponent(chatId)}`, {
       credentials: "same-origin",
       headers: authHeaders(),
     });
@@ -200,6 +252,84 @@
       return null;
     }
     return response.json();
+  };
+
+  const upsertMessageArray = (messages, authoritativeMessage) => {
+    if (!Array.isArray(messages) || !authoritativeMessage?.id) {
+      return;
+    }
+    const targetId = String(authoritativeMessage.id);
+    const index = messages.findIndex((item) => String(item?.id || "") === targetId);
+    if (index >= 0) {
+      messages[index] = {
+        ...(messages[index] || {}),
+        ...authoritativeMessage,
+      };
+      return;
+    }
+    messages.push(authoritativeMessage);
+  };
+
+  const mergePersistedChatPayload = (body, authoritativeChat) => {
+    if (!body?.chat || !authoritativeChat) {
+      return body;
+    }
+
+    const history = body.chat.history;
+    const authoritativeHistory = authoritativeChat.history;
+    if (!history || typeof history !== "object" || !authoritativeHistory || typeof authoritativeHistory !== "object") {
+      return body;
+    }
+
+    const messages = history.messages;
+    const authoritativeMessages = authoritativeHistory.messages;
+    if (!messages || typeof messages !== "object" || !authoritativeMessages || typeof authoritativeMessages !== "object") {
+      return body;
+    }
+
+    const mergedBody = structuredClone(body);
+    const mergedHistory = mergedBody.chat.history || {};
+    const mergedMessages = mergedHistory.messages || {};
+    const idsToMerge = new Set();
+
+    for (const [messageId, message] of Object.entries(authoritativeMessages)) {
+      if (!message || typeof message !== "object") {
+        continue;
+      }
+      const resultId = String(message.result_message_id || "").trim();
+      if (resultId || isTerminalStatus(message.job_status) || message.actions_disabled) {
+        idsToMerge.add(messageId);
+        if (resultId && authoritativeMessages[resultId]) {
+          idsToMerge.add(resultId);
+        }
+      }
+      if (String(message.tool_job_result_for || "").trim()) {
+        idsToMerge.add(messageId);
+      }
+    }
+
+    if (!idsToMerge.size) {
+      return body;
+    }
+
+    for (const messageId of idsToMerge) {
+      const authoritativeMessage = authoritativeMessages[messageId];
+      if (!authoritativeMessage || typeof authoritativeMessage !== "object") {
+        continue;
+      }
+      mergedMessages[messageId] = {
+        ...(mergedMessages[messageId] || {}),
+        ...authoritativeMessage,
+      };
+      upsertMessageArray(mergedBody.chat.messages, authoritativeMessage);
+    }
+
+    if (authoritativeHistory.currentId && !mergedHistory.currentId) {
+      mergedHistory.currentId = authoritativeHistory.currentId;
+    }
+
+    mergedBody.chat.history = mergedHistory;
+    return mergedBody;
   };
 
   const reconcileChat = async () => {
@@ -315,12 +445,48 @@
     window[`${RUNTIME_MARKER}-fetch`] = true;
 
     const originalFetch = window.fetch.bind(window);
-    window.fetch = async (...args) => {
-      const response = await originalFetch(...args);
-      const pathname = actionPathFromArgs(args[0]);
+    window.fetch = async (input, init) => {
+      const pathname = actionPathFromArgs(input);
+      const method = requestMethodFromArgs(input, init);
+      let nextInput = input;
+      let nextInit = init;
+
+      if (method === "POST") {
+        const persistChatId = chatIdFromPersistPath(pathname);
+        if (persistChatId && terminalSnapshotByChat.has(persistChatId)) {
+          const rawBody =
+            typeof init?.body === "string"
+              ? init.body
+              : typeof Request !== "undefined" && input instanceof Request
+                ? null
+                : null;
+          const parsedBody = rawBody ? safeJsonParse(rawBody) : null;
+          const authoritativeChat = terminalSnapshotByChat.get(persistChatId) || null;
+          const mergedBody = parsedBody ? mergePersistedChatPayload(parsedBody, authoritativeChat) : null;
+          if (mergedBody) {
+            nextInit = {
+              ...(init || {}),
+              body: JSON.stringify(mergedBody),
+            };
+          }
+        }
+      }
+
+      const response = await originalFetch(nextInput, nextInit);
       if (ACTION_PATHS.has(pathname)) {
         pollingEnabled = true;
         primeReconcile([0, 500, 1500, 3000]);
+        const actionPayload = await safeResponseJson(response);
+        if (actionPayload?.result_message_id || isTerminalStatus(actionPayload?.job_status)) {
+          const activeChatId = currentChatId();
+          if (activeChatId) {
+            const latestChatPayload = await fetchChatPayload(activeChatId, originalFetch);
+            const latestChat = latestChatPayload?.chat;
+            if (latestChat?.history?.messages) {
+              terminalSnapshotByChat.set(activeChatId, latestChat);
+            }
+          }
+        }
       }
       return response;
     };

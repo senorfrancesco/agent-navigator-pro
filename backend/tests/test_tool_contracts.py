@@ -136,6 +136,7 @@ def test_completed_tool_result_matches_mvp_contract_shape():
         tool_name="ask_document",
         assistant_message="Ответ с цитатами",
         structured_result={"answer": "Штраф указан в разделе 4"},
+        embeds=[{"kind": "status", "title": "Готово"}],
         execution_metadata=ExecutionMetadata(
             requested_tool="ask_document",
             routing_mode="explicit",
@@ -146,6 +147,7 @@ def test_completed_tool_result_matches_mvp_contract_shape():
     dumped = result.model_dump()
     assert dumped["status"] == "completed"
     assert dumped["tool_name"] == "ask_document"
+    assert dumped["embeds"] == [{"kind": "status", "title": "Готово"}]
     assert dumped["execution_metadata"]["execution_mode"] == "sync"
 
 
@@ -155,6 +157,9 @@ def test_accepted_tool_result_matches_job_contract_shape():
         job_id="job-123",
         status_url="/tools/jobs/job-123",
         submitted_at="2026-04-07T12:00:00Z",
+        job_status="queued",
+        status_text="Задача поставлена в очередь.",
+        poll_after_ms=1500,
         execution_metadata=ExecutionMetadata(
             requested_tool="compare_documents_deep",
             routing_mode="explicit",
@@ -169,6 +174,9 @@ def test_accepted_tool_result_matches_job_contract_shape():
 
     assert result.model_dump()["status"] == "accepted"
     assert result.execution_metadata.execution_mode == "async"
+    assert result.model_dump()["job_status"] == "queued"
+    assert result.model_dump()["status_text"] == "Задача поставлена в очередь."
+    assert result.model_dump()["poll_after_ms"] == 1500
     assert status.model_dump()["status"] == "queued"
 
 
@@ -177,6 +185,24 @@ def test_tool_job_status_accepts_cancelling_state():
         job_id="job-456",
         status="cancelling",
         submitted_at="2026-04-08T09:00:00Z",
+        status_text="Задача готовится к отмене.",
+        status_history=[
+            {
+                "key": "stage:prepare",
+                "title": "Подготовка",
+                "content": "Собираем контекст.",
+            }
+        ],
+        progress={"phase": "prepare", "fraction": 0.25},
+        embeds=[{"kind": "info", "title": "Контекст"}],
+        artifacts=[{"artifact_id": "artifact-1", "kind": "report", "title": "Черновик"}],
+        sources=[{"source_id": "src-1", "title": "Requirements.pdf"}],
     )
 
     assert status.model_dump()["status"] == "cancelling"
+    assert status.model_dump()["status_text"] == "Задача готовится к отмене."
+    assert status.model_dump()["status_history"][0]["key"] == "stage:prepare"
+    assert status.model_dump()["progress"]["fraction"] == 0.25
+    assert status.model_dump()["embeds"][0]["kind"] == "info"
+    assert status.model_dump()["artifacts"][0]["artifact_id"] == "artifact-1"
+    assert status.model_dump()["sources"][0]["source_id"] == "src-1"

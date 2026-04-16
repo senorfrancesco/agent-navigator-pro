@@ -13,8 +13,9 @@ from orchestrator import agent_api
 
 
 class _FakeRequest:
-    def __init__(self, payload: Dict[str, Any]):
+    def __init__(self, payload: Dict[str, Any], headers: Dict[str, str] | None = None):
         self._payload = payload
+        self.headers = headers or {}
 
     async def json(self) -> Dict[str, Any]:
         return self._payload
@@ -211,6 +212,138 @@ async def test_openai_chat_completions_non_streaming_returns_json(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_openai_chat_completions_native_tools_passthrough_non_streaming(monkeypatch):
+    captured: Dict[str, Any] = {}
+
+    async def fake_execute(request: Dict[str, Any], *, deps=None):
+        raise AssertionError("execute_orchestration не должен вызываться для native tool passthrough")
+
+    async def fake_request_raw_openai_infer(*, target_model: str, payload: Dict[str, Any]):
+        captured["model_id"] = target_model
+        captured["payload"] = payload
+        return {
+            "id": "chatcmpl-native-tools",
+            "object": "chat.completion",
+            "created": 123,
+            "model": target_model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": "call_123",
+                                "type": "function",
+                                "function": {
+                                    "name": "equipment_deep_tool",
+                                    "arguments": "{\"query\":\"test\"}",
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    monkeypatch.setattr(agent_api, "execute_orchestration", fake_execute)
+    monkeypatch.setattr(agent_api, "get_all_models", lambda: {"qwen-14b-llm": {"kind": "llm"}})
+    monkeypatch.setattr(
+        agent_api,
+        "resolve_model_selection",
+        lambda role_key: type("Selection", (), {"resolved_model_id": "qwen-14b-llm"})(),
+    )
+    monkeypatch.setattr(agent_api, "_request_raw_openai_infer", fake_request_raw_openai_infer)
+    agent_api._active_workflows.clear()
+
+    response = await agent_api.openai_completions(
+        _FakeRequest(
+            {
+                "model": "llm-tools-platform",
+                "messages": [{"role": "user", "content": "Сделай глубокий анализ"}],
+                "stream": False,
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "equipment_deep_tool",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
+                "tool_choice": {"type": "function", "function": {"name": "equipment_deep_tool"}},
+            }
+        )
+    )
+
+    assert captured["model_id"] == "qwen-14b-llm"
+    assert captured["payload"]["model"] == "qwen-14b-llm"
+    assert captured["payload"]["tools"][0]["function"]["name"] == "equipment_deep_tool"
+    assert response["model"] == "llm-tools-platform"
+    assert response["choices"][0]["finish_reason"] == "tool_calls"
+
+
+@pytest.mark.asyncio
+async def test_openai_chat_completions_native_tools_passthrough_streaming(monkeypatch):
+    captured: Dict[str, Any] = {}
+
+    async def fake_execute(request: Dict[str, Any], *, deps=None):
+        raise AssertionError("execute_orchestration не должен вызываться для native tool passthrough")
+
+    async def fake_open_stream(*, target_model: str, payload: Dict[str, Any]):
+        captured["model_id"] = target_model
+        captured["payload"] = payload
+        return object()
+
+    async def fake_stream(_response):
+        yield (
+            "data: "
+            + "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_123\",\"type\":\"function\",\"function\":{\"name\":\"equipment_deep_tool\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n"
+        ).encode("utf-8")
+        yield b"data: [DONE]\n\n"
+
+    monkeypatch.setattr(agent_api, "execute_orchestration", fake_execute)
+    monkeypatch.setattr(agent_api, "get_all_models", lambda: {"qwen-14b-llm": {"kind": "llm"}})
+    monkeypatch.setattr(
+        agent_api,
+        "resolve_model_selection",
+        lambda role_key: type("Selection", (), {"resolved_model_id": "qwen-14b-llm"})(),
+    )
+    monkeypatch.setattr(agent_api, "_open_raw_openai_stream", fake_open_stream)
+    monkeypatch.setattr(agent_api, "_proxy_raw_openai_stream", fake_stream)
+    agent_api._active_workflows.clear()
+
+    response = await agent_api.openai_completions(
+        _FakeRequest(
+            {
+                "model": "llm-tools-platform",
+                "messages": [{"role": "user", "content": "Сделай глубокий анализ"}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "equipment_deep_tool",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
+                "tool_choice": {"type": "function", "function": {"name": "equipment_deep_tool"}},
+            }
+        )
+    )
+    body = await _read_streaming_body(response)
+
+    assert isinstance(response, StreamingResponse)
+    assert captured["model_id"] == "qwen-14b-llm"
+    assert captured["payload"]["model"] == "qwen-14b-llm"
+    assert "\"tool_calls\"" in body
+    assert "equipment_deep_tool" in body
+    assert "data: [DONE]" in body
+
+
+@pytest.mark.asyncio
 async def test_openai_chat_completions_loads_attachment_text_into_session_docs(monkeypatch):
     captured: Dict[str, Any] = {}
 
@@ -266,6 +399,81 @@ async def test_openai_chat_completions_loads_attachment_text_into_session_docs(m
 
     assert response["choices"][0]["message"]["content"] == "summary"
     assert captured["request"]["has_session_docs"] is True
+    assert captured["request"]["session_docs"]["contract.pdf"]["text"] == "Штраф составляет 10 процентов."
+
+
+@pytest.mark.asyncio
+async def test_openai_chat_completions_prefers_forwarded_openwebui_files_for_session_docs(monkeypatch):
+    captured: Dict[str, Any] = {}
+    discover_calls = {"count": 0}
+    load_calls = {"count": 0}
+
+    async def fake_execute(request: Dict[str, Any], *, deps=None):
+        captured["request"] = request
+        return {
+            "assistant_message": "summary",
+            "trace_id": "trace-forwarded",
+            "state_ref": "trace:trace-forwarded",
+            "pending_action_id": None,
+            "ui_effects": {"clear_pending_action": True},
+            "sources": [],
+            "effective_settings": request["effective_settings"],
+            "rag_scope": "session_rag",
+            "knowledge_collection_id": None,
+            "source_scope_summary": "session",
+        }
+
+    def fake_discover_openai_attachments(user_query: str):
+        discover_calls["count"] += 1
+        return []
+
+    async def fake_load_session_docs(_attachments):
+        load_calls["count"] += 1
+        return {}
+
+    monkeypatch.setattr(agent_api, "execute_orchestration", fake_execute)
+    monkeypatch.setattr(agent_api, "_discover_openai_attachments", fake_discover_openai_attachments)
+    monkeypatch.setattr(agent_api, "_load_openai_session_docs", fake_load_session_docs, raising=False)
+    agent_api._active_workflows.clear()
+
+    response = await agent_api.openai_completions(
+        _FakeRequest(
+            {
+                "model": "llm-tools-platform",
+                "thread_id": "chat-123",
+                "openwebui_session_rag_handoff": {"mode": "preferred", "enabled": True},
+                "files": [
+                    {
+                        "id": "file-contract-1",
+                        "name": "contract.pdf",
+                        "type": "text",
+                        "content": "Штраф составляет 10 процентов.",
+                        "file": {
+                            "meta": {"content_type": "application/pdf"},
+                            "data": {
+                                "content": "Штраф составляет 10 процентов.",
+                                "metadata": {"source": "openwebui-upload"},
+                            },
+                        },
+                    }
+                ],
+                "messages": [{"role": "user", "content": "Сделай сводку по прикреплённому документу"}],
+                "stream": False,
+            }
+        )
+    )
+
+    assert response["choices"][0]["message"]["content"] == "summary"
+    assert discover_calls["count"] == 0
+    assert load_calls["count"] == 0
+    assert captured["request"]["thread_id"] == "chat-123"
+    assert captured["request"]["rag_scope"] == "session_rag"
+    assert captured["request"]["document_bindings"][0]["thread_id"] == "chat-123"
+    assert captured["request"]["document_bindings"][0]["document_id"] == "file-contract-1"
+    assert captured["request"]["has_session_docs"] is True
+    assert captured["request"]["active_doc_ids"] == ["file-contract-1"]
+    assert captured["request"]["attachments_meta"][0]["name"] == "contract.pdf"
+    assert captured["request"]["session_docs"]["contract.pdf"]["document_id"] == "file-contract-1"
     assert captured["request"]["session_docs"]["contract.pdf"]["text"] == "Штраф составляет 10 процентов."
 
 
