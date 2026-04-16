@@ -3,7 +3,11 @@ from __future__ import annotations
 import asyncio
 import copy
 import os
+import re
+from dataclasses import is_dataclass, replace
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional
+from urllib.parse import quote
 
 from orchestrator.tool_catalog import ToolDefinition, get_tool_definition, is_known_tool
 from orchestrator.tool_bindings import build_result_available_actions
@@ -13,6 +17,15 @@ from orchestrator.tool_schemas import AcceptedToolResult, ExecutionMetadata, Too
 
 _ACTIVE_TOOL_JOB_TASKS: Dict[str, asyncio.Task[Any]] = {}
 _EXPLICIT_TOOL_JOB_START_DELAY_ENV = "OPENWEBUI_EXPLICIT_TOOL_JOB_START_DELAY_S"
+_GENERIC_DEEP_JOB_ENABLED_ENV = "OPENWEBUI_GENERIC_DEEP_JOB_ENABLED"
+_GENERIC_DEEP_JOB_ENABLED_TOOLS_ENV = "OPENWEBUI_GENERIC_DEEP_JOB_ENABLED_TOOLS"
+_GENERIC_DEEP_JOB_POLL_AFTER_MS_ENV = "OPENWEBUI_GENERIC_DEEP_JOB_POLL_AFTER_MS"
+_REPORT_FILENAME_RE = re.compile(r"\*\*Отчет (?:сохранен|уже сохранен):\*\*\s*`([^`]+)`")
+_DEFAULT_GENERIC_DEEP_JOB_TOOLS = {
+    "analyze_document_deep",
+    "analyze_equipment_deep",
+    "compare_documents_deep",
+}
 
 
 def _resolve_document_context_count(request_payload: Dict[str, Any]) -> int:
@@ -125,6 +138,176 @@ def _resolve_async_terminal_error_summary(response: Dict[str, Any], *, fallback:
     return fallback
 
 
+def _extract_saved_report_filename(report_text: str) -> str | None:
+    match = _REPORT_FILENAME_RE.search(str(report_text or ""))
+    if not match:
+        return None
+    filename = os.path.basename(match.group(1).strip())
+    return filename or None
+
+
+def _normalize_async_result_artifacts(response: Dict[str, Any]) -> Dict[str, Any]:
+    normalized_response = copy.deepcopy(response or {})
+    artifacts = list(normalized_response.get("artifacts") or [])
+    generated_report = normalized_response.get("generated_report")
+
+    if isinstance(generated_report, str):
+        report_filename = _extract_saved_report_filename(generated_report)
+        if report_filename and not any(
+            str(artifact.get("artifact_id") or "").strip() == report_filename
+            for artifact in artifacts
+            if isinstance(artifact, dict)
+        ):
+            report_format = Path(report_filename).suffix.lower().lstrip(".")
+            artifacts.append(
+                {
+                    "artifact_id": report_filename,
+                    "artifact_type": "report",
+                    "url": f"/tool-server/tool-reports/{quote(report_filename, safe='')}",
+                    "title": "Скачать отчёт",
+                    "metadata": {
+                        "filename": report_filename,
+                        "format": report_format or None,
+                        "download_label": "Скачать отчёт",
+                    },
+                }
+            )
+
+    if artifacts:
+        normalized_response["artifacts"] = artifacts
+
+    return normalized_response
+
+
+def _generic_deep_job_enabled(tool_name: str) -> bool:
+    raw_enabled = str(os.getenv(_GENERIC_DEEP_JOB_ENABLED_ENV, "0")).strip().lower()
+    if raw_enabled in {"", "0", "false", "no", "off"}:
+        return False
+    allowlist_raw = str(os.getenv(_GENERIC_DEEP_JOB_ENABLED_TOOLS_ENV, "")).strip()
+    if not allowlist_raw:
+        return tool_name in _DEFAULT_GENERIC_DEEP_JOB_TOOLS
+    allowlist = {
+        item.strip()
+        for item in allowlist_raw.split(",")
+        if item.strip()
+    }
+    return tool_name in allowlist
+
+
+def _resolve_generic_deep_job_poll_after_ms() -> int:
+    raw_value = str(os.getenv(_GENERIC_DEEP_JOB_POLL_AFTER_MS_ENV, "1500")).strip()
+    try:
+        return max(250, int(raw_value))
+    except ValueError:
+        return 1500
+
+
+def _resolve_status_text(job: ToolJobRecord) -> Optional[str]:
+    payload = job.status_payload or {}
+    status_text = str(payload.get("status_text") or "").strip()
+    if status_text:
+        return status_text
+    defaults = {
+        "queued": "Задача поставлена в очередь.",
+        "running": "deep-job выполняется.",
+        "cancelling": "deep-job готовится к отмене.",
+        "completed": "deep-job завершён.",
+        "failed": "deep-job завершён со статусом failed.",
+        "cancelled": "deep-job отменён.",
+    }
+    return defaults.get(str(job.status))
+
+
+class _ToolJobProgressReporter:
+    def __init__(self, *, job_id: str):
+        self.job_id = job_id
+        self._store = get_tool_job_store()
+        self._entries_by_key: Dict[str, Dict[str, Any]] = {}
+        self._entry_order: list[str] = []
+
+    def _status_history(self) -> list[Dict[str, Any]]:
+        return [dict(self._entries_by_key[key]) for key in self._entry_order if key in self._entries_by_key]
+
+    def _progress_payload(self) -> Optional[Dict[str, Any]]:
+        if not self._entry_order:
+            return None
+        latest = self._entries_by_key.get(self._entry_order[-1]) or {}
+        phase = str(latest.get("key") or "").strip()
+        if not phase:
+            return None
+        progress = {"phase": phase}
+        title = str(latest.get("title") or "").strip()
+        content = str(latest.get("content") or "").strip()
+        if title:
+            progress["title"] = title
+        if content:
+            progress["content"] = content
+        return progress
+
+    async def update_progress_box(self, *, key: str, title: str, content: str) -> None:
+        stage_key = str(key or title or "progress").strip() or "progress"
+        if stage_key not in self._entry_order:
+            self._entry_order.append(stage_key)
+        self._entries_by_key[stage_key] = {
+            "key": stage_key,
+            "title": str(title or stage_key).strip(),
+            "content": str(content or title or "").strip(),
+            "updated_at": asyncio.get_running_loop().time(),
+        }
+        self._store.update_job_status(
+            self.job_id,
+            current_stage=stage_key,
+            status_text=str(content or title or "deep-job выполняется.").strip(),
+            progress=self._progress_payload(),
+            status_history=self._status_history(),
+        )
+
+    async def clear_progress_box(self, *, key: str) -> None:
+        stage_key = str(key or "").strip()
+        if not stage_key or stage_key not in self._entries_by_key:
+            return
+        entry = dict(self._entries_by_key[stage_key])
+        entry["cleared_at"] = asyncio.get_running_loop().time()
+        self._entries_by_key[stage_key] = entry
+        self._store.update_job_status(
+            self.job_id,
+            current_stage=stage_key,
+            status_text=str(entry.get("content") or entry.get("title") or "Шаг завершён.").strip(),
+            progress=self._progress_payload(),
+            status_history=self._status_history(),
+        )
+
+    def is_cancelled(self) -> bool:
+        job = self._store.get(self.job_id)
+        return bool(job is not None and job.status in {"cancelling", "cancelled"})
+
+    def finalize_completed(self, response: Dict[str, Any]) -> None:
+        self._store.update_job_status(
+            self.job_id,
+            status_text="deep-job завершён.",
+            progress=self._progress_payload(),
+            status_history=self._status_history(),
+            embeds=list(response.get("embeds") or []),
+            sources=list(response.get("sources") or []),
+            artifacts=list(response.get("artifacts") or []),
+            result_preview=str(response.get("assistant_message") or "").strip()[:280] or None,
+        )
+
+
+def _attach_job_reporter(deps: Any, *, job: ToolJobRecord, reporter: _ToolJobProgressReporter) -> Any:
+    tool_name = str(job.tool_name or "").strip()
+    if not _generic_deep_job_enabled(tool_name):
+        return deps
+    if not is_dataclass(deps):
+        return deps
+    return replace(
+        deps,
+        update_progress_box=reporter.update_progress_box,
+        clear_progress_box=reporter.clear_progress_box,
+        is_cancelled=reporter.is_cancelled,
+    )
+
+
 def build_accepted_tool_job_response(job: ToolJobRecord, request_payload: Dict[str, Any]) -> Dict[str, Any]:
     execution_metadata = job.execution_metadata or _build_execution_metadata_payload(request_payload)
     tool_name = str(request_payload.get("requested_tool") or request_payload.get("tool_name") or "")
@@ -133,6 +316,9 @@ def build_accepted_tool_job_response(job: ToolJobRecord, request_payload: Dict[s
         job_id=job.job_id,
         status_url=job.status_url,
         submitted_at=job.submitted_at,
+        job_status=str(job.status),
+        status_text=_resolve_status_text(job),
+        poll_after_ms=_resolve_generic_deep_job_poll_after_ms() if _generic_deep_job_enabled(tool_name) else None,
         result_preview=job.result_preview,
         available_actions=build_result_available_actions(tool_name, status_url=job.status_url),
         execution_metadata=ExecutionMetadata(**execution_metadata),
@@ -141,6 +327,7 @@ def build_accepted_tool_job_response(job: ToolJobRecord, request_payload: Dict[s
 
 
 def build_tool_job_status_response(job: ToolJobRecord) -> Dict[str, Any]:
+    status_payload = dict(job.status_payload or {})
     payload = ToolJobStatus(
         job_id=job.job_id,
         status=str(job.status),
@@ -148,15 +335,20 @@ def build_tool_job_status_response(job: ToolJobRecord) -> Dict[str, Any]:
         submitted_at=job.submitted_at,
         started_at=job.started_at,
         completed_at=job.completed_at,
-        result_ref=job.result_ref if job.status == "completed" else None,
+        result_ref=job.result_ref if job.status in {"completed", "failed", "cancelled"} and (job.result_payload or job.response) is not None else None,
         error_summary=job.error_summary,
+        status_text=str(status_payload.get("status_text") or _resolve_status_text(job) or "").strip() or None,
+        status_history=list(status_payload.get("status_history") or []),
+        progress=status_payload.get("progress"),
+        artifacts=list(status_payload.get("artifacts") or []),
+        sources=list(status_payload.get("sources") or []),
+        embeds=list(status_payload.get("embeds") or []),
+        result_preview=str(status_payload.get("result_preview") or job.result_preview or "").strip() or None,
     ).model_dump()
     if job.run_id:
         payload["run_id"] = job.run_id
     if job.state_ref:
         payload["state_ref"] = job.state_ref
-    if job.result_preview:
-        payload["result_preview"] = job.result_preview
     return payload
 
 
@@ -164,8 +356,9 @@ def get_tool_job_result(job_id: str) -> Dict[str, Any]:
     job = get_tool_job_store().get(job_id)
     if job is None:
         raise KeyError(job_id)
-    if job.status == "completed" and job.response is not None:
-        return copy.deepcopy(job.response)
+    result_payload = job.result_payload or job.response
+    if job.status in {"completed", "failed", "cancelled"} and result_payload is not None:
+        return copy.deepcopy(result_payload)
     if job.status in {"failed", "cancelled"}:
         raise RuntimeError(f"job-terminal-without-result:{job_id}:{job.status}")
     raise RuntimeError(f"job-not-ready:{job_id}")
@@ -251,6 +444,8 @@ def submit_async_tool_job(
         request_payload=payload_copy,
         execution_metadata=execution_metadata,
     )
+    reporter = _ToolJobProgressReporter(job_id=job.job_id)
+    job_deps = _attach_job_reporter(deps, job=job, reporter=reporter)
     payload_copy.setdefault("idempotency_key", f"tool-job:{job.job_id}")
 
     async def _runner() -> None:
@@ -258,7 +453,8 @@ def submit_async_tool_job(
             if start_delay_s > 0:
                 await asyncio.sleep(start_delay_s)
             store.mark_running(job.job_id)
-            response = await execute_fn(payload_copy, deps=deps)
+            response = await execute_fn(payload_copy, deps=job_deps)
+            response = _normalize_async_result_artifacts(response)
         except asyncio.CancelledError:
             current_job = store.get(job.job_id)
             if current_job is not None and current_job.status in {"completed", "failed", "cancelled"}:
@@ -291,6 +487,8 @@ def submit_async_tool_job(
                 error_summary=_resolve_async_terminal_error_summary(response, fallback="cancelled-by-request"),
             )
             return
+        if _generic_deep_job_enabled(str(job.tool_name or "")):
+            reporter.finalize_completed(response)
         store.finish_completed(job.job_id, response)
 
     task = asyncio.create_task(_runner(), name=f"tool-job:{job.job_id}")

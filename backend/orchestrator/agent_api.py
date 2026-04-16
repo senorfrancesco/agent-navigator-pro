@@ -183,6 +183,8 @@ class GenerationOverrides(BaseModel):
 
 class OrchestrationRequest(BaseModel):
     message: str
+    chat_id: Optional[str] = None
+    message_id: Optional[str] = None
     run_id: Optional[str] = None
     state_ref: Optional[str] = None
     state_version: Optional[int] = None
@@ -616,6 +618,7 @@ def _build_api_execution_dependencies(request: OrchestrationRequest, effective_s
     session_docs = request.session_docs or {}
     document_bindings = list(request.document_bindings or [])
     retrieval_embed_fn: Optional[Any] = None
+    retrieval_embedder_model_id: Optional[str] = None
     model_execution_events: List[Dict[str, Any]] = []
 
     def _build_document_binding_doc_list() -> List[Dict[str, Any]]:
@@ -700,22 +703,66 @@ def _build_api_execution_dependencies(request: OrchestrationRequest, effective_s
     async def _noop_async(*args: Any, **kwargs: Any) -> None:
         return None
 
+    def _resolve_retrieval_selection(model_id: Optional[str] = None) -> Any:
+        if model_id:
+            return resolve_execution_plan(requested_model_id=str(model_id))
+        retrieval_resolution = effective_settings.get("resolved_retrieval_embedder_resolution")
+        if retrieval_resolution is not None and getattr(retrieval_resolution, "resolved_model_id", None):
+            return retrieval_resolution
+        if isinstance(retrieval_resolution, dict):
+            resolved_model_id = str(retrieval_resolution.get("resolved_model_id") or "").strip()
+            if resolved_model_id:
+                return resolve_execution_plan(requested_model_id=resolved_model_id)
+        effective_model_id = str(effective_settings.get("resolved_retrieval_embedder_model_id") or "").strip()
+        if effective_model_id:
+            return resolve_execution_plan(requested_model_id=effective_model_id)
+        return resolve_model_selection("legal.embedder")
+
     def _get_retrieval_embed_fn() -> Any:
-        nonlocal retrieval_embed_fn
+        nonlocal retrieval_embed_fn, retrieval_embedder_model_id
         if retrieval_embed_fn is not None:
             return retrieval_embed_fn
-        retrieval_resolution = effective_settings.get("resolved_retrieval_embedder_resolution")
-        if retrieval_resolution is None and effective_settings.get("resolved_retrieval_embedder_model_id"):
-            retrieval_resolution = resolve_execution_plan(
-                requested_model_id=str(effective_settings.get("resolved_retrieval_embedder_model_id"))
+        retrieval_selection = _resolve_retrieval_selection()
+        primary_model_id = str(getattr(retrieval_selection, "resolved_model_id", "") or "").strip()
+        fallback_model_id = str(getattr(retrieval_selection, "fallback_model_id", "") or "").strip()
+        candidate_model_ids: List[str] = []
+
+        def _add_candidate(model_id: Optional[str]) -> None:
+            candidate = str(model_id or "").strip()
+            if candidate and candidate not in candidate_model_ids:
+                candidate_model_ids.append(candidate)
+
+        _add_candidate(primary_model_id)
+        if fallback_model_id and fallback_model_id != primary_model_id:
+            _add_candidate(fallback_model_id)
+        _add_candidate(os.getenv("LEGAL_EMBEDDER_MODEL"))
+        _add_candidate("labse-embedding")
+
+        for candidate_model_id in candidate_model_ids:
+            candidate_selection = (
+                retrieval_selection
+                if candidate_model_id == primary_model_id
+                else _resolve_retrieval_selection(candidate_model_id)
             )
-        if retrieval_resolution is None:
-            retrieval_resolution = resolve_model_selection("legal.embedder")
-        retrieval_embed_fn = _create_failover_embed_fn(
-            retrieval_resolution,
-            record_model_execution=_record_model_execution,
-        )
-        return retrieval_embed_fn
+            candidate_embed_fn = _create_failover_embed_fn(
+                candidate_selection,
+                record_model_execution=_record_model_execution,
+            )
+            if candidate_embed_fn is None:
+                continue
+            retrieval_embed_fn = candidate_embed_fn
+            retrieval_embedder_model_id = candidate_model_id
+            if candidate_model_id != primary_model_id:
+                effective_settings["resolved_retrieval_embedder_model_id"] = candidate_model_id
+                effective_settings["resolved_retrieval_embedder_resolution"] = candidate_selection
+                logger.warning(
+                    "Retrieval embedder fallback activated primary=%s fallback=%s",
+                    primary_model_id or None,
+                    candidate_model_id,
+                )
+            return retrieval_embed_fn
+        retrieval_embed_fn = None
+        return None
 
     async def _ensure_rag_index_for_doc_ids(doc_ids: List[str], *args: Any, **kwargs: Any) -> bool:
         if not request.thread_id or not document_bindings:
@@ -741,8 +788,9 @@ def _build_api_execution_dependencies(request: OrchestrationRequest, effective_s
         binding_store = get_document_binding_store()
         kb_store = get_knowledge_base_store()
         embedding_model_id = str(
-            effective_settings.get("resolved_retrieval_embedder_model_id")
-            or getattr(resolve_model_selection("legal.embedder"), "resolved_model_id", "")
+            retrieval_embedder_model_id
+            or effective_settings.get("resolved_retrieval_embedder_model_id")
+            or getattr(_resolve_retrieval_selection(), "resolved_model_id", "")
             or "labse"
         )
         indexed_any = False
@@ -1041,6 +1089,134 @@ def _discover_openai_attachments(user_query: str) -> List[FileAttachment]:
     return found_files
 
 
+def _normalize_openwebui_forwarded_file_text(item: Dict[str, Any]) -> str:
+    content = item.get("content")
+    if isinstance(content, str) and content.strip():
+        return content.strip()
+    file_payload = item.get("file")
+    if not isinstance(file_payload, dict):
+        return ""
+    file_data = file_payload.get("data")
+    if not isinstance(file_data, dict):
+        return ""
+    embedded_content = file_data.get("content")
+    if isinstance(embedded_content, str):
+        return embedded_content.strip()
+    return ""
+
+
+def _extract_openwebui_forwarded_context(
+    data: Dict[str, Any],
+    request: Optional[Request] = None,
+) -> Dict[str, Any]:
+    raw_files = data.get("files")
+    files = raw_files if isinstance(raw_files, list) else []
+    handoff_state = data.get("openwebui_session_rag_handoff")
+    handoff_payload = handoff_state if isinstance(handoff_state, dict) else {}
+
+    thread_candidates = [
+        data.get("thread_id"),
+        data.get("session_id"),
+        handoff_payload.get("chat_id"),
+    ]
+    if request is not None:
+        headers = getattr(request, "headers", {}) or {}
+        thread_candidates.extend(
+            [
+                headers.get("X-OpenWebUI-Chat-Id"),
+                headers.get("x-openwebui-chat-id"),
+            ]
+        )
+    thread_id = next((str(item).strip() for item in thread_candidates if str(item or "").strip()), None)
+
+    session_docs: Dict[str, Any] = {}
+    attachments_meta: List[Dict[str, Any]] = []
+    active_doc_ids: List[str] = []
+    dedup_tokens: List[str] = []
+
+    for index, raw_item in enumerate(files, start=1):
+        if not isinstance(raw_item, dict):
+            continue
+        item = dict(raw_item)
+        file_payload = item.get("file")
+        file_meta = file_payload.get("meta") if isinstance(file_payload, dict) and isinstance(file_payload.get("meta"), dict) else {}
+        file_data = file_payload.get("data") if isinstance(file_payload, dict) and isinstance(file_payload.get("data"), dict) else {}
+        embedded_metadata = file_data.get("metadata") if isinstance(file_data.get("metadata"), dict) else {}
+
+        display_name = str(
+            item.get("name")
+            or file_meta.get("name")
+            or embedded_metadata.get("name")
+            or f"openwebui-file-{index}"
+        ).strip()
+        document_id = str(
+            item.get("id")
+            or file_meta.get("id")
+            or file_meta.get("file_id")
+            or embedded_metadata.get("file_id")
+            or display_name
+        ).strip()
+        text = _normalize_openwebui_forwarded_file_text(item)
+        storage_path = str(
+            file_meta.get("path")
+            or embedded_metadata.get("path")
+            or embedded_metadata.get("source")
+            or ""
+        ).strip()
+        mime_type = str(
+            item.get("content_type")
+            or file_meta.get("content_type")
+            or embedded_metadata.get("content_type")
+            or item.get("type")
+            or "application/octet-stream"
+        ).strip()
+        size_value = item.get("size")
+        if size_value is None:
+            size_value = file_meta.get("size")
+        if size_value is None:
+            size_value = len(text.encode("utf-8")) if text else 0
+        try:
+            size = int(size_value or 0)
+        except (TypeError, ValueError):
+            size = 0
+
+        attachments_meta.append(
+            {
+                "name": display_name,
+                "path": storage_path,
+                "size": size,
+                "type": mime_type,
+                "document_id": document_id,
+            }
+        )
+        active_doc_ids.append(document_id)
+
+        session_doc_payload: Dict[str, Any] = {
+            "document_id": document_id,
+            "path": storage_path,
+            "text": text,
+        }
+        if thread_id:
+            session_doc_payload["thread_id"] = thread_id
+        if item.get("id") is not None:
+            session_doc_payload["file_id"] = item.get("id")
+        session_docs[display_name] = session_doc_payload
+
+        if text:
+            text_hash = hashlib.md5(text.encode("utf-8")).hexdigest()
+            dedup_tokens.append(f"{document_id}:{text_hash}:{len(text)}")
+        else:
+            dedup_tokens.append(f"{document_id}:{storage_path}:{size}")
+
+    return {
+        "thread_id": thread_id,
+        "session_docs": session_docs,
+        "attachments_meta": attachments_meta,
+        "active_doc_ids": active_doc_ids,
+        "dedup_tokens": dedup_tokens,
+    }
+
+
 async def _load_openai_session_docs(attachments: List[FileAttachment]) -> Dict[str, Any]:
     if not attachments:
         return {}
@@ -1084,23 +1260,39 @@ def _build_openai_compat_request(
     user_query: str,
     attachments: List[FileAttachment],
     session_docs: Optional[Dict[str, Any]] = None,
+    attachments_meta: Optional[List[Dict[str, Any]]] = None,
+    active_doc_ids: Optional[List[str]] = None,
+    thread_id: Optional[str] = None,
 ) -> OrchestrationRequest:
     target_model = str(data.get("model") or "llm-tools-platform")
     system_prompt = _extract_openai_system_prompt(messages)
     history = _normalize_openai_history(messages, latest_user_query=user_query)
-    active_doc_ids = [att.name for att in attachments]
+    resolved_active_doc_ids = [str(item) for item in (active_doc_ids or []) if str(item).strip()]
+    if not resolved_active_doc_ids:
+        resolved_active_doc_ids = [att.name for att in attachments]
+    if not resolved_active_doc_ids:
+        for name, info in (session_docs or {}).items():
+            if not isinstance(info, dict):
+                continue
+            resolved_active_doc_ids.append(str(info.get("document_id") or name))
+    resolved_attachments_meta = attachments_meta if attachments_meta is not None else [att.model_dump() for att in attachments]
 
     request_payload: Dict[str, Any] = {
         "message": user_query,
         "history": history,
-        "attachments_meta": [att.model_dump() for att in attachments],
-        "active_doc_ids": active_doc_ids,
-        "file_count": len(attachments),
-        "has_session_docs": bool(attachments),
+        "attachments_meta": resolved_attachments_meta,
+        "active_doc_ids": resolved_active_doc_ids,
+        "file_count": len(resolved_attachments_meta or resolved_active_doc_ids),
+        "has_session_docs": bool(session_docs or resolved_attachments_meta),
         "session_docs": session_docs or {},
     }
+    if thread_id:
+        request_payload["thread_id"] = thread_id
     if system_prompt:
         request_payload["custom_system_prompt"] = system_prompt
+    if target_model == "llm-tools-platform" and request_payload["has_session_docs"]:
+        request_payload["assistant_mode"] = "specific_tasks"
+        request_payload["rag_scope"] = "session_rag"
 
     if target_model != "llm-tools-platform":
         request_payload.update(
@@ -1115,8 +1307,22 @@ def _build_openai_compat_request(
     return OrchestrationRequest(**request_payload)
 
 
-def _compute_openai_dedup_key(*, target_model: str, user_query: str, attachments: List[FileAttachment]) -> str:
-    files_hash = _compute_files_hash([item.path for item in attachments]) if attachments else "no_files"
+def _compute_openai_dedup_key(
+    *,
+    target_model: str,
+    user_query: str,
+    attachments: List[FileAttachment],
+    forwarded_file_tokens: Optional[List[str]] = None,
+) -> str:
+    if attachments:
+        files_hash = _compute_files_hash([item.path for item in attachments])
+    elif forwarded_file_tokens:
+        digest = hashlib.md5()
+        for token in sorted(str(item) for item in forwarded_file_tokens if str(item).strip()):
+            digest.update(token.encode("utf-8"))
+        files_hash = digest.hexdigest()
+    else:
+        files_hash = "no_files"
     query_hash = hashlib.md5((user_query or "").encode()).hexdigest()[:16]
     return f"{target_model}:{files_hash}:{query_hash}"
 
@@ -1200,6 +1406,27 @@ def _resolve_raw_model_id(data: Dict[str, Any]) -> str:
     available_ids = {item["id"] for item in _list_raw_chat_capable_models()}
     requested_model = str(data.get("model") or "").strip()
     target_model = requested_model or str(resolve_model_selection("llm.default_chat").resolved_model_id or "").strip()
+    if not target_model:
+        raise HTTPException(status_code=503, detail="raw-model-provider-default-missing")
+    if target_model not in available_ids:
+        raise HTTPException(status_code=404, detail=f"unknown-raw-model:{target_model}")
+    return target_model
+
+
+def _should_passthrough_native_tool_request(data: Dict[str, Any]) -> bool:
+    tools = data.get("tools")
+    return isinstance(tools, list) and len(tools) > 0
+
+
+def _resolve_native_tool_passthrough_model_id(data: Dict[str, Any]) -> str:
+    available_ids = {item["id"] for item in _list_raw_chat_capable_models()}
+    requested_model = str(data.get("model") or "").strip()
+
+    if requested_model and requested_model != "llm-tools-platform":
+        target_model = requested_model
+    else:
+        target_model = str(resolve_model_selection("llm.default_chat").resolved_model_id or "").strip()
+
     if not target_model:
         raise HTTPException(status_code=503, detail="raw-model-provider-default-missing")
     if target_model not in available_ids:
@@ -1528,9 +1755,40 @@ async def openai_completions(request: Request):
     stream_mode = bool(data.get("stream", True))
     messages = data.get("messages", [])
     target_model = data.get("model", "llm-tools-platform")
+
+    if _should_passthrough_native_tool_request(data):
+        raw_target_model = _resolve_native_tool_passthrough_model_id(data)
+        payload = _build_raw_openai_payload(data, target_model=raw_target_model)
+
+        if not stream_mode:
+            try:
+                response = await _request_raw_openai_infer(target_model=raw_target_model, payload=payload)
+            except HTTPException as exc:
+                if _is_busy_http_error(exc):
+                    return _build_raw_busy_non_stream_response(target_model=str(target_model), detail=exc.detail)
+                raise
+            return _sanitize_raw_openai_response(response, target_model=str(target_model))
+
+        try:
+            stream_response = await _open_raw_openai_stream(target_model=raw_target_model, payload=payload)
+        except HTTPException as exc:
+            if _is_busy_http_error(exc):
+                return StreamingResponse(
+                    _stream_openai_compat_response(_build_raw_busy_stream_response(detail=exc.detail)),
+                    media_type="text/event-stream",
+                )
+            raise
+        return StreamingResponse(_proxy_raw_openai_stream(stream_response), media_type="text/event-stream")
+
     user_query = _extract_latest_user_query(messages)
-    found_files = _discover_openai_attachments(user_query)
-    dedup_key = _compute_openai_dedup_key(target_model=target_model, user_query=user_query, attachments=found_files)
+    forwarded_context = _extract_openwebui_forwarded_context(data, request)
+    found_files = [] if forwarded_context["session_docs"] else _discover_openai_attachments(user_query)
+    dedup_key = _compute_openai_dedup_key(
+        target_model=target_model,
+        user_query=user_query,
+        attachments=found_files,
+        forwarded_file_tokens=forwarded_context["dedup_tokens"],
+    )
     now_ts = time.time()
     if dedup_key in _active_workflows and now_ts - _active_workflows[dedup_key] < DEDUP_WINDOW_SEC:
         logger.info(
@@ -1556,7 +1814,11 @@ async def openai_completions(request: Request):
         if now_ts - _active_workflows[k] > 600:
             del _active_workflows[k]
 
-    session_docs = await _load_openai_session_docs(found_files)
+    session_docs = (
+        dict(forwarded_context["session_docs"])
+        if forwarded_context["session_docs"]
+        else await _load_openai_session_docs(found_files)
+    )
     if not stream_mode:
         try:
             compat_request = _build_openai_compat_request(
@@ -1565,7 +1827,11 @@ async def openai_completions(request: Request):
                 user_query=user_query,
                 attachments=found_files,
                 session_docs=session_docs,
+                attachments_meta=forwarded_context["attachments_meta"] or None,
+                active_doc_ids=forwarded_context["active_doc_ids"] or None,
+                thread_id=forwarded_context["thread_id"],
             )
+            _materialize_request_document_context(compat_request)
             effective_settings = resolve_effective_settings(_collect_request_control_plane(compat_request))
             if target_model != "llm-tools-platform":
                 effective_settings["resolved_model_id"] = target_model
@@ -1593,7 +1859,11 @@ async def openai_completions(request: Request):
                 user_query=user_query,
                 attachments=found_files,
                 session_docs=session_docs,
+                attachments_meta=forwarded_context["attachments_meta"] or None,
+                active_doc_ids=forwarded_context["active_doc_ids"] or None,
+                thread_id=forwarded_context["thread_id"],
             )
+            _materialize_request_document_context(compat_request)
             effective_settings = resolve_effective_settings(_collect_request_control_plane(compat_request))
             if target_model != "llm-tools-platform":
                 effective_settings["resolved_model_id"] = target_model

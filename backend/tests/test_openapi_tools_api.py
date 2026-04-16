@@ -65,6 +65,7 @@ def test_tool_server_openapi_filters_non_tool_routes(monkeypatch):
     assert "/tools/ask_document" in payload["paths"]
     assert "/tool-jobs/{job_id}" in payload["paths"]
     assert "/tool-jobs/{job_id}/result" in payload["paths"]
+    assert "/tool-jobs/{job_id}/delivery" in payload["paths"]
     assert "/tool-jobs/{job_id}/cancel" in payload["paths"]
     assert "/health" not in payload["paths"]
     assert "/v1/chat/completions" not in payload["paths"]
@@ -171,6 +172,62 @@ def test_async_tool_route_returns_accepted_contract(monkeypatch):
     assert payload["status"] == "accepted"
     assert payload["tool_name"] == "analyze_document_deep"
     assert payload["job_id"] == "job-1"
+
+
+def test_async_tool_route_persists_forwarded_openwebui_context_and_exposes_active_job(monkeypatch):
+    def fake_submit_async_tool_job(*, request_payload, deps, execute_fn, route_prefix):
+        store = agent_api.get_tool_job_store()
+        return store.create_job(
+            tool_name=request_payload["requested_tool"],
+            route_prefix=route_prefix,
+            request_payload=request_payload,
+            execution_metadata={
+                "requested_tool": request_payload["requested_tool"],
+                "routing_mode": request_payload["routing_mode"],
+                "execution_mode": "async",
+            },
+        )
+
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_TOKEN", "tool-secret")
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_ALLOWED_ORIGINS", "http://localhost:3001")
+    monkeypatch.setattr(agent_api, "_build_api_execution_dependencies", lambda request, settings: object())
+    monkeypatch.setattr(agent_api, "submit_async_tool_job", fake_submit_async_tool_job)
+
+    client = TestClient(agent_api.app)
+    response = client.post(
+        "/tool-server/tools/analyze_document_deep",
+        headers={
+            **_auth_headers(),
+            "X-OpenWebUI-Chat-Id": "chat-openwebui-1",
+            "X-OpenWebUI-Message-Id": "message-openwebui-9",
+        },
+        json={
+            "analysis_goal": "Найди риски",
+            "document_refs": [{"document_id": "doc-1"}],
+        },
+    )
+
+    assert response.status_code == 202
+    payload = response.json()
+    job_id = payload["job_id"]
+
+    store = agent_api.get_tool_job_store()
+    job = store.get(job_id)
+    assert job is not None
+    assert job.request_payload["chat_id"] == "chat-openwebui-1"
+    assert job.request_payload["message_id"] == "message-openwebui-9"
+
+    active_response = client.get(
+        "/tool-server/tool-jobs/active/chat/chat-openwebui-1",
+        headers=_auth_headers(),
+    )
+
+    assert active_response.status_code == 200
+    active_payload = active_response.json()
+    assert active_payload["job"] is not None
+    assert active_payload["job"]["job_id"] == job_id
+    assert active_payload["job"]["status"] == "queued"
+    assert active_payload["job"]["result_message_id"] is None
 
 
 def test_prefixed_sync_tool_route_returns_completed_contract(monkeypatch):
@@ -280,6 +337,129 @@ def test_tool_job_cancel_route_returns_terminal_job_status(monkeypatch):
     assert response.status_code == 200
     assert response.json()["job_id"] == job.job_id
     assert response.json()["status"] == "completed"
+
+
+def test_tool_job_delivery_route_records_result_message_id(monkeypatch):
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_TOKEN", "tool-secret")
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_ALLOWED_ORIGINS", "http://localhost:3001")
+
+    store = agent_api.get_tool_job_store()
+    job = store.create_job(
+        tool_name="analyze_document_deep",
+        route_prefix="/tool-server",
+        request_payload={"requested_tool": "analyze_document_deep"},
+        execution_metadata={"execution_mode": "async"},
+    )
+    store.finish_completed(job.job_id, {"assistant_message": "done"})
+
+    client = TestClient(agent_api.app)
+    response = client.post(
+        f"/tool-server/tool-jobs/{job.job_id}/delivery",
+        headers=_auth_headers(),
+        json={"result_message_id": "assistant-result-1"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["job_id"] == job.job_id
+    assert payload["status"] == "completed"
+    assert payload["result_message_id"] == "assistant-result-1"
+
+
+def test_tool_job_delivery_route_is_idempotent(monkeypatch):
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_TOKEN", "tool-secret")
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_ALLOWED_ORIGINS", "http://localhost:3001")
+
+    store = agent_api.get_tool_job_store()
+    job = store.create_job(
+        tool_name="analyze_document_deep",
+        route_prefix="/tool-server",
+        request_payload={"requested_tool": "analyze_document_deep"},
+        execution_metadata={"execution_mode": "async"},
+    )
+    store.finish_completed(job.job_id, {"assistant_message": "done"})
+
+    client = TestClient(agent_api.app)
+    first = client.post(
+        f"/tool-server/tool-jobs/{job.job_id}/delivery",
+        headers=_auth_headers(),
+        json={"result_message_id": "assistant-result-1"},
+    )
+    second = client.post(
+        f"/tool-server/tool-jobs/{job.job_id}/delivery",
+        headers=_auth_headers(),
+        json={"result_message_id": "assistant-result-2"},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["result_message_id"] == "assistant-result-1"
+    assert second.json()["result_message_id"] == "assistant-result-1"
+
+
+def test_completed_tool_route_exposes_report_artifact_with_download_link(monkeypatch):
+    async def fake_execute(orchestration_request, http_request=None):
+        return {
+            "assistant_message": "Готовый отчёт.\n---\n**Отчет сохранен:** `Report_Test_123.pdf`",
+            "trace_id": "trace-tool-report-1",
+            "route": "document_analysis",
+            "source_scope_summary": "session",
+            "sources": [],
+            "ui_effects": {
+                "generated_report": "Готовый отчёт.\n---\n**Отчет сохранен:** `Report_Test_123.pdf`",
+            },
+        }
+
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_TOKEN", "tool-secret")
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_ALLOWED_ORIGINS", "http://localhost:3001")
+    monkeypatch.setattr(agent_api, "execute_orchestration_api", fake_execute)
+
+    client = TestClient(agent_api.app)
+    response = client.post(
+        "/tools/analyze_document_fast",
+        headers=_auth_headers(),
+        json={
+            "analysis_goal": "Выдели риски",
+            "document_refs": [{"document_id": "doc-1"}],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["artifacts"] == [
+        {
+            "artifact_id": "Report_Test_123.pdf",
+            "artifact_type": "report",
+            "url": "/tool-server/tool-reports/Report_Test_123.pdf",
+            "title": "Скачать отчёт",
+            "metadata": {
+                "filename": "Report_Test_123.pdf",
+                "format": "pdf",
+                "download_label": "Скачать отчёт",
+            },
+        }
+    ]
+
+
+def test_tool_report_download_route_serves_pdf(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_TOKEN", "tool-secret")
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_ALLOWED_ORIGINS", "http://localhost:3001")
+    monkeypatch.setenv("UPLOADS_DIR", str(tmp_path))
+
+    report_path = tmp_path / "Report_Test_123.pdf"
+    report_bytes = b"%PDF-1.4 test report"
+    report_path.write_bytes(report_bytes)
+
+    client = TestClient(agent_api.app)
+    response = client.get(
+        "/tool-server/tool-reports/Report_Test_123.pdf",
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.content == report_bytes
+    assert response.headers["content-type"] == "application/pdf"
+    assert "Report_Test_123.pdf" in response.headers["content-disposition"]
 
 
 def test_tool_route_accepts_eval_only_session_file_ref(monkeypatch):

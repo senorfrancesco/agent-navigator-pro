@@ -19,7 +19,7 @@ OPENWEBUI_DEFAULT_MODEL = "raw.qwen-14b-llm"
 OPENWEBUI_DEFAULT_FUNCTION_CALLING = "native"
 OPENWEBUI_DEFAULT_RAG_EMBEDDING_MODEL = "labse-embedding"
 OPENWEBUI_DEFAULT_RAG_EMBEDDING_BASE_URL = "http://host.docker.internal:8090/v1"
-OPENWEBUI_QDRANT_URI = "http://host.docker.internal:6333"
+OPENWEBUI_QDRANT_URI = "http://qdrant:6333"
 OPENWEBUI_QDRANT_COLLECTION_PREFIX = "anp-openwebui"
 BACKEND_QDRANT_COLLECTION_NAME_SOURCE = "backend_env:QDRANT_COLLECTION_NAME"
 
@@ -955,6 +955,33 @@ def _build_openwebui_workspace_tool_code(
                 "status": status,
             }
 
+        def _status_payload_patch(status_payload):
+            if not isinstance(status_payload, dict):
+                return {}
+            patch = {}
+            status_text = str(status_payload.get("status_text") or "").strip()
+            if status_text:
+                patch["status_text"] = status_text
+            status_history = status_payload.get("status_history")
+            if isinstance(status_history, list):
+                patch["status_history"] = status_history
+            progress = status_payload.get("progress")
+            if progress is not None:
+                patch["progress"] = progress
+            embeds = status_payload.get("embeds")
+            if embeds is not None:
+                patch["embeds"] = embeds
+            sources = status_payload.get("sources")
+            if sources is not None:
+                patch["sources"] = sources
+            artifacts = status_payload.get("artifacts")
+            if artifacts is not None:
+                patch["artifacts"] = artifacts
+            result_preview = str(status_payload.get("result_preview") or "").strip()
+            if result_preview:
+                patch["result_preview"] = result_preview
+            return patch
+
         def _content_to_text(content):
             if isinstance(content, str):
                 return content.strip()
@@ -1247,7 +1274,19 @@ def _build_openwebui_workspace_tool_code(
 
             return fallback_content
 
-        def _persist_terminal_message(chat_id, message_id, *, content, job_id, status_url, status, tool_name, result_message_id=None, actions_disabled=True):
+        def _persist_terminal_message(
+            chat_id,
+            message_id,
+            *,
+            content,
+            job_id,
+            status_url,
+            status,
+            tool_name,
+            result_message_id=None,
+            actions_disabled=True,
+            status_payload=None,
+        ):
             existing = _load_message(chat_id, message_id)
             children_ids = list(existing.get("childrenIds") or [])
             persisted_content = (
@@ -1265,6 +1304,7 @@ def _build_openwebui_workspace_tool_code(
                 "job_status": status,
                 "actions_disabled": actions_disabled,
             }
+            patch.update(_status_payload_patch(status_payload))
             if result_message_id:
                 patch["result_message_id"] = result_message_id
             _persist_message(chat_id, message_id, patch)
@@ -1313,6 +1353,19 @@ def _build_openwebui_workspace_tool_code(
             )
             _persist_message(chat_id, result_message_id, result_message)
             return result_message_id
+
+        async def _record_terminal_delivery(status_url, token, result_message_id):
+            if not status_url or not result_message_id:
+                return
+            try:
+                await _request_json(
+                    "POST",
+                    f"{status_url}/delivery",
+                    token,
+                    {"result_message_id": result_message_id},
+                )
+            except Exception:
+                return
 
         async def _emit_custom_event(__event_emitter__, event_type, data):
             if __event_emitter__ is None:
@@ -1426,16 +1479,14 @@ def _build_openwebui_workspace_tool_code(
                     resolved_tool_name = str(entry.get("tool_name") or tool_name or "__TOOL_NAME__")
                     current_message = _load_message(chat_id, target_message_id)
                     if current_message:
-                        _persist_message(
-                            chat_id,
-                            target_message_id,
-                            {
-                                "id": target_message_id,
-                                "tool_job": _build_tool_job(job_id, status_url, job_status, resolved_tool_name),
-                                "job_status": job_status,
-                                "actions_disabled": job_status in {"completed", "failed", "cancelled"},
-                            },
-                        )
+                        current_patch = {
+                            "id": target_message_id,
+                            "tool_job": _build_tool_job(job_id, status_url, job_status, resolved_tool_name),
+                            "job_status": job_status,
+                            "actions_disabled": job_status in {"completed", "failed", "cancelled"},
+                        }
+                        current_patch.update(_status_payload_patch(status_payload))
+                        _persist_message(chat_id, target_message_id, current_patch)
 
                     if job_status in {"accepted", "queued", "running", "cancelling", "unknown"}:
                         current_status = str(entry.get("job_status") or "accepted")
@@ -1466,6 +1517,7 @@ def _build_openwebui_workspace_tool_code(
                             job_id=job_id,
                             result_payload=result_payload,
                         )
+                        await _record_terminal_delivery(status_url, token, result_message_id)
                         entry["result_message_id"] = result_message_id
                         entry["job_status"] = "completed"
                         registry[key] = entry
@@ -1479,6 +1531,7 @@ def _build_openwebui_workspace_tool_code(
                             tool_name=resolved_tool_name,
                             result_message_id=result_message_id,
                             actions_disabled=True,
+                            status_payload=status_payload,
                         )
                         await _reapply_terminal_branch(
                             chat_id,
@@ -1520,22 +1573,28 @@ def _build_openwebui_workspace_tool_code(
                         )
                         return
 
+                    error_summary = str(status_payload.get("error_summary") or "").strip()
                     terminal_content = (
                         f"deep-job завершён со статусом {job_status}."
                         if job_status != "cancelled"
                         else "deep-job отменён."
                     )
-                    error_summary = str(status_payload.get("error_summary") or "").strip()
                     if error_summary:
                         terminal_content = terminal_content + f"\\nerror: {error_summary}"
+                    try:
+                        result_payload = await _request_json("GET", f"{status_url}/result", token)
+                    except Exception:
+                        result_payload = {"assistant_message": terminal_content}
+                    terminal_content = str(result_payload.get("assistant_message") or "").strip() or terminal_content
                     await _wait_for_message_settle(chat_id, target_message_id)
                     result_message_id = _create_result_message(
                         chat_id,
                         target_message_id,
                         model_name=model_name,
                         job_id=job_id,
-                        result_payload={"assistant_message": terminal_content},
+                        result_payload=result_payload,
                     )
+                    await _record_terminal_delivery(status_url, token, result_message_id)
                     entry["result_message_id"] = result_message_id
                     entry["job_status"] = job_status
                     registry[key] = entry
@@ -1549,6 +1608,7 @@ def _build_openwebui_workspace_tool_code(
                         tool_name=resolved_tool_name,
                         result_message_id=result_message_id,
                         actions_disabled=True,
+                        status_payload=status_payload,
                     )
                     await _reapply_terminal_branch(
                         chat_id,
@@ -1702,8 +1762,7 @@ def _build_openwebui_workspace_tool_code(
 
                     return (
                         f"{target_action_label} принят как deep-job.\\n"
-                        f"job_id: {job_id}\\n"
-                        f"status_url: {status_url}"
+                        "Прогресс отображается в блоке `Deep job`."
                     )
 
                 assistant_message = str(response.get("assistant_message") or "").strip()
@@ -1973,8 +2032,7 @@ def _build_equipment_action_code(
                                     "data": {
                                         "description": (
                                             f"`{target_action_label}` принят как deep-job.\\n"
-                                            f"job_id: {job_id}\\n"
-                                            f"status_url: {status_url}"
+                                            "Прогресс отображается в блоке `Deep job`."
                                         ),
                                         "status": "accepted",
                                         "job_id": job_id,
@@ -1986,14 +2044,11 @@ def _build_equipment_action_code(
                         return {
                             "content": (
                                 f"`{target_action_label}` принят как deep-job.\\n"
-                                f"job_id: {job_id}\\n"
-                                f"status_url: {status_url}"
+                                "Прогресс отображается в блоке `Deep job`."
                             ),
                             "job_id": job_id,
-                            "status_url": status_url,
                             "tool_job": {
                                 "job_id": job_id,
-                                "status_url": status_url,
                                 "tool_name": target_tool_name,
                                 "status": "accepted",
                             },
@@ -2251,6 +2306,33 @@ def _build_equipment_action_code(
                 "status": status,
             }
 
+        def _status_payload_patch(status_payload):
+            if not isinstance(status_payload, dict):
+                return {}
+            patch = {}
+            status_text = str(status_payload.get("status_text") or "").strip()
+            if status_text:
+                patch["status_text"] = status_text
+            status_history = status_payload.get("status_history")
+            if isinstance(status_history, list):
+                patch["status_history"] = status_history
+            progress = status_payload.get("progress")
+            if progress is not None:
+                patch["progress"] = progress
+            embeds = status_payload.get("embeds")
+            if embeds is not None:
+                patch["embeds"] = embeds
+            sources = status_payload.get("sources")
+            if sources is not None:
+                patch["sources"] = sources
+            artifacts = status_payload.get("artifacts")
+            if artifacts is not None:
+                patch["artifacts"] = artifacts
+            result_preview = str(status_payload.get("result_preview") or "").strip()
+            if result_preview:
+                patch["result_preview"] = result_preview
+            return patch
+
         def _resolve_terminal_content(existing, *, fallback_content):
             current_content = str((existing or {}).get("content") or "").strip()
             if (
@@ -2269,7 +2351,18 @@ def _build_equipment_action_code(
 
             return fallback_content
 
-        def _persist_job_state(chat_id, message_id, *, content, job_id, status_url, status, result_message_id=None, actions_disabled=False):
+        def _persist_job_state(
+            chat_id,
+            message_id,
+            *,
+            content,
+            job_id,
+            status_url,
+            status,
+            result_message_id=None,
+            actions_disabled=False,
+            status_payload=None,
+        ):
             existing = _load_message(chat_id, message_id)
             children_ids = list(existing.get("childrenIds") or [])
             persisted_content = (
@@ -2287,6 +2380,7 @@ def _build_equipment_action_code(
                 "job_status": status,
                 "actions_disabled": actions_disabled,
             }
+            patch.update(_status_payload_patch(status_payload))
             if result_message_id:
                 patch["result_message_id"] = result_message_id
             _persist_message(chat_id, message_id, patch)
@@ -2335,6 +2429,19 @@ def _build_equipment_action_code(
             )
             _persist_message(chat_id, result_message_id, result_message)
             return result_message_id
+
+        async def _record_terminal_delivery(status_url, token, result_message_id):
+            if not status_url or not result_message_id:
+                return
+            try:
+                await _request_json(
+                    "POST",
+                    f"{status_url}/delivery",
+                    token,
+                    {"result_message_id": result_message_id},
+                )
+            except Exception:
+                return
 
         async def _emit_custom_event(__event_emitter__, event_type, data):
             if __event_emitter__ is None:
@@ -2440,6 +2547,17 @@ def _build_equipment_action_code(
 
                     if job_status in {"accepted", "queued", "running", "cancelling", "unknown"}:
                         current_status = str(entry.get("job_status") or "accepted")
+                        _persist_job_state(
+                            chat_id,
+                            message_id,
+                            content=str((_load_message(chat_id, message_id) or {}).get("content") or ""),
+                            job_id=job_id,
+                            status_url=status_url,
+                            status=job_status,
+                            result_message_id=entry.get("result_message_id"),
+                            actions_disabled=False,
+                            status_payload=status_payload,
+                        )
                         if job_status != current_status:
                             entry["job_status"] = job_status
                             registry[key] = entry
@@ -2467,6 +2585,7 @@ def _build_equipment_action_code(
                             job_id=job_id,
                             result_payload=result_payload,
                         )
+                        await _record_terminal_delivery(status_url, token, result_message_id)
                         entry["result_message_id"] = result_message_id
                         entry["job_status"] = "completed"
                         registry[key] = entry
@@ -2479,6 +2598,7 @@ def _build_equipment_action_code(
                             status="completed",
                             result_message_id=result_message_id,
                             actions_disabled=True,
+                            status_payload=status_payload,
                         )
                         await _reapply_terminal_branch(
                             chat_id,
@@ -2519,22 +2639,28 @@ def _build_equipment_action_code(
                         )
                         return
 
+                    error_summary = str(status_payload.get("error_summary") or "").strip()
                     terminal_content = (
                         f"deep-job завершён со статусом {job_status}."
                         if job_status != "cancelled"
                         else "deep-job отменён."
                     )
-                    error_summary = str(status_payload.get("error_summary") or "").strip()
                     if error_summary:
                         terminal_content = terminal_content + f"\\nerror: {error_summary}"
+                    try:
+                        result_payload = await _request_json("GET", f"{status_url}/result", token)
+                    except Exception:
+                        result_payload = {"assistant_message": terminal_content}
+                    terminal_content = str(result_payload.get("assistant_message") or "").strip() or terminal_content
                     await _wait_for_message_settle(chat_id, message_id)
                     result_message_id = _create_result_message(
                         chat_id,
                         message_id,
                         model_name=model_name,
                         job_id=job_id,
-                        result_payload={"assistant_message": terminal_content},
+                        result_payload=result_payload,
                     )
+                    await _record_terminal_delivery(status_url, token, result_message_id)
                     entry["result_message_id"] = result_message_id
                     entry["job_status"] = job_status
                     registry[key] = entry
@@ -2547,6 +2673,7 @@ def _build_equipment_action_code(
                         status=job_status,
                         result_message_id=result_message_id,
                         actions_disabled=True,
+                        status_payload=status_payload,
                     )
                     await _reapply_terminal_branch(
                         chat_id,
@@ -2658,8 +2785,7 @@ def _build_equipment_action_code(
                         }
                     accepted_content = (
                         f"`{target_action_label}` принят как deep-job.\\n"
-                        f"job_id: {job_id}\\n"
-                        f"status_url: {status_url}"
+                        "Прогресс отображается в блоке `Deep job`."
                     )
                     if __event_emitter__:
                         await __event_emitter__(
@@ -2727,11 +2853,9 @@ def _build_equipment_action_code(
                     return {
                         "content": accepted_content,
                         "job_id": job_id,
-                        "status_url": status_url,
                         "job_status": "accepted",
                         "tool_job": {
                             "job_id": job_id,
-                            "status_url": status_url,
                             "tool_name": target_tool_name,
                             "status": "accepted",
                         },
@@ -2915,10 +3039,12 @@ def _build_tool_job_refresh_action_code(*, container_tool_server_base_url: str) 
             text = str(payload or "").strip()
             return text or default
 
-        async def _request_json(method, url, token):
+        async def _request_json(method, url, token, payload=None):
             def _do_request():
+                data = None if payload is None else json.dumps(payload).encode("utf-8")
                 request = urllib.request.Request(
                     url,
+                    data=data,
                     method=method,
                     headers={
                         "Authorization": f"Bearer {token}",
@@ -2934,12 +3060,12 @@ def _build_tool_job_refresh_action_code(*, container_tool_server_base_url: str) 
                 except urllib.error.HTTPError as exc:
                     raw_payload = exc.read().decode("utf-8", errors="ignore")
                     try:
-                        payload = json.loads(raw_payload) if raw_payload else {}
+                        error_payload = json.loads(raw_payload) if raw_payload else {}
                     except Exception:
-                        payload = {"detail": raw_payload or str(exc)}
+                        error_payload = {"detail": raw_payload or str(exc)}
                     return {
                         "status_code": int(exc.code or 500),
-                        "payload": payload,
+                        "payload": error_payload,
                     }
                 except urllib.error.URLError as exc:
                     return {
@@ -2948,6 +3074,19 @@ def _build_tool_job_refresh_action_code(*, container_tool_server_base_url: str) 
                     }
 
             return await asyncio.to_thread(_do_request)
+
+        async def _record_terminal_delivery(status_url, token, result_message_id):
+            if not status_url or not result_message_id:
+                return
+            try:
+                await _request_json(
+                    "POST",
+                    f"{status_url}/delivery",
+                    token,
+                    {"result_message_id": result_message_id},
+                )
+            except Exception:
+                return
 
         def _load_message(chat_id, message_id):
             if not chat_id or not message_id:
@@ -2980,6 +3119,33 @@ def _build_tool_job_refresh_action_code(*, container_tool_server_base_url: str) 
                 "tool_name": tool_name,
                 "status": status,
             }
+
+        def _status_payload_patch(status_payload):
+            if not isinstance(status_payload, dict):
+                return {}
+            patch = {}
+            status_text = str(status_payload.get("status_text") or "").strip()
+            if status_text:
+                patch["status_text"] = status_text
+            status_history = status_payload.get("status_history")
+            if isinstance(status_history, list):
+                patch["status_history"] = status_history
+            progress = status_payload.get("progress")
+            if progress is not None:
+                patch["progress"] = progress
+            embeds = status_payload.get("embeds")
+            if embeds is not None:
+                patch["embeds"] = embeds
+            sources = status_payload.get("sources")
+            if sources is not None:
+                patch["sources"] = sources
+            artifacts = status_payload.get("artifacts")
+            if artifacts is not None:
+                patch["artifacts"] = artifacts
+            result_preview = str(status_payload.get("result_preview") or "").strip()
+            if result_preview:
+                patch["result_preview"] = result_preview
+            return patch
 
         def _resolve_terminal_content(existing, *, fallback_content):
             current_content = str((existing or {}).get("content") or "").strip()
@@ -3084,26 +3250,56 @@ def _build_tool_job_refresh_action_code(*, container_tool_server_base_url: str) 
                 job_status = str(status_payload.get("status") or context.get("status") or "unknown")
                 tool_job = _build_tool_job(job_id, status_url, job_status, tool_name)
 
-                if job_status != "completed":
+                if job_status not in {"completed", "failed", "cancelled"}:
                     extra = []
                     error_summary = str(status_payload.get("error_summary") or "").strip()
+                    status_text = str(status_payload.get("status_text") or "").strip()
                     result_preview = str(status_payload.get("result_preview") or "").strip()
+                    status_history = list(status_payload.get("status_history") or [])
+                    progress = status_payload.get("progress")
+                    embeds = list(status_payload.get("embeds") or [])
+                    sources = list(status_payload.get("sources") or [])
+                    artifacts = list(status_payload.get("artifacts") or [])
                     if error_summary:
                         extra.append(f"error: {error_summary}")
                     if result_preview:
                         extra.append(f"preview: {result_preview}")
-                    content = (
+                    content = status_text or (
                         f"Текущий статус deep-job: {job_status}\\n"
                         f"job_id: {job_id}\\n"
                         f"status_url: {status_url}"
                     )
                     if extra:
                         content = content + "\\n" + "\\n".join(extra)
+                    if __request__ is not None and context.get("chat_id") and context.get("message_id"):
+                        _persist_message(
+                            context["chat_id"],
+                            context["message_id"],
+                            {
+                                "id": context["message_id"],
+                                "tool_job": tool_job,
+                                "job_status": job_status,
+                                "actions_disabled": False,
+                                "status_text": status_text or None,
+                                "status_history": status_history,
+                                "progress": progress,
+                                "embeds": embeds,
+                                "sources": sources,
+                                "artifacts": artifacts,
+                                "result_preview": result_preview or None,
+                            },
+                        )
                     return {
                         "content": content,
                         "job_id": job_id,
                         "status_url": status_url,
                         "job_status": job_status,
+                        "status_text": status_text or None,
+                        "status_history": status_history,
+                        "progress": progress,
+                        "embeds": embeds,
+                        "sources": sources,
+                        "artifacts": artifacts,
                         "tool_job": tool_job,
                         "result_message_id": context.get("result_message_id"),
                     }
@@ -3136,13 +3332,13 @@ def _build_tool_job_refresh_action_code(*, container_tool_server_base_url: str) 
                 if result_response.get("status_code") == 409 and str(result_payload.get("detail") or "").startswith("job-not-ready:"):
                     return {
                         "content": (
-                            f"Статус deep-job: completed, но итог ещё не опубликован. Повторите обновление.\\n"
+                            f"Статус deep-job: {job_status}, но итог ещё не опубликован. Повторите обновление.\\n"
                             f"job_id: {job_id}\\n"
                             f"status_url: {status_url}"
                         ),
                         "job_id": job_id,
                         "status_url": status_url,
-                        "job_status": "completed",
+                        "job_status": job_status,
                         "tool_job": tool_job,
                     }
                 if result_response.get("status_code", 500) >= 400:
@@ -3155,7 +3351,7 @@ def _build_tool_job_refresh_action_code(*, container_tool_server_base_url: str) 
                         ),
                         "job_id": job_id,
                         "status_url": status_url,
-                        "job_status": "completed",
+                        "job_status": job_status,
                         "tool_job": tool_job,
                     }
 
@@ -3167,10 +3363,15 @@ def _build_tool_job_refresh_action_code(*, container_tool_server_base_url: str) 
                         job_id=job_id,
                         result_payload=result_payload,
                     )
+                    await _record_terminal_delivery(status_url, self.valves.tool_server_token, result_message_id)
                     existing_message = _load_message(context["chat_id"], context["message_id"])
                     persisted_content = _resolve_terminal_content(
                         existing_message,
-                        fallback_content="Завершено — результат добавлен ниже.",
+                        fallback_content=(
+                            "Завершено — результат добавлен ниже."
+                            if job_status == "completed"
+                            else str(result_payload.get("assistant_message") or "").strip()
+                        ),
                     )
                     _persist_message(
                         context["chat_id"],
@@ -3179,10 +3380,11 @@ def _build_tool_job_refresh_action_code(*, container_tool_server_base_url: str) 
                             "id": context["message_id"],
                             "content": persisted_content,
                             "tool_job": tool_job,
-                            "job_status": "completed",
+                            "job_status": job_status,
                             "result_message_id": result_message_id,
                             "actions_disabled": True,
                             "done": True,
+                            **_status_payload_patch(status_payload),
                         },
                     )
                     _persist_message(context["chat_id"], result_message_id, {"id": result_message_id})
@@ -3201,7 +3403,7 @@ def _build_tool_job_refresh_action_code(*, container_tool_server_base_url: str) 
                         "content": "Результат уже добавлен ниже.",
                         "job_id": job_id,
                         "status_url": status_url,
-                        "job_status": "completed",
+                        "job_status": job_status,
                         "tool_job": tool_job,
                         "result_message_id": result_message_id,
                     }
@@ -3210,7 +3412,7 @@ def _build_tool_job_refresh_action_code(*, container_tool_server_base_url: str) 
                     "content": result_payload.get("assistant_message") or json.dumps(result_payload, ensure_ascii=False, indent=2),
                     "job_id": job_id,
                     "status_url": status_url,
-                    "job_status": "completed",
+                    "job_status": job_status,
                     "tool_job": tool_job,
                 }
         """

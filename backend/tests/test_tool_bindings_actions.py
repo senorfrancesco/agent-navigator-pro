@@ -120,10 +120,13 @@ async def test_equipment_deep_action_returns_structured_job_context(monkeypatch)
     response = await action.action(_build_body_with_last_user_message("Проверь насос НП-100"))
 
     assert response["job_id"] == "job-42"
-    assert response["status_url"] == "/tool-server/tool-jobs/job-42"
     assert response["tool_job"]["job_id"] == "job-42"
-    assert response["tool_job"]["status_url"] == "/tool-server/tool-jobs/job-42"
-    assert "job_id: job-42" in response["content"]
+    assert "status_url" not in response
+    assert "status_url" not in response["tool_job"]
+    assert response["content"] == (
+        "`Глубокий анализ оборудования` принят как deep-job.\n"
+        "Прогресс отображается в блоке `Deep job`."
+    )
 
 
 @pytest.mark.asyncio
@@ -374,7 +377,7 @@ async def test_equipment_deep_action_uses_last_user_message_as_equipment_query(m
         "Отдельно выдели обязательные формулировки."
     )
     assert response["job_id"] == "job-last-user-1"
-    assert response["status_url"] == "/tool-server/tool-jobs/job-last-user-1"
+    assert "status_url" not in response
 
 
 @pytest.mark.asyncio
@@ -406,7 +409,10 @@ async def test_equipment_deep_workspace_tool_forwards_exact_prompt_as_equipment_
         "equipment_query": "Сравни только диски и объём памяти для этой конфигурации.",
         "job_mode": "force_async",
     }
-    assert "job_id: job-tool-query-1" in response
+    assert response == (
+        "Глубокий анализ оборудования принят как deep-job.\n"
+        "Прогресс отображается в блоке `Deep job`."
+    )
 
 
 @pytest.mark.asyncio
@@ -642,8 +648,7 @@ async def test_equipment_deep_action_autopolls_completed_job_and_persists_result
     assert accepted_message["tool_job"]["status"] == "completed"
     assert accepted_message["content"] == (
         "`Глубокий анализ оборудования` принят как deep-job.\n"
-        "job_id: job-auto-1\n"
-        "status_url: /tool-server/tool-jobs/job-auto-1"
+        "Прогресс отображается в блоке `Deep job`."
     )
     assert result_message_id
 
@@ -658,13 +663,13 @@ async def test_equipment_deep_action_autopolls_completed_job_and_persists_result
 
     assert ("GET", "http://host.docker.internal:18000/tool-server/tool-jobs/job-auto-1") in calls
     assert ("GET", "http://host.docker.internal:18000/tool-server/tool-jobs/job-auto-1/result") in calls
+    assert ("POST", "http://host.docker.internal:18000/tool-server/tool-jobs/job-auto-1/delivery") in calls
     assert any(
         event["type"] == "replace"
         and event["data"]["content"]
         == (
             "`Глубокий анализ оборудования` принят как deep-job.\n"
-            "job_id: job-auto-1\n"
-            "status_url: /tool-server/tool-jobs/job-auto-1"
+            "Прогресс отображается в блоке `Deep job`."
         )
         for event in emitted_events
     )
@@ -736,6 +741,14 @@ async def test_equipment_deep_workspace_tool_autopolls_completed_job_and_persist
                     "sources": [{"name": "Requirements.pdf"}],
                 }
             )
+        if request.full_url.endswith("/tool-server/tool-jobs/job-tool-auto-1/delivery"):
+            return _FakeHTTPResponse(
+                {
+                    "job_id": "job-tool-auto-1",
+                    "status": "completed",
+                    "result_message_id": "ignored-by-client",
+                }
+            )
         raise AssertionError(request.full_url)
 
     emitted_events = []
@@ -763,7 +776,10 @@ async def test_equipment_deep_workspace_tool_autopolls_completed_job_and_persist
 
     accepted_message = chat_store["chat-deep-tool-1"]["history"]["messages"][accepted_message_id]
     result_message_id = accepted_message.get("result_message_id")
-    assert "job_id: job-tool-auto-1" in response
+    assert response == (
+        "Глубокий анализ оборудования принят как deep-job.\n"
+        "Прогресс отображается в блоке `Deep job`."
+    )
     assert accepted_message["job_status"] == "completed"
     assert accepted_message["actions_disabled"] is True
     assert accepted_message["tool_job"]["status"] == "completed"
@@ -782,6 +798,7 @@ async def test_equipment_deep_workspace_tool_autopolls_completed_job_and_persist
     assert ("POST", "http://host.docker.internal:18000/tool-server/tools/analyze_equipment_deep") in calls
     assert ("GET", "http://host.docker.internal:18000/tool-server/tool-jobs/job-tool-auto-1") in calls
     assert ("GET", "http://host.docker.internal:18000/tool-server/tool-jobs/job-tool-auto-1/result") in calls
+    assert ("POST", "http://host.docker.internal:18000/tool-server/tool-jobs/job-tool-auto-1/delivery") in calls
     assert any(
         event["type"] == "replace" and event["data"]["content"] == "Исходный accepted bubble"
         for event in emitted_events
@@ -876,6 +893,13 @@ async def test_equipment_deep_workspace_tool_failed_job_emits_reload_meta_and_pe
                     "error_summary": "Модель занята предыдущим тяжёлым запросом.",
                 }
             )
+        if request.full_url.endswith("/tool-server/tool-jobs/job-tool-failed-1/result"):
+            return _FakeHTTPResponse(
+                {
+                    "assistant_message": "Backend terminal failed result.\nerror: Модель занята предыдущим тяжёлым запросом.",
+                    "execution_metadata": {"status": "failed", "reason": "Модель занята предыдущим тяжёлым запросом."},
+                }
+            )
         raise AssertionError(request.full_url)
 
     emitted_events = []
@@ -902,7 +926,10 @@ async def test_equipment_deep_workspace_tool_failed_job_emits_reload_meta_and_pe
     await asyncio.wait_for(poller_task, timeout=1)
 
     accepted_message = chat_store["chat-deep-tool-failed-1"]["history"]["messages"][accepted_message_id]
-    assert "job_id: job-tool-failed-1" in response
+    assert response == (
+        "Глубокий анализ оборудования принят как deep-job.\n"
+        "Прогресс отображается в блоке `Deep job`."
+    )
     assert accepted_message["job_status"] == "failed"
     assert accepted_message["actions_disabled"] is True
     assert accepted_message["tool_job"]["status"] == "failed"
@@ -915,11 +942,12 @@ async def test_equipment_deep_workspace_tool_failed_job_emits_reload_meta_and_pe
     assert result_message["parentId"] == accepted_message_id
     assert result_message["tool_job_result_for"] == accepted_message_id
     assert result_message["job_id"] == "job-tool-failed-1"
-    assert "deep-job завершён со статусом failed." in result_message["content"]
+    assert "Backend terminal failed result." in result_message["content"]
     assert "Модель занята предыдущим тяжёлым запросом." in result_message["content"]
 
     assert ("POST", "http://host.docker.internal:18000/tool-server/tools/analyze_equipment_deep") in calls
     assert ("GET", "http://host.docker.internal:18000/tool-server/tool-jobs/job-tool-failed-1") in calls
+    assert ("GET", "http://host.docker.internal:18000/tool-server/tool-jobs/job-tool-failed-1/result") in calls
     assert any(event["type"] == "chat:message:new" for event in emitted_events)
     assert any(
         event["type"] == "chat:message:meta"
@@ -981,6 +1009,13 @@ async def test_equipment_deep_workspace_tool_failed_job_waits_for_openwebui_mess
                     "error_summary": "Модель занята предыдущим тяжёлым запросом.",
                 }
             )
+        if request.full_url.endswith("/tool-server/tool-jobs/job-tool-settle-1/result"):
+            return _FakeHTTPResponse(
+                {
+                    "assistant_message": "Backend terminal failed result.\nerror: Модель занята предыдущим тяжёлым запросом.",
+                    "execution_metadata": {"status": "failed", "reason": "Модель занята предыдущим тяжёлым запросом."},
+                }
+            )
         raise AssertionError(request.full_url)
 
     emitted_events = []
@@ -1023,7 +1058,10 @@ async def test_equipment_deep_workspace_tool_failed_job_waits_for_openwebui_mess
     accepted_message = chat_store["chat-deep-tool-settle-1"]["history"]["messages"][accepted_message_id]
     result_message_id = accepted_message.get("result_message_id")
 
-    assert "job_id: job-tool-settle-1" in response
+    assert response == (
+        "Глубокий анализ оборудования принят как deep-job.\n"
+        "Прогресс отображается в блоке `Deep job`."
+    )
     assert accepted_message["job_status"] == "failed"
     assert accepted_message["actions_disabled"] is True
     assert accepted_message["tool_job"]["status"] == "failed"
@@ -1035,7 +1073,7 @@ async def test_equipment_deep_workspace_tool_failed_job_waits_for_openwebui_mess
     result_message = chat_store["chat-deep-tool-settle-1"]["history"]["messages"][result_message_id]
     assert result_message["parentId"] == accepted_message_id
     assert result_message["tool_job_result_for"] == accepted_message_id
-    assert "deep-job завершён со статусом failed." in result_message["content"]
+    assert "Backend terminal failed result." in result_message["content"]
     assert any(event["type"] == "chat:message:new" for event in emitted_events)
 
 
@@ -1072,9 +1110,15 @@ async def test_equipment_deep_workspace_tool_resolves_visible_accepted_bubble_fr
                             "role": "assistant",
                             "content": (
                                 "Глубокий анализ принят как deep-job.\n"
-                                "job_id: job-tool-resolve-1\n"
-                                "status_url: /tool-server/tool-jobs/job-tool-resolve-1"
+                                "Прогресс отображается в блоке `Deep job`."
                             ),
+                            "job_id": "job-tool-resolve-1",
+                            "tool_job": {
+                                "job_id": "job-tool-resolve-1",
+                                "status_url": "/tool-server/tool-jobs/job-tool-resolve-1",
+                                "tool_name": "analyze_equipment_deep",
+                                "status": "accepted",
+                            },
                             "done": True,
                             "output": [],
                             "childrenIds": [],
@@ -1101,6 +1145,13 @@ async def test_equipment_deep_workspace_tool_resolves_visible_accepted_bubble_fr
                     "job_id": "job-tool-resolve-1",
                     "status": "failed",
                     "error_summary": "Модель занята предыдущим тяжёлым запросом.",
+                }
+            )
+        if request.full_url.endswith("/tool-server/tool-jobs/job-tool-resolve-1/result"):
+            return _FakeHTTPResponse(
+                {
+                    "assistant_message": "Backend terminal failed result.\nerror: Модель занята предыдущим тяжёлым запросом.",
+                    "execution_metadata": {"status": "failed", "reason": "Модель занята предыдущим тяжёлым запросом."},
                 }
             )
         raise AssertionError(request.full_url)
@@ -1132,7 +1183,10 @@ async def test_equipment_deep_workspace_tool_resolves_visible_accepted_bubble_fr
     visible_message = chat_store["chat-deep-tool-resolve-1"]["history"]["messages"][visible_message_id]
     result_message_id = visible_message.get("result_message_id")
 
-    assert "job_id: job-tool-resolve-1" in response
+    assert response == (
+        "Глубокий анализ оборудования принят как deep-job.\n"
+        "Прогресс отображается в блоке `Deep job`."
+    )
     assert stale_message.get("job_status") is None
     assert stale_message.get("result_message_id") is None
     assert stale_message["childrenIds"] == []
@@ -1146,7 +1200,7 @@ async def test_equipment_deep_workspace_tool_resolves_visible_accepted_bubble_fr
     result_message = chat_store["chat-deep-tool-resolve-1"]["history"]["messages"][result_message_id]
     assert result_message["parentId"] == visible_message_id
     assert result_message["tool_job_result_for"] == visible_message_id
-    assert "deep-job завершён со статусом failed." in result_message["content"]
+    assert "Backend terminal failed result." in result_message["content"]
     assert any(
         event["type"] == "chat:message:new"
         and event["data"]["parent_message_id"] == visible_message_id
@@ -1310,8 +1364,7 @@ async def test_refresh_and_cancel_actions_restore_context_from_persisted_status_
         {
             "description": (
                 "`Глубокий анализ оборудования` принят как deep-job.\n"
-                "job_id: job-88\n"
-                "status_url: /tool-server/tool-jobs/job-88"
+                "Прогресс отображается в блоке `Deep job`."
             ),
             "status": "accepted",
             "job_id": "job-88",
@@ -1366,8 +1419,7 @@ async def test_refresh_and_cancel_actions_restore_context_from_live_chat_lookup(
         {
             "description": (
                 "`Глубокий анализ оборудования` принят как deep-job.\n"
-                "job_id: job-98\n"
-                "status_url: /tool-server/tool-jobs/job-98"
+                "Прогресс отображается в блоке `Deep job`."
             ),
             "status": "accepted",
             "job_id": "job-98",
@@ -1377,8 +1429,7 @@ async def test_refresh_and_cancel_actions_restore_context_from_live_chat_lookup(
         {
             "description": (
                 "`Глубокий анализ оборудования` принят как deep-job.\n"
-                "job_id: job-99\n"
-                "status_url: /tool-server/tool-jobs/job-99"
+                "Прогресс отображается в блоке `Deep job`."
             ),
             "status": "accepted",
             "job_id": "job-99",
@@ -1482,7 +1533,7 @@ async def test_refresh_and_cancel_actions_restore_context_from_live_chat_lookup(
 
 
 @pytest.mark.asyncio
-async def test_refresh_action_returns_terminal_failed_status_without_result_fetch(monkeypatch):
+async def test_refresh_action_fetches_terminal_failed_result_from_backend(monkeypatch):
     export = build_openwebui_binding_export(backend_base_url="http://127.0.0.1:18000")
     actions = {item["action_id"]: item for item in export["actionFunctions"]}
     refresh_namespace = _load_action_namespace(actions["tool_job_refresh_action"]["pythonCode"])
@@ -1492,6 +1543,13 @@ async def test_refresh_action_returns_terminal_failed_status_without_result_fetc
 
     def fake_refresh_urlopen(request, timeout=45):
         refresh_calls.append((request.get_method(), request.full_url))
+        if request.full_url.endswith("/tool-server/tool-jobs/job-busy-1/result"):
+            return _FakeHTTPResponse(
+                {
+                    "assistant_message": "Backend terminal failed result.\nerror: Модель занята предыдущим тяжёлым запросом.",
+                    "execution_metadata": {"status": "failed", "reason": "Модель занята предыдущим тяжёлым запросом."},
+                }
+            )
         return _FakeHTTPResponse(
             {
                 "job_id": "job-busy-1",
@@ -1514,9 +1572,133 @@ async def test_refresh_action_returns_terminal_failed_status_without_result_fetc
     )
 
     assert response["job_status"] == "failed"
-    assert "Текущий статус deep-job: failed" in response["content"]
+    assert "Backend terminal failed result." in response["content"]
     assert "error: Модель занята предыдущим тяжёлым запросом." in response["content"]
-    assert refresh_calls == [("GET", "http://host.docker.internal:18000/tool-server/tool-jobs/job-busy-1")]
+    assert ("GET", "http://host.docker.internal:18000/tool-server/tool-jobs/job-busy-1") in refresh_calls
+    assert ("GET", "http://host.docker.internal:18000/tool-server/tool-jobs/job-busy-1/result") in refresh_calls
+
+
+@pytest.mark.asyncio
+async def test_refresh_action_returns_extended_running_status_payload(monkeypatch):
+    export = build_openwebui_binding_export(backend_base_url="http://127.0.0.1:18000")
+    actions = {item["action_id"]: item for item in export["actionFunctions"]}
+    refresh_namespace = _load_action_namespace(actions["tool_job_refresh_action"]["pythonCode"])
+    refresh_action = refresh_namespace["Action"]()
+
+    def fake_refresh_urlopen(request, timeout=45):
+        return _FakeHTTPResponse(
+            {
+                "job_id": "job-running-1",
+                "status": "running",
+                "current_stage": "stage:analysis",
+                "status_text": "Собираем итоговый вывод.",
+                "progress": {"phase": "stage:analysis", "fraction": 0.8},
+                "status_history": [
+                    {
+                        "key": "stage:indexing",
+                        "title": "Индексация",
+                        "content": "Подготавливаем фрагменты.",
+                    }
+                ],
+                "embeds": [{"kind": "status", "title": "Анализ"}],
+                "sources": [{"source_id": "src-1", "title": "Requirements.pdf"}],
+                "artifacts": [{"artifact_id": "artifact-1", "kind": "report"}],
+            }
+        )
+
+    monkeypatch.setattr(refresh_namespace["urllib"].request, "urlopen", fake_refresh_urlopen)
+    response = await refresh_action.action(
+        {
+            "tool_job": {
+                "job_id": "job-running-1",
+                "status_url": "/tool-server/tool-jobs/job-running-1",
+                "tool_name": "analyze_equipment_deep",
+                "status": "accepted",
+            }
+        }
+    )
+
+    assert response["job_status"] == "running"
+    assert response["status_text"] == "Собираем итоговый вывод."
+    assert response["progress"]["phase"] == "stage:analysis"
+    assert response["status_history"][0]["key"] == "stage:indexing"
+    assert response["embeds"][0]["kind"] == "status"
+    assert response["sources"][0]["source_id"] == "src-1"
+    assert response["artifacts"][0]["artifact_id"] == "artifact-1"
+
+
+@pytest.mark.asyncio
+async def test_refresh_action_persists_extended_running_status_payload(monkeypatch):
+    export = build_openwebui_binding_export(backend_base_url="http://127.0.0.1:18000")
+    actions = {item["action_id"]: item for item in export["actionFunctions"]}
+    refresh_namespace = _load_action_namespace(actions["tool_job_refresh_action"]["pythonCode"])
+    refresh_action = refresh_namespace["Action"]()
+    assistant_message_id = "assistant-running-extended-1"
+    chat_store = _install_fake_openwebui_modules(
+        monkeypatch,
+        chat_store={
+            "chat-running-extended-1": {
+                "history": {
+                    "currentId": assistant_message_id,
+                    "messages": {
+                        assistant_message_id: {
+                            "id": assistant_message_id,
+                            "role": "assistant",
+                            "content": "Глубокий анализ оборудования принят как deep-job.",
+                            "done": True,
+                            "childrenIds": [],
+                        }
+                    },
+                }
+            }
+        },
+    )
+
+    def fake_refresh_urlopen(request, timeout=45):
+        return _FakeHTTPResponse(
+            {
+                "job_id": "job-running-extended-1",
+                "status": "running",
+                "current_stage": "stage:analysis",
+                "status_text": "Собираем итоговый вывод.",
+                "progress": {"phase": "stage:analysis", "fraction": 0.8},
+                "status_history": [
+                    {
+                        "key": "stage:indexing",
+                        "title": "Индексация",
+                        "content": "Подготавливаем фрагменты.",
+                    }
+                ],
+                "embeds": [{"kind": "status", "title": "Анализ"}],
+                "sources": [{"source_id": "src-1", "title": "Requirements.pdf"}],
+                "artifacts": [{"artifact_id": "artifact-1", "kind": "report"}],
+            }
+        )
+
+    monkeypatch.setattr(refresh_namespace["urllib"].request, "urlopen", fake_refresh_urlopen)
+    response = await refresh_action.action(
+        {
+            "chat_id": "chat-running-extended-1",
+            "id": assistant_message_id,
+            "tool_job": {
+                "job_id": "job-running-extended-1",
+                "status_url": "/tool-server/tool-jobs/job-running-extended-1",
+                "tool_name": "analyze_equipment_deep",
+                "status": "accepted",
+            },
+        },
+        __request__=SimpleNamespace(),
+    )
+
+    persisted_message = chat_store["chat-running-extended-1"]["history"]["messages"][assistant_message_id]
+    assert response["job_status"] == "running"
+    assert persisted_message["job_status"] == "running"
+    assert persisted_message["status_text"] == "Собираем итоговый вывод."
+    assert persisted_message["progress"]["phase"] == "stage:analysis"
+    assert persisted_message["status_history"][0]["key"] == "stage:indexing"
+    assert persisted_message["embeds"][0]["kind"] == "status"
+    assert persisted_message["sources"][0]["source_id"] == "src-1"
+    assert persisted_message["artifacts"][0]["artifact_id"] == "artifact-1"
 
 
 @pytest.mark.asyncio
@@ -1561,6 +1743,86 @@ async def test_refresh_action_handles_completed_result_race_without_exception(mo
     assert "итог ещё не опубликован" in response["content"]
     assert ("GET", "http://host.docker.internal:18000/tool-server/tool-jobs/job-race-1") in refresh_calls
     assert ("GET", "http://host.docker.internal:18000/tool-server/tool-jobs/job-race-1/result") in refresh_calls
+
+
+@pytest.mark.asyncio
+async def test_refresh_action_records_terminal_delivery_when_result_message_is_created(monkeypatch):
+    export = build_openwebui_binding_export(backend_base_url="http://127.0.0.1:18000")
+    actions = {item["action_id"]: item for item in export["actionFunctions"]}
+    refresh_namespace = _load_action_namespace(actions["tool_job_refresh_action"]["pythonCode"])
+    refresh_action = refresh_namespace["Action"]()
+
+    accepted_message_id = "assistant-refresh-create-1"
+    chat_store = _install_fake_openwebui_modules(
+        monkeypatch,
+        chat_store={
+            "chat-refresh-create-1": {
+                "history": {
+                    "currentId": accepted_message_id,
+                    "messages": {
+                        accepted_message_id: {
+                            "id": accepted_message_id,
+                            "role": "assistant",
+                            "content": "Завершено — результат добавлен ниже.",
+                            "done": True,
+                            "childrenIds": [],
+                            "tool_job": {
+                                "job_id": "job-refresh-create-1",
+                                "status_url": "/tool-server/tool-jobs/job-refresh-create-1",
+                                "tool_name": "analyze_equipment_deep",
+                                "status": "completed",
+                            },
+                            "job_status": "completed",
+                            "actions_disabled": True,
+                            "model": "raw.qwen-14b-llm",
+                        },
+                    },
+                }
+            }
+        },
+    )
+
+    refresh_calls = []
+
+    def fake_refresh_urlopen(request, timeout=45):
+        refresh_calls.append((request.get_method(), request.full_url))
+        if request.full_url.endswith("/tool-server/tool-jobs/job-refresh-create-1/result"):
+            return _FakeHTTPResponse({"assistant_message": "Новый terminal result."})
+        if request.full_url.endswith("/tool-server/tool-jobs/job-refresh-create-1/delivery"):
+            return _FakeHTTPResponse(
+                {
+                    "job_id": "job-refresh-create-1",
+                    "status": "completed",
+                    "result_message_id": "ignored-by-client",
+                }
+            )
+        return _FakeHTTPResponse({"job_id": "job-refresh-create-1", "status": "completed"})
+
+    monkeypatch.setattr(refresh_namespace["urllib"].request, "urlopen", fake_refresh_urlopen)
+    response = await refresh_action.action(
+        {
+            "chat_id": "chat-refresh-create-1",
+            "id": accepted_message_id,
+            "model": "raw.qwen-14b-llm",
+            "tool_job": {
+                "job_id": "job-refresh-create-1",
+                "status_url": "/tool-server/tool-jobs/job-refresh-create-1",
+                "tool_name": "analyze_equipment_deep",
+                "status": "completed",
+            },
+            "job_status": "completed",
+        },
+        __request__=SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(llm_tools_platform_deep_job_pollers={}))),
+    )
+
+    result_message_id = response["result_message_id"]
+    assert response["job_status"] == "completed"
+    assert result_message_id
+    assert ("GET", "http://host.docker.internal:18000/tool-server/tool-jobs/job-refresh-create-1") in refresh_calls
+    assert ("GET", "http://host.docker.internal:18000/tool-server/tool-jobs/job-refresh-create-1/result") in refresh_calls
+    assert ("POST", "http://host.docker.internal:18000/tool-server/tool-jobs/job-refresh-create-1/delivery") in refresh_calls
+    assert chat_store["chat-refresh-create-1"]["history"]["messages"][accepted_message_id]["result_message_id"] == result_message_id
+    assert chat_store["chat-refresh-create-1"]["history"]["messages"][result_message_id]["content"] == "Новый terminal result."
 
 
 @pytest.mark.asyncio

@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Type
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.openapi.utils import get_openapi
-from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.routing import APIRoute
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from orchestrator.shared.report_utils import get_uploads_dir
 from orchestrator.tool_catalog import get_tool_definition
 from orchestrator.tool_schemas import (
     AcceptedToolResult,
@@ -34,6 +38,13 @@ from orchestrator.tool_execution import build_tool_job_status_response, cancel_t
 _TOOL_SERVER_BEARER = HTTPBearer(auto_error=False)
 _TOOL_ROUTE_PREFIXES = ("/tools/", "/tool-jobs/")
 _TOOL_SERVER_ALIAS_PREFIX = "/tool-server"
+_REPORT_FILENAME_RE = re.compile(r"\*\*Отчет (?:сохранен|уже сохранен):\*\*\s*`([^`]+)`")
+_ALLOWED_REPORT_EXTENSIONS = {".pdf", ".md"}
+
+
+class ToolJobDeliveryRequest(BaseModel):
+    result_message_id: str
+    terminal_emitted_at: Optional[str] = None
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -204,6 +215,33 @@ def _build_document_ref_bindings(document_refs: List[DocumentRef]) -> List[Dict[
     return bindings
 
 
+def _extract_forwarded_header(request: Request, *names: str) -> Optional[str]:
+    for name in names:
+        value = str(request.headers.get(name) or "").strip()
+        if value:
+            return value
+    return None
+
+
+def _extract_forwarded_openwebui_context(request: Request) -> Dict[str, str]:
+    chat_id = _extract_forwarded_header(
+        request,
+        "X-OpenWebUI-Chat-Id",
+        "X-Open-WebUI-Chat-Id",
+    )
+    message_id = _extract_forwarded_header(
+        request,
+        "X-OpenWebUI-Message-Id",
+        "X-Open-WebUI-Message-Id",
+    )
+    context: Dict[str, str] = {}
+    if chat_id:
+        context["chat_id"] = chat_id
+    if message_id:
+        context["message_id"] = message_id
+    return context
+
+
 def _build_orchestration_payload(tool_request: ToolRequest) -> Dict[str, Any]:
     normalized_document_refs = _normalize_document_refs(tool_request.document_refs)
     active_doc_ids = [ref_id for ref_id in (_extract_ref_identity(item) for item in normalized_document_refs) if ref_id]
@@ -300,7 +338,53 @@ def _normalize_tool_artifacts(response: Dict[str, Any]) -> List[ToolArtifact]:
                 metadata={key: value for key, value in generated_report.items() if value is not None},
             )
         )
+    elif isinstance(generated_report, str):
+        report_filename = _extract_saved_report_filename(generated_report)
+        if report_filename:
+            report_ext = Path(report_filename).suffix.lower().lstrip(".")
+            artifacts.append(
+                ToolArtifact(
+                    artifact_id=report_filename,
+                    artifact_type="report",
+                    url=f"/tool-server/tool-reports/{quote(report_filename, safe='')}",
+                    title="Скачать отчёт",
+                    metadata={
+                        "filename": report_filename,
+                        "format": report_ext or None,
+                        "download_label": "Скачать отчёт",
+                    },
+                )
+            )
     return artifacts
+
+
+def _extract_saved_report_filename(report_text: str) -> Optional[str]:
+    match = _REPORT_FILENAME_RE.search(str(report_text or ""))
+    if not match:
+        return None
+    filename = os.path.basename(match.group(1).strip())
+    return filename or None
+
+
+def _resolve_report_download_path(filename: str) -> Optional[Path]:
+    normalized = os.path.basename(str(filename or "").strip())
+    if not normalized or normalized in {".", ".."}:
+        return None
+
+    extension = Path(normalized).suffix.lower()
+    if extension not in _ALLOWED_REPORT_EXTENSIONS:
+        return None
+
+    uploads_dir = Path(get_uploads_dir()).resolve()
+    candidate = (uploads_dir / normalized).resolve()
+    try:
+        candidate.relative_to(uploads_dir)
+    except ValueError:
+        return None
+
+    if not candidate.exists() or not candidate.is_file():
+        return None
+    return candidate
 
 
 def _build_completed_tool_result(tool_request: ToolRequest, response: Dict[str, Any]) -> Dict[str, Any]:
@@ -407,11 +491,29 @@ def create_openapi_tools_router(
 
     async def _execute_tool(tool_request: ToolRequest, http_request: Request) -> Dict[str, Any]:
         payload = _build_orchestration_payload(tool_request)
+        payload.update(_extract_forwarded_openwebui_context(http_request))
         orchestration_request = orchestration_request_model(**payload)
         response = await execute_orchestration_request(orchestration_request, http_request)
         if response.get("status") == "accepted":
             return response
         return _build_completed_tool_result(tool_request, response)
+
+    @router.get(
+        "/tool-reports/{filename:path}",
+        include_in_schema=False,
+        dependencies=[Depends(_require_tool_server_access)],
+    )
+    async def tool_report_download(filename: str, request: Request):
+        report_path = _resolve_report_download_path(filename)
+        if report_path is None:
+            raise HTTPException(status_code=404, detail=f"unknown-tool-report:{filename}")
+
+        media_type = "application/pdf" if report_path.suffix.lower() == ".pdf" else "text/markdown; charset=utf-8"
+        return FileResponse(
+            path=report_path,
+            media_type=media_type,
+            filename=report_path.name,
+        )
 
     @router.get(
         "/tool-server/openapi.json",
@@ -443,6 +545,20 @@ def create_openapi_tools_router(
         return build_tool_job_status_response(job)
 
     @router.get(
+        "/tool-jobs/active/chat/{chat_id}",
+        operation_id="get_active_tool_job_for_chat",
+        dependencies=[Depends(_require_tool_server_access)],
+    )
+    async def active_tool_job_for_chat(chat_id: str, request: Request) -> Dict[str, Any]:
+        job = get_tool_job_store().find_latest_active_by_chat_id(chat_id)
+        if job is None:
+            return {"job": None}
+        payload = build_tool_job_status_response(job)
+        payload["result_message_id"] = job.result_message_id
+        payload["terminal_emitted_at"] = job.terminal_emitted_at
+        return {"job": payload}
+
+    @router.get(
         "/tool-jobs/{job_id}/result",
         operation_id="get_tool_job_result",
         dependencies=[Depends(_require_tool_server_access)],
@@ -454,6 +570,28 @@ def create_openapi_tools_router(
             raise HTTPException(status_code=404, detail=f"unknown-tool-job:{job_id}") from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @router.post(
+        "/tool-jobs/{job_id}/delivery",
+        operation_id="record_tool_job_delivery",
+        dependencies=[Depends(_require_tool_server_access)],
+    )
+    async def tool_job_delivery(job_id: str, payload: ToolJobDeliveryRequest, request: Request) -> Dict[str, Any]:
+        store = get_tool_job_store()
+        try:
+            job = store.record_terminal_delivery(
+                job_id,
+                result_message_id=payload.result_message_id,
+                terminal_emitted_at=payload.terminal_emitted_at,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"unknown-tool-job:{job_id}") from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        response = build_tool_job_status_response(job)
+        response["result_message_id"] = job.result_message_id
+        response["terminal_emitted_at"] = job.terminal_emitted_at
+        return response
 
     @router.post(
         "/tool-jobs/{job_id}/cancel",
@@ -573,6 +711,16 @@ def create_openapi_tools_router(
         return response
 
     _register_tool_server_alias(
+        f"{_TOOL_SERVER_ALIAS_PREFIX}/tool-reports/{{filename:path}}",
+        tool_report_download,
+        methods=["GET"],
+    )
+    _register_tool_server_alias(
+        f"{_TOOL_SERVER_ALIAS_PREFIX}/tool-jobs/active/chat/{{chat_id}}",
+        active_tool_job_for_chat,
+        methods=["GET"],
+    )
+    _register_tool_server_alias(
         f"{_TOOL_SERVER_ALIAS_PREFIX}/tool-jobs/{{job_id}}",
         tool_job_status,
         methods=["GET"],
@@ -582,6 +730,11 @@ def create_openapi_tools_router(
         f"{_TOOL_SERVER_ALIAS_PREFIX}/tool-jobs/{{job_id}}/result",
         tool_job_result,
         methods=["GET"],
+    )
+    _register_tool_server_alias(
+        f"{_TOOL_SERVER_ALIAS_PREFIX}/tool-jobs/{{job_id}}/delivery",
+        tool_job_delivery,
+        methods=["POST"],
     )
     _register_tool_server_alias(
         f"{_TOOL_SERVER_ALIAS_PREFIX}/tool-jobs/{{job_id}}/cancel",
