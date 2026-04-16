@@ -1128,7 +1128,7 @@
   - service ports are now loaded from `.env` / `.env.native` / `.env.runtime` instead of being hardcoded
   - `run_native.sh`, `run_all.sh`, `run_openwebui.sh`, and `start_system_test.sh` now reuse the full stop-path before relaunch so orphaned embedding runtimes do not accumulate across restarts
   Verification:
-  - `bash -n scripts/stop_native.sh scripts/stop_all.sh scripts/run_native.sh scripts/run_all.sh scripts/run_openwebui.sh scripts/start_system_test.sh`
+  - `bash -n scripts/stop_native.sh scripts/stop_all.sh scripts/run_native.sh scripts/run_all.sh scripts/run_openwebui.sh tests/harness/system/start_system_test.sh`
   - live runtime check:
     - `./scripts/run_native.sh --no-attach`
     - `./scripts/stop_native.sh`
@@ -2076,10 +2076,12 @@
   - клиентский патч `deploy/openwebui_legacy_patch/llm_tools_platform_autopoll.js` переведён на восстановление по данным `/api/v1/chats/{chat_id}`: скрипт автоматически подставляет дочерний итоговый bubble рядом с родительским сообщением, скрывает `refresh/cancel` по `actions_disabled` / терминальному `job_status` и больше не пытается обращаться к `tool-server` из браузера;
   - корень сбоя в клиентском слое был в конфликте между runtime guard и `id` инъецированного `<script>`: браузер клал элемент `llm-tools-platform-openwebui-autopoll-v2` в `window`, из-за чего guard завершал патч в первой строке; исправлено отдельным runtime-маркером `__llm_tools_platform_openwebui_autopoll_v2_loaded__`;
   - периодический опрос после исправления стабилизирован до поздних стартовых попыток и шага `2` секунды без лавины запросов на каждую мутацию DOM;
+  - backend production-контракт дополнен маршрутом `POST /tool-server/tool-jobs/{job_id}/delivery`: `tool_job_store` теперь идемпотентно фиксирует первый `result_message_id` и `terminal_emitted_at`, чтобы следующий slice мог привязать terminal child bubble к backend store, а не только к persisted chat состояния `Open WebUI`;
+  - generated `Open WebUI` bindings уже используют этот маршрут в terminal-path: после создания child result message `equipment_deep_action`, `equipment_deep_tool` и `tool_job_refresh_action` best-effort отправляют `POST /tool-server/tool-jobs/{job_id}/delivery`, поэтому backend store начинает видеть фактический `result_message_id`, а не только UI-состояние в истории чата;
   - живой прогон в обычном persisted-чате подтвердил полный сценарий: после `reload` итоговый bubble автоматически появляется под статусным сообщением, текст `Завершено — результат добавлен ниже.` перестаёт быть пустым обещанием, а `Обновить deep-job` / `Отменить deep-job` скрываются;
   - прогон в `temporary chat` остаётся непоказательным для этого слоя: там `chat_id` имеет вид `local:...`, история не пишет серверное состояние через `/api/v1/chats/{chat_id}`, поэтому дальнейшие проверки `deep-job` нужно делать только в обычных persisted-чатах.
 
-- [ ] **T6.4 P5 — Legacy Open WebUI: целостность запуска `deep-job` для native tool call**
+- [x] **T6.4 P5 — Legacy Open WebUI: целостность запуска `deep-job` для native tool call**
   Контекст:
   - живой прогон `2026-04-12` показал два разных режима для одного и того же `analyze_equipment_deep` в legacy `Open WebUI`;
   - в корректных ходах `function_call_output` содержит строку `Глубокий анализ принят как deep-job...`, в `tool_jobs` появляется новый `job_id`, а backend фиксирует `POST /tool-server/tools/analyze_equipment_deep -> 202 Accepted`;
@@ -2104,7 +2106,8 @@
   Progress: в этом slice закрыты два backend-дефекта по single-file пути — в `agent_api` восстановлен импорт `create_ums_embed_fn`, а `document_analysis._extract_llm_content()` научен обрабатывать list-shaped `message` из ответа модели; повторное live подтверждение требует отдельного перезапуска native `agent-api`, потому что текущий tmux runtime запущен без `--reload`.
   Progress: добавлен backend-регрессионный тест на single-file `document_analysis`, где `raw_specs` содержит вложенный `list`; полировщик характеристик теперь пропускает повреждённые элементы вместо падения на `'list' object has no attribute 'get'`, но живой `Playwright`-recheck всё ещё требует перезапуска `native run`, поднятого до этой правки.
   Progress: для наблюдаемого ручного UX добавлен отдельный live-runner `npm run test:e2e:openwebui:live`; `Playwright` в этом режиме идёт через видимый браузер, отключает параллелизм, включает `slowMo`, печатает пользовательский prompt в видимый composer, жмёт `Обновить deep-job` реальным кликом вместо скрытого `POST` и при отсутствии внешнего `manifest` автоматически поднимает встроенный канонический сценарий `Requirements.pdf`.
-  Комментарий: пункт остаётся открытым, пока не устранён сам live-defect с пустым `function_call_output` в native tool-call path; новый harness зафиксирован как воспроизводимый источник истины для этого слоя.
+  Progress: серверный guard теперь дополнительно покрыт output-слоем legacy `Open WebUI`: unit-регрессии проверяют и `detect_unconfirmed_deep_job_output(...)`, и переписывание `serialize_output(...)`, чтобы пустой `function_call_output` не выглядел как подтверждённый запуск.
+  Комментарий: закрыто через обобщение server-side guard на `analyze_equipment_deep` и `analyze_document_deep`, параметризованные unit-регрессии для `messages` и `serialize_output`, а также новый native persisted-chat `Playwright` smoke — он принудительно добавляет `equipment_deep_tool` в первый `/api/chat/completions`, подтверждает непустой `function_call_output` с `job_id/status_url` и сверяет тот же `job_id` с реальной записью в `tool_jobs`.
 
 - [x] **T6.4 P6 — `equipment_deep_action` теряет файловый контекст и уводит `deep-job` в общий чатовый путь**
   Контекст:
@@ -2122,7 +2125,7 @@
   - поведение action и название инструмента больше не расходятся с его реальным backend-контрактом.
   Комментарий: выполнено через проброс `document_refs` / `session_docs` / `attachments_meta` из `Open WebUI action` в `tool-server` и нормализацию путей `/app/backend/data/uploads/*` -> `backend/open_webui_uploads/*`; живой повторный запуск на паре `Requirements.pdf` + `Quotation_12.pdf` подтвердил настоящий equipment-конвейер с извлечением и сопоставлением обоих PDF.
 
-- [ ] **T6.5 P1 — Cross-backend parity tests (`llama-server` vs `vllm`)**
+- [x] **T6.5 P1 — Cross-backend parity tests (`llama-server` vs `vllm`)**
   Контекст: система уже поддерживает минимум два backend mode (`llama-server`, `vllm`), но нет единого contract test, который гарантирует что ключевые пользовательские сценарии не ломаются асимметрично.
   Что сделать:
   - Добавить parity suite для одинаковых smoke scenarios под разными `BACKEND_MODE`
@@ -2132,9 +2135,12 @@
     - streaming response contract
     - `/status` и `/models` metadata
   - Зафиксировать какие различия допустимы, а какие считаются регрессией
+  Выполнено `2026-04-14`:
+  - добавлен `backend/tests/test_backend_parity.py` с единым contract suite для `llama-server` и `vllm`;
+  - suite покрывает `/status`, `/models`, non-stream chat, streaming chat и `document_question`;
+  - тесты фиксируют общий внешний контракт при допустимых mode-specific различиях transport-уровня, например удалённый `model` у `vllm`.
   Verification:
-  - `BACKEND_MODE=llama-server pytest backend/tests/test_backend_parity.py -q`
-  - `BACKEND_MODE=vllm pytest backend/tests/test_backend_parity.py -q`
+  - `pytest backend/tests/test_backend_parity.py -q`
 
 - [ ] **T6.6 P1 — Filesystem / permissions regression suite**
   Контекст: уже были реальные проблемы с созданием каталогов и mixed ownership после container/native paths. Сейчас `run_native.sh` это частично проверяет, но нет единого regression suite для permission edge cases.
@@ -2431,6 +2437,15 @@ Update (2026-04-01):
 - Решение отложено как отдельный structural slice, чтобы не смешивать его с текущим `OpenAPI Tool Server` / `Open WebUI` migration contour.
 - Execution order зафиксирован явно: сначала `M3.5 — Named Tools + Bootstrap`, затем `Unified Model Catalog / Gateway`, потому что `M3.5` даёт immediate user-facing flow и не требует рискованных правок в `agent_api` / `UMS`.
 
+### 2026-04-16 — Tools / deep-job should not depend on a special model
+- Зафиксировано отдельными документами:
+  - `docs/plans/2026-04-16-openwebui-any-model-tools-architecture-plan.md`
+  - `docs/plans/2026-04-16-openwebui-any-model-tools-checklist.md`
+- Нормативное решение: `llm-tools-platform` не является целевой пользовательской моделью для инструментов; это допустимый compatibility alias, но не правильный финальный контракт.
+- Целевая архитектура: пользователь выбирает обычную модель, а инструменты и `deep-job` работают через общий tool-aware gateway с сохранением выбранного `model id`.
+- Этот вопрос не смешивается с текущим panel-path `deep-job`, а идёт отдельным structural slice поверх unified model catalog / gateway migration.
+- Follow-up по panel-path закрыт: скрытый `function_call_output` больше не тащит `status_url` в accepted-payload, а terminal result теперь может поднимать пользовательскую ссылку `Скачать отчёт` через proxy-маршрут форка `Open WebUI` и `tool-reports` на стороне `agent-api`.
+
 ### 2026-03-12 — Orchestration boundary review
 - B3.31 ядро закрыто в коде (3 новых модуля + 37 тестов)
 - `chainlit_app.py` делегирует в backend, `_execute_intent` удалён
@@ -2539,7 +2554,7 @@ DOCUMENT_ANALYSIS_SUMMARIZE_MAX_TOKENS=512
 
 ### 2026-03-18 — Ревизия scripts/: найденный техдолг и follow-up
 
-- `scripts/start_system_test.sh` фактически сломан как executable orchestration wrapper: ключевые `tmux` команды отсутствуют в исполняемом коде и остались только внутри comment-строк с `mux ...`; текущий файл печатает, что tmux session поднята, но сам её не создаёт.
+- `tests/harness/system/start_system_test.sh` фактически сломан как executable orchestration wrapper: ключевые `tmux` команды отсутствуют в исполняемом коде и остались только внутри comment-строк с `mux ...`; текущий файл печатает, что tmux session поднята, но сам её не создаёт.
 - `scripts/run_all.sh` содержит хрупкий `curl -sf` внутри command substitution под `set -e` в `wait_for_model()`. Если `/status` временно недоступен, shell завершится раньше retry-loop. В `run_native.sh` этот же путь уже защищён через `|| true`, значит поведение между native/container paths сейчас расходится.
 - Canonical runtime/operator scripts (`launcher.sh`, `run_native.sh`, `run_all.sh`, `stop_native.sh`, `stop_all.sh`, `bootstrap_env.sh`) и canonical model provisioning wrapper (`scripts/models/install_models.sh`) уже переведены на общий `scripts/utils/env_loader.sh` с `python-dotenv` parsing. `run_openwebui.sh` удалён как лишний entrypoint; `Open WebUI` теперь поднимается прямой `docker compose --profile legacy up -d open-webui` командой, где `legacy` остаётся только техническим именем profile.
 - `backend/tests/test_runtime_launcher.py::test_launcher_sources_native_overrides_before_runtime_preflight` не hermetic: результат зависит от содержимого реального `backend/.env.hardware.override`. При текущем локальном `DEVICE_MODE="cpu"` тест падает, хотя launcher детерминированно применяет приоритет `.env -> .env.native -> .env.hardware.override`.
@@ -2547,7 +2562,7 @@ DOCUMENT_ANALYSIS_SUMMARIZE_MAX_TOKENS=512
 - `scripts/setup_ubuntu.sh` скачивает CUDA keyring/Miniconda installer и Docker GPG material по сети без отдельной checksum/integrity verification в самом скрипте. Для interactive installer это workable path, но как supply-chain baseline слабое место.
 - permission-path всё ещё несимметричен: `scripts/run_native.sh` делает реальный writable preflight для `UPLOADS_DIR` и `backend/.data`, но container/runtime Python path в `chainlit_app.py`, `report_utils.py`, `knowledge_base_store.py`, `state_store.py` в основном ограничен `os.makedirs(..., exist_ok=True)` без отдельной ранней диагностики permission-denied/root-owned state. Нужен единый writable-dir preflight и более явные ошибки для compose/container path.
 - `scripts/setup_ubuntu.sh` до сих пор выставляет `chmod 777 backend/open_webui_uploads`; это помогает “чтобы работало”, но слишком грубая модель прав. Нужен более узкий ownership/permission contract вместо world-writable uploads dir.
-- текущий `Open WebUI` contour в native-first smoke всё ещё имеет split-brain URL contract: browser на хосте может ходить в `http://127.0.0.1:8000/tool-server`, но server-side refresh/import внутри контейнера `open-webui` видит нативный backend только через `host.docker.internal` / bridge IP. Нужен один явный policy/proxy path для этого smoke-контура, иначе `Settings -> Integrations` даёт разные результаты для browser-side verify и container-side `set_tool_servers()`.
+- текущий `Open WebUI` contour в native-first smoke всё ещё имеет split-brain URL contract для backend tool-server path: browser на хосте может ходить в `http://127.0.0.1:8000/tool-server`, но server-side refresh/import внутри контейнера `open-webui` видит нативный backend только через `host.docker.internal` / bridge IP. Контур `Qdrant` уже нормализован: контейнеры используют `http://qdrant:6333`, а хостовый `run_native` использует `http://127.0.0.1:6333`.
 
 ### Future Task — B3.46: Честный multi-GPU runtime contract для 4+ GPU
 

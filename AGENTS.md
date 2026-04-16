@@ -35,6 +35,9 @@ Do not commit local bootstrap artifacts such as `test_logs/`, temporary uploaded
 ## Agent-Specific Instructions
 Respond to repository collaborators in Russian unless a task explicitly requires another language.
 - Считать `Open WebUI` основным UI, а `Chainlit` — совместимым и отладочным путём. Не откатывать документацию и инструкции обратно к `Chainlit-first`.
+- Для задач уровня платформенного кода `Open WebUI` работать в отдельном форке `/home/seral/HDD/proj/open-webui`, а не пытаться реализовать такие изменения внутри этого репозитория через одни только патчи и bootstrap-скрипты.
+- Этот репозиторий `agent-navigator-pro` остаётся источником истины для контура смешанного запуска, контейнерных параметров `open-webui`, `tool_jobs`, интеграционных тестов, деплой-конфигурации и `bootstrap_openwebui.py`.
+- Все runtime-параметры, которые нужны форку `Open WebUI`, сначала брать из `agent-navigator-pro`, а уже потом воспроизводить в форке. Не придумывать параллельную конфигурацию без явной причины.
 - Все важные решения, спорные места, временные обходы, архитектурные компромиссы и найденный техдолг
   фиксировать в `TASKS.md` по ходу работы, если речь идёт об общем проектном backlog, а не о ночном журнале выполнения.
 - Если в ходе сессии появляется временный workaround, его нужно не только озвучить пользователю,
