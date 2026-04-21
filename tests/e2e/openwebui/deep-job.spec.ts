@@ -532,188 +532,206 @@ test('openwebui native deep-job main stop cancels active job', async ({ page, re
   }
 });
 
-for (const scenario of MANIFEST) {
-  test(`openwebui deep-job matrix ${scenario.scenario_id}`, async ({ page, request }) => {
-    test.slow();
-    test.setTimeout(MATRIX_TIMEOUT_MS + 120_000);
+test('openwebui native deep-job queues follow-up turn until active job finishes', async ({ page, request }) => {
+  test.slow();
+  test.setTimeout(210_000);
 
-    const result: RawRunResult = {
-      kind: 'matrix',
-      scenario_id: scenario.scenario_id,
-      pair_key: scenario.pair_key,
-      prompt_variant: scenario.prompt_variant,
-      document_name: path.basename(scenario.document_path),
-      prompt: scenario.prompt,
-      expected_mode: scenario.expected_mode,
-      architecture_probe: scenario.architecture_probe,
-      chat_id: null,
-      user_message_id: null,
-      assistant_message_id: null,
-      uploaded_files: [],
-      action_request_summary: null,
-      action_response_http_status: null,
-      action_response_ok: false,
-      action_response_payload: null,
-      job_id: null,
-      status_url: null,
-      backend_terminal: null,
-      refresh_response_http_status: null,
-      refresh_response_payload: null,
-      ui: {},
-      final_chat: null,
-      error: null,
+  const firstPromptMarker = `NATIVE_DEEP_QUEUE_FIRST_${crypto.randomUUID()}`;
+  const secondPromptMarker = `NATIVE_DEEP_QUEUE_SECOND_${crypto.randomUUID()}`;
+  const firstPrompt = [
+    'Сделай глубокий анализ оборудования: основной узел виртуализации с резервированием питания.',
+    'Это первый deep-job в тесте очереди.',
+    `[${firstPromptMarker}]`,
+  ].join(' ');
+  const secondPrompt = [
+    'Сделай глубокий анализ оборудования: отдельный follow-up по рискам охлаждения и отказоустойчивости.',
+    'Этот запрос должен дождаться завершения первого deep-job.',
+    `[${secondPromptMarker}]`,
+  ].join(' ');
+  const result: RawRunResult = {
+    kind: 'native',
+    scenario_id: 'native-deep-queue-after-terminal',
+    pair_key: 'native-deep-queue',
+    prompt_variant: 'queue-after-terminal',
+    document_name: null,
+    prompt: `${firstPrompt}\n\n${secondPrompt}`,
+    expected_mode: 'native',
+    architecture_probe: false,
+    chat_id: null,
+    user_message_id: null,
+    assistant_message_id: null,
+    uploaded_files: [],
+    action_request_summary: null,
+    action_response_http_status: null,
+    action_response_ok: false,
+    action_response_payload: null,
+    job_id: null,
+    status_url: null,
+    backend_terminal: null,
+    refresh_response_http_status: null,
+    refresh_response_payload: null,
+    native_request_summary: null,
+    native_tool_name: null,
+    native_route_patched: false,
+    launch_classification: null,
+    persisted_function_call_output: null,
+    persisted_output_summary: null,
+    ui: {},
+    final_chat: null,
+    error: null,
+  };
+  const outputPath = path.join(OUTPUT_DIR, 'native-deep-queue-after-terminal.raw.json');
+  let cleanupFirstRoute: (() => Promise<void>) | null = null;
+  let cleanupSecondRoute: (() => Promise<void>) | null = null;
+
+  try {
+    const helperEnabled = await testHelperRouteEnabled(request);
+    test.skip(!helperEnabled, 'LLM_TOOLS_PLATFORM_TEST_MODE=1 обязателен для детерминированного queue кейса.');
+
+    const createdChat = await createChat(request, authToken, 'Codex Native Deep Job Queue');
+    const chatId = String(createdChat.id);
+    result.chat_id = chatId;
+
+    await openChatPage(page, chatId);
+    await livePause(page);
+
+    const firstRoute = await installNativeToolRouteInjection(page, firstPromptMarker, ['equipment_deep_tool']);
+    cleanupFirstRoute = firstRoute.cleanup;
+
+    await sendPromptThroughComposer(page, firstPrompt);
+    await livePause(page, LIVE_PAUSE_MS * 2);
+
+    const firstCapturedRequest = await waitForNativeRouteCapture(
+      firstRoute.captured,
+      firstPromptMarker,
+      CONTROL_TIMEOUT_MS
+    );
+    const firstCapturedPayload =
+      firstCapturedRequest?.payload && typeof firstCapturedRequest.payload === 'object'
+        ? (firstCapturedRequest.payload as Record<string, unknown>)
+        : null;
+    const effectiveChatId = asOptionalString(firstCapturedPayload?.chat_id) || chatId;
+    result.chat_id = effectiveChatId;
+
+    const firstLaunchState = await waitForNativeDeepLaunchState(
+      request,
+      authToken,
+      effectiveChatId,
+      CONTROL_TIMEOUT_MS
+    );
+    result.assistant_message_id = asOptionalString(firstLaunchState.message?.id);
+    result.job_id = firstLaunchState.job_id;
+    result.status_url = firstLaunchState.status_url;
+    result.native_tool_name = firstLaunchState.tool_name;
+    result.launch_classification = firstLaunchState.launch_classification;
+    result.persisted_function_call_output = firstLaunchState.function_call_output;
+    result.persisted_output_summary = summarizePlainObject(firstLaunchState.message?.output);
+
+    const secondRoute = await installNativeToolRouteInjection(page, secondPromptMarker, ['equipment_deep_tool']);
+    cleanupSecondRoute = secondRoute.cleanup;
+
+    await sendPromptThroughComposer(page, secondPrompt);
+    await livePause(page, LIVE_PAUSE_MS * 2);
+
+    const chatWhileQueued = await getChat(request, authToken, effectiveChatId);
+    const deepJobMessagesWhileQueued = listDeepJobAnchorMessages(chatWhileQueued);
+    result.ui.deep_job_count_while_first_running = deepJobMessagesWhileQueued.length;
+    expect.soft(deepJobMessagesWhileQueued).toHaveLength(1);
+
+    const firstDebugResponse = {
+      assistant_message: 'Synthetic completed result for the first queued deep-job.',
+      structured_result: {
+        summary: 'First deep-job completed before queued follow-up started.',
+        source_count: 1,
+      },
+      sources: [{ name: 'synthetic-queue-first.txt' }],
+      artifacts: [{ type: 'markdown', label: 'Synthetic Queue First Artifact' }],
+      output: [{ type: 'note', text: 'Synthetic queue first output item' }],
     };
-    const outputPath = path.join(OUTPUT_DIR, `${scenario.scenario_id}.raw.json`);
+    await debugTransitionToolJob(request, result.job_id || '', {
+      status: 'completed',
+      response: firstDebugResponse,
+    });
 
-    try {
-      const createdChat = await createChat(request, authToken, `Codex Eval ${scenario.scenario_id}`);
-      const chatId = String(createdChat.id);
-      result.chat_id = chatId;
+    const firstMaterialized = await waitForNativeResultMessageMaterialized(
+      request,
+      authToken,
+      effectiveChatId,
+      result.assistant_message_id || '',
+      CONTROL_TIMEOUT_MS
+    );
+    result.ui.first_result_materialized = true;
 
-      await openChatPage(page, chatId);
-      await livePause(page);
-      const uploaded = await uploadFileThroughUi(page, request, authToken, scenario.document_path);
-      await livePause(page);
-      await previewPromptInComposer(page, scenario.prompt);
-      await livePause(page);
-      result.uploaded_files = [summarizeUploadedFile(uploaded)];
+    const secondCapturedRequest = await waitForNativeRouteCapture(
+      secondRoute.captured,
+      secondPromptMarker,
+      CONTROL_TIMEOUT_MS
+    );
+    expect.soft(Boolean(secondCapturedRequest?.mutated)).toBeTruthy();
 
-      const userMessageId = crypto.randomUUID();
-      const assistantMessageId = crypto.randomUUID();
-      result.user_message_id = userMessageId;
-      result.assistant_message_id = assistantMessageId;
+    const chatWithSecondDeepJob = await waitForNativeDeepJobAnchorCount(
+      request,
+      authToken,
+      effectiveChatId,
+      2,
+      CONTROL_TIMEOUT_MS
+    );
+    const secondAcceptedMessage = listDeepJobAnchorMessages(chatWithSecondDeepJob).find((message) => {
+      return asOptionalString(message.id) !== result.assistant_message_id;
+    });
 
-      const userMessage = buildUserMessage({
-        messageId: userMessageId,
-        prompt: scenario.prompt,
-        files: [uploaded.chatFile],
-        childrenIds: [assistantMessageId],
-        timestamp: unixTimestamp(),
-      });
-      const assistantPlaceholder = buildAssistantPlaceholder({
-        messageId: assistantMessageId,
-        parentId: userMessageId,
-        timestamp: unixTimestamp(),
-      });
-
-      await updateChatHistory(request, authToken, createdChat, {
-        [userMessageId]: userMessage,
-        [assistantMessageId]: assistantPlaceholder,
-      }, assistantMessageId);
-
-      const actionSources = [
-        {
-          role: 'assistant',
-          sources: [buildSourceItem(uploaded)],
-        },
-      ];
-      const actionBody = {
-        chat_id: chatId,
-        id: assistantMessageId,
-        model: OPENWEBUI_MODEL,
-        session_id: `pw-${assistantMessageId}`,
-        messages: [userMessage, ...actionSources],
-      };
-      result.action_request_summary = summarizeActionBody(actionBody);
-
-      const actionResponse = await apiJson(request, authToken, 'POST', `${OPENWEBUI_BASE_URL}/api/chat/actions/equipment_deep_action`, actionBody);
-      result.action_response_http_status = actionResponse.status;
-      result.action_response_ok = actionResponse.ok;
-      result.action_response_payload = summarizePlainObject(actionResponse.payload);
-      result.job_id = asOptionalString(actionResponse.payload?.job_id);
-      result.status_url = asOptionalString(actionResponse.payload?.status_url);
-
-      const actionAcceptedPayload = summarizeAcceptedActionPayload(actionResponse.payload, [buildSourceItem(uploaded)]);
-      await patchAssistantMessage(request, authToken, chatId, assistantMessageId, actionAcceptedPayload);
-      await page.reload({ waitUntil: 'domcontentloaded' });
-      await livePause(page, LIVE_PAUSE_MS * 2);
-
-      const acceptedSnippet = excerpt(asOptionalString(actionResponse.payload?.content), 90);
-      if (acceptedSnippet) {
-        try {
-          await expect(page.getByText(acceptedSnippet, { exact: false }).first()).toBeVisible({ timeout: CONTROL_TIMEOUT_MS });
-          result.ui.accepted_visible = true;
-        } catch {
-          result.ui.accepted_visible = false;
-        }
-      }
-
-      if (result.job_id && result.status_url) {
-        result.backend_terminal = await waitForToolJobTerminal(request, result.status_url, MATRIX_TIMEOUT_MS, MATRIX_POLL_INTERVAL_MS);
-      }
-
-      const needsRefresh =
-        Boolean(result.job_id) &&
-        Boolean(result.status_url) &&
-        Boolean(result.backend_terminal?.statusPayload) &&
-        asOptionalString(result.backend_terminal?.statusPayload?.status) !== null;
-
-      if (needsRefresh) {
-        if (LIVE_MODE) {
-          const refreshButton = page.getByRole('button', { name: 'Обновить deep-job' }).first();
-          const refreshNetwork = page.waitForResponse((response) => {
-            return response.request().method() === 'POST' && response.url().includes('/api/chat/actions/tool_job_refresh_action');
-          });
-          await livePause(page);
-          await refreshButton.click();
-          await livePause(page);
-          const refreshResponse = await refreshNetwork;
-          const refreshText = await refreshResponse.text();
-          result.refresh_response_http_status = refreshResponse.status();
-          try {
-            result.refresh_response_payload = summarizePlainObject(JSON.parse(refreshText) as Record<string, unknown>);
-          } catch {
-            result.refresh_response_payload = null;
-          }
-        } else {
-          const refreshBody = {
-            chat_id: chatId,
-            id: assistantMessageId,
-            model: OPENWEBUI_MODEL,
-            session_id: `refresh-${assistantMessageId}`,
-            messages: listChatMessages(await getChat(request, authToken, chatId)),
-          };
-          const refreshResponse = await apiJson(request, authToken, 'POST', `${OPENWEBUI_BASE_URL}/api/chat/actions/tool_job_refresh_action`, refreshBody);
-          result.refresh_response_http_status = refreshResponse.status;
-          result.refresh_response_payload = summarizePlainObject(refreshResponse.payload);
-        }
-      }
-
-      await page.reload({ waitUntil: 'domcontentloaded' });
-      await livePause(page, LIVE_PAUSE_MS * 2);
-      const finalChat = await getChat(request, authToken, chatId);
-      result.final_chat = summarizeChatState(finalChat, assistantMessageId);
-      const acceptedMessage = getChatMessage(finalChat, assistantMessageId);
-      const resultMessage = getChatMessage(finalChat, asOptionalString(acceptedMessage?.result_message_id));
-
-      const resultSnippet = excerpt(asOptionalString(resultMessage?.content), 96);
-      if (resultSnippet) {
-        try {
-          await expect(page.getByText(resultSnippet, { exact: false }).first()).toBeVisible({ timeout: CONTROL_TIMEOUT_MS });
-          result.ui.result_visible = true;
-        } catch {
-          result.ui.result_visible = false;
-        }
-      } else {
-        result.ui.result_visible = false;
-      }
-
-      const refreshButton = page.getByRole('button', { name: 'Обновить deep-job' }).first();
-      const cancelButton = page.getByRole('button', { name: 'Отменить deep-job' }).first();
-      result.ui.refresh_hidden_after = await isHidden(refreshButton);
-      result.ui.cancel_hidden_after = await isHidden(cancelButton);
-
-      expect.soft(result.action_response_ok).toBeTruthy();
-      expect.soft(Boolean(result.job_id)).toBeTruthy();
-    } catch (error) {
-      result.error = formatError(error);
-      throw error;
-    } finally {
-      collectedResults.push(result);
-      writeJson(outputPath, result);
+    if (!secondAcceptedMessage) {
+      throw new Error('Второй queued deep-job не был создан после завершения первого.');
     }
-  });
-}
+
+    const secondDeepJobOutput = getDeepJobOutputItem(secondAcceptedMessage);
+    const secondJobId = asOptionalString(secondDeepJobOutput?.job_id);
+    const secondAcceptedMessageId = asOptionalString(secondAcceptedMessage.id);
+    result.ui.deep_job_count_after_drain = listDeepJobAnchorMessages(chatWithSecondDeepJob).length;
+    expect.soft(secondJobId).toBeTruthy();
+
+    const secondDebugResponse = {
+      assistant_message: 'Synthetic completed result for the queued follow-up deep-job.',
+      structured_result: {
+        summary: 'Queued follow-up deep-job completed after the first terminal state.',
+        source_count: 1,
+      },
+      sources: [{ name: 'synthetic-queue-second.txt' }],
+      artifacts: [{ type: 'markdown', label: 'Synthetic Queue Second Artifact' }],
+      output: [{ type: 'note', text: 'Synthetic queue second output item' }],
+    };
+    await debugTransitionToolJob(request, secondJobId || '', {
+      status: 'completed',
+      response: secondDebugResponse,
+    });
+
+    const secondMaterialized = await waitForNativeResultMessageMaterialized(
+      request,
+      authToken,
+      effectiveChatId,
+      secondAcceptedMessageId || '',
+      CONTROL_TIMEOUT_MS
+    );
+    result.final_chat = summarizeChatState(secondMaterialized.chatPayload, secondAcceptedMessageId || '');
+
+    expect.soft(asOptionalString(firstMaterialized.deepJobOutput?.state)).toBe('completed');
+    expect.soft(asOptionalString(secondMaterialized.deepJobOutput?.state)).toBe('completed');
+    expect.soft(result.ui.deep_job_count_while_first_running).toBe(1);
+    expect.soft(result.ui.deep_job_count_after_drain).toBe(2);
+  } catch (error) {
+    result.error = formatError(error);
+    throw error;
+  } finally {
+    if (cleanupSecondRoute) {
+      await cleanupSecondRoute().catch(() => {});
+    }
+    if (cleanupFirstRoute) {
+      await cleanupFirstRoute().catch(() => {});
+    }
+    collectedResults.push(result);
+    writeJson(outputPath, result);
+  }
+});
 
 function parseEnvFile(filePath: string): Record<string, string> {
   if (!fs.existsSync(filePath)) {
@@ -892,9 +910,6 @@ function runOpenWebUIBootstrapSync(): void {
     '--env-file',
     BACKEND_ENV_PATH,
   ];
-  if (LEGACY_DEEP_JOB_ACTION_TESTS_ENABLED) {
-    args.push('--include-legacy-deep-job-actions');
-  }
   const result = spawnSync(
     'python',
     args,
@@ -919,36 +934,6 @@ function runOpenWebUIBootstrapSync(): void {
   }
 }
 
-async function assertInstalledActionFunctionsSynced(request: APIRequestContext, token: string): Promise<void> {
-  const exportUrl =
-    `${BACKEND_BASE_URL}/operator/tool-bindings/export/openwebui?backend_base_url=` +
-    encodeURIComponent(BACKEND_BASE_URL);
-  const exportResponse = await request.fetch(exportUrl, { method: 'GET' });
-  expect(exportResponse.ok()).toBeTruthy();
-  const exportPayload = (await exportResponse.json()) as { actionFunctions?: Array<Record<string, unknown>> };
-  const exportedActions: Record<string, string> = {};
-  for (const item of exportPayload.actionFunctions || []) {
-    const functionId = asOptionalString(item.action_id) || '';
-    if (!functionId) {
-      continue;
-    }
-    exportedActions[functionId] = asOptionalString(item.pythonCode) || '';
-  }
-
-  const installedActions: Record<string, string> = {};
-  for (const functionId of Object.keys(LEGACY_ACTION_FUNCTION_SYNC_RULES)) {
-    const response = await apiJson(request, token, 'GET', `${OPENWEBUI_BASE_URL}/api/v1/functions/id/${functionId}`);
-    expect(response.ok).toBeTruthy();
-    installedActions[functionId] = asOptionalString(response.payload?.content) || '';
-  }
-
-  const syncReport = evaluateActionFunctionSync(exportedActions, installedActions);
-  writeJson(path.join(OUTPUT_DIR, 'action-function-sync.playwright.json'), syncReport);
-  if (syncReport.status !== 'ok') {
-    throw new Error(`Open WebUI action function drift detected: ${syncReport.drift_function_ids.join(', ')}`);
-  }
-}
-
 async function assertLegacyDeepJobActionFunctionsRemoved(
   request: APIRequestContext,
   token: string
@@ -966,28 +951,6 @@ async function assertLegacyDeepJobActionFunctionsRemoved(
     expect([401, 404]).toContain(response.status);
   }
   writeJson(path.join(OUTPUT_DIR, 'legacy-deep-job-actions.removal.json'), removalReport);
-}
-
-function evaluateActionFunctionSync(
-  exportedActions: Record<string, string>,
-  installedActions: Record<string, string>
-): { status: 'ok' | 'drift'; drift_function_ids: string[]; missing_fragments: Record<string, string[]> } {
-  const driftFunctionIds: string[] = [];
-  const missingFragments: Record<string, string[]> = {};
-  for (const [functionId, requiredFragments] of Object.entries(LEGACY_ACTION_FUNCTION_SYNC_RULES)) {
-    const exportedContent = exportedActions[functionId] || '';
-    const installedContent = installedActions[functionId] || '';
-    const missing = requiredFragments.filter((fragment) => exportedContent.includes(fragment) && !installedContent.includes(fragment));
-    if (missing.length > 0) {
-      driftFunctionIds.push(functionId);
-      missingFragments[functionId] = missing;
-    }
-  }
-  return {
-    status: driftFunctionIds.length === 0 ? 'ok' : 'drift',
-    drift_function_ids: driftFunctionIds,
-    missing_fragments: missingFragments,
-  };
 }
 
 function replaceHost(url: string, host: string): string {
@@ -1713,6 +1676,28 @@ async function waitForNativeDeepLaunchState(
   throw new Error(`Timed out waiting for native deep-job launch state for chat_id=${chatId}`);
 }
 
+async function waitForNativeDeepJobAnchorCount(
+  request: APIRequestContext,
+  token: string,
+  chatId: string,
+  expectedCount: number,
+  timeoutMs: number
+): Promise<Record<string, any>> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const chatPayload = await getChat(request, token, chatId);
+    if (listDeepJobAnchorMessages(chatPayload).length >= expectedCount) {
+      return chatPayload;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+
+  throw new Error(
+    `Timed out waiting for ${String(expectedCount)} native deep-job anchor messages for chat_id=${chatId}`
+  );
+}
+
 async function sendPromptThroughComposer(page: Page, prompt: string): Promise<void> {
   await dismissOpenWebUIReleaseNotes(page);
   await ensureOpenWebUIModelSelected(page);
@@ -1763,6 +1748,10 @@ function getDeepJobOutputItem(message: Record<string, any> | null): Record<strin
       return asOptionalString(item.type) === 'open_webui:deep_job';
     }) as Record<string, any> | undefined
   ) || null;
+}
+
+function listDeepJobAnchorMessages(chatPayload: Record<string, any>): Record<string, any>[] {
+  return listChatMessages(chatPayload).filter((message) => Boolean(getDeepJobOutputItem(message as Record<string, any>)));
 }
 
 function listChatMessages(chatPayload: Record<string, any>): Record<string, unknown>[] {
