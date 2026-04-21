@@ -336,7 +336,7 @@ test('openwebui native deep-job auto materializes terminal result and survives r
     result.persisted_function_call_output = launchState.function_call_output;
     result.persisted_output_summary = summarizePlainObject(launchState.message?.output);
 
-    await expect(page.getByText('Deep job', { exact: false }).first()).toBeVisible({ timeout: CONTROL_TIMEOUT_MS });
+    await expect(page.getByText('Long-running tool', { exact: false }).first()).toBeVisible({ timeout: CONTROL_TIMEOUT_MS });
     await expect(page.getByRole('button', { name: 'Обновить deep-job' })).toHaveCount(0);
     result.ui.panel_visible_before_terminal = true;
 
@@ -482,7 +482,7 @@ test('openwebui native deep-job main stop cancels active job', async ({ page, re
     result.native_tool_name = launchState.tool_name;
     result.launch_classification = launchState.launch_classification;
 
-    await expect(page.getByText('Deep job', { exact: false }).first()).toBeVisible({ timeout: CONTROL_TIMEOUT_MS });
+    await expect(page.getByText('Long-running tool', { exact: false }).first()).toBeVisible({ timeout: CONTROL_TIMEOUT_MS });
 
     const stopButton = page.locator('button[aria-label="Stop"]').first();
     await expect(stopButton).toBeVisible({ timeout: CONTROL_TIMEOUT_MS });

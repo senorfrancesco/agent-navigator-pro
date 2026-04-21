@@ -29,8 +29,8 @@ def _load_action_namespace(python_code: str) -> dict:
     return namespace
 
 
-def _build_body_with_last_user_message(text: str) -> dict:
-    return {
+def _build_body_with_last_user_message(text: str, *, ui_locale: str | None = None) -> dict:
+    body = {
         "messages": [
             {
                 "role": "user",
@@ -38,6 +38,9 @@ def _build_body_with_last_user_message(text: str) -> dict:
             }
         ]
     }
+    if ui_locale is not None:
+        body["ui_locale"] = ui_locale
+    return body
 
 
 def _install_fake_openwebui_modules(monkeypatch, *, chat_store: dict[str, dict] | None = None):
@@ -110,51 +113,6 @@ async def test_equipment_deep_workspace_tool_forwards_exact_prompt_as_equipment_
         return _FakeHTTPResponse(
             {
                 "status": "accepted",
-                "job_id": "job-last-user-1",
-                "status_url": "/tool-server/tool-jobs/job-last-user-1",
-            }
-        )
-
-    monkeypatch.setattr(namespace["urllib"].request, "urlopen", fake_urlopen)
-
-    response = await action.action(
-        {
-            "messages": [
-                {"role": "user", "content": "Первый общий запрос"},
-                {"role": "assistant", "content": "Промежуточный ответ"},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Сфокусируйся на процессорах и памяти."},
-                        {"type": "text", "text": "Отдельно выдели обязательные формулировки."},
-                    ],
-                },
-            ]
-        }
-    )
-
-    assert captured["payload"]["equipment_query"] == (
-        "Сфокусируйся на процессорах и памяти.\n"
-        "Отдельно выдели обязательные формулировки."
-    )
-    assert response["job_id"] == "job-last-user-1"
-    assert "status_url" not in response
-
-
-@pytest.mark.asyncio
-async def test_equipment_deep_workspace_tool_forwards_exact_prompt_as_equipment_query(monkeypatch):
-    export = build_openwebui_binding_export(backend_base_url="http://127.0.0.1:18000")
-    tool_payload = next(item for item in export["workspaceTools"] if item["tool_id"] == "equipment_deep_tool")
-    namespace = _load_action_namespace(tool_payload["pythonCode"])
-    tools = namespace["Tools"]()
-
-    captured: dict[str, dict] = {}
-
-    def fake_urlopen(request, timeout=45):
-        captured["payload"] = json.loads(request.data.decode("utf-8"))
-        return _FakeHTTPResponse(
-            {
-                "status": "accepted",
                 "job_id": "job-tool-query-1",
                 "status_url": "/tool-server/tool-jobs/job-tool-query-1",
             }
@@ -163,16 +121,49 @@ async def test_equipment_deep_workspace_tool_forwards_exact_prompt_as_equipment_
     monkeypatch.setattr(namespace["urllib"].request, "urlopen", fake_urlopen)
 
     response = await tools.analyze_equipment_deep(
-        "Сравни только диски и объём памяти для этой конфигурации."
+        "Сравни только диски и объём памяти для этой конфигурации.",
+        __metadata__={"ui_locale": "ru-RU"},
     )
 
     assert captured["payload"] == {
         "equipment_query": "Сравни только диски и объём памяти для этой конфигурации.",
         "job_mode": "force_async",
+        "ui_locale": "ru",
     }
     assert response == (
-        "Глубокий анализ оборудования принят как deep-job.\n"
-        "Прогресс отображается в блоке `Deep job`."
+        "Глубокий анализ оборудования принят как инструмент долгого выполнения.\n"
+        "Прогресс отображается в блоке `Инструмент долгого выполнения`."
+    )
+
+
+@pytest.mark.asyncio
+async def test_equipment_deep_workspace_tool_localizes_acceptance_for_english(monkeypatch):
+    export = build_openwebui_binding_export(backend_base_url="http://127.0.0.1:18000")
+    tool_payload = next(item for item in export["workspaceTools"] if item["tool_id"] == "equipment_deep_tool")
+    namespace = _load_action_namespace(tool_payload["pythonCode"])
+    tools = namespace["Tools"]()
+
+    def fake_urlopen(request, timeout=45):
+        payload = json.loads(request.data.decode("utf-8"))
+        assert payload["ui_locale"] == "en"
+        return _FakeHTTPResponse(
+            {
+                "status": "accepted",
+                "job_id": "job-tool-query-en-1",
+                "status_url": "/tool-server/tool-jobs/job-tool-query-en-1",
+            }
+        )
+
+    monkeypatch.setattr(namespace["urllib"].request, "urlopen", fake_urlopen)
+
+    response = await tools.analyze_equipment_deep(
+        "Compare only disks and memory volume for this configuration.",
+        __metadata__={"ui_locale": "en-US"},
+    )
+
+    assert response == (
+        "Deep equipment analysis was accepted as a long-running tool.\n"
+        "Progress is shown in the `Long-running tool` panel."
     )
 
 
@@ -228,6 +219,7 @@ async def test_equipment_deep_workspace_tool_routes_single_chat_file_to_document
     response = await tools.analyze_equipment_deep(
         "",
         __chat_id__="chat-doc-deep-1",
+        __metadata__={"ui_locale": "ru-RU"},
     )
 
     assert captured["url"].endswith("/tools/analyze_document_deep")
@@ -236,7 +228,7 @@ async def test_equipment_deep_workspace_tool_routes_single_chat_file_to_document
         {"label": "Requirements.pdf", "file_id": "file-req-1", "file_path": "/app/backend/data/uploads/req.pdf"}
     ]
     assert captured["payload"]["user_inputs"]["session_docs"]["Requirements.pdf"]["path"] == "/app/backend/data/uploads/req.pdf"
-    assert "Глубокий анализ документа принят как deep-job." in response
+    assert "Глубокий анализ документа принят как инструмент долгого выполнения." in response
 
 
 @pytest.mark.asyncio
@@ -395,6 +387,7 @@ async def test_equipment_deep_workspace_tool_autopolls_completed_job_and_persist
         __chat_id__="chat-deep-tool-1",
         __message_id__=accepted_message_id,
         __model__=SimpleNamespace(id="raw.qwen-14b-llm"),
+        __metadata__={"ui_locale": "ru-RU"},
     )
 
     pollers = getattr(fake_request.app.state, "llm_tools_platform_deep_job_pollers", {})
@@ -406,8 +399,8 @@ async def test_equipment_deep_workspace_tool_autopolls_completed_job_and_persist
     accepted_message = chat_store["chat-deep-tool-1"]["history"]["messages"][accepted_message_id]
     result_message_id = accepted_message.get("result_message_id")
     assert response == (
-        "Глубокий анализ оборудования принят как deep-job.\n"
-        "Прогресс отображается в блоке `Deep job`."
+        "Глубокий анализ оборудования принят как инструмент долгого выполнения.\n"
+        "Прогресс отображается в блоке `Инструмент долгого выполнения`."
     )
     assert accepted_message["job_status"] == "completed"
     assert accepted_message["actions_disabled"] is True
@@ -461,13 +454,13 @@ async def test_equipment_deep_workspace_tool_rejects_accepted_without_job_contex
         __chat_id__="chat-deep-tool-invalid-accepted",
         __message_id__="assistant-deep-tool-invalid-accepted",
         __model__=SimpleNamespace(id="raw.qwen-14b-llm"),
+        __metadata__={"ui_locale": "ru-RU"},
     )
 
-    assert "Не удалось запустить deep-job" in response
+    assert "Не удалось запустить инструмент долгого выполнения" in response
     assert "`job_id`" in response
     assert "`status_url`" in response
     assert not getattr(fake_request.app.state, "llm_tools_platform_deep_job_pollers", {})
-
 
 @pytest.mark.asyncio
 async def test_equipment_deep_workspace_tool_failed_job_emits_reload_meta_and_persists_terminal_state(monkeypatch):
@@ -546,6 +539,7 @@ async def test_equipment_deep_workspace_tool_failed_job_emits_reload_meta_and_pe
         __chat_id__="chat-deep-tool-failed-1",
         __message_id__=accepted_message_id,
         __model__=SimpleNamespace(id="raw.qwen-14b-llm"),
+        __metadata__={"ui_locale": "ru-RU"},
     )
 
     pollers = getattr(fake_request.app.state, "llm_tools_platform_deep_job_pollers", {})
@@ -556,8 +550,8 @@ async def test_equipment_deep_workspace_tool_failed_job_emits_reload_meta_and_pe
 
     accepted_message = chat_store["chat-deep-tool-failed-1"]["history"]["messages"][accepted_message_id]
     assert response == (
-        "Глубокий анализ оборудования принят как deep-job.\n"
-        "Прогресс отображается в блоке `Deep job`."
+        "Глубокий анализ оборудования принят как инструмент долгого выполнения.\n"
+        "Прогресс отображается в блоке `Инструмент долгого выполнения`."
     )
     assert accepted_message["job_status"] == "failed"
     assert accepted_message["actions_disabled"] is True
@@ -662,6 +656,7 @@ async def test_equipment_deep_workspace_tool_failed_job_waits_for_openwebui_mess
         __chat_id__="chat-deep-tool-settle-1",
         __message_id__=accepted_message_id,
         __model__=SimpleNamespace(id="raw.qwen-14b-llm"),
+        __metadata__={"ui_locale": "ru-RU"},
     )
 
     async def late_openwebui_persist():
@@ -688,8 +683,8 @@ async def test_equipment_deep_workspace_tool_failed_job_waits_for_openwebui_mess
     result_message_id = accepted_message.get("result_message_id")
 
     assert response == (
-        "Глубокий анализ оборудования принят как deep-job.\n"
-        "Прогресс отображается в блоке `Deep job`."
+        "Глубокий анализ оборудования принят как инструмент долгого выполнения.\n"
+        "Прогресс отображается в блоке `Инструмент долгого выполнения`."
     )
     assert accepted_message["job_status"] == "failed"
     assert accepted_message["actions_disabled"] is True
@@ -738,8 +733,8 @@ async def test_equipment_deep_workspace_tool_resolves_visible_accepted_bubble_fr
                             "id": visible_message_id,
                             "role": "assistant",
                             "content": (
-                                "Глубокий анализ принят как deep-job.\n"
-                                "Прогресс отображается в блоке `Deep job`."
+                                "Глубокий анализ принят как инструмент долгого выполнения.\n"
+                                "Прогресс отображается в блоке `Инструмент долгого выполнения`."
                             ),
                             "job_id": "job-tool-resolve-1",
                             "tool_job": {
@@ -800,6 +795,7 @@ async def test_equipment_deep_workspace_tool_resolves_visible_accepted_bubble_fr
         __chat_id__="chat-deep-tool-resolve-1",
         __message_id__=stale_message_id,
         __model__=SimpleNamespace(id="raw.qwen-14b-llm"),
+        __metadata__={"ui_locale": "ru-RU"},
     )
 
     pollers = getattr(fake_request.app.state, "llm_tools_platform_deep_job_pollers", {})
@@ -813,8 +809,8 @@ async def test_equipment_deep_workspace_tool_resolves_visible_accepted_bubble_fr
     result_message_id = visible_message.get("result_message_id")
 
     assert response == (
-        "Глубокий анализ оборудования принят как deep-job.\n"
-        "Прогресс отображается в блоке `Deep job`."
+        "Глубокий анализ оборудования принят как инструмент долгого выполнения.\n"
+        "Прогресс отображается в блоке `Инструмент долгого выполнения`."
     )
     assert stale_message.get("job_status") is None
     assert stale_message.get("result_message_id") is None

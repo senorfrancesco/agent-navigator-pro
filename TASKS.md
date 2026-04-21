@@ -2446,6 +2446,7 @@ Update (2026-04-01):
 - Целевая архитектура: пользователь выбирает обычную модель, а инструменты и `deep-job` работают через общий tool-aware gateway с сохранением выбранного `model id`.
 - Этот вопрос не смешивается с текущим panel-path `deep-job`, а идёт отдельным structural slice поверх unified model catalog / gateway migration.
 - Follow-up по panel-path закрыт: скрытый `function_call_output` больше не тащит `status_url` в accepted-payload, а terminal result теперь может поднимать пользовательскую ссылку `Скачать отчёт` через proxy-маршрут форка `Open WebUI` и `tool-reports` на стороне `agent-api`.
+- Follow-up по локализации panel-path: backend execution/tool layer уже нормализует `ui_locale` (`ru|en`), прокидывает его из форка `Open WebUI` в `tool_jobs`, локализует accepted/lifecycle тексты, runtime fallback-ответы и подпись `Download report`, а форк пересылает `X-OpenWebUI-Locale` в tool-server и подставляет локализованную ссылку скачивания в terminal message. Остаточный долг — сами workflow-generated markdown/report templates в `document_analysis.py`, `equipment.py`, `compare.py` и `shared/report_utils.py`: они всё ещё жёстко пишут значимую часть итогового deep-analysis по-русски и требуют отдельного slice.
 
 ### 2026-03-12 — Orchestration boundary review
 - B3.31 ядро закрыто в коде (3 новых модуля + 37 тестов)

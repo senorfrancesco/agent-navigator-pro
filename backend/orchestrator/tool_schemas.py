@@ -108,6 +108,7 @@ class BaseToolRequest(BaseModel):
     )
     thread_id: Optional[str] = None
     session_id: Optional[str] = None
+    ui_locale: Optional[str] = None
     job_mode: Literal["sync_if_possible", "force_async"] = "sync_if_possible"
     document_refs: List[DocumentRef] = Field(default_factory=list)
     user_inputs: Dict[str, Any] = Field(default_factory=dict)
@@ -218,6 +219,7 @@ class CompletedToolResult(BaseModel):
 class AcceptedToolResult(BaseModel):
     status: Literal["accepted"] = "accepted"
     tool_name: ToolName
+    tool_label: Optional[str] = None
     job_id: str
     status_url: str
     submitted_at: str
@@ -232,6 +234,7 @@ class AcceptedToolResult(BaseModel):
 class ToolJobStatus(BaseModel):
     job_id: str
     status: Literal["queued", "running", "cancelling", "completed", "failed", "cancelled"]
+    tool_label: Optional[str] = None
     current_stage: Optional[str] = None
     submitted_at: str
     started_at: Optional[str] = None

@@ -29,6 +29,7 @@ def test_tool_catalog_contains_expected_contract_names():
     assert definitions["ask_document"].execution_mode == "sync"
     assert definitions["compare_documents_deep"].execution_mode == "async"
     assert definitions["analyze_equipment_fast"].label == "Быстрый анализ оборудования"
+    assert definitions["analyze_equipment_fast"].label_en == "Equipment analysis"
     assert definitions["analyze_equipment_fast"].openwebui_status == "enabled"
     assert definitions["compare_documents_fast"].openwebui_status == "deferred"
     assert definitions["compare_documents_fast"].requires_min_documents == 2
@@ -154,6 +155,7 @@ def test_completed_tool_result_matches_mvp_contract_shape():
 def test_accepted_tool_result_matches_job_contract_shape():
     result = AcceptedToolResult(
         tool_name="compare_documents_deep",
+        tool_label="Глубокое сравнение документов",
         job_id="job-123",
         status_url="/tools/jobs/job-123",
         submitted_at="2026-04-07T12:00:00Z",
@@ -174,6 +176,7 @@ def test_accepted_tool_result_matches_job_contract_shape():
 
     assert result.model_dump()["status"] == "accepted"
     assert result.execution_metadata.execution_mode == "async"
+    assert result.model_dump()["tool_label"] == "Глубокое сравнение документов"
     assert result.model_dump()["job_status"] == "queued"
     assert result.model_dump()["status_text"] == "Задача поставлена в очередь."
     assert result.model_dump()["poll_after_ms"] == 1500
@@ -184,6 +187,7 @@ def test_tool_job_status_accepts_cancelling_state():
     status = ToolJobStatus(
         job_id="job-456",
         status="cancelling",
+        tool_label="Глубокий анализ документа",
         submitted_at="2026-04-08T09:00:00Z",
         status_text="Задача готовится к отмене.",
         status_history=[
@@ -200,6 +204,7 @@ def test_tool_job_status_accepts_cancelling_state():
     )
 
     assert status.model_dump()["status"] == "cancelling"
+    assert status.model_dump()["tool_label"] == "Глубокий анализ документа"
     assert status.model_dump()["status_text"] == "Задача готовится к отмене."
     assert status.model_dump()["status_history"][0]["key"] == "stage:prepare"
     assert status.model_dump()["progress"]["fraction"] == 0.25

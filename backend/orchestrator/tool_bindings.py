@@ -8,6 +8,7 @@ from urllib.parse import urlsplit, urlunsplit
 from orchestrator.tool_catalog import (
     ToolDefinition,
     ToolName,
+    get_tool_display_label,
     get_tool_definition,
     list_openwebui_deferred_tool_definitions,
     list_openwebui_enabled_tool_definitions,
@@ -22,8 +23,6 @@ OPENWEBUI_DEFAULT_RAG_EMBEDDING_BASE_URL = "http://host.docker.internal:8090/v1"
 OPENWEBUI_QDRANT_URI = "http://qdrant:6333"
 OPENWEBUI_QDRANT_COLLECTION_PREFIX = "anp-openwebui"
 BACKEND_QDRANT_COLLECTION_NAME_SOURCE = "backend_env:QDRANT_COLLECTION_NAME"
-
-
 @dataclass(frozen=True)
 class ToolBinding:
     binding_id: str
@@ -77,6 +76,10 @@ def _prompt_binding_description(tool_name: ToolName) -> str:
 
 def _tool_catalog_entries(definitions: Iterable[ToolDefinition]) -> list[dict[str, Any]]:
     return [definition.to_catalog_entry() for definition in definitions]
+
+
+def _finalize_generated_python_code(code: str) -> str:
+    return str(code or "").strip()
 
 
 TOOL_BINDINGS: Tuple[ToolBinding, ...] = (
@@ -497,15 +500,27 @@ def _build_openwebui_workspace_tool_code(
     tool = _tool(tool_name)
     document_tool_name: ToolName = "analyze_document_deep" if is_async else "analyze_document_fast"
     document_action_label = _tool(document_tool_name).label
+    action_label_en = get_tool_display_label(tool_name, "en")
+    document_action_label_en = get_tool_display_label(document_tool_name, "en")
     document_default_prompt = (
         "Сделай глубокий анализ загруженного документа."
         if is_async
         else "Сделай быстрый анализ загруженного документа."
     )
+    document_default_prompt_en = (
+        "Perform a deep analysis of the uploaded document."
+        if is_async
+        else "Perform a quick analysis of the uploaded document."
+    )
     pair_default_prompt = (
         "Сделай глубокое сравнение загруженных документов."
         if is_async
         else "Сравни загруженные документы по ключевым различиям."
+    )
+    pair_default_prompt_en = (
+        "Perform a deep comparison of the uploaded documents."
+        if is_async
+        else "Compare the uploaded documents by key differences."
     )
     if not is_async:
         return dedent(
@@ -801,6 +816,48 @@ def _build_openwebui_workspace_tool_code(
         MESSAGE_SETTLE_POLL_SECONDS = 0.1
         TERMINAL_REAPPLY_DELAY_SECONDS = 0.5
         TERMINAL_REAPPLY_ATTEMPTS = 5
+        _LOCALE_TEXT = {
+            "ru": {
+                "auto_refresh_stopped": "Автообновление остановлено, используйте refresh.",
+                "status_changed": "Статус инструмента долгого выполнения изменился: {status}",
+                "completed_result_below": "Завершено — результат добавлен ниже.",
+                "cancelled": "Инструмент долгого выполнения отменён.",
+                "terminal_status": "Инструмент долгого выполнения завершён со статусом {status}.",
+                "missing_query": "Не удалось определить пользовательский запрос для `__ACTION_LABEL__`.",
+                "launch_failed": "Не удалось запустить инструмент долгого выполнения.\\nerror: {error}",
+                "missing_confirmation": (
+                    "Не удалось запустить инструмент долгого выполнения.\\n"
+                    "Инструмент не вернул подтверждение запуска (`job_id` и `status_url`)."
+                ),
+                "accepted": "{label} принят как инструмент долгого выполнения.\\nПрогресс отображается в блоке `Инструмент долгого выполнения`.",
+            },
+            "en": {
+                "auto_refresh_stopped": "Auto-refresh stopped. Use refresh to continue.",
+                "status_changed": "Long-running tool status changed: {status}",
+                "completed_result_below": "Completed — the result was added below.",
+                "cancelled": "The long-running tool was cancelled.",
+                "terminal_status": "The long-running tool finished with status {status}.",
+                "missing_query": "Could not determine the user request for `__ACTION_LABEL__`.",
+                "launch_failed": "Failed to start the long-running tool.\\nerror: {error}",
+                "missing_confirmation": (
+                    "Failed to start the long-running tool.\\n"
+                    "The tool did not return a launch confirmation (`job_id` and `status_url`)."
+                ),
+                "accepted": "{label} was accepted as a long-running tool.\\nProgress is shown in the `Long-running tool` panel.",
+            },
+        }
+
+        def _normalize_ui_locale(value):
+            raw = str(value or "").strip().lower()
+            if raw.startswith("ru"):
+                return "ru"
+            return "en"
+
+        def _locale_text(locale, key, **kwargs):
+            template = _LOCALE_TEXT[_normalize_ui_locale(locale)][key]
+            if kwargs:
+                return template.format(**kwargs)
+            return template
 
         async def _request_json(method, url, token, payload=None):
             def _do_request():
@@ -1148,7 +1205,7 @@ def _build_openwebui_workspace_tool_code(
                 "latest_user_text": _content_to_text(user_message.get("content")),
             }
 
-        def _select_tool_request(query, chat_id):
+        def _select_tool_request(query, chat_id, locale):
             document_context = _collect_document_context(chat_id)
             document_refs = document_context.get("document_refs") or []
             user_inputs = document_context.get("user_inputs") or {}
@@ -1157,9 +1214,20 @@ def _build_openwebui_workspace_tool_code(
             if len(document_refs) == 1:
                 return {
                     "tool_name": "__DOCUMENT_TOOL_NAME__",
-                    "action_label": "__DOCUMENT_ACTION_LABEL__",
+                    "action_label": (
+                        "__DOCUMENT_ACTION_LABEL_RU__"
+                        if _normalize_ui_locale(locale) == "ru"
+                        else "__DOCUMENT_ACTION_LABEL_EN__"
+                    ),
                     "payload": {
-                        "analysis_goal": prompt or "__DOCUMENT_DEFAULT_PROMPT__",
+                        "analysis_goal": (
+                            prompt
+                            or (
+                                "__DOCUMENT_DEFAULT_PROMPT_RU__"
+                                if _normalize_ui_locale(locale) == "ru"
+                                else "__DOCUMENT_DEFAULT_PROMPT_EN__"
+                            )
+                        ),
                         "document_refs": document_refs,
                         "user_inputs": user_inputs,
                         "job_mode": "force_async",
@@ -1169,9 +1237,20 @@ def _build_openwebui_workspace_tool_code(
             if len(document_refs) >= 2:
                 return {
                     "tool_name": "__TOOL_NAME__",
-                    "action_label": "__ACTION_LABEL__",
+                    "action_label": (
+                        "__ACTION_LABEL_RU__"
+                        if _normalize_ui_locale(locale) == "ru"
+                        else "__ACTION_LABEL_EN__"
+                    ),
                     "payload": {
-                        "equipment_query": prompt or "__PAIR_DEFAULT_PROMPT__",
+                        "equipment_query": (
+                            prompt
+                            or (
+                                "__PAIR_DEFAULT_PROMPT_RU__"
+                                if _normalize_ui_locale(locale) == "ru"
+                                else "__PAIR_DEFAULT_PROMPT_EN__"
+                            )
+                        ),
                         "document_refs": document_refs,
                         "user_inputs": user_inputs,
                         "job_mode": "force_async",
@@ -1180,12 +1259,16 @@ def _build_openwebui_workspace_tool_code(
 
             if not prompt:
                 return {
-                    "error": "Не удалось определить пользовательский запрос для `__ACTION_LABEL__`."
+                    "error": _locale_text(locale, "missing_query")
                 }
 
             return {
                 "tool_name": "__TOOL_NAME__",
-                "action_label": "__ACTION_LABEL__",
+                "action_label": (
+                    "__ACTION_LABEL_RU__"
+                    if _normalize_ui_locale(locale) == "ru"
+                    else "__ACTION_LABEL_EN__"
+                ),
                 "payload": {
                     "equipment_query": prompt,
                     "job_mode": "force_async",
@@ -1196,8 +1279,15 @@ def _build_openwebui_workspace_tool_code(
             current_content = str((existing or {}).get("content") or "").strip()
             if (
                 current_content
-                and current_content not in {"Завершено — результат добавлен ниже.", "deep-job отменён."}
-                and not current_content.startswith("deep-job завершён со статусом")
+                and current_content
+                not in {
+                    _locale_text("ru", "completed_result_below"),
+                    _locale_text("ru", "cancelled"),
+                    _locale_text("en", "completed_result_below"),
+                    _locale_text("en", "cancelled"),
+                }
+                and not current_content.startswith(_locale_text("ru", "terminal_status", status=""))
+                and not current_content.startswith(_locale_text("en", "terminal_status", status=""))
             ):
                 return current_content
 
@@ -1393,7 +1483,7 @@ def _build_openwebui_workspace_tool_code(
                             _persist_terminal_message(
                                 chat_id,
                                 target_message_id,
-                                content="Автообновление остановлено, используйте refresh.",
+                                content=_locale_text(entry.get("ui_locale"), "auto_refresh_stopped"),
                                 job_id=job_id,
                                 status_url=status_url,
                                 status=str(entry.get("job_status") or "accepted"),
@@ -1404,7 +1494,7 @@ def _build_openwebui_workspace_tool_code(
                             await _emit_custom_event(
                                 __event_emitter__,
                                 "replace",
-                                {"content": "Автообновление остановлено, используйте refresh."},
+                                {"content": _locale_text(entry.get("ui_locale"), "auto_refresh_stopped")},
                             )
                             return
                         await asyncio.sleep(AUTO_POLL_INTERVAL_SECONDS)
@@ -1433,7 +1523,7 @@ def _build_openwebui_workspace_tool_code(
                                 chat_id,
                                 target_message_id,
                                 {
-                                    "description": f"Статус deep-job изменился: {job_status}",
+                                    "description": _locale_text(entry.get("ui_locale"), "status_changed", status=job_status),
                                     "status": job_status,
                                     "job_id": job_id,
                                     "status_url": status_url,
@@ -1460,7 +1550,7 @@ def _build_openwebui_workspace_tool_code(
                         terminal_patch = _persist_terminal_message(
                             chat_id,
                             target_message_id,
-                            content="Завершено — результат добавлен ниже.",
+                            content=_locale_text(entry.get("ui_locale"), "completed_result_below"),
                             job_id=job_id,
                             status_url=status_url,
                             status="completed",
@@ -1511,9 +1601,9 @@ def _build_openwebui_workspace_tool_code(
 
                     error_summary = str(status_payload.get("error_summary") or "").strip()
                     terminal_content = (
-                        f"deep-job завершён со статусом {job_status}."
+                        _locale_text(entry.get("ui_locale"), "terminal_status", status=job_status)
                         if job_status != "cancelled"
-                        else "deep-job отменён."
+                        else _locale_text(entry.get("ui_locale"), "cancelled")
                     )
                     if error_summary:
                         terminal_content = terminal_content + f"\\nerror: {error_summary}"
@@ -1585,7 +1675,7 @@ def _build_openwebui_workspace_tool_code(
                 _persist_terminal_message(
                     chat_id,
                     entry.get("resolved_message_id") or message_id,
-                    content="Автообновление остановлено, используйте refresh.",
+                    content=_locale_text(entry.get("ui_locale"), "auto_refresh_stopped"),
                     job_id=job_id,
                     status_url=status_url,
                     status="accepted",
@@ -1595,7 +1685,7 @@ def _build_openwebui_workspace_tool_code(
                 await _emit_custom_event(
                     __event_emitter__,
                     "replace",
-                    {"content": "Автообновление остановлено, используйте refresh."},
+                    {"content": _locale_text(entry.get("ui_locale"), "auto_refresh_stopped")},
                 )
                 await _emit_custom_event(
                     __event_emitter__,
@@ -1629,6 +1719,7 @@ def _build_openwebui_workspace_tool_code(
                 __chat_id__=None,
                 __message_id__=None,
                 __model__=None,
+                __metadata__=None,
             ) -> str:
                 """
                 __TOOL_SUMMARY__
@@ -1638,12 +1729,14 @@ def _build_openwebui_workspace_tool_code(
                 :param query: __TOOL_INPUT_SUMMARY__
                 :return: __TOOL_OUTPUT_SUMMARY__
                 """
-                routed = _select_tool_request(query, __chat_id__)
+                locale = _normalize_ui_locale((__metadata__ or {}).get("ui_locale"))
+                routed = _select_tool_request(query, __chat_id__, locale)
                 if routed.get("error"):
                     return routed["error"]
                 target_tool_name = str(routed.get("tool_name") or "__TOOL_NAME__")
                 target_action_label = str(routed.get("action_label") or "__ACTION_LABEL__")
                 payload = dict(routed.get("payload") or {})
+                payload["ui_locale"] = locale
                 payload = {key: value for key, value in payload.items() if value is not None and value != ""}
                 try:
                     response = await _request_json(
@@ -1653,19 +1746,13 @@ def _build_openwebui_workspace_tool_code(
                         payload,
                     )
                 except Exception as exc:
-                    return (
-                        "Не удалось запустить deep-job.\\n"
-                        f"error: {exc}"
-                    )
+                    return _locale_text(locale, "launch_failed", error=exc)
 
                 if response.get("status") == "accepted":
                     status_url = str(response.get("status_url", ""))
                     job_id = str(response.get("job_id", "unknown"))
                     if not status_url or not job_id or job_id == "unknown":
-                        return (
-                            "Не удалось запустить deep-job.\\n"
-                            "Инструмент не вернул подтверждение запуска (`job_id` и `status_url`)."
-                        )
+                        return _locale_text(locale, "missing_confirmation")
                     if __request__ is not None and __chat_id__ and __message_id__:
                         normalized_status_url = _absolute_status_url(self.valves.tool_server_base_url, status_url)
                         registry = _poller_registry(__request__.app.state)
@@ -1679,6 +1766,7 @@ def _build_openwebui_workspace_tool_code(
                                 "result_message_id": None,
                                 "stop_requested": False,
                                 "tool_name": target_tool_name,
+                                "ui_locale": locale,
                             }
                             task = asyncio.create_task(
                                 _run_auto_poll(
@@ -1696,29 +1784,29 @@ def _build_openwebui_workspace_tool_code(
                             entry["task"] = task
                             registry[key] = entry
 
-                    return (
-                        f"{target_action_label} принят как deep-job.\\n"
-                        "Прогресс отображается в блоке `Deep job`."
-                    )
+                    return _locale_text(locale, "accepted", label=target_action_label)
 
                 assistant_message = str(response.get("assistant_message") or "").strip()
                 if assistant_message:
                     return assistant_message
-                return (
-                    "Не удалось запустить deep-job.\\n"
-                    "Инструмент не вернул подтверждение запуска (`job_id` и `status_url`)."
-                )
+                return _locale_text(locale, "missing_confirmation")
         '''
     ).strip()
-    return (
+    return _finalize_generated_python_code(
         template.replace("__TOOL_SERVER_BASE_URL__", container_tool_server_base_url)
         .replace("__PRIORITY__", str(priority))
         .replace("__ACTION_LABEL__", action_label)
+        .replace("__ACTION_LABEL_RU__", action_label)
+        .replace("__ACTION_LABEL_EN__", action_label_en)
         .replace("__TOOL_NAME__", tool_name)
         .replace("__DOCUMENT_TOOL_NAME__", document_tool_name)
         .replace("__DOCUMENT_ACTION_LABEL__", document_action_label)
-        .replace("__DOCUMENT_DEFAULT_PROMPT__", document_default_prompt)
-        .replace("__PAIR_DEFAULT_PROMPT__", pair_default_prompt)
+        .replace("__DOCUMENT_ACTION_LABEL_RU__", document_action_label)
+        .replace("__DOCUMENT_ACTION_LABEL_EN__", document_action_label_en)
+        .replace("__DOCUMENT_DEFAULT_PROMPT_RU__", document_default_prompt)
+        .replace("__DOCUMENT_DEFAULT_PROMPT_EN__", document_default_prompt_en)
+        .replace("__PAIR_DEFAULT_PROMPT_RU__", pair_default_prompt)
+        .replace("__PAIR_DEFAULT_PROMPT_EN__", pair_default_prompt_en)
         .replace("__DEFAULT_MODEL__", OPENWEBUI_DEFAULT_MODEL)
         .replace("__METHOD_NAME__", method_name)
         .replace("__TOOL_SUMMARY__", tool.summary)

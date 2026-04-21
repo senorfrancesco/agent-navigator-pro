@@ -38,8 +38,29 @@ from orchestrator.tool_execution import build_tool_job_status_response, cancel_t
 _TOOL_SERVER_BEARER = HTTPBearer(auto_error=False)
 _TOOL_ROUTE_PREFIXES = ("/tools/", "/tool-jobs/")
 _TOOL_SERVER_ALIAS_PREFIX = "/tool-server"
-_REPORT_FILENAME_RE = re.compile(r"\*\*Отчет (?:сохранен|уже сохранен):\*\*\s*`([^`]+)`")
+_REPORT_FILENAME_RE = re.compile(
+    r"\*\*(?:Отчет|Отчёт|Report) (?:сохранен|сохранён|уже сохранен|уже сохранён|saved|already saved):\*\*\s*`([^`]+)`",
+    re.IGNORECASE,
+)
 _ALLOWED_REPORT_EXTENSIONS = {".pdf", ".md"}
+_DEFAULT_TOOL_MESSAGES = {
+    "ru": {
+        "analyze_document_fast": "Сделай быстрый анализ документа",
+        "analyze_document_deep": "Сделай глубокий анализ документа",
+        "compare_documents_fast": "Сравни документы по ключевым различиям",
+        "compare_documents_deep": "Сделай глубокое сравнение документов",
+    },
+    "en": {
+        "analyze_document_fast": "Perform a quick document analysis",
+        "analyze_document_deep": "Perform a deep document analysis",
+        "compare_documents_fast": "Compare the documents by key differences",
+        "compare_documents_deep": "Perform a deep comparison of the documents",
+    },
+}
+_REPORT_DOWNLOAD_LABELS = {
+    "ru": "Скачать отчёт",
+    "en": "Download report",
+}
 
 
 class ToolJobDeliveryRequest(BaseModel):
@@ -102,17 +123,29 @@ def _extract_ref_identity(document_ref: DocumentRef) -> Optional[str]:
     return document_ref.resolved_identity()
 
 
+def _normalize_ui_locale(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if raw.startswith("ru"):
+        return "ru"
+    return "en"
+
+
+def _report_download_label(locale: str) -> str:
+    return _REPORT_DOWNLOAD_LABELS[_normalize_ui_locale(locale)]
+
+
 def _build_tool_message(tool_request: ToolRequest) -> str:
+    ui_locale = _normalize_ui_locale(tool_request.ui_locale)
     if isinstance(tool_request, AskDocumentRequest):
         return tool_request.question
     if isinstance(tool_request, AnalyzeDocumentFastRequest):
-        return tool_request.analysis_goal or "Сделай быстрый анализ документа"
+        return tool_request.analysis_goal or _DEFAULT_TOOL_MESSAGES[ui_locale]["analyze_document_fast"]
     if isinstance(tool_request, AnalyzeDocumentDeepRequest):
-        return tool_request.analysis_goal or "Сделай глубокий анализ документа"
+        return tool_request.analysis_goal or _DEFAULT_TOOL_MESSAGES[ui_locale]["analyze_document_deep"]
     if isinstance(tool_request, CompareDocumentsFastRequest):
-        return tool_request.comparison_goal or "Сравни документы по ключевым различиям"
+        return tool_request.comparison_goal or _DEFAULT_TOOL_MESSAGES[ui_locale]["compare_documents_fast"]
     if isinstance(tool_request, CompareDocumentsDeepRequest):
-        return tool_request.comparison_goal or "Сделай глубокое сравнение документов"
+        return tool_request.comparison_goal or _DEFAULT_TOOL_MESSAGES[ui_locale]["compare_documents_deep"]
     if isinstance(tool_request, AnalyzeEquipmentFastRequest):
         return tool_request.equipment_query
     if isinstance(tool_request, AnalyzeEquipmentDeepRequest):
@@ -234,11 +267,18 @@ def _extract_forwarded_openwebui_context(request: Request) -> Dict[str, str]:
         "X-OpenWebUI-Message-Id",
         "X-Open-WebUI-Message-Id",
     )
+    ui_locale = _extract_forwarded_header(
+        request,
+        "X-OpenWebUI-Locale",
+        "X-Open-WebUI-Locale",
+    )
     context: Dict[str, str] = {}
     if chat_id:
         context["chat_id"] = chat_id
     if message_id:
         context["message_id"] = message_id
+    if ui_locale:
+        context["ui_locale"] = _normalize_ui_locale(ui_locale)
     return context
 
 
@@ -266,6 +306,7 @@ def _build_orchestration_payload(tool_request: ToolRequest) -> Dict[str, Any]:
         "requested_tool": tool_request.tool_name,
         "routing_mode": tool_request.routing_mode,
         "job_mode": tool_request.job_mode,
+        "ui_locale": _normalize_ui_locale(tool_request.ui_locale),
         "thread_id": tool_request.thread_id,
         "session_id": tool_request.session_id,
         "active_doc_ids": active_doc_ids,
@@ -324,7 +365,7 @@ def _normalize_tool_sources(raw_sources: Iterable[Dict[str, Any]]) -> List[ToolS
     return normalized
 
 
-def _normalize_tool_artifacts(response: Dict[str, Any]) -> List[ToolArtifact]:
+def _normalize_tool_artifacts(response: Dict[str, Any], *, ui_locale: str) -> List[ToolArtifact]:
     artifacts: List[ToolArtifact] = []
     generated_report = ((response.get("ui_effects") or {}).get("generated_report") if isinstance(response.get("ui_effects"), dict) else None)
     if isinstance(generated_report, dict):
@@ -342,16 +383,17 @@ def _normalize_tool_artifacts(response: Dict[str, Any]) -> List[ToolArtifact]:
         report_filename = _extract_saved_report_filename(generated_report)
         if report_filename:
             report_ext = Path(report_filename).suffix.lower().lstrip(".")
+            download_label = _report_download_label(ui_locale)
             artifacts.append(
                 ToolArtifact(
                     artifact_id=report_filename,
                     artifact_type="report",
                     url=f"/tool-server/tool-reports/{quote(report_filename, safe='')}",
-                    title="Скачать отчёт",
+                    title=download_label,
                     metadata={
                         "filename": report_filename,
                         "format": report_ext or None,
-                        "download_label": "Скачать отчёт",
+                        "download_label": download_label,
                     },
                 )
             )
@@ -408,7 +450,7 @@ def _build_completed_tool_result(tool_request: ToolRequest, response: Dict[str, 
         assistant_message=str(response.get("assistant_message") or ""),
         structured_result=structured_result,
         sources=_normalize_tool_sources(response.get("sources") or []),
-        artifacts=_normalize_tool_artifacts(response),
+        artifacts=_normalize_tool_artifacts(response, ui_locale=_normalize_ui_locale(tool_request.ui_locale)),
         available_actions=build_result_available_actions(tool_request.tool_name),
         execution_metadata=ExecutionMetadata(
             requested_tool=tool_request.tool_name,

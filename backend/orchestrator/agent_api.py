@@ -185,6 +185,7 @@ class OrchestrationRequest(BaseModel):
     message: str
     chat_id: Optional[str] = None
     message_id: Optional[str] = None
+    ui_locale: Optional[str] = None
     run_id: Optional[str] = None
     state_ref: Optional[str] = None
     state_version: Optional[int] = None

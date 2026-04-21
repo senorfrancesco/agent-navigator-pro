@@ -143,6 +143,7 @@ def test_async_tool_route_returns_accepted_contract(monkeypatch):
         return {
             "status": "accepted",
             "tool_name": "analyze_document_deep",
+            "tool_label": "Deep document analysis",
             "job_id": "job-1",
             "status_url": "/tool-jobs/job-1",
             "submitted_at": "2026-04-07T12:00:00Z",
@@ -171,6 +172,7 @@ def test_async_tool_route_returns_accepted_contract(monkeypatch):
     payload = response.json()
     assert payload["status"] == "accepted"
     assert payload["tool_name"] == "analyze_document_deep"
+    assert payload["tool_label"] == "Deep document analysis"
     assert payload["job_id"] == "job-1"
 
 
@@ -200,6 +202,7 @@ def test_async_tool_route_persists_forwarded_openwebui_context_and_exposes_activ
             **_auth_headers(),
             "X-OpenWebUI-Chat-Id": "chat-openwebui-1",
             "X-OpenWebUI-Message-Id": "message-openwebui-9",
+            "X-OpenWebUI-Locale": "en-US",
         },
         json={
             "analysis_goal": "Найди риски",
@@ -216,6 +219,7 @@ def test_async_tool_route_persists_forwarded_openwebui_context_and_exposes_activ
     assert job is not None
     assert job.request_payload["chat_id"] == "chat-openwebui-1"
     assert job.request_payload["message_id"] == "message-openwebui-9"
+    assert job.request_payload["ui_locale"] == "en"
 
     active_response = client.get(
         "/tool-server/tool-jobs/active/chat/chat-openwebui-1",
@@ -227,6 +231,7 @@ def test_async_tool_route_persists_forwarded_openwebui_context_and_exposes_activ
     assert active_payload["job"] is not None
     assert active_payload["job"]["job_id"] == job_id
     assert active_payload["job"]["status"] == "queued"
+    assert active_payload["job"]["tool_label"] == "Deep document analysis"
     assert active_payload["job"]["result_message_id"] is None
 
 
@@ -284,12 +289,14 @@ def test_prefixed_async_tool_route_returns_prefixed_status_url(monkeypatch):
         headers=_auth_headers(),
         json={
             "equipment_query": "Проверь компрессор КМ-42",
+            "ui_locale": "ru-RU",
         },
     )
 
     assert response.status_code == 202
     payload = response.json()
     assert payload["status"] == "accepted"
+    assert payload["tool_label"] == "Глубокий анализ оборудования"
     assert payload["status_url"].startswith("/tool-server/tool-jobs/")
     assert payload["available_actions"][0]["action_id"] == "tool-job.status.open"
     assert payload["available_actions"][1]["action_id"] == "tool-job.result.open"
@@ -297,6 +304,7 @@ def test_prefixed_async_tool_route_returns_prefixed_status_url(monkeypatch):
 
     status_response = client.get(payload["status_url"], headers=_auth_headers())
     assert status_response.status_code == 200
+    assert status_response.json()["tool_label"] == "Глубокий анализ оборудования"
 
 
 def test_tool_job_result_returns_409_before_completion(monkeypatch):
@@ -420,6 +428,7 @@ def test_completed_tool_route_exposes_report_artifact_with_download_link(monkeyp
         headers=_auth_headers(),
         json={
             "analysis_goal": "Выдели риски",
+            "ui_locale": "ru-RU",
             "document_refs": [{"document_id": "doc-1"}],
         },
     )
@@ -436,6 +445,51 @@ def test_completed_tool_route_exposes_report_artifact_with_download_link(monkeyp
                 "filename": "Report_Test_123.pdf",
                 "format": "pdf",
                 "download_label": "Скачать отчёт",
+            },
+        }
+    ]
+
+
+def test_completed_tool_route_localizes_report_artifact_for_english_locale(monkeypatch):
+    async def fake_execute(orchestration_request, http_request=None):
+        return {
+            "assistant_message": "Report is ready.\n---\n**Report saved:** `Report_Test_123.pdf`",
+            "trace_id": "trace-tool-report-en-1",
+            "route": "document_analysis",
+            "source_scope_summary": "session",
+            "sources": [],
+            "ui_effects": {
+                "generated_report": "Report is ready.\n---\n**Report saved:** `Report_Test_123.pdf`",
+            },
+        }
+
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_TOKEN", "tool-secret")
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_ALLOWED_ORIGINS", "http://localhost:3001")
+    monkeypatch.setattr(agent_api, "execute_orchestration_api", fake_execute)
+
+    client = TestClient(agent_api.app)
+    response = client.post(
+        "/tools/analyze_document_fast",
+        headers=_auth_headers(),
+        json={
+            "analysis_goal": "Highlight the risks",
+            "ui_locale": "en-US",
+            "document_refs": [{"document_id": "doc-1"}],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["artifacts"] == [
+        {
+            "artifact_id": "Report_Test_123.pdf",
+            "artifact_type": "report",
+            "url": "/tool-server/tool-reports/Report_Test_123.pdf",
+            "title": "Download report",
+            "metadata": {
+                "filename": "Report_Test_123.pdf",
+                "format": "pdf",
+                "download_label": "Download report",
             },
         }
     ]

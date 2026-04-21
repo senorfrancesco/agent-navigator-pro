@@ -135,11 +135,21 @@ async def test_submit_async_tool_job_reports_progress_for_generic_deep_job(monke
             "requested_tool": "analyze_document_deep",
             "tool_execution_mode": "async",
             "execution_surface": "explicit_tool",
+            "ui_locale": "ru-RU",
         },
         deps=_stub_execution_dependencies(),
         execute_fn=fake_execute,
         route_prefix="/tool-server",
     )
+
+    accepted_queued = build_accepted_tool_job_response(
+        job,
+        {"requested_tool": "analyze_document_deep"},
+    )
+    assert accepted_queued["job_status"] == "queued"
+    assert accepted_queued["tool_label"] == "Глубокий анализ документа"
+    assert accepted_queued["status_text"] == "Задача поставлена в очередь."
+    assert "предостав" not in accepted_queued["status_text"].lower()
 
     for _ in range(100):
         await asyncio.sleep(0.01)
@@ -154,10 +164,12 @@ async def test_submit_async_tool_job_reports_progress_for_generic_deep_job(monke
     status_payload = build_tool_job_status_response(stored)
 
     assert accepted["job_status"] == "completed"
-    assert accepted["status_text"] == "deep-job завершён."
+    assert accepted["tool_label"] == "Глубокий анализ документа"
+    assert accepted["status_text"] == "Выполнение завершено."
     assert accepted["poll_after_ms"] == 1500
     assert status_payload["status"] == "completed"
-    assert status_payload["status_text"] == "deep-job завершён."
+    assert status_payload["tool_label"] == "Глубокий анализ документа"
+    assert status_payload["status_text"] == "Выполнение завершено."
     assert status_payload["progress"]["phase"] == "stage:analysis"
     assert status_payload["status_history"][0]["key"] == "stage:indexing"
     assert status_payload["status_history"][1]["key"] == "stage:analysis"
@@ -167,6 +179,56 @@ async def test_submit_async_tool_job_reports_progress_for_generic_deep_job(monke
     assert status_payload["artifacts"][0]["url"] == "/tool-server/tool-reports/Report_Test_123.pdf"
     result_payload = get_tool_job_result(job.job_id)
     assert result_payload["artifacts"][0]["artifact_id"] == "Report_Test_123.pdf"
+
+
+@pytest.mark.asyncio
+async def test_submit_async_tool_job_localizes_generic_deep_job_status_for_english(monkeypatch):
+    monkeypatch.setenv("OPENWEBUI_GENERIC_DEEP_JOB_ENABLED", "1")
+    monkeypatch.setenv("OPENWEBUI_EXPLICIT_TOOL_JOB_START_DELAY_S", "0")
+    monkeypatch.delenv("OPENWEBUI_GENERIC_DEEP_JOB_ENABLED_TOOLS", raising=False)
+
+    async def fake_execute(payload, deps=None):
+        await deps.update_progress_box(
+            key="stage:indexing",
+            title="Indexing",
+            content="Preparing the document chunks.",
+        )
+        return {
+            "assistant_message": "Deep analysis is ready.\n---\n**Report saved:** `Report_Test_123.pdf`",
+            "generated_report": "Deep analysis is ready.\n---\n**Report saved:** `Report_Test_123.pdf`",
+        }
+
+    job = submit_async_tool_job(
+        request_payload={
+            "requested_tool": "analyze_document_deep",
+            "tool_execution_mode": "async",
+            "execution_surface": "explicit_tool",
+            "ui_locale": "en-US",
+        },
+        deps=_stub_execution_dependencies(),
+        execute_fn=fake_execute,
+        route_prefix="/tool-server",
+    )
+
+    accepted_queued = build_accepted_tool_job_response(
+        job,
+        {"requested_tool": "analyze_document_deep"},
+    )
+    assert accepted_queued["tool_label"] == "Deep document analysis"
+    assert accepted_queued["status_text"] == "The task has been queued."
+
+    for _ in range(100):
+        await asyncio.sleep(0.01)
+        stored = get_tool_job_store().get(job.job_id)
+        if stored is not None and stored.status == "completed":
+            break
+
+    stored = get_tool_job_store().get(job.job_id)
+    assert stored is not None
+    status_payload = build_tool_job_status_response(stored)
+    assert status_payload["status_text"] == "Execution completed."
+    assert status_payload["artifacts"][0]["title"] == "Download report"
+    assert status_payload["artifacts"][0]["metadata"]["download_label"] == "Download report"
 
 
 @pytest.mark.asyncio

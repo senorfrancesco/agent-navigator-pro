@@ -22,6 +22,7 @@ OpenWebUIToolStatus = Literal["enabled", "deferred"]
 class ToolDefinition:
     name: ToolName
     label: str
+    label_en: str
     category: ToolCategory
     execution_mode: ExecutionMode
     summary: str
@@ -34,6 +35,12 @@ class ToolDefinition:
     requires_document_context: bool = False
     requires_min_documents: int = 0
     supported_routing_modes: Tuple[RoutingMode, ...] = ("explicit", "assisted", "auto")
+
+    def display_label(self, locale: str | None = None) -> str:
+        raw_locale = str(locale or "").strip().lower()
+        if raw_locale.startswith("ru"):
+            return self.label
+        return self.label_en
 
     @property
     def openapi_description(self) -> str:
@@ -60,6 +67,7 @@ class ToolDefinition:
         return {
             "name": self.name,
             "label": self.label,
+            "label_en": self.label_en,
             "category": self.category,
             "execution_mode": self.execution_mode,
             "summary": self.summary,
@@ -77,6 +85,7 @@ TOOL_DEFINITIONS: Dict[ToolName, ToolDefinition] = {
     "ask_document": ToolDefinition(
         name="ask_document",
         label="Вопрос по документу",
+        label_en="Document question",
         category="document_qa",
         execution_mode="sync",
         summary="Точечный вопрос по документу с опорой на document_ref и retrieval по релевантным фрагментам.",
@@ -91,6 +100,7 @@ TOOL_DEFINITIONS: Dict[ToolName, ToolDefinition] = {
     "analyze_document_fast": ToolDefinition(
         name="analyze_document_fast",
         label="Быстрый анализ документа",
+        label_en="Quick document analysis",
         category="document_analysis",
         execution_mode="sync",
         summary="Быстрый обзор документа с извлечением ключевых пунктов и рисков.",
@@ -105,6 +115,7 @@ TOOL_DEFINITIONS: Dict[ToolName, ToolDefinition] = {
     "analyze_document_deep": ToolDefinition(
         name="analyze_document_deep",
         label="Глубокий анализ документа",
+        label_en="Deep document analysis",
         category="document_analysis",
         execution_mode="async",
         summary="Глубокий анализ документа для длинных разборов и rich result/report contract.",
@@ -119,6 +130,7 @@ TOOL_DEFINITIONS: Dict[ToolName, ToolDefinition] = {
     "compare_documents_fast": ToolDefinition(
         name="compare_documents_fast",
         label="Сравнение документов",
+        label_en="Document comparison",
         category="document_compare",
         execution_mode="sync",
         summary="Быстрое сравнение документов по ключевым различиям и конфликтам.",
@@ -134,6 +146,7 @@ TOOL_DEFINITIONS: Dict[ToolName, ToolDefinition] = {
     "compare_documents_deep": ToolDefinition(
         name="compare_documents_deep",
         label="Глубокое сравнение документов",
+        label_en="Deep document comparison",
         category="document_compare",
         execution_mode="async",
         summary="Глубокое сравнение документов с rich result/report contract и long-running execution.",
@@ -149,6 +162,7 @@ TOOL_DEFINITIONS: Dict[ToolName, ToolDefinition] = {
     "analyze_equipment_fast": ToolDefinition(
         name="analyze_equipment_fast",
         label="Быстрый анализ оборудования",
+        label_en="Equipment analysis",
         category="equipment_analysis",
         execution_mode="sync",
         summary="Быстрый one-shot анализ оборудования, спецификации или краткой карточки.",
@@ -160,6 +174,7 @@ TOOL_DEFINITIONS: Dict[ToolName, ToolDefinition] = {
     "analyze_equipment_deep": ToolDefinition(
         name="analyze_equipment_deep",
         label="Глубокий анализ оборудования",
+        label_en="Deep equipment analysis",
         category="equipment_analysis",
         execution_mode="async",
         summary="Глубокий анализ оборудования с async job contract для тяжёлых запросов.",
@@ -189,3 +204,7 @@ def is_known_tool(name: str) -> bool:
 
 def get_tool_definition(name: ToolName) -> ToolDefinition:
     return TOOL_DEFINITIONS[name]
+
+
+def get_tool_display_label(name: ToolName, locale: str | None = None) -> str:
+    return get_tool_definition(name).display_label(locale)

@@ -9,7 +9,12 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional
 from urllib.parse import quote
 
-from orchestrator.tool_catalog import ToolDefinition, get_tool_definition, is_known_tool
+from orchestrator.tool_catalog import (
+    ToolDefinition,
+    get_tool_definition,
+    get_tool_display_label,
+    is_known_tool,
+)
 from orchestrator.tool_bindings import build_result_available_actions
 from orchestrator.tool_job_store import ToolJobRecord, get_tool_job_store
 from orchestrator.tool_schemas import AcceptedToolResult, ExecutionMetadata, ToolJobStatus
@@ -20,12 +25,55 @@ _EXPLICIT_TOOL_JOB_START_DELAY_ENV = "OPENWEBUI_EXPLICIT_TOOL_JOB_START_DELAY_S"
 _GENERIC_DEEP_JOB_ENABLED_ENV = "OPENWEBUI_GENERIC_DEEP_JOB_ENABLED"
 _GENERIC_DEEP_JOB_ENABLED_TOOLS_ENV = "OPENWEBUI_GENERIC_DEEP_JOB_ENABLED_TOOLS"
 _GENERIC_DEEP_JOB_POLL_AFTER_MS_ENV = "OPENWEBUI_GENERIC_DEEP_JOB_POLL_AFTER_MS"
-_REPORT_FILENAME_RE = re.compile(r"\*\*Отчет (?:сохранен|уже сохранен):\*\*\s*`([^`]+)`")
+_REPORT_FILENAME_RE = re.compile(
+    r"\*\*(?:Отчет|Отчёт|Report) (?:сохранен|сохранён|уже сохранен|уже сохранён|saved|already saved):\*\*\s*`([^`]+)`",
+    re.IGNORECASE,
+)
 _DEFAULT_GENERIC_DEEP_JOB_TOOLS = {
     "analyze_document_deep",
     "analyze_equipment_deep",
     "compare_documents_deep",
 }
+_JOB_STATUS_TEXTS = {
+    "ru": {
+        "queued": "Задача поставлена в очередь.",
+        "running": "Выполняется обработка.",
+        "cancelling": "Останавливается выполнение.",
+        "completed": "Выполнение завершено.",
+        "failed": "Выполнение завершилось с ошибкой.",
+        "cancelled": "Выполнение отменено.",
+        "step_completed": "Шаг завершён.",
+        "download_report": "Скачать отчёт",
+    },
+    "en": {
+        "queued": "The task has been queued.",
+        "running": "Processing is in progress.",
+        "cancelling": "Stopping execution.",
+        "completed": "Execution completed.",
+        "failed": "Execution failed.",
+        "cancelled": "Execution was cancelled.",
+        "step_completed": "Step completed.",
+        "download_report": "Download report",
+    },
+}
+
+
+def _normalize_ui_locale(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if raw.startswith("ru"):
+        return "ru"
+    return "en"
+
+
+def _job_text(locale: Any, key: str) -> str:
+    return _JOB_STATUS_TEXTS[_normalize_ui_locale(locale)][key]
+
+
+def _resolve_job_locale(job: ToolJobRecord | Dict[str, Any] | None) -> str:
+    if isinstance(job, dict):
+        return _normalize_ui_locale(job.get("ui_locale"))
+    request_payload = getattr(job, "request_payload", None) or {}
+    return _normalize_ui_locale(request_payload.get("ui_locale"))
 
 
 def _resolve_document_context_count(request_payload: Dict[str, Any]) -> int:
@@ -36,6 +84,13 @@ def _resolve_document_context_count(request_payload: Dict[str, Any]) -> int:
         len(request_payload.get("attachments_meta") or []),
     ]
     return max(counts)
+
+
+def _resolve_tool_label(tool_name: Any, ui_locale: Any) -> str | None:
+    normalized_tool_name = str(tool_name or "").strip()
+    if not normalized_tool_name or not is_known_tool(normalized_tool_name):
+        return None
+    return get_tool_display_label(normalized_tool_name, _normalize_ui_locale(ui_locale))
 
 
 def apply_tool_contract_to_payload(request_payload: Dict[str, Any]) -> Optional[ToolDefinition]:
@@ -146,7 +201,7 @@ def _extract_saved_report_filename(report_text: str) -> str | None:
     return filename or None
 
 
-def _normalize_async_result_artifacts(response: Dict[str, Any]) -> Dict[str, Any]:
+def _normalize_async_result_artifacts(response: Dict[str, Any], *, ui_locale: str) -> Dict[str, Any]:
     normalized_response = copy.deepcopy(response or {})
     artifacts = list(normalized_response.get("artifacts") or [])
     generated_report = normalized_response.get("generated_report")
@@ -159,16 +214,17 @@ def _normalize_async_result_artifacts(response: Dict[str, Any]) -> Dict[str, Any
             if isinstance(artifact, dict)
         ):
             report_format = Path(report_filename).suffix.lower().lstrip(".")
+            download_label = _job_text(ui_locale, "download_report")
             artifacts.append(
                 {
                     "artifact_id": report_filename,
                     "artifact_type": "report",
                     "url": f"/tool-server/tool-reports/{quote(report_filename, safe='')}",
-                    "title": "Скачать отчёт",
+                    "title": download_label,
                     "metadata": {
                         "filename": report_filename,
                         "format": report_format or None,
-                        "download_label": "Скачать отчёт",
+                        "download_label": download_label,
                     },
                 }
             )
@@ -202,19 +258,29 @@ def _resolve_generic_deep_job_poll_after_ms() -> int:
         return 1500
 
 
-def _resolve_status_text(job: ToolJobRecord) -> Optional[str]:
+def _resolve_status_text(job: ToolJobRecord, *, ui_locale: Any = None) -> Optional[str]:
+    locale = _normalize_ui_locale(ui_locale) if ui_locale is not None else _resolve_job_locale(job)
+    defaults = {
+        "queued": _job_text(locale, "queued"),
+        "running": _job_text(locale, "running"),
+        "cancelling": _job_text(locale, "cancelling"),
+        "completed": _job_text(locale, "completed"),
+        "failed": _job_text(locale, "failed"),
+        "cancelled": _job_text(locale, "cancelled"),
+    }
+    legacy_defaults = {
+        "deep-job выполняется.",
+        "deep-job готовится к отмене.",
+        "deep-job завершён.",
+        "deep-job завершён со статусом failed.",
+        "deep-job отменён.",
+    }
+    for localized_defaults in _JOB_STATUS_TEXTS.values():
+        legacy_defaults.update(localized_defaults.values())
     payload = job.status_payload or {}
     status_text = str(payload.get("status_text") or "").strip()
-    if status_text:
+    if status_text and status_text not in legacy_defaults:
         return status_text
-    defaults = {
-        "queued": "Задача поставлена в очередь.",
-        "running": "deep-job выполняется.",
-        "cancelling": "deep-job готовится к отмене.",
-        "completed": "deep-job завершён.",
-        "failed": "deep-job завершён со статусом failed.",
-        "cancelled": "deep-job отменён.",
-    }
     return defaults.get(str(job.status))
 
 
@@ -257,7 +323,9 @@ class _ToolJobProgressReporter:
         self._store.update_job_status(
             self.job_id,
             current_stage=stage_key,
-            status_text=str(content or title or "deep-job выполняется.").strip(),
+            status_text=str(
+                content or title or _job_text(_resolve_job_locale(self._store.get(self.job_id)), "running")
+            ).strip(),
             progress=self._progress_payload(),
             status_history=self._status_history(),
         )
@@ -272,7 +340,11 @@ class _ToolJobProgressReporter:
         self._store.update_job_status(
             self.job_id,
             current_stage=stage_key,
-            status_text=str(entry.get("content") or entry.get("title") or "Шаг завершён.").strip(),
+            status_text=str(
+                entry.get("content")
+                or entry.get("title")
+                or _job_text(_resolve_job_locale(self._store.get(self.job_id)), "step_completed")
+            ).strip(),
             progress=self._progress_payload(),
             status_history=self._status_history(),
         )
@@ -284,7 +356,7 @@ class _ToolJobProgressReporter:
     def finalize_completed(self, response: Dict[str, Any]) -> None:
         self._store.update_job_status(
             self.job_id,
-            status_text="deep-job завершён.",
+            status_text=_job_text(_resolve_job_locale(self._store.get(self.job_id)), "completed"),
             progress=self._progress_payload(),
             status_history=self._status_history(),
             embeds=list(response.get("embeds") or []),
@@ -311,13 +383,23 @@ def _attach_job_reporter(deps: Any, *, job: ToolJobRecord, reporter: _ToolJobPro
 def build_accepted_tool_job_response(job: ToolJobRecord, request_payload: Dict[str, Any]) -> Dict[str, Any]:
     execution_metadata = job.execution_metadata or _build_execution_metadata_payload(request_payload)
     tool_name = str(request_payload.get("requested_tool") or request_payload.get("tool_name") or "")
+    ui_locale = request_payload.get("ui_locale")
+    if ui_locale is None:
+        ui_locale = (job.request_payload or {}).get("ui_locale")
+    tool_label = str(
+        request_payload.get("tool_label")
+        or (job.request_payload or {}).get("tool_label")
+        or _resolve_tool_label(tool_name, ui_locale)
+        or ""
+    ).strip() or None
     result = AcceptedToolResult(
         tool_name=tool_name,
+        tool_label=tool_label,
         job_id=job.job_id,
         status_url=job.status_url,
         submitted_at=job.submitted_at,
         job_status=str(job.status),
-        status_text=_resolve_status_text(job),
+        status_text=_resolve_status_text(job, ui_locale=ui_locale),
         poll_after_ms=_resolve_generic_deep_job_poll_after_ms() if _generic_deep_job_enabled(tool_name) else None,
         result_preview=job.result_preview,
         available_actions=build_result_available_actions(tool_name, status_url=job.status_url),
@@ -328,9 +410,19 @@ def build_accepted_tool_job_response(job: ToolJobRecord, request_payload: Dict[s
 
 def build_tool_job_status_response(job: ToolJobRecord) -> Dict[str, Any]:
     status_payload = dict(job.status_payload or {})
+    request_payload = dict(job.request_payload or {})
+    tool_name = str(job.tool_name or request_payload.get("requested_tool") or request_payload.get("tool_name") or "")
+    ui_locale = request_payload.get("ui_locale")
     payload = ToolJobStatus(
         job_id=job.job_id,
         status=str(job.status),
+        tool_label=str(
+            status_payload.get("tool_label")
+            or request_payload.get("tool_label")
+            or _resolve_tool_label(tool_name, ui_locale)
+            or ""
+        ).strip()
+        or None,
         current_stage=job.current_stage,
         submitted_at=job.submitted_at,
         started_at=job.started_at,
@@ -436,6 +528,13 @@ def submit_async_tool_job(
 ) -> ToolJobRecord:
     store = get_tool_job_store()
     payload_copy = copy.deepcopy(request_payload)
+    payload_copy.setdefault(
+        "tool_label",
+        _resolve_tool_label(
+            payload_copy.get("requested_tool") or payload_copy.get("tool_name"),
+            payload_copy.get("ui_locale"),
+        ),
+    )
     start_delay_s = _resolve_async_tool_job_start_delay_s(payload_copy)
     execution_metadata = _build_execution_metadata_payload(payload_copy)
     job = store.create_job(
@@ -454,7 +553,10 @@ def submit_async_tool_job(
                 await asyncio.sleep(start_delay_s)
             store.mark_running(job.job_id)
             response = await execute_fn(payload_copy, deps=job_deps)
-            response = _normalize_async_result_artifacts(response)
+            response = _normalize_async_result_artifacts(
+                response,
+                ui_locale=_normalize_ui_locale(payload_copy.get("ui_locale")),
+            )
         except asyncio.CancelledError:
             current_job = store.get(job.job_id)
             if current_job is not None and current_job.status in {"completed", "failed", "cancelled"}:
@@ -487,9 +589,9 @@ def submit_async_tool_job(
                 error_summary=_resolve_async_terminal_error_summary(response, fallback="cancelled-by-request"),
             )
             return
+        store.finish_completed(job.job_id, response)
         if _generic_deep_job_enabled(str(job.tool_name or "")):
             reporter.finalize_completed(response)
-        store.finish_completed(job.job_id, response)
 
     task = asyncio.create_task(_runner(), name=f"tool-job:{job.job_id}")
     _ACTIVE_TOOL_JOB_TASKS[job.job_id] = task

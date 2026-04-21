@@ -1158,6 +1158,7 @@ def test_execute_documents_summary_updates_single_progress_box_per_chunk():
             _execute_documents_summary(
                 query="Сделай сводку",
                 history=[],
+                ui_locale="ru-RU",
                 deps=deps,
             )
         )
@@ -1188,6 +1189,53 @@ def test_execute_documents_summary_updates_single_progress_box_per_chunk():
         "content": "Готово: обработано 2/2 фрагментов.",
     }
     deps.clear_progress_box.assert_not_awaited()
+
+
+def test_execute_documents_summary_localizes_progress_for_english():
+    deps = _build_minimal_deps()
+    deps.get_all_docs = lambda: [
+        {
+            "document_id": "doc-1",
+            "display_name": "contract.txt",
+            "text": ("First paragraph. " * 180) + "\n\n" + ("Second paragraph. " * 180),
+        }
+    ]
+    deps.infer_assistant_text = AsyncMock(side_effect=["chunk-1", "chunk-2", "merged", "global"])
+
+    with patch("orchestrator.execution_runtime._format_elapsed_seconds", return_value="12.3 sec."):
+        response = asyncio.run(
+            _execute_documents_summary(
+                query="Build a summary",
+                history=[],
+                ui_locale="en-US",
+                deps=deps,
+            )
+        )
+
+    assert "## Document summary" in response["assistant_message"]
+    assert "**Execution time:** 12.3 sec." in response["assistant_message"]
+    assert deps.update_progress_box.await_args_list[0].kwargs == {
+        "key": "documents_summary_progress",
+        "title": "Summarizing document chunks",
+        "content": "1/2",
+    }
+    assert deps.update_progress_box.await_args_list[1].kwargs == {
+        "key": "documents_summary_progress",
+        "title": "Summarizing document chunks",
+        "content": "2/2",
+    }
+    assert deps.update_progress_box.await_args_list[2].kwargs["title"] == "Intermediate summary"
+    assert "Document ready: contract.txt" in deps.update_progress_box.await_args_list[2].kwargs["content"]
+    assert deps.update_progress_box.await_args_list[3].kwargs == {
+        "key": "documents_summary_progress",
+        "title": "Building the final summary",
+        "content": "Building the overall summary from the intermediate results.",
+    }
+    assert deps.update_progress_box.await_args_list[4].kwargs == {
+        "key": "documents_summary_progress",
+        "title": "Summarization completed",
+        "content": "Done: processed 2/2 chunks.",
+    }
 
 
 def test_execute_documents_summary_uses_low_vram_stage_policy():
@@ -1247,7 +1295,7 @@ def test_execute_documents_summary_returns_partial_response_when_global_summary_
     )
 
     assert "merged-summary" in response["assistant_message"]
-    assert "Общая сводка недоступна" in response["assistant_message"]
+    assert "The overall summary is unavailable" in response["assistant_message"]
 
 
 def test_execute_documents_summary_reuses_cached_chunk_summaries():
@@ -1393,7 +1441,7 @@ def test_execute_documents_summary_uses_hierarchy_when_margin_blocks_fast_path(m
     deps.infer_assistant_text = AsyncMock(side_effect=["chunk-1", "chunk-2", "merge-1", "global"])
 
     def _estimate_tokens(text: str) -> int:
-        if "СУММАРИЗАЦИИ ФРАГМЕНТОВ" in text:
+        if "СУММАРИЗАЦИИ ФРАГМЕНТОВ" in text or "CHUNK SUMMARIES" in text:
             return 600
         return 32
 
@@ -1536,10 +1584,10 @@ def test_execute_documents_summary_updates_progress_with_partial_results():
     progress_titles = [call.kwargs["title"] for call in deps.update_progress_box.await_args_list]
     progress_contents = [call.kwargs["content"] for call in deps.update_progress_box.await_args_list]
 
-    assert progress_titles[:2] == ["Суммаризация фрагментов", "Суммаризация фрагментов"]
-    assert "Готов документ: contract.txt" in progress_contents[2]
+    assert progress_titles[:2] == ["Summarizing document chunks", "Summarizing document chunks"]
+    assert "Document ready: contract.txt" in progress_contents[2]
     assert "merged" in progress_contents[2]
-    assert "Формирую общую сводку" in progress_contents[3]
+    assert "Building the overall summary" in progress_contents[3]
 
 
 def test_execute_documents_summary_emits_degraded_notice_when_stage_requires_reduced_context():
@@ -1571,7 +1619,7 @@ def test_execute_documents_summary_emits_degraded_notice_when_stage_requires_red
 
     assert response["execution_metadata"]["degraded"] is True
     assert response["execution_metadata"]["policy"] == "reduced_context"
-    assert "ограничений ресурсов" in response["assistant_message"]
+    assert "resource limits" in response["assistant_message"]
 
 
 def test_execute_documents_summary_retries_global_only_after_policy_change():
@@ -1730,7 +1778,7 @@ def test_execute_orchestration_returns_busy_status_for_ums_saturation(monkeypatc
     )
 
     assert response["execution_metadata"]["status"] == "busy"
-    assert "Модель занята" in response["assistant_message"]
+    assert "The model is busy" in response["assistant_message"]
 
 
 def test_execute_document_analysis_surfaces_partial_summary_metadata():
@@ -1795,11 +1843,14 @@ def test_execute_document_analysis_passes_prefetched_text_and_analysis_goal_to_w
                 },
                 effective_settings={"runtime_budget_metadata": {"tier": 1}},
                 deps=deps,
+                ui_locale="en",
             )
         )
 
     assert captured_state["analysis_goal"] == "Сфокусируйся на процессорах и памяти."
     assert captured_state["prefetched_full_text"] == "Требование: 2 процессора, 128 ГБ RAM"
+    assert captured_state["ui_locale"] == "en"
+    assert captured_state["runtime_context"]["ui_locale"] == "en"
     assert result["execution_metadata"]["status"] == "completed"
 
 
@@ -1905,13 +1956,14 @@ def test_execute_equipment_explicit_tool_rejects_single_document_instead_of_fall
                 effective_settings={},
                 deps=deps,
                 strict_tool_contract=True,
+                ui_locale="en-US",
             )
         )
 
     fallback_chat.assert_not_awaited()
     assert result["execution_metadata"]["status"] == "failed"
     assert result["execution_metadata"]["reason"] == "equipment_requires_two_documents"
-    assert "Используйте отдельный инструмент анализа документа" in result["assistant_message"]
+    assert "Use the document analysis tool" in result["assistant_message"]
 
 
 @pytest.mark.integration

@@ -139,6 +139,162 @@ _RUSSIAN_NUMBER_WORDS = {
     "девят": "9",
     "десят": "10",
 }
+_DEEP_JOB_LOCALES = {"ru", "en"}
+_EXECUTION_RUNTIME_TEXTS = {
+    "ru": {
+        "documents_summary_no_docs": "Нет загруженных документов для суммаризации.",
+        "documents_summary_empty_doc": "Документ пуст или текст не извлечён.",
+        "documents_summary_chunk_title": "Суммаризация фрагментов",
+        "documents_summary_chunk_prompt": (
+            "Кратко суммаризируй фрагмент документа в 3-5 пунктов: тема, цель, ключевые "
+            "требования/положения, сроки/ограничения (если есть), важные риски/последствия."
+        ),
+        "documents_summary_chunk_system": (
+            "Ты аналитик документов. Пиши строго по тексту, без домыслов."
+        ),
+        "documents_summary_document_label": "Документ",
+        "documents_summary_chunk_label": "ФРАГМЕНТ",
+        "documents_summary_intermediate_title": "Промежуточная сводка",
+        "documents_summary_doc_ready": "Готов документ: {doc_name}\n\n{summary}",
+        "documents_summary_merge_prompt": (
+            "Объедини суммаризации фрагментов одного документа в итоговую краткую сводку из 4-6 пунктов, "
+            "без повторов и без домыслов."
+        ),
+        "documents_summary_merge_system": (
+            "Ты аналитик документов. Собери единую сводку строго по промежуточным summary."
+        ),
+        "documents_summary_chunks_label": "СУММАРИЗАЦИИ ФРАГМЕНТОВ",
+        "documents_summary_partial_only": (
+            "Частичная сводка по документу; этап объединения summary не завершился.\n\n{summary}"
+        ),
+        "documents_summary_global_title": "Формирование итоговой сводки",
+        "documents_summary_global_content": "Формирую общую сводку по уже собранным промежуточным результатам.",
+        "documents_summary_global_system": (
+            "Ты аналитик. На основе сводок по документам сформируй:\n"
+            "1) ОБЩАЯ СВОДКА (5-8 предложений)\n"
+            "2) КЛЮЧЕВЫЕ РАЗЛИЧИЯ/АКЦЕНТЫ (если документов больше одного) списком\n"
+            "Пиши только на основе входных сводок."
+        ),
+        "documents_summary_summaries_label": "СВОДКИ",
+        "documents_summary_global_fallback": (
+            "Общая сводка недоступна: финальный этап суммаризации не завершился. "
+            "Ниже сохранены промежуточные сводки по документам."
+        ),
+        "documents_summary_completed_title": "Суммаризация завершена",
+        "documents_summary_completed_content": "Готово: обработано {processed_chunks}/{total_chunks} фрагментов.",
+        "documents_summary_heading": "## Сводка по документам",
+        "documents_summary_degraded_note": (
+            "Примечание: ответ упрощён из-за ограничений ресурсов; применён reduced-context режим."
+        ),
+        "documents_summary_per_doc_heading": "### По каждому документу",
+        "documents_summary_global_heading": "### Общая сводка",
+        "documents_summary_elapsed": "**Время выполнения:** {elapsed}",
+        "pair_docs_min": "Нужно минимум 2 документа для выполнения этого сценария.",
+        "pair_docs_too_many": (
+            "В активном наборе больше 2 документов. Уточните целевую пару "
+            "или оставьте только нужные файлы.\n{labels}"
+        ),
+        "pair_docs_invalid": "Недостаточно валидных файлов для выполнения этого сценария.",
+        "single_doc_select": (
+            "Для анализа нужен один целевой документ. "
+            "Уточните, какой файл анализировать.\n{active_status_line}\n{labels}"
+        ),
+        "single_doc_missing": "Нужно загрузить документ для анализа.",
+        "equipment_single_doc_wrong_tool": (
+            "Для одного загруженного документа инструмент анализа оборудования не подходит. "
+            "Используйте отдельный инструмент анализа документа или добавьте второй документ для сравнения."
+        ),
+        "errors_prefix": "Ошибки:\n",
+        "report_generation_failed": "Не удалось создать отчёт.",
+        "cancelled": "Запрос остановлен пользователем.",
+        "busy": "Модель занята предыдущим тяжёлым запросом. Дождитесь освобождения слота или остановите активный запуск.",
+        "failed": "Ошибка выполнения сценария: {error}",
+    },
+    "en": {
+        "documents_summary_no_docs": "No uploaded documents are available for summarization.",
+        "documents_summary_empty_doc": "The document is empty or its text could not be extracted.",
+        "documents_summary_chunk_title": "Summarizing document chunks",
+        "documents_summary_chunk_prompt": (
+            "Summarize the document chunk in 3-5 bullets: topic, purpose, key requirements or provisions, "
+            "deadlines or constraints if present, and major risks or consequences."
+        ),
+        "documents_summary_chunk_system": (
+            "You are a document analyst. Stay strictly grounded in the text and avoid speculation."
+        ),
+        "documents_summary_document_label": "Document",
+        "documents_summary_chunk_label": "CHUNK",
+        "documents_summary_intermediate_title": "Intermediate summary",
+        "documents_summary_doc_ready": "Document ready: {doc_name}\n\n{summary}",
+        "documents_summary_merge_prompt": (
+            "Merge the chunk summaries of one document into a final concise summary of 4-6 bullets, "
+            "without repetition and without speculation."
+        ),
+        "documents_summary_merge_system": (
+            "You are a document analyst. Produce one consolidated summary strictly from the intermediate summaries."
+        ),
+        "documents_summary_chunks_label": "CHUNK SUMMARIES",
+        "documents_summary_partial_only": (
+            "Partial summary for the document; the summary merge stage did not complete.\n\n{summary}"
+        ),
+        "documents_summary_global_title": "Building the final summary",
+        "documents_summary_global_content": "Building the overall summary from the intermediate results.",
+        "documents_summary_global_system": (
+            "You are an analyst. Based on the document summaries, produce:\n"
+            "1) OVERALL SUMMARY (5-8 sentences)\n"
+            "2) KEY DIFFERENCES / EMPHASES (if more than one document) as a list\n"
+            "Rely only on the supplied summaries."
+        ),
+        "documents_summary_summaries_label": "SUMMARIES",
+        "documents_summary_global_fallback": (
+            "The overall summary is unavailable because the final summarization stage did not complete. "
+            "The intermediate document summaries are preserved below."
+        ),
+        "documents_summary_completed_title": "Summarization completed",
+        "documents_summary_completed_content": "Done: processed {processed_chunks}/{total_chunks} chunks.",
+        "documents_summary_heading": "## Document summary",
+        "documents_summary_degraded_note": (
+            "Note: the answer was simplified because of resource limits; reduced-context mode was applied."
+        ),
+        "documents_summary_per_doc_heading": "### Per document",
+        "documents_summary_global_heading": "### Overall summary",
+        "documents_summary_elapsed": "**Execution time:** {elapsed}",
+        "pair_docs_min": "At least 2 documents are required to run this scenario.",
+        "pair_docs_too_many": (
+            "There are more than 2 documents in the active set. Specify the target pair "
+            "or leave only the files you want to compare.\n{labels}"
+        ),
+        "pair_docs_invalid": "There are not enough valid files to run this scenario.",
+        "single_doc_select": (
+            "The analysis needs one target document. "
+            "Specify which file should be analyzed.\n{active_status_line}\n{labels}"
+        ),
+        "single_doc_missing": "Upload a document to start the analysis.",
+        "equipment_single_doc_wrong_tool": (
+            "The equipment analysis tool is not intended for a single uploaded document. "
+            "Use the document analysis tool or add a second document for comparison."
+        ),
+        "errors_prefix": "Errors:\n",
+        "report_generation_failed": "Failed to build the report.",
+        "cancelled": "The request was stopped by the user.",
+        "busy": "The model is busy with a previous heavy request. Wait for the slot to free up or stop the active run.",
+        "failed": "Scenario execution failed: {error}",
+    },
+}
+
+
+def _normalize_ui_locale(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if raw.startswith("ru"):
+        return "ru"
+    return "en"
+
+
+def _runtime_text(key: str, *, ui_locale: Any = None, **kwargs: Any) -> str:
+    locale = _normalize_ui_locale(ui_locale)
+    template = _EXECUTION_RUNTIME_TEXTS[locale][key]
+    if kwargs:
+        return template.format(**kwargs)
+    return template
 
 
 def _is_low_vram_device_mode(effective_settings: Optional[Dict[str, Any]]) -> bool:
@@ -1418,38 +1574,48 @@ def _build_session_doc_list(session_docs: Dict[str, Any]) -> List[Dict[str, Any]
     return docs
 
 
-def _select_pair_files(new_files: List[Dict[str, Any]], session_docs: Dict[str, Any]) -> tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+def _select_pair_files(
+    new_files: List[Dict[str, Any]],
+    session_docs: Dict[str, Any],
+    *,
+    ui_locale: str = "en",
+) -> tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
     files = list(new_files or [])[:2]
     if len(files) < 2:
         file_names = list((session_docs or {}).keys())
         if len(file_names) < 2:
-            return None, "Нужно минимум 2 документа для выполнения этого сценария."
+            return None, _runtime_text("pair_docs_min", ui_locale=ui_locale)
         if len(file_names) > 2:
             labels = "\n".join(f"- {name}" for name in file_names)
-            return None, (
-                "В активном наборе больше 2 документов. Уточните целевую пару "
-                f"или оставьте только нужные файлы.\n{labels}"
-            )
+            return None, _runtime_text("pair_docs_too_many", ui_locale=ui_locale, labels=labels)
         files = [{"name": name, "path": session_docs[name].get("path")} for name in file_names]
 
     if len(files) < 2 or any(not f.get("path") for f in files):
-        return None, "Недостаточно валидных файлов для выполнения этого сценария."
+        return None, _runtime_text("pair_docs_invalid", ui_locale=ui_locale)
     return files, None
 
 
-def _select_single_file(new_files: List[Dict[str, Any]], session_docs: Dict[str, Any], active_status_line: str) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+def _select_single_file(
+    new_files: List[Dict[str, Any]],
+    session_docs: Dict[str, Any],
+    active_status_line: str,
+    *,
+    ui_locale: str = "en",
+) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
     if new_files:
         return new_files[0], None
     if session_docs:
         if len(session_docs) > 1:
             labels = "\n".join(f"- {name}" for name in session_docs.keys())
-            return None, (
-                "Для анализа нужен один целевой документ. "
-                f"Уточните, какой файл анализировать.\n{active_status_line}\n{labels}"
+            return None, _runtime_text(
+                "single_doc_select",
+                ui_locale=ui_locale,
+                active_status_line=active_status_line,
+                labels=labels,
             )
         only_name = next(iter(session_docs))
         return {"name": only_name, "path": session_docs[only_name].get("path")}, None
-    return None, "Нужно загрузить документ для анализа."
+    return None, _runtime_text("single_doc_missing", ui_locale=ui_locale)
 
 
 async def _execute_compare(
@@ -1457,10 +1623,11 @@ async def _execute_compare(
     new_files: List[Dict[str, Any]],
     session_docs: Dict[str, Any],
     deps: ExecutionDependencies,
+    ui_locale: str = "en",
 ) -> Dict[str, Any]:
     from orchestrator.workflows.compare import create_compare_graph
 
-    files, error_message = _select_pair_files(new_files, session_docs)
+    files, error_message = _select_pair_files(new_files, session_docs, ui_locale=ui_locale)
     if error_message:
         return {"assistant_message": error_message}
 
@@ -1480,7 +1647,9 @@ async def _execute_compare(
             "errors": [],
             "runtime_context": {
                 "started_at_monotonic": time.monotonic(),
+                "ui_locale": ui_locale,
             },
+            "ui_locale": ui_locale,
         },
     )
     report = final_state.get("final_report", "")
@@ -1536,8 +1705,10 @@ async def _execute_compare(
             **({"model_execution": model_execution} if model_execution is not None else {}),
         }
     if errors:
-        return {"assistant_message": "Ошибки:\n" + "\n".join(f"- {e}" for e in errors)}
-    return {"assistant_message": "Не удалось создать отчёт."}
+        return {
+            "assistant_message": _runtime_text("errors_prefix", ui_locale=ui_locale) + "\n".join(f"- {e}" for e in errors)
+        }
+    return {"assistant_message": _runtime_text("report_generation_failed", ui_locale=ui_locale)}
 
 
 async def _execute_equipment(
@@ -1549,18 +1720,18 @@ async def _execute_equipment(
     effective_settings: Optional[Dict[str, Any]],
     deps: ExecutionDependencies,
     strict_tool_contract: bool = False,
+    ui_locale: str = "en",
 ) -> Dict[str, Any]:
     from orchestrator.workflows.equipment import create_equipment_graph
 
-    files, error_message = _select_pair_files(new_files, session_docs)
+    files, error_message = _select_pair_files(new_files, session_docs, ui_locale=ui_locale)
     if error_message:
         available_docs_count = max(len(new_files or []), len(session_docs or {}))
         if available_docs_count < 2:
             if strict_tool_contract and available_docs_count > 0:
                 return {
                     "assistant_message": (
-                        "Для одного загруженного документа инструмент анализа оборудования не подходит. "
-                        "Используйте отдельный инструмент анализа документа или добавьте второй документ для сравнения."
+                        _runtime_text("equipment_single_doc_wrong_tool", ui_locale=ui_locale)
                     ),
                     "execution_metadata": {"status": "failed", "reason": "equipment_requires_two_documents"},
                     "quality_signals": {"structured_output_ok": False, "coverage_signals": 0, "parsed_items": 0},
@@ -1603,8 +1774,10 @@ async def _execute_equipment(
             "errors": [],
             "runtime_context": {
                 "started_at_monotonic": time.monotonic(),
+                "ui_locale": ui_locale,
             },
             "session_id": "",
+            "ui_locale": ui_locale,
         },
     )
     report = final_state.get("final_report", "")
@@ -1638,8 +1811,10 @@ async def _execute_equipment(
             **({"model_execution": model_execution} if model_execution is not None else {}),
         }
     if errors:
-        return {"assistant_message": "Ошибки:\n" + "\n".join(f"- {e}" for e in errors)}
-    return {"assistant_message": "Не удалось создать отчёт."}
+        return {
+            "assistant_message": _runtime_text("errors_prefix", ui_locale=ui_locale) + "\n".join(f"- {e}" for e in errors)
+        }
+    return {"assistant_message": _runtime_text("report_generation_failed", ui_locale=ui_locale)}
 
 
 async def _execute_document_analysis(
@@ -1649,11 +1824,17 @@ async def _execute_document_analysis(
     session_docs: Dict[str, Any],
     effective_settings: Optional[Dict[str, Any]],
     deps: ExecutionDependencies,
+    ui_locale: str = "en",
 ) -> Dict[str, Any]:
     from orchestrator.workflows.document_analysis import create_analysis_graph
 
     _raise_if_execution_cancelled(deps)
-    file_entry, error_message = _select_single_file(new_files, session_docs, deps.active_set_status_line())
+    file_entry, error_message = _select_single_file(
+        new_files,
+        session_docs,
+        deps.active_set_status_line(),
+        ui_locale=ui_locale,
+    )
     if error_message:
         return {"assistant_message": error_message}
 
@@ -1686,7 +1867,9 @@ async def _execute_document_analysis(
                 "update_progress_box": deps.update_progress_box,
                 "summary_policy": _build_document_analysis_summary_policy(effective_settings),
                 "started_at_monotonic": time.monotonic(),
+                "ui_locale": ui_locale,
             },
+            "ui_locale": ui_locale,
         },
     )
     report = final_state.get("final_report", "")
@@ -1720,8 +1903,10 @@ async def _execute_document_analysis(
             **({"model_execution": model_execution} if model_execution is not None else {}),
         }
     if errors:
-        return {"assistant_message": "Ошибки:\n" + "\n".join(f"- {e}" for e in errors)}
-    return {"assistant_message": "Не удалось создать отчёт."}
+        return {
+            "assistant_message": _runtime_text("errors_prefix", ui_locale=ui_locale) + "\n".join(f"- {e}" for e in errors)
+        }
+    return {"assistant_message": _runtime_text("report_generation_failed", ui_locale=ui_locale)}
 
 
 async def _execute_documents_summary(
@@ -1729,6 +1914,7 @@ async def _execute_documents_summary(
     query: str,
     history: List[Dict[str, Any]],
     effective_settings: Optional[Dict[str, Any]] = None,
+    ui_locale: str = "en",
     deps: ExecutionDependencies,
 ) -> Dict[str, Any]:
     started_at_monotonic = time.monotonic()
@@ -1761,7 +1947,7 @@ async def _execute_documents_summary(
 
     docs = deps.get_all_docs() or []
     if not docs:
-        return {"assistant_message": "Нет загруженных документов для суммаризации."}
+        return {"assistant_message": _runtime_text("documents_summary_no_docs", ui_locale=ui_locale)}
 
     per_doc_chunks: List[Dict[str, Any]] = []
     total_chunks = 0
@@ -1789,7 +1975,7 @@ async def _execute_documents_summary(
         doc_id = str(doc_entry.get("document_id") or doc_name)
         chunks = list(doc_entry.get("chunks") or [])
         if not chunks:
-            per_doc.append({"name": doc_name, "summary": "Документ пуст или текст не извлечён."})
+            per_doc.append({"name": doc_name, "summary": _runtime_text("documents_summary_empty_doc", ui_locale=ui_locale)})
             continue
         chunk_summaries: List[str] = []
         for chunk in chunks:
@@ -1797,18 +1983,16 @@ async def _execute_documents_summary(
             processed_chunks += 1
             await deps.update_progress_box(
                 key="documents_summary_progress",
-                title="Суммаризация фрагментов",
+                title=_runtime_text("documents_summary_chunk_title", ui_locale=ui_locale),
                 content=f"{processed_chunks}/{total_chunks}",
             )
             prompt = deps.build_prompt(
-                (
-                    "Кратко суммаризируй фрагмент документа в 3-5 пунктов: тема, цель, ключевые "
-                    "требования/положения, сроки/ограничения (если есть), важные риски/последствия."
-                ),
+                _runtime_text("documents_summary_chunk_prompt", ui_locale=ui_locale),
                 [],
                 (
-                    "Ты аналитик документов. Пиши строго по тексту, без домыслов. "
-                    f"Документ: {doc_name}\n\nФРАГМЕНТ:\n{chunk}"
+                    f"{_runtime_text('documents_summary_chunk_system', ui_locale=ui_locale)} "
+                    f"{_runtime_text('documents_summary_document_label', ui_locale=ui_locale)}: {doc_name}\n\n"
+                    f"{_runtime_text('documents_summary_chunk_label', ui_locale=ui_locale)}:\n{chunk}"
                 ),
             )
             cache_key = _build_documents_summary_chunk_cache_key(
@@ -1887,8 +2071,13 @@ async def _execute_documents_summary(
             global_summary = chunk_summaries[0]
             await deps.update_progress_box(
                 key="documents_summary_progress",
-                title="Промежуточная сводка",
-                content=f"Готов документ: {doc_name}\n\n{chunk_summaries[0]}",
+                title=_runtime_text("documents_summary_intermediate_title", ui_locale=ui_locale),
+                content=_runtime_text(
+                    "documents_summary_doc_ready",
+                    ui_locale=ui_locale,
+                    doc_name=doc_name,
+                    summary=chunk_summaries[0],
+                ),
             )
             continue
         reduce_items = chunk_summaries
@@ -1915,14 +2104,12 @@ async def _execute_documents_summary(
                     if str(item or "").strip()
                 )
                 final_merge_prompt = deps.build_prompt(
-                    (
-                        "Объедини суммаризации фрагментов одного документа в итоговую краткую сводку из 4-6 пунктов, "
-                        "без повторов и без домыслов."
-                    ),
+                    _runtime_text("documents_summary_merge_prompt", ui_locale=ui_locale),
                     [],
                     (
-                        "Ты аналитик документов. Собери единую сводку строго по промежуточным summary. "
-                        f"Документ: {doc_name}\n\nСУММАРИЗАЦИИ ФРАГМЕНТОВ:\n"
+                        f"{_runtime_text('documents_summary_merge_system', ui_locale=ui_locale)} "
+                        f"{_runtime_text('documents_summary_document_label', ui_locale=ui_locale)}: {doc_name}\n\n"
+                        f"{_runtime_text('documents_summary_chunks_label', ui_locale=ui_locale)}:\n"
                         + _join_summary_items(reduce_items, max_chars=None)
                     ),
                 )
@@ -1932,14 +2119,12 @@ async def _execute_documents_summary(
                     max_items=reduce_group_size,
                 )
                 group_preview_prompt = deps.build_prompt(
-                    (
-                        "Объедини суммаризации фрагментов одного документа в итоговую краткую сводку из 4-6 пунктов, "
-                        "без повторов и без домыслов."
-                    ),
+                    _runtime_text("documents_summary_merge_prompt", ui_locale=ui_locale),
                     [],
                     (
-                        "Ты аналитик документов. Собери единую сводку строго по промежуточным summary. "
-                        f"Документ: {doc_name}\n\nСУММАРИЗАЦИИ ФРАГМЕНТОВ:\n"
+                        f"{_runtime_text('documents_summary_merge_system', ui_locale=ui_locale)} "
+                        f"{_runtime_text('documents_summary_document_label', ui_locale=ui_locale)}: {doc_name}\n\n"
+                        f"{_runtime_text('documents_summary_chunks_label', ui_locale=ui_locale)}:\n"
                         + _join_summary_items(grouped_preview[0], max_chars=merge_char_cap)
                     ),
                 )
@@ -2067,14 +2252,12 @@ async def _execute_documents_summary(
                 for batch in grouped_batches:
                     _raise_if_execution_cancelled(deps)
                     merge_prompt = deps.build_prompt(
-                        (
-                            "Объедини суммаризации фрагментов одного документа в итоговую краткую сводку из 4-6 пунктов, "
-                            "без повторов и без домыслов."
-                        ),
+                        _runtime_text("documents_summary_merge_prompt", ui_locale=ui_locale),
                         [],
                         (
-                            "Ты аналитик документов. Собери единую сводку строго по промежуточным summary. "
-                            f"Документ: {doc_name}\n\nСУММАРИЗАЦИИ ФРАГМЕНТОВ:\n"
+                            f"{_runtime_text('documents_summary_merge_system', ui_locale=ui_locale)} "
+                            f"{_runtime_text('documents_summary_document_label', ui_locale=ui_locale)}: {doc_name}\n\n"
+                            f"{_runtime_text('documents_summary_chunks_label', ui_locale=ui_locale)}:\n"
                             + _join_summary_items(batch, max_chars=merge_char_cap)
                         ),
                     )
@@ -2126,8 +2309,13 @@ async def _execute_documents_summary(
             per_doc.append({"name": doc_name, "summary": reduce_items[0]})
             await deps.update_progress_box(
                 key="documents_summary_progress",
-                title="Промежуточная сводка",
-                content=f"Готов документ: {doc_name}\n\n{reduce_items[0]}",
+                title=_runtime_text("documents_summary_intermediate_title", ui_locale=ui_locale),
+                content=_runtime_text(
+                    "documents_summary_doc_ready",
+                    ui_locale=ui_locale,
+                    doc_name=doc_name,
+                    summary=reduce_items[0],
+                ),
             )
         except Exception as exc:
             inc_metric_counter(
@@ -2153,9 +2341,10 @@ async def _execute_documents_summary(
             per_doc.append(
                 {
                     "name": doc_name,
-                    "summary": (
-                        "Частичная сводка по документу; этап объединения summary не завершился.\n\n"
-                        f"{fallback_summary}"
+                    "summary": _runtime_text(
+                        "documents_summary_partial_only",
+                        ui_locale=ui_locale,
+                        summary=fallback_summary,
                     ).strip(),
                 }
             )
@@ -2175,8 +2364,13 @@ async def _execute_documents_summary(
             )
             await deps.update_progress_box(
                 key="documents_summary_progress",
-                title="Промежуточная сводка",
-                content=f"Готов документ: {doc_name}\n\n{per_doc[-1]['summary']}",
+                title=_runtime_text("documents_summary_intermediate_title", ui_locale=ui_locale),
+                content=_runtime_text(
+                    "documents_summary_doc_ready",
+                    ui_locale=ui_locale,
+                    doc_name=doc_name,
+                    summary=per_doc[-1]["summary"],
+                ),
             )
 
         combined_input = _join_summary_items(
@@ -2189,19 +2383,16 @@ async def _execute_documents_summary(
         )
         await deps.update_progress_box(
             key="documents_summary_progress",
-            title="Формирование итоговой сводки",
-            content="Формирую общую сводку по уже собранным промежуточным результатам.",
+            title=_runtime_text("documents_summary_global_title", ui_locale=ui_locale),
+            content=_runtime_text("documents_summary_global_content", ui_locale=ui_locale),
         )
         _raise_if_execution_cancelled(deps)
         global_prompt = deps.build_prompt(
             query,
             history,
             (
-                "Ты аналитик. На основе сводок по документам сформируй:\n"
-                "1) ОБЩАЯ СВОДКА (5-8 предложений)\n"
-                "2) КЛЮЧЕВЫЕ РАЗЛИЧИЯ/АКЦЕНТЫ (если документов больше одного) списком\n"
-                "Пиши только на основе входных сводок.\n\n"
-                f"СВОДКИ:\n{combined_input}"
+                f"{_runtime_text('documents_summary_global_system', ui_locale=ui_locale)}\n\n"
+                f"{_runtime_text('documents_summary_summaries_label', ui_locale=ui_locale)}:\n{combined_input}"
             ),
         )
         try:
@@ -2229,16 +2420,18 @@ async def _execute_documents_summary(
                 exc,
                 exc_info=True,
             )
-            global_summary = (
-                "Общая сводка недоступна: финальный этап суммаризации не завершился. "
-                "Ниже сохранены промежуточные сводки по документам."
-            )
+            global_summary = _runtime_text("documents_summary_global_fallback", ui_locale=ui_locale)
     await deps.update_progress_box(
         key="documents_summary_progress",
-        title="Суммаризация завершена",
-        content=f"Готово: обработано {processed_chunks}/{total_chunks} фрагментов.",
+        title=_runtime_text("documents_summary_completed_title", ui_locale=ui_locale),
+        content=_runtime_text(
+            "documents_summary_completed_content",
+            ui_locale=ui_locale,
+            processed_chunks=processed_chunks,
+            total_chunks=total_chunks,
+        ),
     )
-    lines = ["## Сводка по документам", ""]
+    lines = [_runtime_text("documents_summary_heading", ui_locale=ui_locale), ""]
     strategy_priority = {
         "partial_only": 3,
         "hierarchical_merge": 2,
@@ -2299,19 +2492,21 @@ async def _execute_documents_summary(
                 "policy": final_event.get("policy", "reduced_context"),
             }
         )
-        lines.append(
-            "Примечание: ответ упрощён из-за ограничений ресурсов; применён reduced-context режим."
-        )
+        lines.append(_runtime_text("documents_summary_degraded_note", ui_locale=ui_locale))
         lines.append("")
-    lines.append("### По каждому документу")
+    lines.append(_runtime_text("documents_summary_per_doc_heading", ui_locale=ui_locale))
     for item in per_doc:
         lines.extend([f"#### {item['name']}", item["summary"], ""])
     lines.extend(
         [
-            "### Общая сводка",
+            _runtime_text("documents_summary_global_heading", ui_locale=ui_locale),
             global_summary.strip(),
             "",
-            f"**Время выполнения:** {_format_elapsed_seconds(time.monotonic() - started_at_monotonic)}",
+            _runtime_text(
+                "documents_summary_elapsed",
+                ui_locale=ui_locale,
+                elapsed=_format_elapsed_seconds(time.monotonic() - started_at_monotonic),
+            ),
         ]
     )
     result = {"assistant_message": "\n".join(lines).strip()}
@@ -2730,6 +2925,7 @@ async def execute_orchestration(
     telemetry_collector, telemetry_token = begin_execution_telemetry()
     request = copy.deepcopy(request)
     try:
+        ui_locale = _normalize_ui_locale(request.get("ui_locale"))
         session_docs = request.get("session_docs") or {}
         attachments_meta = request.get("attachments_meta") or []
         history = request.get("history") or []
@@ -2818,7 +3014,12 @@ async def execute_orchestration(
         exec_span = start_current_span(name=str(executor), kind="stage", category="workflow")
         try:
             if executor == "compare_documents":
-                result = await _execute_compare(new_files=attachments_meta, session_docs=session_docs, deps=deps)
+                result = await _execute_compare(
+                    new_files=attachments_meta,
+                    session_docs=session_docs,
+                    deps=deps,
+                    ui_locale=ui_locale,
+                )
             elif executor == "equipment_analysis":
                 result = await _execute_equipment(
                     query=request.get("message", ""),
@@ -2828,6 +3029,7 @@ async def execute_orchestration(
                     effective_settings=effective_settings,
                     deps=deps,
                     strict_tool_contract=str(request.get("execution_surface") or "") == "explicit_tool",
+                    ui_locale=ui_locale,
                 )
             elif executor == "document_analysis":
                 result = await _execute_document_analysis(
@@ -2836,6 +3038,7 @@ async def execute_orchestration(
                     session_docs=session_docs,
                     effective_settings=effective_settings,
                     deps=deps,
+                    ui_locale=ui_locale,
                 )
             elif executor == "document_question":
                 result = await _execute_doc_question(
@@ -2850,6 +3053,7 @@ async def execute_orchestration(
                     query=request.get("message", ""),
                     history=history,
                     effective_settings=effective_settings,
+                    ui_locale=ui_locale,
                     deps=deps,
                 )
             else:
@@ -2864,21 +3068,21 @@ async def execute_orchestration(
         except asyncio.CancelledError:
             finish_current_span(exec_span, status="cancelled")
             result = {
-                "assistant_message": "Запрос остановлен пользователем.",
+                "assistant_message": _runtime_text("cancelled", ui_locale=ui_locale),
                 "execution_metadata": {"status": "cancelled"},
                 "quality_signals": {"structured_output_ok": False, "coverage_signals": 0, "parsed_items": 0},
             }
         except UMSBusyError:
             finish_current_span(exec_span, status="busy")
             result = {
-                "assistant_message": "Модель занята предыдущим тяжёлым запросом. Дождитесь освобождения слота или остановите активный запуск.",
+                "assistant_message": _runtime_text("busy", ui_locale=ui_locale),
                 "execution_metadata": {"status": "busy"},
                 "quality_signals": {"structured_output_ok": False, "coverage_signals": 0, "parsed_items": 0},
             }
         except Exception as exc:
             finish_current_span(exec_span, status="error")
             result = {
-                "assistant_message": f"Ошибка выполнения сценария: {exc}",
+                "assistant_message": _runtime_text("failed", ui_locale=ui_locale, error=exc),
                 "execution_metadata": {"status": "failed"},
                 "quality_signals": {"structured_output_ok": False, "coverage_signals": 0, "parsed_items": 0},
             }
