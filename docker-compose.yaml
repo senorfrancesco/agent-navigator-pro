@@ -184,11 +184,10 @@ services:
 
   # --- Open WebUI ---
   open-webui:
-    image: ghcr.io/open-webui/open-webui:0.8.12
+    build:
+      context: ../open-webui
+      dockerfile: Dockerfile
     container_name: open-webui
-    entrypoint:
-      - /bin/bash
-      - /llm-tools-platform-patch/entrypoint.sh
     ports:
       - "3001:8080"
     env_file:
@@ -199,7 +198,6 @@ services:
     volumes:
       - open-webui:/app/backend/data
       - ./backend/open_webui_uploads:/app/backend/data/uploads
-      - ./deploy/openwebui_legacy_patch:/llm-tools-platform-patch:ro
     environment:
       - OPENAI_API_BASE_URL=http://host.docker.internal:8000/v1
       - OPENAI_API_KEY=sk-dummy

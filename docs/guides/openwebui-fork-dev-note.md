@@ -60,15 +60,16 @@ RAG_RERANKING_ENGINE=
 OPENWEBUI_SESSION_RAG_HANDOFF=preferred
 ```
 
-Также в продукте уже есть важные ограничения в [entrypoint.sh](../../deploy/openwebui_legacy_patch/entrypoint.sh):
+Текущий контейнерный runtime больше не использует upstream-образ с runtime-патчем. Теперь сервис `open-webui` в [docker-compose.yaml](../../docker-compose.yaml) собирается прямо из локального форка `/home/seral/HDD/proj/open-webui`.
 
-- жёсткая проверка версии `0.8.12`;
-- наложение текущего патча на `index.html`;
-- экспорт `LLM_TOOLS_PLATFORM_OPENWEBUI_DEEP_JOB_GUARD=1`.
+Из этого следуют два правила:
+
+- все рабочие runtime-параметры по-прежнему сначала берём из `agent-navigator-pro`;
+- поведение long-running панели, `session RAG handoff` и guard неподтверждённого запуска теперь должно жить в самом форке, а не в `entrypoint.sh` и не в monkeypatch-слое.
 
 Это означает:
 
-- форк должен стартовать в том же рабочем режиме, что и контейнерный `0.8.12`;
+- форк должен стартовать в том же рабочем режиме, что и контейнерный сервис продукта;
 - если меняем что-то в форке, мы сравниваем это не с абстрактным upstream, а с нашим реальным продуктовым контейнером;
 - все важные параметры запуска сначала считаются из `agent-navigator-pro`, а уже потом воспроизводятся во форке.
 

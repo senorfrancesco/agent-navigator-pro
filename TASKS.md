@@ -2080,6 +2080,7 @@
   - generated `Open WebUI` bindings уже используют этот маршрут в terminal-path: после создания child result message `equipment_deep_action`, `equipment_deep_tool` и `tool_job_refresh_action` best-effort отправляют `POST /tool-server/tool-jobs/{job_id}/delivery`, поэтому backend store начинает видеть фактический `result_message_id`, а не только UI-состояние в истории чата;
   - живой прогон в обычном persisted-чате подтвердил полный сценарий: после `reload` итоговый bubble автоматически появляется под статусным сообщением, текст `Завершено — результат добавлен ниже.` перестаёт быть пустым обещанием, а `Обновить deep-job` / `Отменить deep-job` скрываются;
   - прогон в `temporary chat` остаётся непоказательным для этого слоя: там `chat_id` имеет вид `local:...`, история не пишет серверное состояние через `/api/v1/chats/{chat_id}`, поэтому дальнейшие проверки `deep-job` нужно делать только в обычных persisted-чатах.
+  Комментарий: этот `Action Function`-контур оставлен здесь только как исторический этап. `deploy/openwebui_legacy_patch` уже снят из supported runtime, контейнерный `Open WebUI` собирается из локального форка, а текущий поддерживаемый маршрут native-only: панель long-running выполнения, автообновление состояния и остановка через нативный `Stop`.
 
 - [x] **T6.4 P5 — Legacy Open WebUI: целостность запуска `deep-job` для native tool call**
   Контекст:
