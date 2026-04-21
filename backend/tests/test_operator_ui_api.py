@@ -299,14 +299,7 @@ def test_operator_tool_bindings_export_openwebui_returns_manual_import_bundle():
         "compare_documents_fast",
         "compare_documents_deep",
     }
-    assert len(payload["actionFunctions"]) == 4
-    action_ids = {item["action_id"] for item in payload["actionFunctions"]}
-    assert action_ids == {
-        "equipment_fast_action",
-        "equipment_deep_action",
-        "tool_job_refresh_action",
-        "tool_job_cancel_action",
-    }
+    assert payload["actionFunctions"] == []
     assert payload["runtimeConfig"]["rag"] == {
         "vectorDb": "qdrant",
         "embeddingEngine": "openai",
@@ -333,15 +326,6 @@ def test_operator_tool_bindings_export_openwebui_returns_manual_import_bundle():
         "QDRANT_URL",
         "QDRANT_COLLECTION_NAME",
     ]
-    equipment_fast_action = next(item for item in payload["actionFunctions"] if item["action_id"] == "equipment_fast_action")
-    assert equipment_fast_action["manualImportRequired"] is True
-    assert equipment_fast_action["targetModels"] == ["raw.*"]
-    assert equipment_fast_action["isActive"] is True
-    assert equipment_fast_action["isGlobal"] is True
-    assert "Authorization" in equipment_fast_action["pythonCode"]
-    assert "/tools/{target_tool_name}" in equipment_fast_action["pythonCode"]
-    assert "analyze_document_fast" in equipment_fast_action["pythonCode"]
-    assert "analyze_equipment_fast" in equipment_fast_action["pythonCode"]
     assert payload["importChecklist"][0].startswith("1. Создайте только именованные tools")
 
 

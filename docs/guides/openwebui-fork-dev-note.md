@@ -15,7 +15,7 @@
 - параметров контейнера `open-webui`;
 - `tool_jobs`, `agent-api`, `document-server`, `legal-server`, `ums`;
 - интеграционных тестов `Open WebUI` поверх нашего backend;
-- `bootstrap_openwebui.py`, `Action Function`, `Workspace Tools`, `Playwright`-контуров.
+- `bootstrap_openwebui.py`, `Workspace Tools`, `Playwright`-контуров.
 
 ### `open-webui`
 
@@ -267,18 +267,14 @@ python -m pip check
 
 `bootstrap_openwebui.py` сохраняется как общий механизм импорта и синхронизации `Open WebUI`.
 
-Но для чистой архитектуры `deep-job` он не должен по умолчанию тащить старые deep-job-ориентированные `Action Function`:
-
-- `equipment_fast_action`
-- `equipment_deep_action`
-- `tool_job_refresh_action`
-- `tool_job_cancel_action`
+Но для чистой архитектуры `deep-job` он не должен тащить старые deep-job-ориентированные `Action Function`.
 
 Нормальная политика такая:
 
-- bootstrap по умолчанию работает без этих legacy action-функций;
-- если они уже существуют в `Open WebUI`, bootstrap должен их удалить;
-- вернуть их можно только явным флагом временной совместимости, а не скрыто по умолчанию.
+- export bundle публикует пустой список `actionFunctions`;
+- bootstrap не создаёт ни одну `Action Function`;
+- если legacy actions уже существуют в `Open WebUI`, bootstrap должен их удалить;
+- поддерживаемый UX ограничен нативной панелью, автообновлением и нативной кнопкой `Stop`.
 
 Это нужно, чтобы новый panel-path не зависел от старого action-path даже косвенно.
 

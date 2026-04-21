@@ -195,26 +195,10 @@ def test_select_action_functions_excludes_legacy_deep_job_actions_by_default():
             {"action_id": "tool_job_refresh_action"},
             {"action_id": "tool_job_cancel_action"},
             {"action_id": "search_action"},
-        ],
-        include_legacy_deep_job_actions=False,
+        ]
     )
 
     assert [item["action_id"] for item in selected] == ["search_action"]
-
-
-def test_select_action_functions_keeps_legacy_deep_job_actions_with_explicit_flag():
-    selected = bootstrap_openwebui.select_action_functions(
-        [
-            {"action_id": "equipment_fast_action"},
-            {"action_id": "search_action"},
-        ],
-        include_legacy_deep_job_actions=True,
-    )
-
-    assert [item["action_id"] for item in selected] == [
-        "equipment_fast_action",
-        "search_action",
-    ]
 
 
 def test_get_prompt_by_command_uses_prompt_list_endpoint(monkeypatch):
@@ -832,44 +816,13 @@ def test_cleanup_legacy_action_functions_deletes_known_ids_by_default(monkeypatc
     )
     monkeypatch.setattr(client, "delete_function", lambda function_id: deleted_ids.append(function_id) or {})
 
-    summary = bootstrap_openwebui.cleanup_legacy_action_functions(
-        client,
-        include_legacy_deep_job_actions=False,
-    )
+    summary = bootstrap_openwebui.cleanup_legacy_action_functions(client)
 
     assert summary == {
         "action": "updated",
         "deletedIds": ["equipment_fast_action", "tool_job_refresh_action"],
     }
     assert deleted_ids == ["equipment_fast_action", "tool_job_refresh_action"]
-
-
-def test_cleanup_legacy_action_functions_is_noop_with_explicit_compatibility_flag(monkeypatch):
-    client = bootstrap_openwebui.OpenWebUIBootstrapClient(
-        openwebui_base_url="http://127.0.0.1:3001",
-        admin_token="secret-token",
-    )
-
-    monkeypatch.setattr(
-        client,
-        "get_function_by_id",
-        lambda function_id: (_ for _ in ()).throw(AssertionError("compatibility mode should not inspect legacy actions")),
-    )
-    monkeypatch.setattr(
-        client,
-        "delete_function",
-        lambda function_id: (_ for _ in ()).throw(AssertionError("compatibility mode should not delete legacy actions")),
-    )
-
-    summary = bootstrap_openwebui.cleanup_legacy_action_functions(
-        client,
-        include_legacy_deep_job_actions=True,
-    )
-
-    assert summary == {
-        "action": "noop",
-        "deletedIds": [],
-    }
 
 
 def test_bootstrap_openwebui_summary_reports_native_function_calling(monkeypatch):
@@ -896,7 +849,7 @@ def test_bootstrap_openwebui_summary_reports_native_function_calling(monkeypatch
                 "openWebUIOwned": {"toolServerConnection": ["config.enable"]},
             },
             "workspaceTools": [{}, {}],
-            "actionFunctions": [{}, {}, {}, {}],
+            "actionFunctions": [],
             "workspacePrompts": [{}, {}],
         },
     )
@@ -937,6 +890,11 @@ def test_bootstrap_openwebui_summary_reports_native_function_calling(monkeypatch
     )
     monkeypatch.setattr(
         bootstrap_openwebui,
+        "cleanup_legacy_action_functions",
+        lambda *args, **kwargs: {"action": "noop", "deletedIds": []},
+    )
+    monkeypatch.setattr(
+        bootstrap_openwebui,
         "cleanup_user_settings_tool_servers",
         lambda *args, **kwargs: {"action": "noop", "removedCount": 0, "removedToolServerNames": []},
     )
@@ -958,12 +916,7 @@ def test_bootstrap_openwebui_summary_reports_native_function_calling(monkeypatch
         lambda *args, **kwargs: {
             "createdIds": [],
             "updatedIds": [],
-            "noopIds": [
-                "equipment_fast_action",
-                "equipment_deep_action",
-                "tool_job_refresh_action",
-                "tool_job_cancel_action",
-            ],
+            "noopIds": [],
             "appliedChanges": [],
             "uiOwnedDriftIgnored": [],
             "materializationDriftIgnored": [],
@@ -1147,6 +1100,11 @@ def test_bootstrap_openwebui_summary_reports_follow_up_disabled_task_policy(monk
     )
     monkeypatch.setattr(
         bootstrap_openwebui,
+        "cleanup_legacy_action_functions",
+        lambda *args, **kwargs: {"action": "noop", "deletedIds": []},
+    )
+    monkeypatch.setattr(
+        bootstrap_openwebui,
         "cleanup_user_settings_tool_servers",
         lambda *args, **kwargs: {"action": "updated", "removedCount": 1, "removedToolServerNames": ["llm-tools-platform Tools"]},
     )
@@ -1242,7 +1200,7 @@ def test_bootstrap_openwebui_dry_run_reports_planned_changes_without_mutation(mo
             },
             "ownership": {},
             "workspaceTools": [{"tool_id": "equipment_fast_tool"}],
-            "actionFunctions": [{"action_id": "equipment_fast_action"}],
+            "actionFunctions": [],
             "workspacePrompts": [{"openwebui": {"command": "/hw_fast"}}],
         },
     )
@@ -1301,11 +1259,7 @@ def test_bootstrap_openwebui_filters_legacy_deep_job_actions_and_reports_cleanup
             "preflightRequirements": {},
             "ownership": {},
             "workspaceTools": [],
-            "actionFunctions": [
-                {"action_id": "equipment_fast_action"},
-                {"action_id": "tool_job_refresh_action"},
-                {"action_id": "search_action"},
-            ],
+            "actionFunctions": [],
             "workspacePrompts": [],
         },
     )
@@ -1374,7 +1328,7 @@ def test_bootstrap_openwebui_filters_legacy_deep_job_actions_and_reports_cleanup
         or {
             "createdIds": [],
             "updatedIds": [],
-            "noopIds": ["search_action"],
+            "noopIds": [],
             "appliedChanges": [],
             "uiOwnedDriftIgnored": [],
             "materializationDriftIgnored": [],
@@ -1406,8 +1360,8 @@ def test_bootstrap_openwebui_filters_legacy_deep_job_actions_and_reports_cleanup
         tool_server_token="tool-token",
     )
 
-    assert result["actionFunctionCount"] == 1
-    assert upsert_calls == [["search_action"]]
+    assert result["actionFunctionCount"] == 0
+    assert upsert_calls == [[]]
     assert result["driftSummary"]["legacyActionFunctionCleanup"] == {
         "action": "updated",
         "deletedIds": ["equipment_fast_action"],

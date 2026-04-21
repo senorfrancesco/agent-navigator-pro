@@ -125,27 +125,3 @@ def test_evaluate_native_backend_processes_reports_missing_services():
     assert report["status"] == "failed"
     assert sorted(report["present"]) == ["agent-api", "document-server"]
     assert sorted(report["missing"]) == ["legal-server", "ums"]
-
-
-def test_evaluate_action_function_sync_detects_delivery_drift():
-    harness = _load_harness_module()
-
-    report = harness.evaluate_action_function_sync(
-        {
-            "equipment_deep_action": "statusHistory _record_terminal_delivery /delivery",
-            "tool_job_refresh_action": "statusHistory _record_terminal_delivery /delivery",
-            "tool_job_cancel_action": "statusHistory",
-        },
-        {
-            "equipment_deep_action": "statusHistory",
-            "tool_job_refresh_action": "statusHistory",
-            "tool_job_cancel_action": "statusHistory",
-        },
-    )
-
-    assert report["status"] == "drift"
-    assert report["drift_function_ids"] == [
-        "equipment_deep_action",
-        "tool_job_refresh_action",
-    ]
-    assert report["missing_fragments"]["equipment_deep_action"] == ["/delivery", "_record_terminal_delivery"]

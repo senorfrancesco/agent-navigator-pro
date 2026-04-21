@@ -386,18 +386,17 @@ def build_openwebui_binding_export(*, backend_base_url: str) -> Dict[str, Any]:
             }
             for binding in prompts
         ],
-        "actionFunctions": _build_openwebui_action_functions(container_tool_server_base_url=f"{container_base_url}/tool-server"),
+        "actionFunctions": [],
         "importChecklist": [
             "1. Создайте только именованные tools `equipment_fast_tool` и `equipment_deep_tool` из export bundle как тонкие Python-обёртки без доменной логики в `Open WebUI`.",
             "2. Добавьте `Workspace Prompts` `/hw_fast` и `/hw_deep` из export bundle без изменения команд.",
-            "3. Импортируйте `Action Functions` и привяжите их только к raw-model provider (`raw.*`).",
-            "4. В `Valves` каждого local tool и Action Function вставьте актуальный `OPENAPI_TOOL_SERVER_TOKEN` из backend `.env`.",
-            "5. Для пути с глубокой задачей проверьте `equipment_deep_action`, затем `tool_job_refresh_action` и `tool_job_cancel_action`.",
-            "6. Не добавляйте `llm-tools-platform OpenAPI Tool Server` в список выбора чата по умолчанию; транспортный слой уже вызывается из wrappers и actions.",
+            "3. В `Valves` каждого local tool вставьте актуальный `OPENAPI_TOOL_SERVER_TOKEN` из backend `.env`.",
+            "4. Проверьте запуск инструмента долгого выполнения только через нативный путь `Open WebUI`: панель, автообновление и `Stop`.",
+            "5. Не добавляйте `llm-tools-platform OpenAPI Tool Server` в список выбора чата по умолчанию; транспортный слой уже вызывается из wrappers.",
         ],
         "notes": [
-            "Action Functions в `Open WebUI` остаются управляемым администратором связующим слоем поверх backend-owned tool server.",
-            "Раздел `Workspace > Tools` остаётся основным явным списком выбора только для включённых product tools; prompts и actions являются дополнительными пользовательскими слоями.",
+            "Нативный long-running путь в `Open WebUI` остаётся единственной поддерживаемой пользовательской поверхностью для инструментов долгого выполнения.",
+            "Раздел `Workspace > Tools` остаётся основным явным списком выбора только для включённых product tools; prompts являются дополнительным пользовательским слоем.",
             "Транспортный `llm-tools-platform OpenAPI Tool Server` остаётся отладочной и справочной точкой входа, а не chat-visible инструментом по умолчанию.",
             "Document и compare tools остаются deferred до завершения backend-owned upload/document binding и multi-document context.",
         ],
@@ -445,69 +444,6 @@ def _derive_container_base_url(browser_base_url: str) -> str:
             netloc = f"{netloc}:{parsed.port}"
         return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment)).rstrip("/")
     return browser_base_url.rstrip("/")
-
-
-def _build_openwebui_action_functions(*, container_tool_server_base_url: str) -> list[dict[str, Any]]:
-    equipment_fast = _tool("analyze_equipment_fast")
-    equipment_deep = _tool("analyze_equipment_deep")
-    return [
-        {
-            "action_id": "equipment_fast_action",
-            "title": equipment_fast.label,
-            "description": f"{equipment_fast.summary} Использовать, когда: {equipment_fast.use_when}",
-            "targetModels": ["raw.*"],
-            "manualImportRequired": True,
-            "isActive": True,
-            "isGlobal": True,
-            "pythonCode": _build_equipment_action_code(
-                container_tool_server_base_url=container_tool_server_base_url,
-                tool_name="analyze_equipment_fast",
-                action_label=equipment_fast.label,
-                force_async=False,
-                priority=10,
-            ),
-        },
-        {
-            "action_id": "equipment_deep_action",
-            "title": equipment_deep.label,
-            "description": f"{equipment_deep.summary} Использовать, когда: {equipment_deep.use_when}",
-            "targetModels": ["raw.*"],
-            "manualImportRequired": True,
-            "isActive": True,
-            "isGlobal": True,
-            "pythonCode": _build_equipment_action_code(
-                container_tool_server_base_url=container_tool_server_base_url,
-                tool_name="analyze_equipment_deep",
-                action_label=equipment_deep.label,
-                force_async=True,
-                priority=20,
-            ),
-        },
-        {
-            "action_id": "tool_job_refresh_action",
-            "title": "Обновить deep-job",
-            "description": "Подтягивает текущий статус deep job и, если результат готов, открывает terminal tool result.",
-            "targetModels": ["raw.*"],
-            "manualImportRequired": True,
-            "isActive": True,
-            "isGlobal": True,
-            "pythonCode": _build_tool_job_refresh_action_code(
-                container_tool_server_base_url=container_tool_server_base_url,
-            ),
-        },
-        {
-            "action_id": "tool_job_cancel_action",
-            "title": "Отменить deep-job",
-            "description": "Отправляет cancel на активную tool job после явного подтверждения пользователя.",
-            "targetModels": ["raw.*"],
-            "manualImportRequired": True,
-            "isActive": True,
-            "isGlobal": True,
-            "pythonCode": _build_tool_job_cancel_action_code(
-                container_tool_server_base_url=container_tool_server_base_url,
-            ),
-        },
-    ]
 
 
 def _build_openwebui_workspace_tools(*, container_tool_server_base_url: str) -> list[dict[str, Any]]:
