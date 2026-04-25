@@ -1,6 +1,7 @@
 """
 Unified Model Server (UMS) - Управляет жизненным циклом LLM и Embedding моделей.
-Поддерживает динамическое переключение моделей на основе файловой системы.
+Использует канонический каталог static + dynamic registry и хранит active_model_id
+как persisted runtime state.
 """
 
 import os
@@ -8,6 +9,8 @@ import sys
 import json
 import time
 import copy
+import hashlib
+import re
 import signal
 import subprocess
 import asyncio
@@ -15,11 +18,12 @@ import logging
 import psutil
 import warnings
 import threading
+import uuid
 from collections import deque
 from contextlib import suppress
 from contextlib import asynccontextmanager as async_cm
 from enum import Enum
-from typing import Dict, List, Optional, Any, AsyncGenerator
+from typing import Dict, List, Optional, Any, AsyncGenerator, Tuple
 from pathlib import Path
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
@@ -92,6 +96,11 @@ class _RemoteProcess:
         return self.returncode
 
 MODELS_DIR = BACKEND_ROOT / "models" / "gguf"
+MODELS_ROOT = BACKEND_ROOT / "models"
+
+_SPLIT_GGUF_RE = re.compile(r"^(?P<base>.+)-(?P<index>\d{5})-of-(?P<total>\d{5})\.gguf$", re.IGNORECASE)
+_MODEL_HINT_FILENAMES = {"config.json", "adapter_config.json", "modules.json", "sentence_bert_config.json"}
+_ADAPTER_HINT_FILENAMES = {"adapter_config.json", "adapter_model.safetensors"}
 
 def _build_static_model_entry(model_id: str) -> Optional[Dict[str, Any]]:
     try:
@@ -103,8 +112,16 @@ def _build_static_model_entry(model_id: str) -> Optional[Dict[str, Any]]:
         return None
     entry: Dict[str, Any] = {
         "type": runtime_type,
+        "kind": config.get("kind"),
+        "runtime_type": config.get("runtime_type"),
         "path": config.get("path"),
         "port": config.get("port"),
+        "display_name": config.get("display_name") or model_id,
+        "user_selectable": bool(config.get("user_selectable")),
+        "capabilities": copy.deepcopy(config.get("capabilities") or {}),
+        "generation_defaults": copy.deepcopy(config.get("generation_defaults") or {}),
+        "load_defaults": copy.deepcopy(config.get("load_defaults") or {}),
+        "catalog_origin": "static",
     }
     if runtime_type in {"gguf", "gguf-vl"}:
         entry["ctx_size"] = int(config.get("ctx_size") or 0)
@@ -127,6 +144,579 @@ def _default_heavy_model_id() -> str:
     runtime_config = get_runtime_config()
     role_key = str(runtime_config.get("default_active_heavy_role") or "llm.default_chat")
     return resolve_model_selection(role_key).resolved_model_id
+
+
+def _active_model_state_path() -> Path:
+    return Path(
+        os.getenv("UMS_ACTIVE_MODEL_STATE_PATH", str(BACKEND_ROOT / ".data" / "ums_active_model_state.json"))
+    )
+
+
+def _ensure_active_model_state_parent() -> None:
+    _active_model_state_path().parent.mkdir(parents=True, exist_ok=True)
+
+
+def _load_active_model_runtime_state() -> Dict[str, Any]:
+    path = _active_model_state_path()
+    if not path.exists():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except Exception as exc:
+        logger.warning("Failed to load active model runtime state: %s", exc)
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _save_active_model_runtime_state() -> None:
+    _ensure_active_model_state_parent()
+    payload = {
+        "active_model_id": state.get("active_model"),
+        "active_model_source": state.get("active_model_source"),
+        "updated_at": int(time.time()),
+    }
+    with _active_model_state_path().open("w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def _scan_folders_state_path() -> Path:
+    return Path(
+        os.getenv("UMS_SCAN_FOLDERS_STATE_PATH", str(BACKEND_ROOT / ".data" / "ums_scan_folders.json"))
+    )
+
+
+def _ensure_scan_folders_state_parent() -> None:
+    _scan_folders_state_path().parent.mkdir(parents=True, exist_ok=True)
+
+
+def _normalize_existing_path(path_str: str) -> Path:
+    normalized = Path(path_str).expanduser().resolve()
+    if not normalized.exists():
+        raise HTTPException(status_code=422, detail=f"Path not found: {normalized}")
+    return normalized
+
+
+def _path_is_within(candidate: Path, root: Path) -> bool:
+    try:
+        candidate.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _scan_folder_id(path: Path) -> str:
+    return hashlib.sha1(str(path).encode("utf-8")).hexdigest()[:12]
+
+
+def _normalize_scan_folder_entry(path: Path, *, added_at: Optional[int] = None) -> Dict[str, Any]:
+    return {
+        "id": _scan_folder_id(path),
+        "path": str(path),
+        "added_at": int(added_at or time.time()),
+    }
+
+
+def _load_scan_folders_state() -> List[Dict[str, Any]]:
+    path = _scan_folders_state_path()
+    if not path.exists():
+        return []
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except Exception as exc:
+        logger.warning("Failed to load scan folders state: %s", exc)
+        return []
+    folders = payload.get("folders") if isinstance(payload, dict) else None
+    if not isinstance(folders, list):
+        return []
+    normalized: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for entry in folders:
+        if not isinstance(entry, dict):
+            continue
+        raw_path = str(entry.get("path") or "").strip()
+        if not raw_path:
+            continue
+        try:
+            resolved_path = _normalize_existing_path(raw_path)
+        except HTTPException:
+            continue
+        folder_id = _scan_folder_id(resolved_path)
+        if folder_id in seen:
+            continue
+        normalized.append(_normalize_scan_folder_entry(resolved_path, added_at=int(entry.get("added_at") or time.time())))
+        seen.add(folder_id)
+    return normalized
+
+
+def _save_scan_folders_state() -> None:
+    _ensure_scan_folders_state_parent()
+    payload = {
+        "folders": copy.deepcopy(state.get("scan_folders") or []),
+        "updated_at": int(time.time()),
+    }
+    with _scan_folders_state_path().open("w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def _browse_allowlist_roots() -> List[Path]:
+    roots: List[Path] = []
+    candidate_paths: List[Path] = [MODELS_ROOT, Path.home()]
+    extra_roots_raw = str(os.getenv("UMS_BROWSE_ALLOWLIST_ROOTS") or "").strip()
+    if extra_roots_raw:
+        for token in extra_roots_raw.split(os.pathsep):
+            token = token.strip()
+            if token:
+                candidate_paths.append(Path(token).expanduser())
+    for folder in list(state.get("scan_folders") or []):
+        raw_path = str((folder or {}).get("path") or "").strip()
+        if raw_path:
+            candidate_paths.append(Path(raw_path))
+    seen: set[str] = set()
+    for candidate in candidate_paths:
+        try:
+            resolved = candidate.resolve()
+        except Exception:
+            continue
+        if not resolved.exists() or not resolved.is_dir():
+            continue
+        key = str(resolved)
+        if key in seen:
+            continue
+        roots.append(resolved)
+        seen.add(key)
+    return sorted(roots, key=lambda item: str(item))
+
+
+def _assert_browse_allowed(path: Path) -> Path:
+    resolved = _normalize_existing_path(str(path))
+    if not resolved.is_dir():
+        raise HTTPException(status_code=422, detail=f"Directory expected: {resolved}")
+    for root in _browse_allowlist_roots():
+        if _path_is_within(resolved, root):
+            return resolved
+    raise HTTPException(status_code=403, detail=f"Path is outside allowed roots: {resolved}")
+
+
+def _count_model_file_hints(directory: Path) -> int:
+    try:
+        children = list(directory.iterdir())
+    except OSError:
+        return 0
+    hint_count = 0
+    for child in children:
+        if child.is_file():
+            name = child.name.lower()
+            if child.suffix.lower() in {".gguf", ".safetensors"}:
+                hint_count += 1
+    return hint_count
+
+
+def _browse_folder_signals(directory: Path) -> Dict[str, bool]:
+    signals = {
+        "has_gguf": False,
+        "has_safetensors": False,
+        "has_adapter": False,
+        "has_config": False,
+    }
+    try:
+        children = list(directory.iterdir())
+    except OSError:
+        return signals
+    for child in children:
+        try:
+            if not child.is_file():
+                continue
+        except OSError:
+            continue
+        name = child.name.lower()
+        suffix = child.suffix.lower()
+        if suffix == ".gguf":
+            signals["has_gguf"] = True
+        if suffix == ".safetensors":
+            signals["has_safetensors"] = True
+        if name == "config.json":
+            signals["has_config"] = True
+        if name in {"adapter_config.json", "adapter_model.safetensors"}:
+            signals["has_adapter"] = True
+    return signals
+
+
+def _browse_folder_tags(signals: Dict[str, bool]) -> List[str]:
+    tags: List[str] = []
+    if bool(signals.get("has_gguf")):
+        tags.append("GGUF")
+    if bool(signals.get("has_adapter")):
+        tags.append("Adapter")
+    if bool(signals.get("has_safetensors")):
+        tags.append("Safetensors")
+    if bool(signals.get("has_config")):
+        tags.append("Config")
+    return tags
+
+
+def _browse_entry_payload(directory: Path, *, source: str = "directory") -> Dict[str, Any]:
+    hint_count = _count_model_file_hints(directory)
+    signals = _browse_folder_signals(directory)
+    return {
+        "name": directory.name or str(directory),
+        "path": str(directory),
+        "source": source,
+        "looks_like_model_dir": any(bool(value) for value in signals.values()),
+        "model_file_count_hint": hint_count,
+        "folder_signals": signals,
+        "folder_tags": _browse_folder_tags(signals),
+    }
+
+
+def _split_family_key(name: str) -> str:
+    raw_name = Path(name).name
+    stem = raw_name[:-5] if raw_name.lower().endswith(".gguf") else raw_name
+    stem = stem.lower()
+    match = _SPLIT_GGUF_RE.match(raw_name)
+    if match:
+        stem = match.group("base").lower()
+    suffix_re = re.compile(r"-(q\d+(_k|_\d+)?(_[a-z])?|f16|fp16|bf16|q4|q5|q6|q8|merged|instruct|chat)$")
+    while True:
+        updated = suffix_re.sub("", stem)
+        if updated == stem:
+            break
+        stem = updated
+    stem = stem.replace("mmproj-", "")
+    stem = stem.replace("projector-", "")
+    return re.sub(r"[^a-z0-9]+", "-", stem).strip("-")
+
+
+def _slugify_candidate_id(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "model"
+
+
+def _display_name_from_path(path: Path) -> str:
+    raw_name = path.name
+    stem = raw_name[:-5] if raw_name.lower().endswith(".gguf") else raw_name
+    return stem.replace("_", " ").replace("-", " ").strip() or raw_name
+
+
+def _is_mmproj_artifact(path: Path) -> bool:
+    name = path.name.lower()
+    return "mmproj" in name or "projector" in name
+
+
+def _looks_like_vision_model(path: Path) -> bool:
+    stem = path.stem.lower()
+    return bool(re.search(r"(^|[-_])vl([_-]|$)", stem)) or "vision" in stem
+
+
+def _match_mmproj_candidates(model_path: Path, mmproj_files: List[Path]) -> List[Path]:
+    if not mmproj_files:
+        return []
+    model_key = _split_family_key(model_path.name)
+    exact_matches = [candidate for candidate in mmproj_files if _split_family_key(candidate.name) == model_key]
+    if exact_matches:
+        return exact_matches
+    loose_matches = [
+        candidate
+        for candidate in mmproj_files
+        if model_key and (
+            _split_family_key(candidate.name) in model_key or model_key in _split_family_key(candidate.name)
+        )
+    ]
+    if loose_matches:
+        return loose_matches
+    if len(mmproj_files) == 1:
+        return list(mmproj_files)
+    return []
+
+
+def _split_group_payload(shards: List[Path]) -> Dict[str, Any]:
+    ordered = sorted(shards, key=lambda item: item.name.lower())
+    match = _SPLIT_GGUF_RE.match(ordered[0].name)
+    total = int(match.group("total")) if match else len(ordered)
+    base_name = match.group("base") if match else ordered[0].stem
+    family_key = _split_family_key(base_name)
+    complete = len(ordered) == total and {
+        int(_SPLIT_GGUF_RE.match(item.name).group("index"))  # type: ignore[union-attr]
+        for item in ordered
+        if _SPLIT_GGUF_RE.match(item.name)
+    } == set(range(1, total + 1))
+    return {
+        "family_key": family_key,
+        "display_name": _display_name_from_path(Path(base_name)),
+        "primary_path": str(ordered[0]),
+        "shards": [str(item) for item in ordered],
+        "complete": complete,
+        "total": total,
+    }
+
+
+def _preview_entry_payload(
+    *,
+    candidate_id: str,
+    display_name: str,
+    kind: str,
+    runtime_type: str,
+    status: str,
+    status_reason: str,
+    user_selectable: bool,
+    resolved_source: Dict[str, Any],
+) -> Dict[str, Any]:
+    return {
+        "candidate_id": candidate_id,
+        "display_name": display_name,
+        "kind": kind,
+        "runtime_type": runtime_type,
+        "status": status,
+        "status_reason": status_reason,
+        "user_selectable": user_selectable,
+        "resolved_source": resolved_source,
+    }
+
+
+def _preview_model_directory(path_str: str) -> Dict[str, Any]:
+    source_path = _assert_browse_allowed(Path(path_str))
+    warnings_payload: List[Dict[str, str]] = []
+    entries: List[Dict[str, Any]] = []
+
+    files = [item for item in source_path.rglob("*") if item.is_file()]
+    adapter_artifacts = [item for item in files if item.name.lower() in _ADAPTER_HINT_FILENAMES]
+    if adapter_artifacts:
+        entries.append(
+            _preview_entry_payload(
+                candidate_id=_slugify_candidate_id(f"{source_path.name}-adapter"),
+                display_name=f"{source_path.name} adapter",
+                kind="adapter",
+                runtime_type="transformers-adapter",
+                status=_MODEL_CATALOG_STATUS_UNSUPPORTED,
+                status_reason="adapter_followup_slice",
+                user_selectable=False,
+                resolved_source={"adapter_path": str(source_path)},
+            )
+        )
+
+    gguf_files = [item.resolve() for item in files if item.suffix.lower() == ".gguf"]
+    mmproj_files = [item for item in gguf_files if _is_mmproj_artifact(item)]
+    candidate_gguf_files = [item for item in gguf_files if not _is_mmproj_artifact(item)]
+
+    split_groups: Dict[str, List[Path]] = {}
+    standalone_gguf: List[Path] = []
+    for item in candidate_gguf_files:
+        match = _SPLIT_GGUF_RE.match(item.name)
+        if match:
+            family_key = _split_family_key(match.group("base"))
+            split_groups.setdefault(family_key, []).append(item)
+            continue
+        standalone_gguf.append(item)
+
+    preferred_family_keys: set[str] = set()
+    for model_path in sorted(standalone_gguf, key=lambda item: item.name.lower()):
+        family_key = _split_family_key(model_path.name)
+        preferred_family_keys.add(family_key)
+        display_name = _display_name_from_path(model_path)
+        if _looks_like_vision_model(model_path):
+            mmproj_candidates = _match_mmproj_candidates(model_path, mmproj_files)
+            if len(mmproj_candidates) > 1:
+                entries.append(
+                    _preview_entry_payload(
+                        candidate_id=_slugify_candidate_id(family_key or model_path.stem),
+                        display_name=display_name,
+                        kind="vision",
+                        runtime_type="gguf-vl",
+                        status=_MODEL_CATALOG_STATUS_AMBIGUOUS,
+                        status_reason="multiple_mmproj_candidates",
+                        user_selectable=False,
+                        resolved_source={
+                            "gguf_path": str(model_path),
+                            "mmproj_candidates": [str(item) for item in mmproj_candidates],
+                        },
+                    )
+                )
+                continue
+            if not mmproj_candidates:
+                entries.append(
+                    _preview_entry_payload(
+                        candidate_id=_slugify_candidate_id(family_key or model_path.stem),
+                        display_name=display_name,
+                        kind="vision",
+                        runtime_type="gguf-vl",
+                        status=_MODEL_CATALOG_STATUS_INCOMPLETE,
+                        status_reason="missing_mmproj_path",
+                        user_selectable=False,
+                        resolved_source={"gguf_path": str(model_path)},
+                    )
+                )
+                continue
+            entries.append(
+                _preview_entry_payload(
+                    candidate_id=_slugify_candidate_id(family_key or model_path.stem),
+                    display_name=display_name,
+                    kind="vision",
+                    runtime_type="gguf-vl",
+                    status=_MODEL_CATALOG_STATUS_READY,
+                    status_reason="configured",
+                    user_selectable=True,
+                    resolved_source={
+                        "gguf_path": str(model_path),
+                        "mmproj_path": str(mmproj_candidates[0]),
+                    },
+                )
+            )
+            continue
+        entries.append(
+            _preview_entry_payload(
+                candidate_id=_slugify_candidate_id(family_key or model_path.stem),
+                display_name=display_name,
+                kind="llm",
+                runtime_type="gguf",
+                status=_MODEL_CATALOG_STATUS_READY,
+                status_reason="configured",
+                user_selectable=True,
+                resolved_source={"gguf_path": str(model_path)},
+            )
+        )
+
+    for family_key, shards in sorted(split_groups.items(), key=lambda item: item[0]):
+        group = _split_group_payload(shards)
+        if family_key in preferred_family_keys:
+            warnings_payload.append(
+                {
+                    "code": "split_candidate_omitted",
+                    "message": f"Split GGUF for {group['display_name']} omitted because merged artifact is preferred",
+                }
+            )
+            continue
+        entries.append(
+            _preview_entry_payload(
+                candidate_id=_slugify_candidate_id(group["family_key"]),
+                display_name=str(group["display_name"]),
+                kind="llm",
+                runtime_type="gguf",
+                status=_MODEL_CATALOG_STATUS_READY if bool(group["complete"]) else _MODEL_CATALOG_STATUS_INCOMPLETE,
+                status_reason="configured" if bool(group["complete"]) else "missing_split_shards",
+                user_selectable=bool(group["complete"]),
+                resolved_source={
+                    "primary_path": str(group["primary_path"]),
+                    "shards": list(group["shards"]),
+                },
+            )
+        )
+
+    if not entries and (source_path / "config.json").exists():
+        entries.append(
+            _preview_entry_payload(
+                candidate_id=_slugify_candidate_id(source_path.name),
+                display_name=source_path.name,
+                kind="embedding",
+                runtime_type="st",
+                status=_MODEL_CATALOG_STATUS_UNSUPPORTED,
+                status_reason="st_followup_slice",
+                user_selectable=False,
+                resolved_source={"directory_path": str(source_path)},
+            )
+        )
+
+    return {
+        "source_path": str(source_path),
+        "entries": entries,
+        "warnings": warnings_payload,
+    }
+
+
+def _set_active_model_id(
+    model_id: Optional[str],
+    *,
+    source: Optional[str] = None,
+    persist: bool = True,
+) -> Optional[str]:
+    normalized_model_id = str(model_id or "").strip() or None
+    normalized_source = str(source or "").strip() or None
+    state["active_model"] = normalized_model_id
+    state["active_model_source"] = normalized_source if normalized_model_id else None
+    if persist:
+        _save_active_model_runtime_state()
+    return normalized_model_id
+
+
+def _resolve_bootstrap_active_model() -> Tuple[Optional[str], Optional[str]]:
+    dynamic_models = state.get("dynamic_models") or {}
+    persisted_state = _load_active_model_runtime_state()
+    candidates = [
+        (
+            str(persisted_state.get("active_model_id") or "").strip(),
+            str(persisted_state.get("active_model_source") or "persisted_runtime_state").strip(),
+        ),
+        (
+            str(os.getenv("DEFAULT_ACTIVE_MODEL_ID") or "").strip(),
+            "default_active_model_id",
+        ),
+        (
+            str(_default_heavy_model_id() or "").strip(),
+            "runtime.default_active_heavy_role",
+        ),
+    ]
+    for candidate_model_id, candidate_source in candidates:
+        if not candidate_model_id:
+            continue
+        if candidate_model_id in STATIC_MODELS_CONFIG or candidate_model_id in dynamic_models:
+            return candidate_model_id, candidate_source
+        logger.warning(
+            "Ignoring unavailable bootstrap active model candidate model_id=%s source=%s",
+            candidate_model_id,
+            candidate_source,
+        )
+    return None, None
+
+
+def _current_or_bootstrap_active_model_id() -> Optional[str]:
+    active_model_id = str(state.get("active_model") or "").strip()
+    if active_model_id:
+        return active_model_id
+    bootstrap_model_id, _ = _resolve_bootstrap_active_model()
+    return bootstrap_model_id
+
+
+def _activation_source_for_stage(stage: str) -> Optional[str]:
+    normalized_stage = str(stage or "").strip().lower()
+    if normalized_stage == "activate":
+        return "activation"
+    if normalized_stage == "infer":
+        return "inference"
+    return None
+
+
+def _default_dynamic_model_capabilities(model_type: str) -> Dict[str, bool]:
+    normalized_type = str(model_type or "").strip().lower()
+    return {
+        "supports_tools": normalized_type in {"gguf", "gguf-vl"},
+        "supports_vision": normalized_type == "gguf-vl",
+        "supports_structured_output": normalized_type in {"gguf", "gguf-vl"},
+    }
+
+
+def _normalize_dynamic_model_config(model_id: str, config: Dict[str, Any]) -> Dict[str, Any]:
+    payload = dict(config)
+    model_type = str(payload.get("type") or "").strip().lower() or "gguf"
+    payload["type"] = model_type
+    payload["display_name"] = str(payload.get("display_name") or model_id)
+    default_kind = "embedding" if model_type == "st" else ("vision" if model_type == "gguf-vl" else "llm")
+    payload["kind"] = str(payload.get("kind") or default_kind)
+    payload["runtime_type"] = str(payload.get("runtime_type") or model_type)
+    payload["user_selectable"] = bool(payload.get("user_selectable", True))
+    payload["capabilities"] = dict(payload.get("capabilities") or _default_dynamic_model_capabilities(model_type))
+    payload["generation_defaults"] = dict(payload.get("generation_defaults") or {})
+    payload["load_defaults"] = dict(payload.get("load_defaults") or {})
+    payload["catalog_origin"] = "dynamic"
+    if payload.get("ctx_size") is not None:
+        payload["load_defaults"]["ctx_size"] = int(payload["ctx_size"])
+    if payload.get("gpu_layers") is not None:
+        payload["load_defaults"]["gpu_layers"] = int(payload["gpu_layers"])
+    if payload.get("mmproj"):
+        payload["load_defaults"]["mmproj_path"] = payload["mmproj"]
+    if payload.get("shards"):
+        payload["load_defaults"]["shards"] = list(payload.get("shards") or [])
+    if payload.get("source_path"):
+        payload["source_path"] = str(payload["source_path"])
+    return payload
 
 
 def _preload_sequence() -> List[str]:
@@ -158,6 +748,7 @@ STATIC_MODELS_CONFIG = _build_static_models_config()
 
 state = {
     "active_model": None, # Последняя запрошенная "тяжелая" модель
+    "active_model_source": None,
     "processes": {},      # model_id -> process
     "placements": {},     # model_id -> placement metadata
     "admission": {},      # model_id -> admission metadata
@@ -167,16 +758,20 @@ state = {
     "runtime_budget": {},
     "dynamic_ports": 8100, # Начальный порт для динамических моделей
     "dynamic_models": {},
+    "scan_folders": [],
     "discovered_model_ports": {},
     "reserved_ports": set(),
     "port_owners": {},
     "released_dynamic_ports": [],
     "concurrency_policy": {},
+    "model_load_jobs": {},
 }
 _model_start_locks: Dict[str, threading.Lock] = {}
 _model_start_locks_guard = threading.Lock()
 _heavy_model_lifecycle_lock = threading.RLock()
 _process_log_buffers: Dict[int, deque[str]] = {}
+_model_load_jobs_lock = threading.RLock()
+_model_load_context = threading.local()
 
 _LLM_LAYER_GUESSES = {
     "qwen-7b-llm": 28,
@@ -197,6 +792,7 @@ _RUNTIME_STATE_LOADING = "loading"
 _RUNTIME_STATE_UNAVAILABLE = "unavailable"
 _RUNTIME_STATE_DEGRADED_CPU = "degraded_cpu"
 _RUNTIME_STATE_ERROR_GPU = "error_gpu"
+_MODEL_LOAD_TERMINAL_STATES = {"ready", "failed", "cancelled"}
 _HEAVY_GPU_RUNTIME_FAILURE_MARKERS = (
     "ggml_cuda_init: failed",
     "failed to initialize cuda",
@@ -244,6 +840,348 @@ def _set_runtime_state(
 def _get_runtime_state(model_id: str) -> Optional[Dict[str, Any]]:
     payload = (state.get("runtime_states") or {}).get(model_id)
     return copy.deepcopy(payload) if payload is not None else None
+
+
+class _ModelLoadCancelled(RuntimeError):
+    pass
+
+
+def _model_load_job_now() -> float:
+    return time.time()
+
+
+def _model_load_job_timestamp() -> int:
+    return int(_model_load_job_now())
+
+
+def _serialize_model_load_job(job: Dict[str, Any]) -> Dict[str, Any]:
+    public_keys = {
+        "job_id",
+        "model_id",
+        "action",
+        "device_mode",
+        "state",
+        "phase",
+        "detail",
+        "error",
+        "started_model_id",
+        "process_pid",
+        "bytes_loaded",
+        "bytes_total",
+        "percent",
+        "rate_bytes_per_sec",
+        "eta_seconds",
+        "created_at",
+        "started_at",
+        "updated_at",
+        "completed_at",
+        "model",
+    }
+    return {key: copy.deepcopy(value) for key, value in job.items() if key in public_keys and value is not None}
+
+
+def _set_model_load_job_state(
+    job_id: str,
+    *,
+    state_value: Optional[str] = None,
+    phase: Optional[str] = None,
+    detail: Optional[str] = None,
+    error: Optional[str] = None,
+    started_model_id: Optional[str] = None,
+    model: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    with _model_load_jobs_lock:
+        job = state.setdefault("model_load_jobs", {}).get(job_id)
+        if job is None:
+            raise KeyError(job_id)
+        now = _model_load_job_timestamp()
+        if state_value is not None:
+            job["state"] = state_value
+            if state_value in _MODEL_LOAD_TERMINAL_STATES:
+                job["completed_at"] = now
+        if phase is not None:
+            job["phase"] = phase
+        if detail is not None:
+            job["detail"] = detail
+        if error is not None:
+            job["error"] = error
+        if started_model_id is not None:
+            job["started_model_id"] = started_model_id
+        if model is not None:
+            job["model"] = model
+        job["updated_at"] = now
+        return _serialize_model_load_job(job)
+
+
+def _configured_gguf_paths_for_load(model_id: str, config: Dict[str, Any]) -> List[Path]:
+    runtime_type = str(config.get("runtime_type") or config.get("type") or "").strip().lower()
+    if runtime_type not in {"gguf", "gguf-vl"}:
+        return []
+
+    paths: List[Path] = []
+    raw_model_path = str(config.get("path") or "").strip()
+    if raw_model_path:
+        paths.append(Path(resolve_model_path(raw_model_path)))
+
+    raw_shards = list(config.get("shards") or ((config.get("load_defaults") or {}).get("shards")) or [])
+    for raw_shard in raw_shards:
+        paths.append(Path(resolve_model_path(str(raw_shard))))
+
+    deduped: List[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(path)
+    return deduped
+
+
+def _local_model_load_total_bytes(model_id: str, config: Dict[str, Any]) -> Optional[int]:
+    total = 0
+    for path in _configured_gguf_paths_for_load(model_id, config):
+        try:
+            if path.is_file():
+                total += path.stat().st_size
+        except OSError:
+            continue
+    return total if total > 0 else None
+
+
+def _read_process_rss_bytes(pid: int) -> Optional[int]:
+    if pid <= 0:
+        return None
+    status_path = Path(f"/proc/{pid}/status")
+    try:
+        for line in status_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            if line.startswith("VmRSS:"):
+                parts = line.split()
+                if len(parts) >= 2:
+                    return int(parts[1]) * 1024
+    except Exception:
+        pass
+    try:
+        return int(psutil.Process(pid).memory_info().rss)
+    except Exception:
+        return None
+
+
+def _refresh_model_load_job_progress_unlocked(job: Dict[str, Any]) -> None:
+    state_value = str(job.get("state") or "")
+    if state_value in {"ready", "failed", "cancelled"}:
+        if state_value == "ready":
+            job["percent"] = 100.0
+        return
+
+    process = job.get("_process")
+    pid = int(getattr(process, "pid", 0) or job.get("process_pid") or 0)
+    bytes_total = job.get("bytes_total")
+    bytes_loaded = _read_process_rss_bytes(pid) if pid > 0 else None
+    now = _model_load_job_now()
+
+    if bytes_loaded is not None:
+        job["bytes_loaded"] = max(0, int(bytes_loaded))
+        if bytes_total:
+            job["percent"] = round(min(99.0, max(0.0, (float(bytes_loaded) / float(bytes_total)) * 100.0)), 1)
+
+        last_bytes = job.get("_last_sample_bytes")
+        last_time = job.get("_last_sample_time")
+        if isinstance(last_bytes, int) and isinstance(last_time, (float, int)) and now > float(last_time):
+            delta_bytes = max(0, int(bytes_loaded) - int(last_bytes))
+            delta_seconds = max(0.001, now - float(last_time))
+            rate = float(delta_bytes) / delta_seconds
+            job["rate_bytes_per_sec"] = round(rate, 2)
+            if bytes_total and rate > 0:
+                remaining = max(0, int(bytes_total) - int(bytes_loaded))
+                job["eta_seconds"] = int(round(float(remaining) / rate))
+        job["_last_sample_bytes"] = int(bytes_loaded)
+        job["_last_sample_time"] = now
+
+    job["updated_at"] = _model_load_job_timestamp()
+
+
+def _build_model_load_job_view(job_id: str) -> Dict[str, Any]:
+    with _model_load_jobs_lock:
+        job = state.setdefault("model_load_jobs", {}).get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail=f"Model load job {job_id} not found")
+        _refresh_model_load_job_progress_unlocked(job)
+        return _serialize_model_load_job(job)
+
+
+def _attach_current_model_load_process(process: subprocess.Popen) -> None:
+    job_id = getattr(_model_load_context, "job_id", None)
+    if not job_id:
+        return
+    with _model_load_jobs_lock:
+        job = state.setdefault("model_load_jobs", {}).get(job_id)
+        if job is None:
+            return
+        job["_process"] = process
+        job["process_pid"] = int(getattr(process, "pid", 0) or 0)
+        job["state"] = "loading"
+        job["phase"] = "loading_memory"
+        job["detail"] = "loading_model_into_memory"
+        _refresh_model_load_job_progress_unlocked(job)
+
+
+def _raise_if_current_model_load_cancelled(process: Optional[subprocess.Popen] = None) -> None:
+    cancel_event = getattr(_model_load_context, "cancel_event", None)
+    if cancel_event is None or not cancel_event.is_set():
+        return
+    if process is not None:
+        _terminate_process(process)
+        _drop_process_log_buffer(getattr(process, "pid", None))
+    raise _ModelLoadCancelled("model_load_cancelled")
+
+
+def _run_model_load_job(job_id: str) -> None:
+    with _model_load_jobs_lock:
+        job = state.setdefault("model_load_jobs", {}).get(job_id)
+        if job is None:
+            return
+        model_id = str(job["model_id"])
+        device_mode = DeviceMode(str(job.get("device_mode") or state["device_mode"]))
+        action = str(job.get("action") or "activate")
+        cancel_event = job["_cancel_event"]
+        job["state"] = "starting"
+        job["phase"] = "validating"
+        job["detail"] = "validating_model"
+        job["started_at"] = _model_load_job_timestamp()
+        job["updated_at"] = job["started_at"]
+
+    _model_load_context.job_id = job_id
+    _model_load_context.cancel_event = cancel_event
+    try:
+        if cancel_event.is_set():
+            raise _ModelLoadCancelled("model_load_cancelled")
+        _set_model_load_job_state(job_id, phase="starting_process", detail="starting_model_runtime")
+        started_model_id = _start_server(model_id, device_mode, stage=action)
+        if cancel_event.is_set():
+            with suppress(Exception):
+                _stop_model(started_model_id)
+            raise _ModelLoadCancelled("model_load_cancelled")
+        _set_model_load_job_state(
+            job_id,
+            state_value="ready",
+            phase="ready",
+            detail="model_ready",
+            started_model_id=started_model_id,
+            model=_build_model_view(started_model_id),
+        )
+    except _ModelLoadCancelled:
+        _set_runtime_state(model_id, _RUNTIME_STATE_UNAVAILABLE, reason="cancelled")
+        _set_model_load_job_state(job_id, state_value="cancelled", phase="cancelled", detail="model_load_cancelled")
+    except Exception as exc:
+        logger.warning("Model load job %s failed for %s: %s", job_id, model_id, exc)
+        _set_model_load_job_state(
+            job_id,
+            state_value="failed",
+            phase="failed",
+            detail="model_load_failed",
+            error=str(exc),
+        )
+    finally:
+        with _model_load_jobs_lock:
+            job = state.setdefault("model_load_jobs", {}).get(job_id)
+            if job is not None:
+                job.pop("_process", None)
+                job.pop("_thread", None)
+                job.pop("_cancel_event", None)
+        _model_load_context.job_id = None
+        _model_load_context.cancel_event = None
+
+
+def _create_or_get_model_load_job(model_id: str, *, device_mode: DeviceMode, action: str = "activate") -> Dict[str, Any]:
+    config = get_model_config(model_id)
+    if not config:
+        raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
+    _assert_model_runtime_is_supported(model_id, config)
+
+    _prune_dead_processes()
+    with _model_load_jobs_lock:
+        for existing in (state.setdefault("model_load_jobs", {}) or {}).values():
+            if (
+                str(existing.get("model_id") or "") == model_id
+                and str(existing.get("state") or "") not in _MODEL_LOAD_TERMINAL_STATES
+            ):
+                _refresh_model_load_job_progress_unlocked(existing)
+                return _serialize_model_load_job(existing)
+
+        if model_id in (state.get("processes") or {}):
+            job_id = str(uuid.uuid4())
+            ready_job = {
+                "job_id": job_id,
+                "model_id": model_id,
+                "action": action,
+                "device_mode": device_mode.value,
+                "state": "ready",
+                "phase": "ready",
+                "detail": "model_already_running",
+                "bytes_loaded": None,
+                "bytes_total": _local_model_load_total_bytes(model_id, config),
+                "percent": 100.0,
+                "created_at": _model_load_job_timestamp(),
+                "started_at": _model_load_job_timestamp(),
+                "updated_at": _model_load_job_timestamp(),
+                "completed_at": _model_load_job_timestamp(),
+                "started_model_id": model_id,
+                "model": _build_model_view(model_id),
+            }
+            state.setdefault("model_load_jobs", {})[job_id] = ready_job
+            return _serialize_model_load_job(ready_job)
+
+        job_id = str(uuid.uuid4())
+        job = {
+            "job_id": job_id,
+            "model_id": model_id,
+            "action": action,
+            "device_mode": device_mode.value,
+            "state": "queued",
+            "phase": "queued",
+            "detail": "queued",
+            "bytes_loaded": None,
+            "bytes_total": _local_model_load_total_bytes(model_id, config),
+            "percent": 0.0,
+            "rate_bytes_per_sec": None,
+            "eta_seconds": None,
+            "created_at": _model_load_job_timestamp(),
+            "updated_at": _model_load_job_timestamp(),
+            "_cancel_event": threading.Event(),
+        }
+        thread = threading.Thread(target=_run_model_load_job, args=(job_id,), name=f"ums-model-load:{model_id}", daemon=True)
+        job["_thread"] = thread
+        state.setdefault("model_load_jobs", {})[job_id] = job
+        thread.start()
+        return _serialize_model_load_job(job)
+
+
+def _cancel_model_load_job(job_id: str) -> Dict[str, Any]:
+    with _model_load_jobs_lock:
+        job = state.setdefault("model_load_jobs", {}).get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail=f"Model load job {job_id} not found")
+        if str(job.get("state") or "") in _MODEL_LOAD_TERMINAL_STATES:
+            return _serialize_model_load_job(job)
+        cancel_event = job.get("_cancel_event")
+        if cancel_event is not None:
+            cancel_event.set()
+        process = job.get("_process")
+        model_id = str(job.get("model_id") or "")
+        job["state"] = "cancelled"
+        job["phase"] = "cancelled"
+        job["detail"] = "model_load_cancelled"
+        job["updated_at"] = _model_load_job_timestamp()
+        job["completed_at"] = job["updated_at"]
+
+    if process is not None:
+        with suppress(Exception):
+            _terminate_process(process)
+        _drop_process_log_buffer(getattr(process, "pid", None))
+    if model_id:
+        _set_runtime_state(model_id, _RUNTIME_STATE_UNAVAILABLE, reason="cancelled")
+    return _build_model_load_job_view(job_id)
 
 
 def _build_runtime_unavailable_payload(
@@ -836,7 +1774,7 @@ def _build_infer_payload(model_id: str, config: Dict[str, Any], payload: Dict[st
 
 
 def _get_runtime_ctx_size() -> int:
-    active_model = state.get("active_model") or "qwen-14b-llm"
+    active_model = _current_or_bootstrap_active_model_id() or "qwen-14b-llm"
     config = get_model_config(active_model) or STATIC_MODELS_CONFIG.get("qwen-14b-llm", {})
     ctx_size = int(config.get("ctx_size") or STATIC_MODELS_CONFIG["qwen-14b-llm"]["ctx_size"])
     return max(ctx_size, 1024)
@@ -1152,7 +2090,7 @@ def _prune_dead_processes() -> List[str]:
         state.setdefault("admission", {}).pop(model_id, None)
         _set_runtime_state(model_id, _RUNTIME_STATE_UNAVAILABLE, reason="process_exited")
         if state.get("active_model") == model_id:
-            state["active_model"] = None
+            _set_active_model_id(None)
         removed.append(model_id)
     return removed
 
@@ -1163,7 +2101,7 @@ def _cleanup_failed_start_state(model_id: str) -> None:
     state.setdefault("placements", {}).pop(model_id, None)
     state.setdefault("admission", {}).pop(model_id, None)
     if state.get("active_model") == model_id:
-        state["active_model"] = None
+        _set_active_model_id(None)
     _release_port(model_id, reusable=False)
 
 
@@ -1266,7 +2204,7 @@ def _should_attempt_model_failover(exc: Exception) -> bool:
 def _start_server_with_failover(model_id: str, device_mode: DeviceMode, *, stage: str = "startup") -> str:
     plan = _resolve_server_model_failover_plan(model_id)
     try:
-        return _start_server_once(model_id, device_mode)
+        return _start_server_once(model_id, device_mode, stage=stage)
     except Exception as primary_exc:
         if not plan.get("fallback_available") or not _should_attempt_model_failover(primary_exc):
             raise
@@ -1294,7 +2232,7 @@ def _start_server_with_failover(model_id: str, device_mode: DeviceMode, *, stage
             role_label=plan.get("role_label"),
         )
         try:
-            return _start_server_once(fallback_model_id, device_mode)
+            return _start_server_once(fallback_model_id, device_mode, stage=stage)
         except Exception as fallback_exc:
             logger.error(
                 "Fallback model start failed for %s -> %s at stage=%s: %s",
@@ -1308,34 +2246,19 @@ def _start_server_with_failover(model_id: str, device_mode: DeviceMode, *, stage
 # === Dynamic Model Discovery ===
 
 def get_model_config(model_id: str) -> Optional[Dict[str, Any]]:
-    """Возвращает конфиг модели, либо из статики, либо из файловой системы."""
+    """Возвращает конфиг модели из static registry или dynamic registry."""
     if model_id in STATIC_MODELS_CONFIG:
         refreshed = _build_static_model_entry(model_id)
         if refreshed is not None:
             STATIC_MODELS_CONFIG[model_id].update(refreshed)
-        return STATIC_MODELS_CONFIG[model_id]
+        return dict(STATIC_MODELS_CONFIG[model_id])
     dynamic_models = state.get("dynamic_models") or {}
     if model_id in dynamic_models:
-        return dict(dynamic_models[model_id])
-    
-    # Ищем файл в папке gguf
-    for root, dirs, files in os.walk(MODELS_DIR):
-        for file in files:
-            if file.endswith(".gguf") and os.path.splitext(file)[0] == model_id:
-                full_path = os.path.join(root, file)
-                discovered_ports = state.setdefault("discovered_model_ports", {})
-                assigned_port = discovered_ports.get(model_id)
-                if assigned_port is None:
-                    assigned_port = _reserve_port(model_id)
-                    discovered_ports[model_id] = assigned_port
-                return {
-                    "type": "gguf",
-                    "path": full_path,
-                    "ctx_size": 8192,  # Дефолт для новых моделей
-                    "gpu_layers": -1,  # Пытаемся все на GPU
-                    "port": assigned_port,
-                }
-    return None
+        return _normalize_dynamic_model_config(model_id, dynamic_models[model_id])
+    try:
+        return dict(get_registry_model_config(model_id))
+    except Exception:
+        return None
 
 # === Model Management ===
 
@@ -1359,7 +2282,7 @@ def _stop_model(model_id: str):
                     except:
                         pass
             if state["active_model"] == model_id:
-                state["active_model"] = None
+                _set_active_model_id(None)
     _set_runtime_state(model_id, _RUNTIME_STATE_UNAVAILABLE, reason="stopped")
     if model_id in (state.get("discovered_model_ports") or {}):
         state.get("discovered_model_ports", {}).pop(model_id, None)
@@ -1463,9 +2386,11 @@ def _launch_server_process(
         bufsize=1,
     )
     _register_process_log_reader(process)
+    _attach_current_model_load_process(process)
     try:
         start_time = time.time()
         while time.time() - start_time < health_timeout_s:
+            _raise_if_current_model_load_cancelled(process)
             if process.poll() is not None:
                 raise RuntimeError(f"Server exited with code {process.returncode}")
             try:
@@ -1575,6 +2500,7 @@ def _start_heavy_local_model(
     placement: Dict[str, Any],
     model_path: str,
     device_mode: DeviceMode,
+    activation_source: Optional[str] = None,
 ) -> str:
     requested_device = str(placement.get("requested_device") or device_mode.value)
     runtime_issue: Optional[str] = None
@@ -1595,7 +2521,8 @@ def _start_heavy_local_model(
         if runtime_issue is None:
             state["processes"][model_id] = process
             state["placements"][model_id] = effective_placement
-            state["active_model"] = model_id
+            if activation_source:
+                _set_active_model_id(model_id, source=activation_source)
             _set_runtime_state(
                 model_id,
                 _RUNTIME_STATE_AVAILABLE,
@@ -1648,7 +2575,8 @@ def _start_heavy_local_model(
         )
         state["processes"][model_id] = process
         state["placements"][model_id] = effective_placement
-        state["active_model"] = model_id
+        if activation_source:
+            _set_active_model_id(model_id, source=activation_source)
         _set_runtime_state(
             model_id,
             _RUNTIME_STATE_DEGRADED_CPU,
@@ -1674,14 +2602,16 @@ def _start_heavy_local_model(
     )
 
 
-def _start_server_once(model_id: str, device_mode: DeviceMode):
+def _start_server_once(model_id: str, device_mode: DeviceMode, *, stage: str = "startup"):
     with _get_model_start_lock(model_id):
         device_mode = _resolve_component_device_mode(model_id, device_mode)
         config = get_model_config(model_id)
         if not config:
             raise HTTPException(status_code=404, detail=f"Model {model_id} not found in filesystem.")
         config = dict(config)
+        _assert_model_runtime_is_supported(model_id, config)
         use_vllm_backend = _should_use_vllm_backend(config)
+        activation_source = _activation_source_for_stage(stage)
         model_path = ""
         if not use_vllm_backend:
             model_path = resolve_model_path(_require_configured_model_path(model_id, config))
@@ -1737,7 +2667,8 @@ def _start_server_once(model_id: str, device_mode: DeviceMode):
                 vllm_placement = _build_vllm_placement(model_id, config)
                 vllm_placement["port"] = assigned_port
                 state["placements"][model_id] = vllm_placement
-                state["active_model"] = model_id
+                if activation_source:
+                    _set_active_model_id(model_id, source=activation_source)
                 _set_runtime_state(model_id, _RUNTIME_STATE_AVAILABLE, reason="ok", placement=vllm_placement)
                 return model_id
 
@@ -1816,6 +2747,7 @@ def _start_server_once(model_id: str, device_mode: DeviceMode):
                     placement=placement,
                     model_path=model_path,
                     device_mode=device_mode,
+                    activation_source=activation_source,
                 )
 
         _reap_stale_listener_on_port(config["port"], tracked_proc=existing_proc)
@@ -1961,12 +2893,34 @@ class ModelRegistrationRequest(BaseModel):
     gpu_layers: Optional[int] = None
     mmproj: Optional[str] = None
     replace: bool = False
+    display_name: Optional[str] = None
+    kind: Optional[str] = None
+    runtime_type: Optional[str] = None
+    user_selectable: Optional[bool] = None
+    capabilities: Optional[Dict[str, bool]] = None
+    generation_defaults: Optional[Dict[str, Any]] = None
+    load_defaults: Optional[Dict[str, Any]] = None
+    shards: Optional[List[str]] = None
+    source_path: Optional[str] = None
+    preview_status: Optional[str] = None
+    status_reason: Optional[str] = None
+
+
+class ScanFolderRequest(BaseModel):
+    path: str
+
+
+class PreviewPathRequest(BaseModel):
+    path: str
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # T3.7: Hardware profiling при старте
     state["dynamic_models"] = _load_dynamic_models_registry()
+    state["scan_folders"] = _load_scan_folders_state()
     _align_dynamic_port_counter()
+    bootstrap_active_model_id, bootstrap_active_model_source = _resolve_bootstrap_active_model()
+    _set_active_model_id(bootstrap_active_model_id, source=bootstrap_active_model_source, persist=False)
     state["device_mode"] = _resolve_runtime_device_mode()
     try:
         sys.path.insert(0, str(BACKEND_ROOT))
@@ -2278,16 +3232,102 @@ async def _proxy_sse_stream(
 
 
 def _discover_available_model_ids() -> List[str]:
-    model_ids = list(STATIC_MODELS_CONFIG.keys())
+    model_ids = list(get_registered_models().keys())
     model_ids.extend((state.get("dynamic_models") or {}).keys())
-    if MODELS_DIR.exists():
-        for root, _, files in os.walk(MODELS_DIR):
-            for file in files:
-                if file.endswith(".gguf"):
-                    model_id = os.path.splitext(file)[0]
-                    if model_id not in model_ids:
-                        model_ids.append(model_id)
-    return sorted(model_ids)
+    return sorted({model_id for model_id in model_ids if str(model_id).strip()})
+
+
+_MODEL_CATALOG_STATUS_READY = "ready"
+_MODEL_CATALOG_STATUS_INCOMPLETE = "incomplete"
+_MODEL_CATALOG_STATUS_AMBIGUOUS = "ambiguous"
+_MODEL_CATALOG_STATUS_UNSUPPORTED = "unsupported"
+_SUPPORTED_MODEL_RUNTIME_TYPES = {"gguf", "gguf-vl", "st"}
+
+
+def _resolve_model_catalog_status(
+    model_id: str,
+    *,
+    config: Dict[str, Any],
+    resolved_path: str,
+    runtime_state: Optional[Dict[str, Any]],
+    running: bool,
+) -> tuple[str, str]:
+    ambiguous_candidates = config.get("ambiguous_candidates") or config.get("discovery_candidates") or []
+    if isinstance(ambiguous_candidates, list) and len(ambiguous_candidates) > 1:
+        return _MODEL_CATALOG_STATUS_AMBIGUOUS, "multiple_candidates"
+
+    runtime_type = str(config.get("runtime_type") or config.get("type") or "").strip().lower()
+    if running or str((runtime_state or {}).get("runtime_state") or "").strip().lower() in {
+        _RUNTIME_STATE_AVAILABLE,
+        _RUNTIME_STATE_DEGRADED_CPU,
+    }:
+        return _MODEL_CATALOG_STATUS_READY, "running"
+
+    if runtime_type not in _SUPPORTED_MODEL_RUNTIME_TYPES:
+        return _MODEL_CATALOG_STATUS_UNSUPPORTED, f"runtime_type:{runtime_type or 'unknown'}"
+
+    if not resolved_path:
+        return _MODEL_CATALOG_STATUS_INCOMPLETE, "missing_model_path"
+
+    resolved_model_path = Path(resolved_path)
+    if not resolved_model_path.exists():
+        return _MODEL_CATALOG_STATUS_INCOMPLETE, "missing_model_path"
+
+    if runtime_type == "st":
+        if not resolved_model_path.is_dir():
+            return _MODEL_CATALOG_STATUS_INCOMPLETE, "invalid_model_path"
+    else:
+        if not resolved_model_path.is_file():
+            return _MODEL_CATALOG_STATUS_INCOMPLETE, "invalid_model_path"
+        if resolved_model_path.suffix.lower() != ".gguf":
+            return _MODEL_CATALOG_STATUS_INCOMPLETE, "invalid_model_artifact"
+
+    if runtime_type == "gguf-vl":
+        raw_mmproj_path = str(
+            config.get("mmproj")
+            or config.get("mmproj_path")
+            or ((config.get("load_defaults") or {}).get("mmproj_path"))
+            or ""
+        ).strip()
+        if not raw_mmproj_path:
+            return _MODEL_CATALOG_STATUS_INCOMPLETE, "missing_mmproj_path"
+        resolved_mmproj_path = Path(resolve_model_path(raw_mmproj_path))
+        if not resolved_mmproj_path.exists():
+            return _MODEL_CATALOG_STATUS_INCOMPLETE, "missing_mmproj_path"
+        if not resolved_mmproj_path.is_file():
+            return _MODEL_CATALOG_STATUS_INCOMPLETE, "invalid_mmproj_path"
+
+    raw_shards = list(config.get("shards") or ((config.get("load_defaults") or {}).get("shards")) or [])
+    if raw_shards:
+        resolved_shards: List[Path] = []
+        for raw_shard in raw_shards:
+            resolved_shard_path = Path(resolve_model_path(str(raw_shard)))
+            if not resolved_shard_path.exists():
+                return _MODEL_CATALOG_STATUS_INCOMPLETE, "missing_split_shards"
+            if not resolved_shard_path.is_file() or resolved_shard_path.suffix.lower() != ".gguf":
+                return _MODEL_CATALOG_STATUS_INCOMPLETE, "invalid_split_shard"
+            resolved_shards.append(resolved_shard_path)
+        if not resolved_shards:
+            return _MODEL_CATALOG_STATUS_INCOMPLETE, "missing_split_shards"
+
+    if not config.get("port"):
+        return _MODEL_CATALOG_STATUS_INCOMPLETE, "missing_runtime_port"
+
+    return _MODEL_CATALOG_STATUS_READY, "configured"
+
+
+def _assert_model_runtime_is_supported(model_id: str, config: Dict[str, Any]) -> None:
+    runtime_type = str(config.get("runtime_type") or config.get("type") or "").strip().lower()
+    if runtime_type in _SUPPORTED_MODEL_RUNTIME_TYPES:
+        return
+    raise HTTPException(
+        status_code=422,
+        detail={
+            "status": "unsupported_model_runtime",
+            "model_id": model_id,
+            "runtime_type": runtime_type or "unknown",
+        },
+    )
 
 
 def _build_model_view(model_id: str) -> Dict[str, Any]:
@@ -2297,18 +3337,50 @@ def _build_model_view(model_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
     resolved_path = resolve_model_path(config["path"]) if str(config.get("path") or "").strip() else ""
     backend = "vllm" if _should_use_vllm_backend(config) else "local"
+    running = model_id in state["processes"]
+    runtime_state = _get_runtime_state(model_id)
+    catalog_status, catalog_status_reason = _resolve_model_catalog_status(
+        model_id,
+        config=config,
+        resolved_path=resolved_path,
+        runtime_state=runtime_state,
+        running=running,
+    )
+    resolved_source: Dict[str, Any] = {"path": resolved_path} if resolved_path else {}
+    raw_mmproj_path = str(
+        config.get("mmproj")
+        or config.get("mmproj_path")
+        or ((config.get("load_defaults") or {}).get("mmproj_path"))
+        or ""
+    ).strip()
+    if raw_mmproj_path:
+        resolved_source["mmproj_path"] = resolve_model_path(raw_mmproj_path)
+    raw_shards = list(config.get("shards") or ((config.get("load_defaults") or {}).get("shards")) or [])
+    if raw_shards:
+        resolved_source["shards"] = [resolve_model_path(str(item)) for item in raw_shards]
     return {
         "model_id": model_id,
+        "display_name": config.get("display_name") or model_id,
+        "kind": config.get("kind"),
         "type": config["type"],
+        "runtime_type": config.get("runtime_type") or config["type"],
         "path": resolved_path,
         "resolved_path": resolved_path,
         "backend": backend,
         "port": config["port"],
-        "running": model_id in state["processes"],
+        "user_selectable": bool(config.get("user_selectable")),
+        "capabilities": copy.deepcopy(config.get("capabilities") or {}),
+        "generation_defaults": copy.deepcopy(config.get("generation_defaults") or {}),
+        "load_defaults": copy.deepcopy(config.get("load_defaults") or {}),
+        "catalog_origin": str(config.get("catalog_origin") or "static"),
+        "status": catalog_status,
+        "status_reason": catalog_status_reason,
+        "resolved_source": resolved_source,
+        "running": running,
         "active": state.get("active_model") == model_id,
         "placement": copy.deepcopy((state.get("placements") or {}).get(model_id)),
         "admission": copy.deepcopy((state.get("admission") or {}).get(model_id)),
-        "runtime_state": _get_runtime_state(model_id),
+        "runtime_state": runtime_state,
     }
 
 
@@ -2336,7 +3408,7 @@ def _load_dynamic_models_registry() -> Dict[str, Dict[str, Any]]:
     for model_id, config in models.items():
         if not isinstance(model_id, str) or not isinstance(config, dict):
             continue
-        loaded[model_id] = dict(config)
+        loaded[model_id] = _normalize_dynamic_model_config(model_id, config)
     state["dynamic_models"] = loaded
     _sync_port_registry()
     return loaded
@@ -2350,6 +3422,98 @@ def _save_dynamic_models_registry() -> None:
     }
     with _dynamic_models_registry_path().open("w", encoding="utf-8") as fh:
         json.dump(payload, fh, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def _list_scan_folders() -> List[Dict[str, Any]]:
+    return copy.deepcopy(state.get("scan_folders") or [])
+
+
+def _add_scan_folder(path_str: str) -> Dict[str, Any]:
+    resolved_path = _normalize_existing_path(path_str)
+    if not resolved_path.is_dir():
+        raise HTTPException(status_code=422, detail=f"Directory expected: {resolved_path}")
+    folders = list(state.get("scan_folders") or [])
+    normalized_entry = _normalize_scan_folder_entry(resolved_path)
+    for existing in folders:
+        if str(existing.get("id") or "") == normalized_entry["id"]:
+            return copy.deepcopy(existing)
+    folders.append(normalized_entry)
+    folders.sort(key=lambda item: str(item.get("path") or ""))
+    state["scan_folders"] = folders
+    _save_scan_folders_state()
+    return copy.deepcopy(normalized_entry)
+
+
+def _delete_scan_folder(folder_id: str) -> None:
+    normalized_id = str(folder_id or "").strip()
+    folders = list(state.get("scan_folders") or [])
+    filtered = [folder for folder in folders if str(folder.get("id") or "") != normalized_id]
+    if len(filtered) == len(folders):
+        raise HTTPException(status_code=404, detail=f"Scan folder {normalized_id} not found")
+    state["scan_folders"] = filtered
+    _save_scan_folders_state()
+
+
+def _browse_folders(path_str: Optional[str], *, show_hidden: bool = False) -> Dict[str, Any]:
+    if path_str:
+        current_path = _assert_browse_allowed(Path(path_str))
+        try:
+            children = sorted(
+                [
+                    child for child in current_path.iterdir()
+                    if child.is_dir() and (show_hidden or not child.name.startswith("."))
+                ],
+                key=lambda item: item.name.lower(),
+            )
+        except OSError as exc:
+            raise HTTPException(status_code=422, detail=f"Failed to read directory: {exc}") from exc
+        parent_path = current_path.parent
+        return {
+            "current_path": str(current_path),
+            "parent_path": str(parent_path) if any(_path_is_within(parent_path, root) for root in _browse_allowlist_roots()) else None,
+            "entries": [_browse_entry_payload(child) for child in children],
+        }
+
+    roots = _browse_allowlist_roots()
+    return {
+        "current_path": None,
+        "parent_path": None,
+        "entries": [_browse_entry_payload(root, source="allowlist_root") for root in roots],
+    }
+
+
+def _recommended_folder_roots() -> List[str]:
+    candidates: List[Path] = [MODELS_ROOT, Path.home() / "models"]
+    for env_name, env_value in os.environ.items():
+        if not env_name.startswith("MODEL_PATH_"):
+            continue
+        raw_value = str(env_value or "").strip()
+        if not raw_value:
+            continue
+        try:
+            candidate = Path(raw_value).expanduser()
+            candidate = (BACKEND_ROOT / candidate).resolve() if not candidate.is_absolute() else candidate.resolve()
+        except Exception:
+            continue
+        if candidate.is_file():
+            candidates.append(candidate.parent)
+        elif candidate.is_dir():
+            candidates.append(candidate)
+    recommended: List[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except Exception:
+            continue
+        if not resolved.exists() or not resolved.is_dir():
+            continue
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        recommended.append(key)
+    return recommended
 
 
 def _align_dynamic_port_counter() -> None:
@@ -2406,6 +3570,18 @@ def _register_dynamic_model(request: ModelRegistrationRequest) -> Dict[str, Any]
     if model_id in dynamic_models and not request.replace:
         raise HTTPException(status_code=409, detail=f"Model {model_id} is already registered")
 
+    preview_status = str(request.preview_status or "").strip().lower()
+    if preview_status and preview_status != _MODEL_CATALOG_STATUS_READY:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "status": "preview_not_registerable",
+                "preview_status": preview_status,
+                "status_reason": str(request.status_reason or "").strip() or "preview_not_ready",
+                "model_id": model_id,
+            },
+        )
+
     model_type = _normalize_registered_model_type(request.type)
     resolved_path = _resolve_registration_path(request.path, expected_type=model_type)
     if request.port is not None:
@@ -2418,21 +3594,43 @@ def _register_dynamic_model(request: ModelRegistrationRequest) -> Dict[str, Any]
         "type": model_type,
         "path": resolved_path,
         "port": int(request.port) if request.port is not None else _allocate_dynamic_port(),
+        "display_name": str(request.display_name or model_id),
+        "user_selectable": True if request.user_selectable is None else bool(request.user_selectable),
+        "capabilities": dict(request.capabilities or _default_dynamic_model_capabilities(model_type)),
+        "generation_defaults": dict(request.generation_defaults or {}),
+        "load_defaults": dict(request.load_defaults or {}),
+        "catalog_origin": "dynamic",
     }
+    if request.kind is not None:
+        config["kind"] = str(request.kind)
+    if request.runtime_type is not None:
+        config["runtime_type"] = str(request.runtime_type)
+    if request.source_path is not None:
+        config["source_path"] = str(_assert_browse_allowed(Path(request.source_path)))
     if request.port is not None:
         state["dynamic_ports"] = max(int(state.get("dynamic_ports") or 8100), int(request.port) + 1)
     if request.ctx_size is not None:
         config["ctx_size"] = int(request.ctx_size)
+        config["load_defaults"]["ctx_size"] = int(request.ctx_size)
     if request.gpu_layers is not None:
         config["gpu_layers"] = int(request.gpu_layers)
+        config["load_defaults"]["gpu_layers"] = int(request.gpu_layers)
     if model_type == "gguf-vl":
         if request.mmproj is None:
             raise HTTPException(status_code=422, detail="gguf-vl models require mmproj")
         config["mmproj"] = _resolve_registration_path(request.mmproj, expected_type="gguf")
+        config["load_defaults"]["mmproj_path"] = config["mmproj"]
     elif request.mmproj is not None:
         config["mmproj"] = _resolve_registration_path(request.mmproj)
+        config["load_defaults"]["mmproj_path"] = config["mmproj"]
+    if request.shards is not None:
+        resolved_shards = [_resolve_registration_path(item, expected_type="gguf") for item in request.shards]
+        if not resolved_shards:
+            raise HTTPException(status_code=422, detail="Split GGUF registration requires at least one shard")
+        config["shards"] = resolved_shards
+        config["load_defaults"]["shards"] = resolved_shards
 
-    dynamic_models[model_id] = config
+    dynamic_models[model_id] = _normalize_dynamic_model_config(model_id, config)
     _release_port(model_id, reusable=False)
     _register_port_owner(model_id, int(config["port"]))
     _save_dynamic_models_registry()
@@ -2528,8 +3726,42 @@ async def list_available_models():
     _prune_dead_processes()
     return {
         "models": [_build_model_view(model_id) for model_id in _discover_available_model_ids()],
+        "active_model_id": state.get("active_model"),
+        "active_model_source": state.get("active_model_source"),
         "active_heavy_model": state.get("active_model"),
     }
+
+
+@app.get("/models/scan-folders")
+async def list_scan_folders():
+    return {"folders": _list_scan_folders()}
+
+
+@app.post("/models/scan-folders")
+async def add_scan_folder(request: ScanFolderRequest):
+    folder = _add_scan_folder(request.path)
+    return {"status": "success", "folder": folder}
+
+
+@app.delete("/models/scan-folders/{folder_id}")
+async def delete_scan_folder(folder_id: str):
+    _delete_scan_folder(folder_id)
+    return {"status": "success", "folder_id": folder_id}
+
+
+@app.get("/models/browse-folders")
+async def browse_folders(path: Optional[str] = None, show_hidden: bool = False):
+    return _browse_folders(path, show_hidden=show_hidden)
+
+
+@app.get("/models/recommended-folders")
+async def recommended_folders():
+    return {"folders": _recommended_folder_roots()}
+
+
+@app.post("/models/preview-path")
+async def preview_model_path(request: PreviewPathRequest):
+    return _preview_model_directory(request.path)
 
 
 @app.get("/models/running")
@@ -2537,6 +3769,8 @@ async def list_running_models():
     _prune_dead_processes()
     running_ids = list(state.get("processes") or {})
     return {
+        "active_model_id": state.get("active_model"),
+        "active_model_source": state.get("active_model_source"),
         "active_heavy_model": state.get("active_model"),
         "running_model_ids": running_ids,
         "running_models": [_build_model_view(model_id) for model_id in running_ids],
@@ -2562,6 +3796,36 @@ async def unregister_model(model_id: str):
         "status": "success",
         "action": "unregister",
         "model_id": model_id,
+    }
+
+
+@app.post("/models/{model_id}/load")
+async def load_model(model_id: str, request: ModelControlRequest):
+    job = _create_or_get_model_load_job(
+        model_id,
+        device_mode=request.device_mode or state["device_mode"],
+        action="activate",
+    )
+    return {
+        "status": "success",
+        "action": "load",
+        "job_id": job["job_id"],
+        "status_url": f"/model-load-jobs/{job['job_id']}",
+        "job": job,
+    }
+
+
+@app.get("/model-load-jobs/{job_id}")
+async def get_model_load_job(job_id: str):
+    return _build_model_load_job_view(job_id)
+
+
+@app.post("/model-load-jobs/{job_id}/cancel")
+async def cancel_model_load_job(job_id: str):
+    return {
+        "status": "success",
+        "action": "cancel",
+        "job": _cancel_model_load_job(job_id),
     }
 
 
@@ -2637,6 +3901,8 @@ async def get_status():
     _update_runtime_observability_metrics()
     concurrency_policy = _get_concurrency_policy_snapshot()
     return {
+        "active_model_id": state["active_model"],
+        "active_model_source": state.get("active_model_source"),
         "active_heavy_model": state["active_model"],
         "running": list(state["processes"].keys()),
         "placements": dict(state.get("placements") or {}),
@@ -2661,7 +3927,7 @@ async def get_status():
 
 @app.get("/ready/infer")
 async def ready_infer(model_id: Optional[str] = None):
-    requested_model_id = str(model_id or _default_heavy_model_id())
+    requested_model_id = str(model_id or _current_or_bootstrap_active_model_id() or _default_heavy_model_id())
     config = get_model_config(requested_model_id)
     if not config:
         raise HTTPException(

@@ -100,6 +100,19 @@ async def _api_request(method: str, path: str, json=None) -> httpx.Response:
         return await client.request(method, path, json=json)
 
 
+def _wait_for_model_load_job(job_id: str, expected_state: str, timeout_s: float = 1.0):
+    deadline = time.time() + timeout_s
+    payload = None
+    while time.time() < deadline:
+        response = asyncio.run(_api_request("GET", f"/model-load-jobs/{job_id}"))
+        assert response.status_code == 200
+        payload = response.json()
+        if payload["state"] == expected_state:
+            return payload
+        time.sleep(0.01)
+    raise AssertionError(f"Job {job_id} did not reach {expected_state}: {payload}")
+
+
 @pytest.fixture(autouse=True)
 def _reset_ums_state(monkeypatch, tmp_path):
     reset_observability_metrics()
@@ -131,6 +144,9 @@ def _reset_ums_state(monkeypatch, tmp_path):
         "UMS_RETRIEVED_CONTEXT_RATIO",
         "UMS_GENERATION_TOKENS_RESERVE",
         "UMS_DYNAMIC_MODELS_REGISTRY_PATH",
+        "UMS_ACTIVE_MODEL_STATE_PATH",
+        "UMS_SCAN_FOLDERS_STATE_PATH",
+        "UMS_BROWSE_ALLOWLIST_ROOTS",
         "UMS_LLM_MAX_CONCURRENCY",
         "UMS_EMBED_MAX_CONCURRENCY",
         "UMS_LLM_CONCURRENCY",
@@ -140,6 +156,15 @@ def _reset_ums_state(monkeypatch, tmp_path):
         "VLLM_BASE_URL",
         "VLLM_API_KEY",
         "VLLM_MODEL_ID_QWEN_14B_LLM",
+        "MODEL_PATH_QWEN32B",
+        "MODEL_PATH_LLAMA31_8B",
+        "MODEL_PATH_MISTRAL_7B",
+        "MODEL_PATH_PHI3_MINI_Q4",
+        "MODEL_PATH_SAIGA_YANDEXGPT_8B",
+        "MODEL_PATH_YANDEXGPT_LITE_8B",
+        "MODEL_PATH_BGE_M3",
+        "MODEL_PATH_MULTILINGUAL_E5",
+        "MODEL_PATH_XLMR_XNLI",
         "MODEL_PATH_QWEN14B",
         "MODEL_PATH_QWENVL",
         "MODEL_PATH_LABSE",
@@ -147,17 +172,22 @@ def _reset_ums_state(monkeypatch, tmp_path):
     ):
         monkeypatch.delenv(env_name, raising=False)
     monkeypatch.setenv("UMS_DYNAMIC_MODELS_REGISTRY_PATH", str(tmp_path / "ums_dynamic_models.json"))
+    monkeypatch.setenv("UMS_ACTIVE_MODEL_STATE_PATH", str(tmp_path / "ums_active_model_state.json"))
+    monkeypatch.setenv("UMS_SCAN_FOLDERS_STATE_PATH", str(tmp_path / "ums_scan_folders.json"))
     ums_server.state["processes"].clear()
     ums_server.state["placements"].clear()
     ums_server.state["active_model"] = None
+    ums_server.state["active_model_source"] = None
     ums_server.state["tier_config"] = None
     ums_server.state["dynamic_models"] = {}
+    ums_server.state["scan_folders"] = []
     ums_server.state["discovered_model_ports"] = {}
     ums_server.state["dynamic_ports"] = 8100
     ums_server.state["reserved_ports"] = set()
     ums_server.state["port_owners"] = {}
     ums_server.state["released_dynamic_ports"] = []
     ums_server.state["concurrency_policy"] = {}
+    ums_server.state["model_load_jobs"] = {}
     monkeypatch.setattr(ums_server, "_find_listener_pids", lambda port: [])
     ums_server._llm_semaphore = asyncio.Semaphore(1)
     ums_server._embed_semaphore = asyncio.Semaphore(4)
@@ -1171,6 +1201,7 @@ def test_status_does_not_recreate_live_semaphores(monkeypatch):
 
 def test_models_api_lists_available_models_and_active_state():
     ums_server.state["active_model"] = "qwen-14b-llm"
+    ums_server.state["active_model_source"] = "activation"
     ums_server.state["processes"] = {"qwen-14b-llm": _FakeProcess(pid=111)}
     ums_server.state["placements"] = {
         "qwen-14b-llm": {"placement_mode": "single-gpu", "gpu_indices": [0]},
@@ -1185,14 +1216,44 @@ def test_models_api_lists_available_models_and_active_state():
 
     assert response.status_code == 200
     payload = response.json()
+    assert payload["active_model_id"] == "qwen-14b-llm"
+    assert payload["active_model_source"] == "activation"
     assert payload["active_heavy_model"] == "qwen-14b-llm"
     models = {item["model_id"]: item for item in payload["models"]}
     assert set(models) == {"labse-embedding", "qwen-14b-llm"}
+    assert models["qwen-14b-llm"]["display_name"] == "Qwen2.5 14B Instruct"
+    assert models["qwen-14b-llm"]["catalog_origin"] == "static"
+    assert models["qwen-14b-llm"]["user_selectable"] is True
+    assert models["qwen-14b-llm"]["status"] == "ready"
+    assert models["qwen-14b-llm"]["status_reason"] == "running"
     assert models["qwen-14b-llm"]["running"] is True
     assert models["qwen-14b-llm"]["active"] is True
     assert models["qwen-14b-llm"]["resolved_path"] == models["qwen-14b-llm"]["path"]
+    assert models["labse-embedding"]["status"] == "incomplete"
+    assert models["labse-embedding"]["status_reason"] == "missing_model_path"
     assert models["labse-embedding"]["running"] is False
     assert models["labse-embedding"]["active"] is False
+
+
+def test_models_api_lists_registry_entries_with_catalog_statuses():
+    response = asyncio.run(_api_request("GET", "/models"))
+
+    assert response.status_code == 200
+    payload = response.json()
+    models = {item["model_id"]: item for item in payload["models"]}
+
+    assert models["qwen-14b-llm"]["status"] == "incomplete"
+    assert models["qwen-14b-llm"]["status_reason"] == "missing_model_path"
+    assert models["qwen-32b-llm"]["status"] == "incomplete"
+    assert models["qwen-32b-llm"]["status_reason"] == "missing_model_path"
+    assert models["qwen-vl-8b"]["status"] == "incomplete"
+    assert models["qwen-vl-8b"]["status_reason"] == "missing_model_path"
+    assert models["bge-m3-embedding"]["status"] == "incomplete"
+    assert models["bge-m3-embedding"]["status_reason"] == "missing_model_path"
+    assert models["qwen3-reranker-0.6b"]["status"] == "unsupported"
+    assert models["qwen3-reranker-0.6b"]["status_reason"] == "runtime_type:external"
+    assert models["qwen-7b-llm"]["status"] == "unsupported"
+    assert models["qwen-7b-llm"]["status_reason"] == "runtime_type:dynamic"
 
 
 def test_get_model_config_prefers_canonical_runtime_path_env(monkeypatch):
@@ -1239,6 +1300,34 @@ def test_get_model_config_requires_env_path_when_no_canonical_or_legacy_override
     assert ums_server.get_model_config("qwen-14b-llm")["path"] == ""
 
 
+def test_resolve_bootstrap_active_model_prefers_persisted_runtime_state(monkeypatch):
+    state_path = Path(os.environ["UMS_ACTIVE_MODEL_STATE_PATH"])
+    state_path.write_text(
+        json.dumps(
+            {
+                "active_model_id": "qwen-vl-8b",
+                "active_model_source": "activation",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DEFAULT_ACTIVE_MODEL_ID", "qwen-14b-llm")
+
+    model_id, source = ums_server._resolve_bootstrap_active_model()
+
+    assert model_id == "qwen-vl-8b"
+    assert source == "activation"
+
+
+def test_resolve_bootstrap_active_model_falls_back_to_env_default(monkeypatch):
+    monkeypatch.setenv("DEFAULT_ACTIVE_MODEL_ID", "qwen-vl-8b")
+
+    model_id, source = ums_server._resolve_bootstrap_active_model()
+
+    assert model_id == "qwen-vl-8b"
+    assert source == "default_active_model_id"
+
+
 def test_start_server_rejects_missing_canonical_model_path_env(monkeypatch):
     for env_name in (
         "MODEL_PATH_LLM",
@@ -1255,6 +1344,7 @@ def test_start_server_rejects_missing_canonical_model_path_env(monkeypatch):
 
 def test_models_running_api_lists_running_models_and_placements():
     ums_server.state["active_model"] = "qwen-14b-llm"
+    ums_server.state["active_model_source"] = "activation"
     ums_server.state["processes"] = {
         "qwen-14b-llm": _FakeProcess(pid=111),
         "labse-embedding": _FakeProcess(pid=222),
@@ -1280,6 +1370,8 @@ def test_models_running_api_lists_running_models_and_placements():
 
     assert response.status_code == 200
     payload = response.json()
+    assert payload["active_model_id"] == "qwen-14b-llm"
+    assert payload["active_model_source"] == "activation"
     assert payload["active_heavy_model"] == "qwen-14b-llm"
     assert payload["running_model_ids"] == ["qwen-14b-llm", "labse-embedding"]
     running_models = {item["model_id"]: item for item in payload["running_models"]}
@@ -1292,6 +1384,7 @@ def test_models_running_api_lists_running_models_and_placements():
 
 def test_models_running_omits_dead_local_processes():
     ums_server.state["active_model"] = "qwen-14b-llm"
+    ums_server.state["active_model_source"] = "activation"
     ums_server.state["processes"] = {
         "qwen-14b-llm": _FakeProcess(pid=111, returncode=1),
         "labse-embedding": _FakeProcess(pid=222),
@@ -1305,6 +1398,8 @@ def test_models_running_omits_dead_local_processes():
 
     assert response.status_code == 200
     payload = response.json()
+    assert payload["active_model_id"] is None
+    assert payload["active_model_source"] is None
     assert payload["active_heavy_model"] is None
     assert payload["running_model_ids"] == ["labse-embedding"]
     assert set(payload["placements"]) == {"labse-embedding"}
@@ -1342,7 +1437,7 @@ def test_activate_endpoint_starts_model_and_returns_active_view():
     def _fake_start(model_id, device_mode, stage="activate"):
         assert model_id == "qwen-14b-llm"
         assert device_mode == ums_server.DeviceMode.HYBRID
-        ums_server.state["active_model"] = model_id
+        ums_server._set_active_model_id(model_id, source="activation")
         ums_server.state["processes"][model_id] = _FakeProcess(pid=111)
         ums_server.state["placements"][model_id] = {
             "placement_mode": "single-gpu",
@@ -1366,6 +1461,10 @@ def test_activate_endpoint_starts_model_and_returns_active_view():
     assert payload["model"]["model_id"] == "qwen-14b-llm"
     assert payload["model"]["running"] is True
     assert payload["model"]["active"] is True
+    assert payload["model"]["catalog_origin"] == "static"
+    persisted = json.loads(Path(os.environ["UMS_ACTIVE_MODEL_STATE_PATH"]).read_text(encoding="utf-8"))
+    assert persisted["active_model_id"] == "qwen-14b-llm"
+    assert persisted["active_model_source"] == "activation"
     mock_start.assert_called_once_with("qwen-14b-llm", ums_server.DeviceMode.HYBRID, stage="activate")
 
 
@@ -1403,6 +1502,110 @@ def test_activate_endpoint_uses_remote_vllm_backend(monkeypatch):
     mock_probe.assert_called_once_with("qwen-14b-llm")
 
 
+def test_model_load_endpoint_creates_async_job_and_reports_ready(tmp_path):
+    model_path = tmp_path / "demo.gguf"
+    model_path.write_bytes(b"0" * 1024)
+    fake_config = {
+        "type": "gguf",
+        "runtime_type": "gguf",
+        "path": str(model_path),
+        "port": 8099,
+        "display_name": "Demo",
+        "user_selectable": True,
+    }
+
+    def _fake_start(model_id, device_mode, stage="activate"):
+        assert model_id == "demo-llm"
+        assert device_mode == ums_server.DeviceMode.CPU
+        assert stage == "activate"
+        return model_id
+
+    with patch.object(ums_server, "get_model_config", return_value=fake_config), patch.object(
+        ums_server, "_start_server", side_effect=_fake_start
+    ), patch.object(
+        ums_server, "_build_model_view", return_value={"model_id": "demo-llm", "running": True, "active": True}
+    ):
+        response = asyncio.run(_api_request("POST", "/models/demo-llm/load", json={"device_mode": "cpu"}))
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status"] == "success"
+        assert payload["action"] == "load"
+        assert payload["status_url"] == f"/model-load-jobs/{payload['job_id']}"
+        assert payload["job"]["bytes_total"] == 1024
+
+        ready = _wait_for_model_load_job(payload["job_id"], "ready")
+
+    assert ready["phase"] == "ready"
+    assert ready["percent"] == 100.0
+    assert ready["model"]["model_id"] == "demo-llm"
+
+
+def test_model_load_job_status_reports_memory_progress(monkeypatch):
+    job_id = "progress-job"
+    ums_server.state["model_load_jobs"][job_id] = {
+        "job_id": job_id,
+        "model_id": "qwen-14b-llm",
+        "action": "activate",
+        "device_mode": "hybrid",
+        "state": "loading",
+        "phase": "loading_memory",
+        "detail": "loading_model_into_memory",
+        "process_pid": 321,
+        "bytes_loaded": None,
+        "bytes_total": 1000,
+        "percent": 0.0,
+        "created_at": int(time.time()),
+        "updated_at": int(time.time()),
+        "_process": _FakeProcess(pid=321),
+    }
+    monkeypatch.setattr(ums_server, "_read_process_rss_bytes", lambda pid: 250 if pid == 321 else None)
+
+    response = asyncio.run(_api_request("GET", f"/model-load-jobs/{job_id}"))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["state"] == "loading"
+    assert payload["bytes_loaded"] == 250
+    assert payload["bytes_total"] == 1000
+    assert payload["percent"] == 25.0
+
+
+def test_cancel_model_load_job_stops_loading_process():
+    job_id = "cancel-job"
+    cancel_event = threading.Event()
+    fake_process = _FakeProcess(pid=987)
+    ums_server.state["model_load_jobs"][job_id] = {
+        "job_id": job_id,
+        "model_id": "qwen-14b-llm",
+        "action": "activate",
+        "device_mode": "hybrid",
+        "state": "loading",
+        "phase": "loading_memory",
+        "detail": "loading_model_into_memory",
+        "process_pid": 987,
+        "bytes_loaded": None,
+        "bytes_total": 1000,
+        "percent": 0.0,
+        "created_at": int(time.time()),
+        "updated_at": int(time.time()),
+        "_cancel_event": cancel_event,
+        "_process": fake_process,
+    }
+
+    with patch.object(ums_server, "_terminate_process") as mock_terminate:
+        response = asyncio.run(_api_request("POST", f"/model-load-jobs/{job_id}/cancel"))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "success"
+    assert payload["job"]["state"] == "cancelled"
+    assert payload["job"]["phase"] == "cancelled"
+    assert cancel_event.is_set()
+    assert ums_server.state["runtime_states"]["qwen-14b-llm"]["reason"] == "cancelled"
+    mock_terminate.assert_called_once_with(fake_process)
+
+
 def test_stop_endpoint_stops_model_and_returns_stopped_view():
     async def _run_inline(func, *args, **kwargs):
         return func(*args, **kwargs)
@@ -1418,7 +1621,7 @@ def test_stop_endpoint_stops_model_and_returns_stopped_view():
         assert model_id == "qwen-14b-llm"
         ums_server.state["processes"].pop(model_id, None)
         ums_server.state["placements"].pop(model_id, None)
-        ums_server.state["active_model"] = None
+        ums_server._set_active_model_id(None)
 
     with patch.object(ums_server.asyncio, "to_thread", side_effect=_run_inline), patch.object(ums_server, "_stop_model", side_effect=_fake_stop) as mock_stop:
         response = asyncio.run(_api_request("POST", "/models/qwen-14b-llm/stop"))
@@ -1430,6 +1633,9 @@ def test_stop_endpoint_stops_model_and_returns_stopped_view():
     assert payload["model"]["model_id"] == "qwen-14b-llm"
     assert payload["model"]["running"] is False
     assert payload["model"]["active"] is False
+    persisted = json.loads(Path(os.environ["UMS_ACTIVE_MODEL_STATE_PATH"]).read_text(encoding="utf-8"))
+    assert persisted["active_model_id"] is None
+    assert persisted["active_model_source"] is None
     mock_stop.assert_called_once_with("qwen-14b-llm")
 
 
@@ -1446,6 +1652,17 @@ def test_model_control_endpoints_return_404_for_unknown_model(method, path):
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Model missing-model not found"
+
+
+def test_activate_endpoint_rejects_unsupported_runtime_type():
+    response = asyncio.run(_api_request("POST", "/models/qwen3-reranker-0.6b/activate", json={}))
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == {
+        "status": "unsupported_model_runtime",
+        "model_id": "qwen3-reranker-0.6b",
+        "runtime_type": "external",
+    }
 
 
 def test_register_dynamic_model_endpoint_persists_and_lists_model(tmp_path, monkeypatch):
@@ -1474,6 +1691,8 @@ def test_register_dynamic_model_endpoint_persists_and_lists_model(tmp_path, monk
     assert payload["status"] == "success"
     assert payload["action"] == "register"
     assert payload["model"]["model_id"] == "dynamic-qwen"
+    assert payload["model"]["catalog_origin"] == "dynamic"
+    assert payload["model"]["user_selectable"] is True
     assert payload["model"]["port"] == 8115
     assert payload["model"]["resolved_path"] == str(model_path.resolve())
     models_response = asyncio.run(_api_request("GET", "/models"))
@@ -1678,23 +1897,360 @@ def test_register_skips_released_dynamic_port_when_os_listener_is_present(tmp_pa
         )
 
     assert response.status_code == 200
-    assert response.json()["model"]["port"] == 8101
-    assert ums_server.state["port_owners"][8101] == "dynamic-c"
+    allocated_port = response.json()["model"]["port"]
+    assert allocated_port != 8100
+    assert allocated_port >= 8101
+    assert ums_server.state["port_owners"][allocated_port] == "dynamic-c"
 
 
-def test_discovered_model_gets_stable_reserved_port_mapping(tmp_path):
+def test_raw_filesystem_models_are_not_discovered_into_catalog(tmp_path):
     discovered_path = tmp_path / "discovered" / "dynamic-qwen.gguf"
     discovered_path.parent.mkdir(parents=True, exist_ok=True)
     discovered_path.write_text("stub", encoding="utf-8")
 
     with patch.object(ums_server, "MODELS_DIR", discovered_path.parent):
-        first = ums_server.get_model_config("dynamic-qwen")
-        second = ums_server.get_model_config("dynamic-qwen")
+        assert ums_server.get_model_config("dynamic-qwen") is None
+        assert "dynamic-qwen" not in ums_server._discover_available_model_ids()
 
-    assert first["port"] == 8100
-    assert second["port"] == 8100
-    assert ums_server.state["discovered_model_ports"]["dynamic-qwen"] == 8100
-    assert ums_server.state["port_owners"][8100] == "dynamic-qwen"
+
+def test_browse_folders_lists_only_directories_with_model_hints(tmp_path, monkeypatch):
+    monkeypatch.setenv("UMS_BROWSE_ALLOWLIST_ROOTS", str(tmp_path))
+    model_dir = tmp_path / "qwen-folder"
+    model_dir.mkdir()
+    (model_dir / "model.gguf").write_text("stub", encoding="utf-8")
+    (model_dir / "adapter_config.json").write_text("{}", encoding="utf-8")
+    plain_dir = tmp_path / "plain-folder"
+    plain_dir.mkdir()
+    (tmp_path / "not-a-directory.gguf").write_text("stub", encoding="utf-8")
+
+    response = asyncio.run(_api_request("GET", f"/models/browse-folders?path={tmp_path}"))
+
+    assert response.status_code == 200
+    payload = response.json()
+    entries = {item["name"]: item for item in payload["entries"]}
+    assert set(entries) == {"plain-folder", "qwen-folder"}
+    assert entries["qwen-folder"]["looks_like_model_dir"] is True
+    assert entries["qwen-folder"]["model_file_count_hint"] == 1
+    assert entries["qwen-folder"]["folder_tags"] == ["GGUF", "Adapter"]
+    assert entries["qwen-folder"]["folder_signals"]["has_gguf"] is True
+    assert entries["qwen-folder"]["folder_signals"]["has_adapter"] is True
+    assert entries["plain-folder"]["looks_like_model_dir"] is False
+    assert entries["plain-folder"]["folder_tags"] == []
+
+
+def test_recommended_folders_include_models_root_and_model_path_parents(tmp_path, monkeypatch):
+    monkeypatch.setenv("UMS_BROWSE_ALLOWLIST_ROOTS", str(tmp_path))
+    custom_root = tmp_path / "external-models"
+    custom_root.mkdir()
+    model_file = custom_root / "phi3.gguf"
+    model_file.write_text("stub", encoding="utf-8")
+    home_models = Path.home() / "models"
+    home_models.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("MODEL_PATH_TEST_INVENTORY", str(model_file))
+
+    response = asyncio.run(_api_request("GET", "/models/recommended-folders"))
+
+    assert response.status_code == 200
+    folders = response.json()["folders"]
+    assert str(ums_server.MODELS_ROOT.resolve()) in folders
+    assert str(custom_root.resolve()) in folders
+    assert str(home_models.resolve()) in folders
+
+
+def test_browse_folders_rejects_paths_outside_allowlist(tmp_path, monkeypatch):
+    monkeypatch.setenv("UMS_BROWSE_ALLOWLIST_ROOTS", str(tmp_path))
+    outside_dir = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside_dir.mkdir(exist_ok=True)
+
+    response = asyncio.run(_api_request("GET", f"/models/browse-folders?path={outside_dir}"))
+
+    assert response.status_code == 403
+
+
+def test_scan_folders_can_be_added_listed_and_removed(tmp_path, monkeypatch):
+    monkeypatch.setenv("UMS_BROWSE_ALLOWLIST_ROOTS", str(tmp_path))
+    scan_dir = tmp_path / "scan-root"
+    scan_dir.mkdir()
+
+    add_response = asyncio.run(_api_request("POST", "/models/scan-folders", json={"path": str(scan_dir)}))
+    assert add_response.status_code == 200
+    folder = add_response.json()["folder"]
+
+    list_response = asyncio.run(_api_request("GET", "/models/scan-folders"))
+    assert list_response.status_code == 200
+    assert list_response.json()["folders"] == [folder]
+
+    persisted = json.loads(Path(os.environ["UMS_SCAN_FOLDERS_STATE_PATH"]).read_text(encoding="utf-8"))
+    assert persisted["folders"][0]["path"] == str(scan_dir.resolve())
+
+    delete_response = asyncio.run(_api_request("DELETE", f"/models/scan-folders/{folder['id']}"))
+    assert delete_response.status_code == 200
+    assert asyncio.run(_api_request("GET", "/models/scan-folders")).json()["folders"] == []
+
+
+def test_scan_folders_accept_new_root_outside_current_allowlist(tmp_path, monkeypatch):
+    monkeypatch.setenv("UMS_BROWSE_ALLOWLIST_ROOTS", str(tmp_path))
+    external_root = tmp_path.parent / f"{tmp_path.name}-external-root"
+    external_root.mkdir(exist_ok=True)
+
+    add_response = asyncio.run(_api_request("POST", "/models/scan-folders", json={"path": str(external_root)}))
+
+    assert add_response.status_code == 200
+    folder = add_response.json()["folder"]
+    browse_response = asyncio.run(_api_request("GET", f"/models/browse-folders?path={external_root}"))
+    assert browse_response.status_code == 200
+    assert browse_response.json()["current_path"] == str(external_root.resolve())
+    assert any(item["id"] == folder["id"] for item in asyncio.run(_api_request("GET", "/models/scan-folders")).json()["folders"])
+
+
+def test_preview_path_returns_ready_entry_for_single_gguf(tmp_path, monkeypatch):
+    monkeypatch.setenv("UMS_BROWSE_ALLOWLIST_ROOTS", str(tmp_path))
+    model_dir = tmp_path / "single-gguf"
+    model_dir.mkdir()
+    gguf_path = model_dir / "qwen2.5-14b-instruct-q4_k_m.gguf"
+    gguf_path.write_text("stub", encoding="utf-8")
+
+    response = asyncio.run(_api_request("POST", "/models/preview-path", json={"path": str(model_dir)}))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["warnings"] == []
+    assert len(payload["entries"]) == 1
+    entry = payload["entries"][0]
+    assert entry["runtime_type"] == "gguf"
+    assert entry["status"] == "ready"
+    assert entry["resolved_source"]["gguf_path"] == str(gguf_path.resolve())
+
+
+def test_preview_path_returns_ready_entry_for_gguf_vl_with_mmproj(tmp_path, monkeypatch):
+    monkeypatch.setenv("UMS_BROWSE_ALLOWLIST_ROOTS", str(tmp_path))
+    model_dir = tmp_path / "qwen-vl"
+    model_dir.mkdir()
+    gguf_path = model_dir / "Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
+    mmproj_path = model_dir / "mmproj-Qwen3-VL-8B-Instruct-F16.gguf"
+    gguf_path.write_text("stub", encoding="utf-8")
+    mmproj_path.write_text("stub", encoding="utf-8")
+
+    response = asyncio.run(_api_request("POST", "/models/preview-path", json={"path": str(model_dir)}))
+
+    assert response.status_code == 200
+    entry = response.json()["entries"][0]
+    assert entry["runtime_type"] == "gguf-vl"
+    assert entry["status"] == "ready"
+    assert entry["resolved_source"]["mmproj_path"] == str(mmproj_path.resolve())
+
+
+def test_preview_path_marks_gguf_vl_without_mmproj_as_incomplete(tmp_path, monkeypatch):
+    monkeypatch.setenv("UMS_BROWSE_ALLOWLIST_ROOTS", str(tmp_path))
+    model_dir = tmp_path / "qwen-vl-missing-mmproj"
+    model_dir.mkdir()
+    (model_dir / "Qwen3-VL-8B-Instruct-Q4_K_M.gguf").write_text("stub", encoding="utf-8")
+
+    response = asyncio.run(_api_request("POST", "/models/preview-path", json={"path": str(model_dir)}))
+
+    assert response.status_code == 200
+    entry = response.json()["entries"][0]
+    assert entry["runtime_type"] == "gguf-vl"
+    assert entry["status"] == "incomplete"
+    assert entry["status_reason"] == "missing_mmproj_path"
+
+
+def test_preview_path_collapses_split_gguf_into_single_entry(tmp_path, monkeypatch):
+    monkeypatch.setenv("UMS_BROWSE_ALLOWLIST_ROOTS", str(tmp_path))
+    model_dir = tmp_path / "split-gguf"
+    model_dir.mkdir()
+    for index in range(1, 4):
+        (model_dir / f"qwen2.5-32b-instruct-q4-0000{index}-of-00003.gguf").write_text("stub", encoding="utf-8")
+
+    response = asyncio.run(_api_request("POST", "/models/preview-path", json={"path": str(model_dir)}))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["entries"]) == 1
+    entry = payload["entries"][0]
+    assert entry["status"] == "ready"
+    assert len(entry["resolved_source"]["shards"]) == 3
+    assert entry["resolved_source"]["primary_path"].endswith("00001-of-00003.gguf")
+
+
+def test_preview_path_prefers_merged_gguf_over_split_candidate(tmp_path, monkeypatch):
+    monkeypatch.setenv("UMS_BROWSE_ALLOWLIST_ROOTS", str(tmp_path))
+    model_dir = tmp_path / "merged-and-split"
+    model_dir.mkdir()
+    merged = model_dir / "qwen2.5-32b-instruct-q4-merged.gguf"
+    merged.write_text("stub", encoding="utf-8")
+    for index in range(1, 4):
+        (model_dir / f"qwen2.5-32b-instruct-q4-0000{index}-of-00003.gguf").write_text("stub", encoding="utf-8")
+
+    response = asyncio.run(_api_request("POST", "/models/preview-path", json={"path": str(model_dir)}))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["entries"]) == 1
+    assert payload["entries"][0]["resolved_source"]["gguf_path"] == str(merged.resolve())
+    assert payload["warnings"][0]["code"] == "split_candidate_omitted"
+
+
+def test_preview_path_marks_adapter_contour_as_unsupported(tmp_path, monkeypatch):
+    monkeypatch.setenv("UMS_BROWSE_ALLOWLIST_ROOTS", str(tmp_path))
+    model_dir = tmp_path / "adapter-dir"
+    model_dir.mkdir()
+    (model_dir / "adapter_config.json").write_text("{}", encoding="utf-8")
+    (model_dir / "adapter_model.safetensors").write_text("stub", encoding="utf-8")
+
+    response = asyncio.run(_api_request("POST", "/models/preview-path", json={"path": str(model_dir)}))
+
+    assert response.status_code == 200
+    entry = response.json()["entries"][0]
+    assert entry["status"] == "unsupported"
+    assert entry["status_reason"] == "adapter_followup_slice"
+
+
+def test_preview_path_marks_st_directory_as_unsupported(tmp_path, monkeypatch):
+    monkeypatch.setenv("UMS_BROWSE_ALLOWLIST_ROOTS", str(tmp_path))
+    model_dir = tmp_path / "st-dir"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text("{}", encoding="utf-8")
+
+    response = asyncio.run(_api_request("POST", "/models/preview-path", json={"path": str(model_dir)}))
+
+    assert response.status_code == 200
+    entry = response.json()["entries"][0]
+    assert entry["runtime_type"] == "st"
+    assert entry["status"] == "unsupported"
+    assert entry["status_reason"] == "st_followup_slice"
+    assert entry["user_selectable"] is False
+
+
+def test_register_model_accepts_ready_preview_payload_and_rejects_incomplete_preview(tmp_path, monkeypatch):
+    registry_path = tmp_path / "ums_dynamic_models.json"
+    monkeypatch.setenv("UMS_DYNAMIC_MODELS_REGISTRY_PATH", str(registry_path))
+    monkeypatch.setenv("UMS_BROWSE_ALLOWLIST_ROOTS", str(tmp_path))
+    model_dir = tmp_path / "register-from-preview"
+    model_dir.mkdir()
+    gguf_path = model_dir / "qwen2.5-14b-instruct-q4_k_m.gguf"
+    gguf_path.write_text("stub", encoding="utf-8")
+
+    preview_response = asyncio.run(_api_request("POST", "/models/preview-path", json={"path": str(model_dir)}))
+    preview_entry = preview_response.json()["entries"][0]
+    ready_register = asyncio.run(
+        _api_request(
+            "POST",
+            "/models/register",
+            json={
+                "model_id": "preview-qwen",
+                "type": "gguf",
+                "path": preview_entry["resolved_source"]["gguf_path"],
+                "display_name": preview_entry["display_name"],
+                "runtime_type": preview_entry["runtime_type"],
+                "kind": preview_entry["kind"],
+                "user_selectable": preview_entry["user_selectable"],
+                "source_path": str(model_dir),
+                "preview_status": preview_entry["status"],
+                "status_reason": preview_entry["status_reason"],
+            },
+        )
+    )
+
+    assert ready_register.status_code == 200
+    models_response = asyncio.run(_api_request("GET", "/models"))
+    assert "preview-qwen" in {item["model_id"] for item in models_response.json()["models"]}
+
+    rejected = asyncio.run(
+        _api_request(
+            "POST",
+            "/models/register",
+            json={
+                "model_id": "preview-qwen-incomplete",
+                "type": "gguf-vl",
+                "path": preview_entry["resolved_source"]["gguf_path"],
+                "preview_status": "incomplete",
+                "status_reason": "missing_mmproj_path",
+            },
+        )
+    )
+    assert rejected.status_code == 422
+    assert rejected.json()["detail"]["status"] == "preview_not_registerable"
+
+
+def test_register_model_accepts_ready_gguf_vl_preview_payload(tmp_path, monkeypatch):
+    registry_path = tmp_path / "ums_dynamic_models.json"
+    monkeypatch.setenv("UMS_DYNAMIC_MODELS_REGISTRY_PATH", str(registry_path))
+    monkeypatch.setenv("UMS_BROWSE_ALLOWLIST_ROOTS", str(tmp_path))
+    model_dir = tmp_path / "register-vl-from-preview"
+    model_dir.mkdir()
+    gguf_path = model_dir / "Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
+    mmproj_path = model_dir / "mmproj-Qwen3-VL-8B-Instruct-F16.gguf"
+    gguf_path.write_text("stub", encoding="utf-8")
+    mmproj_path.write_text("stub", encoding="utf-8")
+
+    preview_response = asyncio.run(_api_request("POST", "/models/preview-path", json={"path": str(model_dir)}))
+    entry = preview_response.json()["entries"][0]
+
+    register_response = asyncio.run(
+        _api_request(
+            "POST",
+            "/models/register",
+            json={
+                "model_id": "preview-vl",
+                "type": "gguf-vl",
+                "path": entry["resolved_source"]["gguf_path"],
+                "mmproj": entry["resolved_source"]["mmproj_path"],
+                "display_name": entry["display_name"],
+                "runtime_type": entry["runtime_type"],
+                "kind": entry["kind"],
+                "user_selectable": entry["user_selectable"],
+                "source_path": str(model_dir),
+                "preview_status": entry["status"],
+                "status_reason": entry["status_reason"],
+            },
+        )
+    )
+
+    assert register_response.status_code == 200
+    payload = register_response.json()["model"]
+    assert payload["model_id"] == "preview-vl"
+    assert payload["runtime_type"] == "gguf-vl"
+    assert payload["load_defaults"]["mmproj_path"] == str(mmproj_path.resolve())
+
+
+def test_register_model_accepts_ready_split_gguf_preview_payload(tmp_path, monkeypatch):
+    registry_path = tmp_path / "ums_dynamic_models.json"
+    monkeypatch.setenv("UMS_DYNAMIC_MODELS_REGISTRY_PATH", str(registry_path))
+    monkeypatch.setenv("UMS_BROWSE_ALLOWLIST_ROOTS", str(tmp_path))
+    model_dir = tmp_path / "register-split-from-preview"
+    model_dir.mkdir()
+    for index in range(1, 4):
+        (model_dir / f"qwen2.5-32b-instruct-q4-0000{index}-of-00003.gguf").write_text("stub", encoding="utf-8")
+
+    preview_response = asyncio.run(_api_request("POST", "/models/preview-path", json={"path": str(model_dir)}))
+    entry = preview_response.json()["entries"][0]
+
+    register_response = asyncio.run(
+        _api_request(
+            "POST",
+            "/models/register",
+            json={
+                "model_id": "preview-split",
+                "type": "gguf",
+                "path": entry["resolved_source"]["primary_path"],
+                "shards": entry["resolved_source"]["shards"],
+                "display_name": entry["display_name"],
+                "runtime_type": entry["runtime_type"],
+                "kind": entry["kind"],
+                "user_selectable": entry["user_selectable"],
+                "source_path": str(model_dir),
+                "preview_status": entry["status"],
+                "status_reason": entry["status_reason"],
+            },
+        )
+    )
+
+    assert register_response.status_code == 200
+    payload = register_response.json()["model"]
+    assert payload["model_id"] == "preview-split"
+    assert payload["runtime_type"] == "gguf"
+    assert len(payload["load_defaults"]["shards"]) == 3
 
 
 def test_start_server_falls_back_when_static_requested_port_is_occupied(monkeypatch):
@@ -1762,7 +2318,7 @@ def test_start_server_falls_back_to_registry_model_and_records_event():
     fake_process = _FakeProcess(pid=321)
     launch_calls = []
 
-    def fake_start_once(model_id, device_mode):
+    def fake_start_once(model_id, device_mode, stage="startup"):
         launch_calls.append(model_id)
         if model_id == "qwen-14b-llm":
             raise RuntimeError("primary startup failed")
@@ -2144,7 +2700,7 @@ async def test_non_stream_infer_falls_back_to_registry_model_when_primary_startu
             return {"type": "gguf", "path": "./models/gguf/qwen7b.gguf", "ctx_size": 4096, "gpu_layers": 0, "port": 8094}
         return None
 
-    def fake_start_once(model_id, device_mode):
+    def fake_start_once(model_id, device_mode, stage="infer"):
         if model_id == "qwen-14b-llm":
             raise RuntimeError("primary startup failed")
         ums_server.state["processes"][model_id] = _FakeProcess(pid=555)
@@ -2197,7 +2753,7 @@ async def test_openai_embeddings_falls_back_to_registry_model_when_primary_start
             return {"type": "st", "path": "./models/st/Qwen3-Embedding-0.6B", "port": 8094}
         return None
 
-    def fake_start_once(model_id, device_mode):
+    def fake_start_once(model_id, device_mode, stage="embeddings"):
         if model_id == "labse-embedding":
             raise RuntimeError("primary startup failed")
         ums_server.state["processes"][model_id] = _FakeProcess(pid=556)
@@ -2333,7 +2889,7 @@ def test_unregister_releases_port_for_future_dynamic_registration():
     assert second.json()["model"]["port"] == first_port
 
 
-def test_discovered_model_reserves_stable_port_and_owner_mapping(tmp_path):
+def test_raw_discovered_model_does_not_reserve_port_mapping(tmp_path):
     model_root = tmp_path / "models"
     model_root.mkdir()
     gguf_path = model_root / "runtime-model.gguf"
@@ -2343,9 +2899,9 @@ def test_discovered_model_reserves_stable_port_and_owner_mapping(tmp_path):
         first = ums_server.get_model_config("runtime-model")
         second = ums_server.get_model_config("runtime-model")
 
-    assert first["port"] == second["port"]
-    assert ums_server.state["discovered_model_ports"]["runtime-model"] == first["port"]
-    assert ums_server.state["port_owners"][first["port"]] == "runtime-model"
+    assert first is None
+    assert second is None
+    assert "runtime-model" not in ums_server.state["discovered_model_ports"]
 
 
 def test_stop_model_releases_discovered_port_reservation():
