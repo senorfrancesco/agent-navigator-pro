@@ -33,7 +33,7 @@
 2. Поднять контейнерный `Open WebUI`:
 
 ```bash
-docker compose --profile legacy up -d open-webui
+docker compose up -d open-webui
 ```
 
 3. Открыть:
@@ -42,7 +42,6 @@ docker compose --profile legacy up -d open-webui
 
 Важно:
 
-- имя compose-профиля `legacy` сохранено только как историческое имя профиля;
 - сам сервис `open-webui` уже не использует `legacy_patch` и собирается из локального форка;
 - практический runtime path сегодня это `native backend + containerized Open WebUI from fork`.
 
@@ -92,7 +91,7 @@ docker compose --profile legacy up -d open-webui
 
 - при ручной диагностике отдельно проверять browser-reachable и container-reachable адреса;
 - для mixed-runtime smoke сначала подтверждать `/health`, `/tool-server/openapi.json` и container-side доступ до `agent-api` и `UMS`;
-- учитывать, что `docker compose --profile legacy up` теперь собирает сервис из локального форка, а не берёт готовый upstream-образ.
+- учитывать, что `docker compose up -d open-webui` теперь собирает сервис из локального форка, а не берёт готовый upstream-образ.
 
 ## Что намеренно не делаем
 

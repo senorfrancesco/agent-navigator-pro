@@ -137,7 +137,9 @@ def test_run_native_help_documents_primary_ui_flag():
     assert result.returncode == 0
     assert "--skip-openwebui" in result.stdout
     assert "--skip-chainlit" in result.stdout
+    assert "--build-openwebui" in result.stdout
     assert "Не запускать контейнер `Open WebUI`" in result.stdout
+    assert "Пересобрать контейнер `Open WebUI` из форка ../open-webui" in result.stdout
     assert "--skip-runtime-apply" in result.stdout
     assert "--apply-runtime" in result.stdout
     assert "./scripts/evaluate_runtime.sh recommend" in result.stdout
@@ -509,6 +511,44 @@ def test_run_native_direct_start_skip_chainlit_alias_maps_to_openwebui_skip(tmp_
     assert "run_native:test-mode validated" in result.stdout
     assert "skip_openwebui=true" in result.stdout.lower()
     assert "skip_chainlit_compat=true" in result.stdout.lower()
+
+
+def test_run_native_build_openwebui_flag_is_reported_in_test_mode(tmp_path):
+    backend_env = tmp_path / ".env"
+    runtime_env = tmp_path / ".env.runtime"
+    uploads_dir = tmp_path / "uploads"
+    llm_file = tmp_path / "model.gguf"
+    llm_file.write_text("stub", encoding="utf-8")
+    intent_dir = tmp_path / "intent"
+    retrieval_dir = tmp_path / "retrieval"
+    intent_dir.mkdir()
+    retrieval_dir.mkdir()
+
+    backend_env.write_text("CHAINLIT_AUTH_SECRET='ok'\nCHAINLIT_ADMIN_PASSWORD='ok'\n", encoding="utf-8")
+    runtime_env.write_text(
+        "\n".join(
+            [
+                f"UPLOADS_DIR='{uploads_dir}'",
+                f"MODEL_PATH_LLM='{llm_file}'",
+                "MODEL_PATH_VLM=''",
+                "MMPROJ_PATH=''",
+                f"MODEL_PATH_EMBEDDING_INTENT='{intent_dir}'",
+                f"MODEL_PATH_EMBEDDING_RETRIEVAL='{retrieval_dir}'",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["LLM_TOOLS_PLATFORM_TEST_MODE"] = "1"
+    env["LLM_TOOLS_PLATFORM_SKIP_CONDA_CHECKS"] = "1"
+    env["LLM_TOOLS_PLATFORM_BACKEND_ENV_FILE"] = str(backend_env)
+    env["LLM_TOOLS_PLATFORM_RUNTIME_ENV_FILE"] = str(runtime_env)
+
+    result = _run_script("run_native.sh", "--apply-runtime", "--build-openwebui", "--no-attach", env=env)
+
+    assert result.returncode == 0
+    assert "openwebui_build=build" in result.stdout
+    assert "build_openwebui=true" in result.stdout.lower()
 
 
 def test_evaluate_runtime_defaults_to_plan(tmp_path):
@@ -1180,7 +1220,9 @@ def test_run_native_waits_for_infer_ready_before_starting_ui():
     assert "wait_for_infer_ready" in run_native
     assert "/ready/infer" in run_native
     assert 'echo -e "${YELLOW}Пропуск запуска Agent API и Open WebUI: UMS infer-ready не подтвержден.${NC}"' in run_native
-    assert "docker compose up --no-build --no-deps -d open-webui" in run_native
+    assert "start_openwebui_compose_service" in run_native
+    assert "compose_args+=(--no-build)" in run_native
+    assert "compose_args+=(--build)" in run_native
 
 
 def test_stop_scripts_kill_detached_runtime_process_patterns():

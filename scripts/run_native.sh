@@ -25,6 +25,12 @@ ATTACH_TMUX=true
 FROM_LAUNCHER=false
 SKIP_OPENWEBUI=false
 SKIP_CHAINLIT_ALIAS=false
+BUILD_OPENWEBUI=false
+case "${LLM_TOOLS_PLATFORM_BUILD_OPENWEBUI:-}" in
+  1|true|TRUE|yes|YES)
+    BUILD_OPENWEBUI=true
+    ;;
+esac
 if [ -n "${LLM_TOOLS_PLATFORM_SKIP_RUNTIME_APPLY+x}" ]; then
   SKIP_RUNTIME_APPLY="${LLM_TOOLS_PLATFORM_SKIP_RUNTIME_APPLY}"
   EXPLICIT_RUNTIME_ENV_SELECTION=true
@@ -58,6 +64,9 @@ run_native.sh
       стартовать как обычно.
   --skip-chainlit
       Совместимый алиас для `--skip-openwebui`.
+  --build-openwebui
+      Пересобрать контейнер `Open WebUI` из форка ../open-webui перед запуском.
+      Без этого флага native-запуск использует уже собранный образ.
   --skip-runtime-apply
       Явно не загружать backend/.env.runtime для этого запуска.
   --apply-runtime
@@ -93,6 +102,9 @@ for arg in "$@"; do
     --skip-chainlit)
       SKIP_OPENWEBUI=true
       SKIP_CHAINLIT_ALIAS=true
+      ;;
+    --build-openwebui)
+      BUILD_OPENWEBUI=true
       ;;
     --skip-runtime-apply)
       SKIP_RUNTIME_APPLY=true
@@ -309,6 +321,7 @@ first_non_empty() {
 print_startup_config_summary() {
   local config_source="backend/.env"
   local openwebui_mode="on"
+  local openwebui_build_mode="no-build"
   local llm_device_summary=""
   local vlm_device_summary=""
   local intent_device_summary=""
@@ -322,6 +335,9 @@ print_startup_config_summary() {
   if [ "$SKIP_OPENWEBUI" = true ]; then
     openwebui_mode="off"
   fi
+  if [ "$BUILD_OPENWEBUI" = true ]; then
+    openwebui_build_mode="build"
+  fi
 
   llm_device_summary="$(first_non_empty "${LLM_DEVICE_MODE:-}" "${DEVICE_MODE:-}")"
   vlm_device_summary="$(first_non_empty "${VLM_DEVICE_MODE:-}" "${LLM_DEVICE_MODE:-}" "${DEVICE_MODE:-}")"
@@ -331,7 +347,7 @@ print_startup_config_summary() {
   embed_gpu_summary="$(first_non_empty "${UMS_EMBEDDING_GPU_INDEX:-}")"
 
   echo -e "${BLUE}Конфиг запуска:${NC}"
-  echo "  runtime: source=${config_source} conda=${CONDA_ENV} backend=${BACKEND_MODE:-llama-cpp-python} profile=${UMS_RUNTIME_PROFILE:-adaptive} qdrant=on openwebui=${openwebui_mode}"
+  echo "  runtime: source=${config_source} conda=${CONDA_ENV} backend=${BACKEND_MODE:-llama-cpp-python} profile=${UMS_RUNTIME_PROFILE:-adaptive} qdrant=on openwebui=${openwebui_mode} openwebui_build=${openwebui_build_mode}"
   echo "  placement: llm=${llm_device_summary} vlm=${vlm_device_summary} intent=${intent_device_summary} retrieval=${retrieval_device_summary} llm_gpus=${llm_gpu_summary} embed_gpu=${embed_gpu_summary}"
   echo "  ports: api=${AGENT_PORT} doc=${DOC_PORT} legal=${LEGAL_PORT} ums=${UMS_PORT} qdrant=${QDRANT_PORT} openwebui=${OPENWEBUI_PORT}"
 }
@@ -398,13 +414,32 @@ fi
 print_startup_config_summary
 
 if [ "${LLM_TOOLS_PLATFORM_TEST_MODE:-0}" = "1" ]; then
-  echo "run_native:test-mode validated conda_env=${CONDA_ENV} uploads_dir=${UPLOADS_DIR} skip_openwebui=${SKIP_OPENWEBUI} skip_chainlit_compat=${SKIP_CHAINLIT_ALIAS}"
+  echo "run_native:test-mode validated conda_env=${CONDA_ENV} uploads_dir=${UPLOADS_DIR} skip_openwebui=${SKIP_OPENWEBUI} skip_chainlit_compat=${SKIP_CHAINLIT_ALIAS} build_openwebui=${BUILD_OPENWEBUI}"
   exit 0
 fi
 
 ensure_docker_compose() {
   command -v docker >/dev/null 2>&1 || die "missing:docker"
   docker compose version >/dev/null 2>&1 || die "missing:docker-compose"
+}
+
+ensure_openwebui_fork_context() {
+  local fork_dir="$PROJECT_ROOT/../open-webui"
+  if [ ! -f "$fork_dir/Dockerfile" ]; then
+    die "missing:open-webui-fork:$fork_dir"
+  fi
+}
+
+start_openwebui_compose_service() {
+  local compose_args=(up --no-deps -d)
+  ensure_openwebui_fork_context
+  if [ "$BUILD_OPENWEBUI" = true ]; then
+    compose_args+=(--build)
+  else
+    compose_args+=(--no-build)
+  fi
+  compose_args+=(open-webui)
+  docker compose "${compose_args[@]}"
 }
 
 normalize_native_qdrant_url() {
@@ -573,10 +608,14 @@ if [ "$UMS_INFER_READY" = true ]; then
   if [ "$SKIP_OPENWEBUI" = true ]; then
     echo -e "${YELLOW}Пропуск запуска Open WebUI (--skip-openwebui).${NC}"
   else
-    echo -e "${GREEN}Запуск Open WebUI через Docker Compose на порту $OPENWEBUI_PORT...${NC}"
+    if [ "$BUILD_OPENWEBUI" = true ]; then
+      echo -e "${GREEN}Сборка и запуск Open WebUI из форка ../open-webui на порту $OPENWEBUI_PORT...${NC}"
+    else
+      echo -e "${GREEN}Запуск Open WebUI через Docker Compose на порту $OPENWEBUI_PORT...${NC}"
+    fi
     (
       cd "$PROJECT_ROOT"
-      docker compose up --no-build --no-deps -d open-webui
+      start_openwebui_compose_service
     )
     wait_for_service "Open WebUI" "$OPENWEBUI_PORT" "/health" 60 || SERVICES_OK=false
   fi

@@ -201,6 +201,7 @@ services:
     environment:
       - OPENAI_API_BASE_URL=http://host.docker.internal:8000/v1
       - OPENAI_API_KEY=sk-dummy
+      - ENABLE_AGENT_NAVIGATOR_RUNTIME_MODELS=True
       - ENABLE_FOLLOW_UP_GENERATION=False
       - HF_HUB_OFFLINE=1
       - ENABLE_RAG_WEB_SEARCH=False
