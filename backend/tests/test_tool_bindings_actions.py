@@ -131,7 +131,7 @@ async def test_equipment_deep_workspace_tool_forwards_exact_prompt_as_equipment_
         "ui_locale": "ru",
     }
     assert response == (
-        "Глубокий анализ оборудования принят как инструмент долгого выполнения.\n"
+        "Принят в работу: Глубокий анализ оборудования.\n"
         "Прогресс отображается в блоке `Инструмент долгого выполнения`."
     )
 
@@ -162,7 +162,7 @@ async def test_equipment_deep_workspace_tool_localizes_acceptance_for_english(mo
     )
 
     assert response == (
-        "Deep equipment analysis was accepted as a long-running tool.\n"
+        "Accepted: Deep equipment analysis.\n"
         "Progress is shown in the `Long-running tool` panel."
     )
 
@@ -228,7 +228,7 @@ async def test_equipment_deep_workspace_tool_routes_single_chat_file_to_document
         {"label": "Requirements.pdf", "file_id": "file-req-1", "file_path": "/app/backend/data/uploads/req.pdf"}
     ]
     assert captured["payload"]["user_inputs"]["session_docs"]["Requirements.pdf"]["path"] == "/app/backend/data/uploads/req.pdf"
-    assert "Глубокий анализ документа принят как инструмент долгого выполнения." in response
+    assert "Принят в работу: Глубокий анализ документа." in response
 
 
 @pytest.mark.asyncio
@@ -399,7 +399,7 @@ async def test_equipment_deep_workspace_tool_autopolls_completed_job_and_persist
     accepted_message = chat_store["chat-deep-tool-1"]["history"]["messages"][accepted_message_id]
     result_message_id = accepted_message.get("result_message_id")
     assert response == (
-        "Глубокий анализ оборудования принят как инструмент долгого выполнения.\n"
+        "Принят в работу: Глубокий анализ оборудования.\n"
         "Прогресс отображается в блоке `Инструмент долгого выполнения`."
     )
     assert accepted_message["job_status"] == "completed"
@@ -457,7 +457,7 @@ async def test_equipment_deep_workspace_tool_rejects_accepted_without_job_contex
         __metadata__={"ui_locale": "ru-RU"},
     )
 
-    assert "Не удалось запустить инструмент долгого выполнения" in response
+    assert "Не удалось запустить: Глубокий анализ оборудования." in response
     assert "`job_id`" in response
     assert "`status_url`" in response
     assert not getattr(fake_request.app.state, "llm_tools_platform_deep_job_pollers", {})
@@ -550,7 +550,7 @@ async def test_equipment_deep_workspace_tool_failed_job_emits_reload_meta_and_pe
 
     accepted_message = chat_store["chat-deep-tool-failed-1"]["history"]["messages"][accepted_message_id]
     assert response == (
-        "Глубокий анализ оборудования принят как инструмент долгого выполнения.\n"
+        "Принят в работу: Глубокий анализ оборудования.\n"
         "Прогресс отображается в блоке `Инструмент долгого выполнения`."
     )
     assert accepted_message["job_status"] == "failed"
@@ -683,7 +683,7 @@ async def test_equipment_deep_workspace_tool_failed_job_waits_for_openwebui_mess
     result_message_id = accepted_message.get("result_message_id")
 
     assert response == (
-        "Глубокий анализ оборудования принят как инструмент долгого выполнения.\n"
+        "Принят в работу: Глубокий анализ оборудования.\n"
         "Прогресс отображается в блоке `Инструмент долгого выполнения`."
     )
     assert accepted_message["job_status"] == "failed"
@@ -733,7 +733,7 @@ async def test_equipment_deep_workspace_tool_resolves_visible_accepted_bubble_fr
                             "id": visible_message_id,
                             "role": "assistant",
                             "content": (
-                                "Глубокий анализ принят как инструмент долгого выполнения.\n"
+                                "Принят в работу: Глубокий анализ оборудования.\n"
                                 "Прогресс отображается в блоке `Инструмент долгого выполнения`."
                             ),
                             "job_id": "job-tool-resolve-1",
@@ -809,7 +809,7 @@ async def test_equipment_deep_workspace_tool_resolves_visible_accepted_bubble_fr
     result_message_id = visible_message.get("result_message_id")
 
     assert response == (
-        "Глубокий анализ оборудования принят как инструмент долгого выполнения.\n"
+        "Принят в работу: Глубокий анализ оборудования.\n"
         "Прогресс отображается в блоке `Инструмент долгого выполнения`."
     )
     assert stale_message.get("job_status") is None

@@ -824,12 +824,12 @@ def _build_openwebui_workspace_tool_code(
                 "cancelled": "Инструмент долгого выполнения отменён.",
                 "terminal_status": "Инструмент долгого выполнения завершён со статусом {status}.",
                 "missing_query": "Не удалось определить пользовательский запрос для `__ACTION_LABEL__`.",
-                "launch_failed": "Не удалось запустить инструмент долгого выполнения.\\nerror: {error}",
+                "launch_failed": "Не удалось запустить: {label}.\\nerror: {error}",
                 "missing_confirmation": (
-                    "Не удалось запустить инструмент долгого выполнения.\\n"
+                    "Не удалось запустить: {label}.\\n"
                     "Инструмент не вернул подтверждение запуска (`job_id` и `status_url`)."
                 ),
-                "accepted": "{label} принят как инструмент долгого выполнения.\\nПрогресс отображается в блоке `Инструмент долгого выполнения`.",
+                "accepted": "Принят в работу: {label}.\\nПрогресс отображается в блоке `Инструмент долгого выполнения`.",
             },
             "en": {
                 "auto_refresh_stopped": "Auto-refresh stopped. Use refresh to continue.",
@@ -838,12 +838,12 @@ def _build_openwebui_workspace_tool_code(
                 "cancelled": "The long-running tool was cancelled.",
                 "terminal_status": "The long-running tool finished with status {status}.",
                 "missing_query": "Could not determine the user request for `__ACTION_LABEL__`.",
-                "launch_failed": "Failed to start the long-running tool.\\nerror: {error}",
+                "launch_failed": "Failed to start: {label}.\\nerror: {error}",
                 "missing_confirmation": (
-                    "Failed to start the long-running tool.\\n"
+                    "Failed to start: {label}.\\n"
                     "The tool did not return a launch confirmation (`job_id` and `status_url`)."
                 ),
-                "accepted": "{label} was accepted as a long-running tool.\\nProgress is shown in the `Long-running tool` panel.",
+                "accepted": "Accepted: {label}.\\nProgress is shown in the `Long-running tool` panel.",
             },
         }
 
@@ -1746,13 +1746,13 @@ def _build_openwebui_workspace_tool_code(
                         payload,
                     )
                 except Exception as exc:
-                    return _locale_text(locale, "launch_failed", error=exc)
+                    return _locale_text(locale, "launch_failed", label=target_action_label, error=exc)
 
                 if response.get("status") == "accepted":
                     status_url = str(response.get("status_url", ""))
                     job_id = str(response.get("job_id", "unknown"))
                     if not status_url or not job_id or job_id == "unknown":
-                        return _locale_text(locale, "missing_confirmation")
+                        return _locale_text(locale, "missing_confirmation", label=target_action_label)
                     if __request__ is not None and __chat_id__ and __message_id__:
                         normalized_status_url = _absolute_status_url(self.valves.tool_server_base_url, status_url)
                         registry = _poller_registry(__request__.app.state)
@@ -1789,7 +1789,7 @@ def _build_openwebui_workspace_tool_code(
                 assistant_message = str(response.get("assistant_message") or "").strip()
                 if assistant_message:
                     return assistant_message
-                return _locale_text(locale, "missing_confirmation")
+                return _locale_text(locale, "missing_confirmation", label=target_action_label)
         '''
     ).strip()
     return _finalize_generated_python_code(
