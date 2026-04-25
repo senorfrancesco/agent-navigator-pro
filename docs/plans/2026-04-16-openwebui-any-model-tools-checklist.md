@@ -41,8 +41,13 @@
 - [ ] Зафиксировать layering model registry:
   - [ ] статический operator-owned registry в `backend/config/models.yaml`;
   - [ ] отдельный dynamic registry для административных регистраций в `UMS`;
+  - [ ] при folder-browser потоке отдельно хранить scan-folders как служебное административное состояние, не смешивая их с model entries;
   - [ ] единый нормализованный каталог `static + dynamic` для UI и orchestration;
   - [ ] единые статусы готовности `ready` / `incomplete` / `ambiguous` / `unsupported`.
+- [ ] Явно зафиксировать, что `json` в этом контуре нужен только как backend API/storage формат:
+  - [ ] пользователь не импортирует `json`-файл модели;
+  - [ ] `browse-folders` / `preview-model-path` / `register-model` обмениваются обычными `json`-payload;
+  - [ ] persisted `json` допустим только для scan-folders и dynamic registry, а не как пользовательский формат выбора модели.
 - [ ] Зафиксировать, что пользовательские локальные модели не кодируются набором `USER_MODEL_*` переменных в `.env`, а регистрируются в model registry.
 - [ ] Зафиксировать backend-owned иерархию inference defaults по образцу `Unsloth`:
   - [ ] model-specific defaults;
@@ -80,6 +85,19 @@
   - [ ] `RERANKER_MODEL`;
   - [ ] `VISION_MODEL_ID`;
   - [ ] другие backend-owned service bindings.
+- [x] Зафиксировать фактический baseline инвентарь в `backend/models` и опираться дальше на него, а не на абстрактный `raw`-каталог:
+  - [x] `qwen-14b-llm` -> `backend/models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf`;
+  - [x] `qwen-vl-8b` -> `backend/models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf` + `mmproj`;
+  - [x] `qwen3-embedding-0.6b` -> `backend/models/st/Qwen3-Embedding-0.6B`;
+  - [x] `labse-embedding` -> `backend/models/st/LaBSE`.
+- [x] Зафиксировать, что `qwen3-reranker-0.6b` уже есть в static registry, но пока не подтверждён локальным готовым runtime-артефактом в `backend/models`.
+- [ ] Добавить в registry следующие реальные кандидаты из уже существующего инвентаря:
+  - [ ] `qwen-32b-llm` на базе `backend/models/gguf/qwen2.5-32b-q4/qwen2.5-32b-instruct-q4-merged.gguf`;
+  - [ ] `llama-3.1-8b`;
+  - [ ] `mistral-7b`;
+  - [ ] `phi-3-mini-q4` и определить судьбу `phi-3-mini-fp16` как отдельного entry или внутреннего runtime-варианта;
+  - [ ] отдельно оценить `saiga-yandexgpt-8b` и `yandexgpt-lite-8b`;
+  - [ ] отдельно решить служебные кандидаты `E5-legal`, `Rubert`, `bge-m3`, `multilingual-e5-large-instruct`, `xlm-roberta-large-xnli`.
 - [ ] Перестать использовать `.env` как механизм динамического пользовательского переключения модели.
 - [ ] В registry хранить отдельно:
   - [ ] `model_id`;
@@ -98,6 +116,10 @@
   - [ ] backend распознаёт `GGUF` / `LoRA` / vision / другие признаки;
   - [ ] backend строит нормализованную запись registry;
   - [ ] только после этого модель попадает в пользовательский список выбора.
+- [ ] Развести служебные backend-сущности:
+  - [ ] scan-folder как разрешённый или ранее добавленный корень для навигации и повторного сканирования;
+  - [ ] model entry как нормализованную selectable-модель;
+  - [ ] не превращать сам факт добавления папки в автоматическую публикацию новой модели.
 - [ ] Нормализовать `gguf-vl` наборы файлов в одну модельную запись:
   - [ ] основной `GGUF` файл считается моделью;
   - [ ] `mmproj` считается связанным runtime-артефактом, а не отдельной моделью;
@@ -107,10 +129,13 @@
   - [ ] шард-файлы `00001-of-00004` и далее не считаются отдельными selectable entries;
   - [ ] в registry сохраняется шаблон набора и полный список `shards`;
   - [ ] модель не публикуется как `ready`, если набор shard-файлов неполный.
+- [x] Зафиксировать для текущего инвентаря, что `qwen2.5-32b-q4` уже лежит и как `merged.gguf`, и как полный split-набор; первым пользовательским entry должен быть `merged.gguf`, а split-набор остаётся backend-нормализуемым источником.
 - [ ] Нормализовать адаптеры `LoRA` / `QLoRA` в отдельные логические model entries:
   - [ ] хранить `adapter_path`, `adapter_format`, `base_model_ref`;
   - [ ] merged-экспорт адаптера считать обычной моделью, а не adapter-entry;
   - [ ] не публиковать каталог `PEFT` как готовую `llama.cpp`-модель без конвертации или другого runtime.
+- [x] Зафиксировать, что в текущем `backend/models` нет `LoRA` / `QLoRA`-артефактов (`adapter_config.json`, `adapter_model.safetensors`, `*lora*.gguf`), поэтому adapter-runtime остаётся follow-up, а не текущим обязательным slice.
+- [x] Зафиксировать, что `WizardLM-30B` на текущем узле представлен только `.lock` / `.incomplete`-артефактами и не должен появляться в каталоге готовых моделей.
 - [ ] Зафиксировать отдельный backend-контракт для `llama.cpp`-адаптеров:
   - [ ] запуск через `--lora` / `--lora-scaled`;
   - [ ] для `llama-server` допускается backend-owned управление через `/lora-adapters`;
@@ -136,6 +161,8 @@
 
 ## 5. Что нужно сделать во форке `Open WebUI`
 
+- [x] Сделать `UMS`-интеграцию опциональным адаптером, а не обязательной зависимостью самостоятельного форка.
+  - Done: добавлен флаг `ENABLE_AGENT_NAVIGATOR_RUNTIME_MODELS`; без него runtime-каталог пустой, runtime-меню скрыто, а стандартный `Open WebUI` не ходит в `UMS`.
 - [ ] Показывать пользователю только пользовательские chat-модели, а не скрытую специальную tool-модель как обязательный путь.
 - [ ] Сохранять выбранный пользователем `model id` и передавать его в backend без скрытой подмены.
 - [ ] Показывать статус переключения модели и загрузки, но не владеть реальной lifecycle-логикой модели.
@@ -174,6 +201,14 @@
   - [ ] показывать пользователю только подготовленный список доступных моделей из backend-реестра;
   - [ ] вынести добавление модели по пути в отдельный администраторский поток;
   - [ ] после явной backend-регистрации добавленная модель появляется в общем списке выбора.
+- [ ] Явно не использовать `Workspace -> Models` `.json`-импорт как канонический путь регистрации локальных runtime-моделей.
+- [ ] Явно не использовать ручной ввод `Model ID` / `Model Name` в `Workspace -> Models` как замену backend-регистрации runtime-модели.
+- [ ] Сделать административный поток выбора модели по образцу `Unsloth`:
+  - [ ] backend `json`-браузер каталогов с allowlist разрешённых корней;
+  - [ ] `browse-folders` для навигации по папкам;
+  - [ ] `preview-model-path` для backend-нормализации выбранной папки;
+  - [ ] `register-model` для явной регистрации нормализованной model entry;
+  - [ ] после регистрации новый `model_id` появляется в обычном chat selector.
 - [ ] Удалить из форка `Open WebUI` пользовательский `raw`-режим выбора моделей:
   - [ ] убрать отдельный `raw`-список;
   - [ ] убрать отдельный `raw`-selector;
@@ -186,6 +221,8 @@
 
 - [ ] модельный store: [/home/seral/HDD/proj/open-webui/src/lib/stores/index.ts](/home/seral/HDD/proj/open-webui/src/lib/stores/index.ts)
 - [ ] агрегатор моделей: [/home/seral/HDD/proj/open-webui/backend/open_webui/utils/models.py](/home/seral/HDD/proj/open-webui/backend/open_webui/utils/models.py)
+- [ ] chat selector: [/home/seral/HDD/proj/open-webui/src/lib/components/chat/ModelSelector.svelte](/home/seral/HDD/proj/open-webui/src/lib/components/chat/ModelSelector.svelte)
+- [ ] workspace models import contour, который не должен использоваться для runtime-регистрации: [/home/seral/HDD/proj/open-webui/src/lib/components/workspace/Models.svelte](/home/seral/HDD/proj/open-webui/src/lib/components/workspace/Models.svelte)
 - [ ] chat settings: [/home/seral/HDD/proj/open-webui/src/lib/components/chat/Settings/General.svelte](/home/seral/HDD/proj/open-webui/src/lib/components/chat/Settings/General.svelte)
 - [ ] advanced params: [/home/seral/HDD/proj/open-webui/src/lib/components/chat/Settings/Advanced/AdvancedParams.svelte](/home/seral/HDD/proj/open-webui/src/lib/components/chat/Settings/Advanced/AdvancedParams.svelte)
 - [ ] model editor: [/home/seral/HDD/proj/open-webui/src/lib/components/workspace/Models/ModelEditor.svelte](/home/seral/HDD/proj/open-webui/src/lib/components/workspace/Models/ModelEditor.svelte)

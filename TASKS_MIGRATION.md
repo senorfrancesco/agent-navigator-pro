@@ -520,6 +520,10 @@
   - источник живого дефекта был в том, что `Open WebUI` использует alias `open_webui.utils.chat.generate_openai_chat_completion`; патч теперь подменяет и `routers.openai`, и этот alias, поэтому обычная chat-загрузка реально доходит до backend wrapper;
   - `tests/harness/openwebui/openwebui_followup_payload_harness.py` расширен режимами `session`, `knowledge`, `full`, `diagnostic`; diagnostic режим сохраняет `operatorSummary`, `open-webui` logs, `agent-api` docker logs, `tmux` tail и browser console/page errors;
   - live smoke `--mode session` и `--mode diagnostic` подтверждён: ordinary upload даёт grounded answer с цитатой, в `Qdrant` растёт только `rag_chunks_v1`, а native `Knowledge` остаётся в `anp-openwebui_*`; separation остаётся `true`.
+  Follow-up для доведения migration до конца:
+  - убрать постоянную зависимость retrieval от `session_docs` fallback в `retrieve_merged_chunks(...)`, когда session indexing стабильно материализуется до doc-QA;
+  - зафиксировать thread summary / context compaction как backend-owned memory contract: старые ходы сворачиваются в summary, а в prompt остаются summary + последние raw turns + retrieval, а не полный чат;
+  - сохранить жёсткое разделение ролей хранилищ: `Qdrant` только для retrieval, `state_store` для orchestration state, `tool_jobs` для long-running lifecycle, `document bindings` для связи чат ↔ документ.
 
 - [ ] M3.9 — Принять финальное решение по роли `ask_document`
   Нужно сделать:

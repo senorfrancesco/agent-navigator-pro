@@ -55,6 +55,17 @@
 - backend tool routing здесь не должен быть обязательным скрытым шагом;
 - retrieval source-of-truth должен быть общим и проверяемым на уровне corpus/collections, а не только chat-session памяти UI.
 - follow-up вопрос по документу должен заново опираться на `document_ref` и retrieval, а не на один старый deep-ответ в истории чата.
+- история диалога допускается только как дискурсивная память:
+  - что уже обсуждалось;
+  - на какие сущности и документы ссылается follow-up;
+  - какие решения и ограничения уже появились в потоке.
+  Она не является источником фактов по документу вместо retrieval.
+- prompt для document QA должен собираться из отдельных слоёв:
+  - thread summary;
+  - нескольких последних raw turns;
+  - retrieval-блока из `Qdrant`;
+  - текущего вопроса пользователя.
+  Полная история чата не должна без границ уходить в prompt на каждом ходу.
 
 ### Contour B — Explicit Domain Tools
 
@@ -76,6 +87,35 @@
   - второй запускает новый анализ под конкретную цель;
   - новый `analysis_goal` должен иметь право дать новый результат по тому же документу.
 
+## Context and Memory Model
+
+### Разделение ролей хранилищ
+
+- `Qdrant` хранит retrieval-память:
+  - session chunks;
+  - knowledge-base chunks;
+  - вектора;
+  - `source_scope`, `thread_id`, `document_id`, `collection_id`, `expires_at`.
+- backend state layer хранит orchestration-state:
+  - `run_id`;
+  - `state_ref`;
+  - `pending_action`;
+  - resume/checkpoint payload.
+- `tool_jobs` хранит lifecycle долгих задач и связанные артефакты.
+- `document_binding_store` хранит связь чат/ветка ↔ документы ↔ `document_id`.
+- файловое хранилище хранит оригиналы файлов и отчёты.
+
+### Best practice для контекста диалога
+
+- retrieval по документам не должен заменяться историей чата;
+- старые ходы должны инкрементально сворачиваться в backend-owned thread summary;
+- в prompt должны попадать:
+  - summary потока;
+  - последние raw turns;
+  - retrieval-результаты;
+  - текущий вопрос;
+- `Qdrant` не должен становиться универсальной базой для истории чата, `pending_action` и `tool_jobs`.
+
 ## V1 / V2 Boundary for Qdrant
 
 ### V1
@@ -84,12 +124,15 @@
 - session/fresh uploads могут жить как session overlay вне `Qdrant`;
 - merge policy остаётся в backend retrieval layer;
 - `Open WebUI Knowledge` работает поверх готового ingestion/indexing path.
+- допустим временный compatibility fallback: если persisted session scope ещё не материализован, retrieval может кратковременно опираться на `session_docs`, но это не считается целевым source-of-truth.
 
 ### V2
 
-- session docs можно переносить в `Qdrant` как short-lived scopes;
+- session docs должны жить в backend-owned `Qdrant` как short-lived scopes;
 - filtering идёт по `thread_id` / `workspace_id` / `collection_id`;
 - lifecycle очистки и TTL остаётся отдельной backend/infra задачей.
+- `session_docs` остаётся только транспортным входом upload/handoff, а не retrieval-source-of-truth;
+- thread summary и context compaction становятся backend-owned частью memory contract.
 
 ## Implementation Tasks
 
@@ -148,4 +191,7 @@
 - внешний ingestion contour формально введён в архитектуру;
 - explicit tools и native Knowledge chat разведены по назначению и ownership;
 - follow-up по документу проектируется от `document_ref + question/analysis_goal`, а не от одного ранее сохранённого анализа;
+- `history` описан как вспомогательная диалоговая память, а не как основной retrieval-source;
+- целевой session retrieval contour зафиксирован как backend-owned `Qdrant` path без постоянной зависимости от `session_docs` fallback;
+- роли `Qdrant`, state-store, `tool_jobs` и document bindings разведены явно;
 - для implementer больше нет двусмысленности, зачем нужен backend tool path после включения `Open WebUI Knowledge`.

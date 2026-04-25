@@ -176,6 +176,43 @@
 - служебные модели задаются backend-конфигурацией;
 - `Open WebUI` не становится владельцем путей к служебным моделям и не хранит их как пользовательские chat-model selection state.
 
+### 4.8. Фактический инвентарь `backend/models`
+
+На текущем узле уже лежит не абстрактный, а вполне конкретный baseline моделей, и дальнейший registry нужно строить именно от него, а не от общего `raw`-сканирования.
+
+Что уже подтверждено как фактический baseline на диске и совпадает с текущим registry / `.env`:
+
+- `backend/models/gguf/qwen-14b/Qwen2.5-14B-Instruct-Q4_K_M.gguf`: каноническая пользовательская `LLM` `qwen-14b-llm`;
+- `backend/models/gguf/Qwen3-VL-8B-Q4/Qwen3-VL-8B-Instruct-Q4_K_M.gguf`: вместе с `backend/models/gguf/Qwen3-VL-8B-Q4/mmproj-Qwen3-VL-8B-Instruct-F16.gguf` образует одну vision-модель `qwen-vl-8b`;
+- `backend/models/st/Qwen3-Embedding-0.6B`: текущий intent/embedder baseline `qwen3-embedding-0.6b`;
+- `backend/models/st/LaBSE`: текущий retrieval baseline `labse-embedding`.
+
+Что уже есть в static registry, но ещё не подтверждено как локально готовый runtime на этом узле:
+
+- `qwen3-reranker-0.6b` уже описан в `backend/config/models.yaml`, но локальные веса для него в `backend/models` сейчас не подтверждены отдельным готовым каталогом или файлом;
+- до появления реального артефакта этот entry нужно считать конфигурационным placeholder, а не готовой пользовательской или служебной моделью.
+
+Что лежит на диске как реальные следующие кандидаты на регистрацию:
+
+- `backend/models/gguf/qwen2.5-32b-q4/qwen2.5-32b-instruct-q4-merged.gguf`: первый кандидат на добавление как `qwen-32b-llm`;
+- `backend/models/gguf/llama-3.1-8b/Meta-Llama-3.1-8B-Instruct-Q5_K_M.gguf`;
+- `backend/models/gguf/mistral-7b-q6/mistral-7b-instruct-v0.2.Q6_K.gguf`;
+- `backend/models/gguf/phi-3-mini-q4/Phi-3-mini-4k-instruct-q4.gguf`;
+- `backend/models/gguf/phi-3-mini-fp16/Phi-3-mini-4k-instruct-fp16.gguf`;
+- `backend/models/gguf/dolphin-mixtral/dolphin-2.7-mixtral-8x7b.Q4_K_M.gguf`;
+- `backend/models/gguf/saiga-yandexgpt-8b/saiga_yandexgpt_8b.Q8_0.gguf`;
+- `backend/models/gguf/yandexgpt-lite-8b/YandexGPT-5-Lite-8B-instruct-Q4_K_M.gguf`;
+- из служебных `sentence-transformers`: `E5-legal`, `Rubert`, `bge-m3`, `multilingual-e5-large-instruct`, `xlm-roberta-large-xnli`.
+
+Что должно быть явно исключено из пользовательского selector и из наивного registry:
+
+- `mmproj` не является отдельной моделью; это связанный runtime-артефакт для `gguf-vl`;
+- split-набор `backend/models/gguf/qwen2.5-32b-q4/qwen2.5-32b-instruct-q4_0-00001-of-00005.gguf` и далее до `00005-of-00005` не является пятью моделями; это один составной набор, и первым пользовательским entry должен быть именно `merged.gguf`, если он стабильно запускается;
+- `backend/models/gguf/huggingface/download/WizardLM-30B-Uncensored.Q4_K_M.gguf.lock` и `.incomplete`-артефакты загрузки не являются готовыми моделями и не должны появляться в каталоге;
+- `backend/models/onnx/labse.onnx` и `onnx`-подкаталоги внутри `sentence-transformers` не должны автоматически публиковаться как отдельные selectable entries без отдельного runtime-контракта.
+
+Отдельно важно: в `backend/models` сейчас не найдено ни `adapter_config.json`, ни `adapter_model.safetensors`, ни `*lora*.gguf`. Это значит, что `LoRA` / `QLoRA`-поддержка остаётся архитектурным follow-up, но пока не является активным runtime-case для текущего инвентаря на узле.
+
 ## 5. Разделение реализации по репозиториям
 
 ### 5.1. Что нужно делать во форке `Open WebUI`
@@ -189,6 +226,13 @@
 - отображение capability-ограничений, если backend сообщает, что активная модель не подходит для конкретного инструмента или сценария;
 - отображение существующей панели `System Prompt` / `Advanced Params` для request-time параметров генерации;
 - отображение отдельного действия `Reload` / `Apply and Reload` для параметров загрузки модели по образцу `Unsloth`.
+
+Интеграция с `UMS` должна быть опциональным адаптером, а не обязательной зависимостью форка:
+
+- без включённого адаптера форк стартует и работает как обычный `Open WebUI`;
+- стандартные провайдеры, настройки, знания, функции, голос и базовый чат не зависят от доступности `UMS`;
+- runtime-модели из папок, загрузка в память, отмена загрузки и административная регистрация доступны только при явном включении `ENABLE_AGENT_NAVIGATOR_RUNTIME_MODELS`;
+- если адаптер включён, но `UMS` недоступен, деградирует только runtime-слой локальных моделей, а не весь интерфейс.
 
 Отдельно фиксируется требование по встроенному menu / settings sidebar по образцу `Unsloth`:
 
@@ -219,6 +263,8 @@
 
 - модельный store: [/home/seral/HDD/proj/open-webui/src/lib/stores/index.ts](/home/seral/HDD/proj/open-webui/src/lib/stores/index.ts)
 - агрегатор списка моделей: [/home/seral/HDD/proj/open-webui/backend/open_webui/utils/models.py](/home/seral/HDD/proj/open-webui/backend/open_webui/utils/models.py)
+- текущий chat selector: [/home/seral/HDD/proj/open-webui/src/lib/components/chat/ModelSelector.svelte](/home/seral/HDD/proj/open-webui/src/lib/components/chat/ModelSelector.svelte)
+- текущий workspace import contour: [/home/seral/HDD/proj/open-webui/src/lib/components/workspace/Models.svelte](/home/seral/HDD/proj/open-webui/src/lib/components/workspace/Models.svelte)
 
 Во форке не должно жить:
 
@@ -226,8 +272,52 @@
 - определение `4bit`/`trust_remote_code`/`mmproj`;
 - владение активной генеративной моделью в обход `UMS`;
 - хранение путей к служебным моделям как UI-owned state.
+- использование `Workspace -> Models` `.json`-импорта как основного пути регистрации локальных inference-моделей.
 
 Обычный пользователь должен выбирать модель только из подготовленного списка доступных моделей. Отдельный поток «добавить модель по пути» остаётся административной функцией и не является частью основного пользовательского UX.
+
+Отдельно фиксируется текущий structural gap форка `Open WebUI`:
+
+- chat selector уже умеет выбирать готовые `model_id` из списка;
+- но `Workspace -> Models` contour сейчас построен вокруг `.json`-импорта и ручного ввода model-entry метаданных;
+- этот contour подходит для workspace preset-объектов и локальных описаний моделей внутри самого `Open WebUI`, но не подходит как канонический путь регистрации реальных runtime-моделей из `agent-navigator-pro`.
+
+Поэтому для нашей архитектуры административный поток должен быть другим и повторять полезную часть `Unsloth`:
+
+- не `json`-импорт model preset-файла;
+- не ручной ввод `Model ID` / `Model Name` как замена runtime-регистрации;
+- а backend-owned выбор папки через `json`-браузер каталогов с allowlist;
+- затем preview и нормализация найденной модели на backend;
+- затем явная регистрация в registry;
+- и только потом появление нового `model_id` в обычном chat selector.
+
+То есть в нашем продукте «выбрать папку с моделью» должно означать backend flow:
+
+1. `browse-folders`;
+2. `preview-model-path`;
+3. `register-model`;
+4. обновление общего model catalog для chat selector.
+
+При этом `json` в нашем случае нужен только как внутренний transport/storage формат backend-слоя:
+
+- UI не должен просить пользователя выбирать `json`-файл модели;
+- backend endpoints возвращают обычные `json`-ответы для браузера каталогов, preview и регистрации;
+- persisted `json`-хранилище допустимо только как внутренний dynamic registry и служебное состояние административного контура.
+
+Нормативное разделение здесь такое:
+
+- отдельно можно хранить список зарегистрированных scan-folders, чтобы backend повторно знал, какие корни разрешены и какие каталоги пользователь уже добавлял;
+- отдельно должен храниться dynamic registry нормализованных model entries;
+- scan-folder не равен модели и не должен автоматически становиться selectable entry;
+- selectable entry появляется только после backend-нормализации папки в конкретный `model_id`.
+
+То есть если администратор добавил ещё одну папку, backend может сохранить:
+
+- сам путь scan-folder как часть служебного административного состояния;
+- одну или несколько нормализованных model entries, полученных из этой папки;
+- статус готовности каждой такой записи.
+
+Но это остаётся внутренним backend-механизмом. Пользователь видит только итоговый список готовых `model_id`, а не `json`-файлы и не сырые пути.
 
 Отдельно фиксируется, что существующая `raw`-логика не должна оставаться скрытым альтернативным контуром. Она подлежит удалению как пользовательский и системный режим выбора моделей. После перехода остаются только:
 
@@ -268,6 +358,7 @@
 Именно здесь нужно внедрять заимствования из `Unsloth`:
 
 - backend-сканирование пользовательских папок;
+- backend `json`-браузер каталогов по allowlist вместо прямого `Workspace -> Models` `.json`-импорта;
 - единый `ModelConfig`/`ModelDescriptor` слой;
 - автоподстановку параметров загрузки;
 - inference defaults по модели/семейству;
@@ -279,6 +370,7 @@
 
 - операторский статический реестр остаётся в `backend/config/models.yaml`;
 - административные добавления по пути попадают в отдельный dynamic registry `UMS`;
+- при наличии folder-browser рядом может существовать и отдельное persisted-хранилище scan-folders, но оно не подменяет dynamic registry;
 - на чтении UI и orchestration должны видеть единый нормализованный каталог, собранный из static + dynamic частей;
 - обе части registry обязаны оперировать не сырыми файлами, а логическими model entries со статусами готовности `ready` / `incomplete` / `ambiguous` / `unsupported`.
 
