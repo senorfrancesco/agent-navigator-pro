@@ -97,7 +97,7 @@ async def test_openai_chat_completions_preserves_direct_model_override(monkeypat
     response = await agent_api.openai_completions(
         _FakeRequest(
             {
-                "model": "qwen-coder-32b",
+                "model": "qwen-vl-8b",
                 "messages": [{"role": "user", "content": "Напиши функцию"}],
             }
         )
@@ -105,8 +105,81 @@ async def test_openai_chat_completions_preserves_direct_model_override(monkeypat
     body = await _read_streaming_body(response)
 
     assert captured["request"]["runtime_mode"] == "chat_only"
-    assert captured["request"]["effective_settings"]["resolved_model_id"] == "qwen-coder-32b"
+    assert captured["request"]["effective_settings"]["resolved_model_id"] == "qwen-vl-8b"
     assert "coder answer" in body
+
+
+def test_list_models_uses_registry_catalog_only(monkeypatch):
+    monkeypatch.setattr(
+        agent_api,
+        "_list_raw_chat_capable_models",
+        lambda: [
+            {"id": "qwen-14b-llm", "object": "model", "created": 1, "owned_by": "llm-tools-platform-raw-provider"}
+        ],
+    )
+
+    response = agent_api.list_models()
+
+    assert response["object"] == "list"
+    assert [item["id"] for item in response["data"]] == ["llm-tools-platform", "qwen-14b-llm"]
+
+
+def test_resolve_raw_model_id_prefers_active_ums_model(monkeypatch):
+    monkeypatch.setattr(
+        agent_api,
+        "_list_raw_chat_capable_models",
+        lambda: [
+            {"id": "qwen-14b-llm", "object": "model", "created": 1, "owned_by": "x"},
+            {"id": "qwen-vl-8b", "object": "model", "created": 1, "owned_by": "x"},
+        ],
+    )
+    monkeypatch.setattr(agent_api.ums_client, "get_status", lambda: {"active_model_id": "qwen-vl-8b"})
+
+    assert agent_api._resolve_raw_model_id({"messages": [{"role": "user", "content": "Привет"}]}) == "qwen-vl-8b"
+
+
+def test_resolve_native_tool_passthrough_model_rejects_incompatible_model(monkeypatch):
+    monkeypatch.setattr(
+        agent_api,
+        "_list_raw_chat_capable_models",
+        lambda: [
+            {"id": "qwen-14b-llm", "object": "model", "created": 1, "owned_by": "x"},
+        ],
+    )
+    monkeypatch.setattr(
+        agent_api,
+        "resolve_user_model_selection",
+        lambda requested_model_id, required_capabilities=None: type(
+            "Resolution",
+            (),
+            {
+                "exists_in_registry": True,
+                "resolved_model_id": requested_model_id,
+                "required_capabilities": list(required_capabilities or []),
+                "missing_capabilities": ["supports_tools"],
+                "capabilities": {
+                    "supports_tools": False,
+                    "supports_vision": False,
+                    "supports_structured_output": True,
+                },
+                "user_selectable": True,
+                "compatible": False,
+            },
+        )(),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        agent_api._resolve_native_tool_passthrough_model_id(
+            {
+                "model": "qwen-14b-llm",
+                "messages": [{"role": "user", "content": "Привет"}],
+                "tools": [{"type": "function", "function": {"name": "equipment_deep_tool"}}],
+            }
+        )
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail["status"] == "incompatible_model"
+    assert exc_info.value.detail["missing_capabilities"] == ["supports_tools"]
 
 
 @pytest.mark.asyncio

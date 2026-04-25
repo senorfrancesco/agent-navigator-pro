@@ -33,7 +33,11 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from services.model_manager.ums_client import create_ums_embed_fn, ums_client
-from services.model_manager.model_selection import resolve_execution_plan, resolve_model_selection
+from services.model_manager.model_selection import (
+    resolve_execution_plan,
+    resolve_model_selection,
+    resolve_user_model_selection,
+)
 from services.model_manager.models_config import get_all_models
 from services.observability import (
     inc_metric_counter,
@@ -1392,6 +1396,11 @@ def _list_raw_chat_capable_models() -> List[Dict[str, Any]]:
         kind = str(config.get("kind") or "")
         if kind not in {"llm", "vision"}:
             continue
+        user_selectable = config.get("user_selectable")
+        if user_selectable is None:
+            user_selectable = True
+        if not bool(user_selectable):
+            continue
         payload.append(
             {
                 "id": model_id,
@@ -1403,15 +1412,88 @@ def _list_raw_chat_capable_models() -> List[Dict[str, Any]]:
     return payload
 
 
-def _resolve_raw_model_id(data: Dict[str, Any]) -> str:
+def _build_model_incompatibility_detail(
+    *,
+    requested_model_id: str,
+    required_capabilities: List[str],
+    missing_capabilities: List[str],
+    capabilities: Dict[str, Any],
+    user_selectable: bool,
+) -> Dict[str, Any]:
+    return {
+        "status": "incompatible_model",
+        "requested_model_id": requested_model_id,
+        "required_capabilities": list(required_capabilities),
+        "missing_capabilities": list(missing_capabilities),
+        "user_selectable": bool(user_selectable),
+        "capabilities": dict(capabilities),
+    }
+
+
+def _request_requires_vision(data: Dict[str, Any]) -> bool:
+    for message in data.get("messages") or []:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if str(part.get("type") or "").strip() == "image_url":
+                return True
+    return False
+
+
+def _resolve_default_user_model_id(*, available_ids: set[str]) -> str:
+    with suppress(Exception):
+        status = ums_client.get_status()
+        active_model_id = str(
+            (status or {}).get("active_model_id")
+            or (status or {}).get("active_heavy_model")
+            or ""
+        ).strip()
+        if active_model_id and active_model_id in available_ids:
+            return active_model_id
+    return str(resolve_model_selection("llm.default_chat").resolved_model_id or "").strip()
+
+
+def _resolve_user_facing_model_id(
+    data: Dict[str, Any],
+    *,
+    required_capabilities: Optional[List[str]] = None,
+) -> str:
     available_ids = {item["id"] for item in _list_raw_chat_capable_models()}
     requested_model = str(data.get("model") or "").strip()
-    target_model = requested_model or str(resolve_model_selection("llm.default_chat").resolved_model_id or "").strip()
+    target_model = requested_model
+    if not target_model or target_model == "llm-tools-platform":
+        target_model = _resolve_default_user_model_id(available_ids=available_ids)
     if not target_model:
         raise HTTPException(status_code=503, detail="raw-model-provider-default-missing")
-    if target_model not in available_ids:
+
+    resolution = resolve_user_model_selection(
+        target_model,
+        required_capabilities=required_capabilities or [],
+    )
+    if not resolution.exists_in_registry:
         raise HTTPException(status_code=404, detail=f"unknown-raw-model:{target_model}")
-    return target_model
+    if target_model not in available_ids or not resolution.compatible:
+        raise HTTPException(
+            status_code=422,
+            detail=_build_model_incompatibility_detail(
+                requested_model_id=target_model,
+                required_capabilities=resolution.required_capabilities,
+                missing_capabilities=resolution.missing_capabilities,
+                capabilities=resolution.capabilities,
+                user_selectable=resolution.user_selectable,
+            ),
+        )
+    return resolution.resolved_model_id
+
+
+def _resolve_raw_model_id(data: Dict[str, Any]) -> str:
+    required_capabilities: List[str] = []
+    if _request_requires_vision(data):
+        required_capabilities.append("supports_vision")
+    return _resolve_user_facing_model_id(data, required_capabilities=required_capabilities)
 
 
 def _should_passthrough_native_tool_request(data: Dict[str, Any]) -> bool:
@@ -1420,19 +1502,10 @@ def _should_passthrough_native_tool_request(data: Dict[str, Any]) -> bool:
 
 
 def _resolve_native_tool_passthrough_model_id(data: Dict[str, Any]) -> str:
-    available_ids = {item["id"] for item in _list_raw_chat_capable_models()}
-    requested_model = str(data.get("model") or "").strip()
-
-    if requested_model and requested_model != "llm-tools-platform":
-        target_model = requested_model
-    else:
-        target_model = str(resolve_model_selection("llm.default_chat").resolved_model_id or "").strip()
-
-    if not target_model:
-        raise HTTPException(status_code=503, detail="raw-model-provider-default-missing")
-    if target_model not in available_ids:
-        raise HTTPException(status_code=404, detail=f"unknown-raw-model:{target_model}")
-    return target_model
+    required_capabilities = ["supports_tools"]
+    if _request_requires_vision(data):
+        required_capabilities.append("supports_vision")
+    return _resolve_user_facing_model_id(data, required_capabilities=required_capabilities)
 
 
 def _build_raw_openai_payload(data: Dict[str, Any], *, target_model: str) -> Dict[str, Any]:
@@ -1736,18 +1809,11 @@ async def raw_openai_completions(request: Request):
 
 @app.get("/v1/models")
 def list_models():
-    """Возвращает динамический список доступных GGUF моделей."""
-    models = [{"id": "llm-tools-platform", "object": "model", "created": int(time.time()), "owned_by": "llm-tools-platform"}]
-    try:
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        models_dir = os.path.join(base_dir, 'models', 'gguf')
-        if os.path.exists(models_dir):
-            for root, dirs, files in os.walk(models_dir):
-                for file in files:
-                    if file.endswith(".gguf"):
-                        mid = os.path.splitext(file)[0]
-                        models.append({"id": mid, "object": "model", "created": int(os.path.getctime(os.path.join(root, file))), "owned_by": "local-fs"})
-    except Exception as e: print(f"Error scanning models: {e}")
+    """Возвращает список пользовательских моделей из канонического backend-каталога."""
+    models = [
+        {"id": "llm-tools-platform", "object": "model", "created": int(time.time()), "owned_by": "llm-tools-platform"}
+    ]
+    models.extend(_list_raw_chat_capable_models())
     return {"object": "list", "data": models}
 
 @app.post("/v1/chat/completions")
@@ -1755,7 +1821,8 @@ async def openai_completions(request: Request):
     data = await request.json()
     stream_mode = bool(data.get("stream", True))
     messages = data.get("messages", [])
-    target_model = data.get("model", "llm-tools-platform")
+    requested_target_model = str(data.get("model") or "llm-tools-platform").strip() or "llm-tools-platform"
+    target_model = requested_target_model
 
     if _should_passthrough_native_tool_request(data):
         raw_target_model = _resolve_native_tool_passthrough_model_id(data)
@@ -1780,6 +1847,12 @@ async def openai_completions(request: Request):
                 )
             raise
         return StreamingResponse(_proxy_raw_openai_stream(stream_response), media_type="text/event-stream")
+
+    if requested_target_model != "llm-tools-platform":
+        direct_required_capabilities: List[str] = []
+        if _request_requires_vision(data):
+            direct_required_capabilities.append("supports_vision")
+        target_model = _resolve_user_facing_model_id(data, required_capabilities=direct_required_capabilities)
 
     user_query = _extract_latest_user_query(messages)
     forwarded_context = _extract_openwebui_forwarded_context(data, request)
