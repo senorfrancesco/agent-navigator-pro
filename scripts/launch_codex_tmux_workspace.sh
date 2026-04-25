@@ -145,12 +145,15 @@ if ! command -v "$CODEX_BIN" >/dev/null 2>&1; then
   exit 1
 fi
 
+# Фиксируем абсолютный путь заранее: tmux-панели могут жить с другим PATH.
+CODEX_BIN="$(command -v "$CODEX_BIN")"
+
 build_codex_command() {
   local chat_id="$1"
   if [ -n "$chat_id" ]; then
-    printf '%s resume %q' "$CODEX_BIN" "$chat_id"
+    printf '%q resume %q' "$CODEX_BIN" "$chat_id"
   else
-    printf '%s' "$CODEX_BIN"
+    printf '%q' "$CODEX_BIN"
   fi
 }
 
@@ -205,6 +208,7 @@ tmux select-pane -t "$grid_top_left_pane"
 
 echo "tmux-workspace:ok session=$SESSION_NAME grid_window=$GRID_WINDOW_NAME helper_window=$HELPER_WINDOW_NAME"
 echo "layout:window1=4x codex grid window2=vertical terminal+assistant"
+echo "codex-bin:$CODEX_BIN"
 echo "grid chats: ${GRID_CHAT_1:-new}, ${GRID_CHAT_2:-new}, ${GRID_CHAT_3:-new}, ${GRID_CHAT_4:-new}"
 echo "helper chat: ${HELPER_CHAT:-new}"
 echo "attach with: tmux attach -t $SESSION_NAME"
