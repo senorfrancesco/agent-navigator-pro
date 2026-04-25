@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import os
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from services.model_manager.model_registry import (
+    get_model_capabilities,
+    get_model_display_name,
     get_model_key_by_id,
+    get_model_spec_by_id,
     get_preferred_role_for_model_id,
     get_role_spec,
+    is_user_selectable_model,
     resolve_registry_model_id,
 )
 
@@ -26,6 +30,25 @@ class ModelSelection:
     fallback_model_id: str
     resolved_model_id: str
     fallback_available: bool
+    source: str
+    warning: Optional[str]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class UserModelSelection:
+    requested_model_id: str
+    requested_model_key: Optional[str]
+    resolved_model_id: str
+    display_name: str
+    exists_in_registry: bool
+    user_selectable: bool
+    capabilities: Dict[str, bool]
+    required_capabilities: List[str]
+    missing_capabilities: List[str]
+    compatible: bool
     source: str
     warning: Optional[str]
 
@@ -59,6 +82,61 @@ def resolve_model_selection(
     env: Optional[Mapping[str, str]] = None,
 ) -> ModelSelection:
     return resolve_execution_plan(role_key=role_key, requested_model_id=requested_model_id, env=env)
+
+
+def resolve_user_model_selection(
+    requested_model_id: str,
+    *,
+    required_capabilities: Optional[List[str]] = None,
+    env: Optional[Mapping[str, str]] = None,
+) -> UserModelSelection:
+    source = env if env is not None else os.environ
+    normalized_model_id = str(requested_model_id or "").strip()
+    if not normalized_model_id:
+        raise ValueError("resolve_user_model_selection requires requested_model_id")
+
+    required = [str(item).strip() for item in (required_capabilities or []) if str(item).strip()]
+    try:
+        spec = get_model_spec_by_id(normalized_model_id, env=source)
+    except KeyError:
+        return UserModelSelection(
+            requested_model_id=normalized_model_id,
+            requested_model_key=None,
+            resolved_model_id=normalized_model_id,
+            display_name=normalized_model_id,
+            exists_in_registry=False,
+            user_selectable=False,
+            capabilities={},
+            required_capabilities=required,
+            missing_capabilities=["user_selectable", *required] if required else ["user_selectable"],
+            compatible=False,
+            source="unknown_model_id",
+            warning="Model id is not registered in the canonical registry.",
+        )
+
+    capabilities = get_model_capabilities(normalized_model_id, env=source)
+    user_selectable = is_user_selectable_model(normalized_model_id, env=source)
+    missing_capabilities: List[str] = []
+    if not user_selectable:
+        missing_capabilities.append("user_selectable")
+    for capability in required:
+        if not capabilities.get(capability, False):
+            missing_capabilities.append(capability)
+
+    return UserModelSelection(
+        requested_model_id=normalized_model_id,
+        requested_model_key=str(spec.get("model_key") or "") or None,
+        resolved_model_id=normalized_model_id,
+        display_name=get_model_display_name(normalized_model_id, env=source),
+        exists_in_registry=True,
+        user_selectable=user_selectable,
+        capabilities=capabilities,
+        required_capabilities=required,
+        missing_capabilities=missing_capabilities,
+        compatible=not missing_capabilities,
+        source="registry_user_model",
+        warning=None if not missing_capabilities else "Requested user-facing model is incompatible with this path.",
+    )
 
 
 def resolve_execution_plan(

@@ -3,8 +3,23 @@ version: 1
 models:
   qwen14b_llm:
     model_id: qwen-14b-llm
+    display_name: Qwen2.5 14B Instruct
     kind: llm
     runtime_type: gguf
+    user_selectable: true
+    capabilities:
+      supports_tools: true
+      supports_vision: false
+      supports_structured_output: true
+    generation_defaults:
+      temperature: 0.5
+      top_p: 0.9
+      repetition_penalty: 1.2
+      max_tokens: 2048
+    load_defaults:
+      ctx_size: 16384
+      gpu_layers: -1
+      quant: Q4_K_M
     path:
       canonical_env: MODEL_PATH_LLM
       legacy_envs:
@@ -19,29 +34,232 @@ models:
       quant_default: Q4_K_M
   qwen7b_llm:
     model_id: qwen-7b-llm
+    display_name: Qwen2.5 7B Instruct
     kind: llm
     runtime_type: dynamic
+    user_selectable: false
+    capabilities:
+      supports_tools: true
+      supports_vision: false
+      supports_structured_output: true
+    generation_defaults:
+      temperature: 0.5
+      top_p: 0.9
+      repetition_penalty: 1.2
+      max_tokens: 2048
+    load_defaults:
+      ctx_size: 4096
+      quant: Q4_K_M
     runtime:
       quant_default: Q4_K_M
       ctx_size_default: 4096
   qwen32b_llm:
     model_id: qwen-32b-llm
+    display_name: Qwen2.5 32B Instruct
     kind: llm
-    runtime_type: dynamic
+    runtime_type: gguf
+    user_selectable: true
+    capabilities:
+      supports_tools: true
+      supports_vision: false
+      supports_structured_output: true
+    generation_defaults:
+      temperature: 0.5
+      top_p: 0.9
+      repetition_penalty: 1.2
+      max_tokens: 4096
+    load_defaults:
+      ctx_size: 16384
+      gpu_layers: -1
+      quant: Q4_K_M
+    path:
+      canonical_env: MODEL_PATH_QWEN32B
+      legacy_envs: []
     runtime:
-      quant_default: Q4_K_M
+      api_endpoint: /v1/completions
+      port: 8095
       ctx_size_default: 16384
+      gpu_layers_default: -1
+      quant_default: Q4_K_M
+  llama31_8b_llm:
+    model_id: llama-3.1-8b
+    display_name: Meta Llama 3.1 8B Instruct
+    kind: llm
+    runtime_type: gguf
+    user_selectable: true
+    capabilities:
+      supports_tools: true
+      supports_vision: false
+      supports_structured_output: true
+    generation_defaults:
+      temperature: 0.5
+      top_p: 0.9
+      repetition_penalty: 1.2
+      max_tokens: 2048
+    load_defaults:
+      ctx_size: 8192
+      gpu_layers: -1
+      quant: Q5_K_M
+    path:
+      canonical_env: MODEL_PATH_LLAMA31_8B
+      legacy_envs: []
+    runtime:
+      api_endpoint: /v1/completions
+      port: 8096
+      ctx_size_default: 8192
+      gpu_layers_default: -1
+      quant_default: Q5_K_M
+  mistral7b_llm:
+    model_id: mistral-7b
+    display_name: Mistral 7B Instruct v0.2
+    kind: llm
+    runtime_type: gguf
+    user_selectable: true
+    capabilities:
+      supports_tools: true
+      supports_vision: false
+      supports_structured_output: true
+    generation_defaults:
+      temperature: 0.5
+      top_p: 0.9
+      repetition_penalty: 1.2
+      max_tokens: 2048
+    load_defaults:
+      ctx_size: 8192
+      gpu_layers: -1
+      quant: Q6_K
+    path:
+      canonical_env: MODEL_PATH_MISTRAL_7B
+      legacy_envs: []
+    runtime:
+      api_endpoint: /v1/completions
+      port: 8097
+      ctx_size_default: 8192
+      gpu_layers_default: -1
+      quant_default: Q6_K
+  phi3_mini_q4_llm:
+    model_id: phi-3-mini-q4
+    display_name: Phi-3 Mini 4K Instruct Q4
+    kind: llm
+    runtime_type: gguf
+    user_selectable: true
+    capabilities:
+      supports_tools: true
+      supports_vision: false
+      supports_structured_output: true
+    generation_defaults:
+      temperature: 0.5
+      top_p: 0.9
+      repetition_penalty: 1.2
+      max_tokens: 2048
+    load_defaults:
+      ctx_size: 4096
+      gpu_layers: -1
+      quant: Q4
+    path:
+      canonical_env: MODEL_PATH_PHI3_MINI_Q4
+      legacy_envs: []
+    runtime:
+      api_endpoint: /v1/completions
+      port: 8098
+      ctx_size_default: 4096
+      gpu_layers_default: -1
+      quant_default: Q4
+  saiga_yandexgpt_8b_llm:
+    model_id: saiga-yandexgpt-8b
+    display_name: Saiga YandexGPT 8B
+    kind: llm
+    runtime_type: gguf
+    user_selectable: true
+    capabilities:
+      supports_tools: true
+      supports_vision: false
+      supports_structured_output: true
+    generation_defaults:
+      temperature: 0.5
+      top_p: 0.9
+      repetition_penalty: 1.2
+      max_tokens: 2048
+    load_defaults:
+      ctx_size: 8192
+      gpu_layers: -1
+      quant: Q8_0
+    path:
+      canonical_env: MODEL_PATH_SAIGA_YANDEXGPT_8B
+      legacy_envs: []
+    runtime:
+      api_endpoint: /v1/completions
+      port: 8099
+      ctx_size_default: 8192
+      gpu_layers_default: -1
+      quant_default: Q8_0
+  yandexgpt_lite_8b_llm:
+    model_id: yandexgpt-lite-8b
+    display_name: YandexGPT 5 Lite 8B Instruct
+    kind: llm
+    runtime_type: gguf
+    user_selectable: true
+    capabilities:
+      supports_tools: true
+      supports_vision: false
+      supports_structured_output: true
+    generation_defaults:
+      temperature: 0.5
+      top_p: 0.9
+      repetition_penalty: 1.2
+      max_tokens: 2048
+    load_defaults:
+      ctx_size: 8192
+      gpu_layers: -1
+      quant: Q4_K_M
+    path:
+      canonical_env: MODEL_PATH_YANDEXGPT_LITE_8B
+      legacy_envs: []
+    runtime:
+      api_endpoint: /v1/completions
+      port: 8101
+      ctx_size_default: 8192
+      gpu_layers_default: -1
+      quant_default: Q4_K_M
   qwen72b_llm:
     model_id: qwen-72b-llm
+    display_name: Qwen2.5 72B Instruct
     kind: llm
     runtime_type: dynamic
+    user_selectable: false
+    capabilities:
+      supports_tools: true
+      supports_vision: false
+      supports_structured_output: true
+    generation_defaults:
+      temperature: 0.5
+      top_p: 0.9
+      repetition_penalty: 1.2
+      max_tokens: 4096
+    load_defaults:
+      ctx_size: 32768
+      quant: Q4_K_M
     runtime:
       quant_default: Q4_K_M
       ctx_size_default: 32768
   qwen_vl_8b:
     model_id: qwen-vl-8b
+    display_name: Qwen3 VL 8B Instruct
     kind: vision
     runtime_type: gguf-vl
+    user_selectable: true
+    capabilities:
+      supports_tools: true
+      supports_vision: true
+      supports_structured_output: true
+    generation_defaults:
+      temperature: 0.5
+      top_p: 0.9
+      repetition_penalty: 1.2
+      max_tokens: 2048
+    load_defaults:
+      ctx_size: 16384
+      gpu_layers: -1
     path:
       canonical_env: MODEL_PATH_VLM
       legacy_envs:
@@ -58,8 +276,18 @@ models:
         - MMPROJ_PATH
   labse_embedding:
     model_id: labse-embedding
+    display_name: LaBSE Embedding
     kind: retrieval_embedder
     runtime_type: st
+    user_selectable: false
+    capabilities:
+      supports_tools: false
+      supports_vision: false
+      supports_structured_output: false
+    generation_defaults: {}
+    load_defaults:
+      ctx_size: 512
+      gpu_layers: 10
     path:
       canonical_env: MODEL_PATH_EMBEDDING_RETRIEVAL
       legacy_envs:
@@ -73,8 +301,18 @@ models:
       gpu_layers_default: 10
   qwen3_embedding_06b:
     model_id: qwen3-embedding-0.6b
+    display_name: Qwen3 Embedding 0.6B
     kind: intent_embedder
     runtime_type: st
+    user_selectable: false
+    capabilities:
+      supports_tools: false
+      supports_vision: false
+      supports_structured_output: false
+    generation_defaults: {}
+    load_defaults:
+      ctx_size: 512
+      gpu_layers: 0
     path:
       canonical_env: MODEL_PATH_EMBEDDING_INTENT
       legacy_envs:
@@ -88,12 +326,130 @@ models:
       gpu_layers_default: 0
   qwen3_reranker_06b:
     model_id: qwen3-reranker-0.6b
+    display_name: Qwen3 Reranker 0.6B
     kind: reranker
     runtime_type: external
+    user_selectable: false
+    capabilities:
+      supports_tools: false
+      supports_vision: false
+      supports_structured_output: false
+    generation_defaults: {}
+    load_defaults: {}
     path:
       canonical_env: MODEL_PATH_RERANKER
       legacy_envs: []
       default: ""
+  e5_legal_embedder:
+    model_id: e5-legal-embedding
+    display_name: E5 Legal Embedding
+    kind: legal_embedder
+    runtime_type: st
+    user_selectable: false
+    capabilities:
+      supports_tools: false
+      supports_vision: false
+      supports_structured_output: false
+    generation_defaults: {}
+    load_defaults:
+      ctx_size: 512
+      gpu_layers: 0
+    path:
+      canonical_env: MODEL_PATH_E5_LEGAL
+      legacy_envs: []
+    runtime:
+      api_endpoint: /v1/embeddings
+      port: 8102
+      ctx_size_default: 512
+      gpu_layers_default: 0
+  rubert_embedder:
+    model_id: rubert-embedding
+    display_name: RuBERT Embedding
+    kind: classifier_embedder
+    runtime_type: st
+    user_selectable: false
+    capabilities:
+      supports_tools: false
+      supports_vision: false
+      supports_structured_output: false
+    generation_defaults: {}
+    load_defaults:
+      ctx_size: 512
+      gpu_layers: 0
+    path:
+      canonical_env: MODEL_PATH_RUBERT
+      legacy_envs: []
+    runtime:
+      api_endpoint: /v1/embeddings
+      port: 8103
+      ctx_size_default: 512
+      gpu_layers_default: 0
+  bge_m3_embedder:
+    model_id: bge-m3-embedding
+    display_name: BGE M3 Embedding
+    kind: retrieval_embedder
+    runtime_type: st
+    user_selectable: false
+    capabilities:
+      supports_tools: false
+      supports_vision: false
+      supports_structured_output: false
+    generation_defaults: {}
+    load_defaults:
+      ctx_size: 512
+      gpu_layers: 0
+    path:
+      canonical_env: MODEL_PATH_BGE_M3
+      legacy_envs: []
+    runtime:
+      api_endpoint: /v1/embeddings
+      port: 8104
+      ctx_size_default: 512
+      gpu_layers_default: 0
+  multilingual_e5_large_instruct_embedder:
+    model_id: multilingual-e5-large-instruct-embedding
+    display_name: Multilingual E5 Large Instruct
+    kind: retrieval_embedder
+    runtime_type: st
+    user_selectable: false
+    capabilities:
+      supports_tools: false
+      supports_vision: false
+      supports_structured_output: false
+    generation_defaults: {}
+    load_defaults:
+      ctx_size: 512
+      gpu_layers: 0
+    path:
+      canonical_env: MODEL_PATH_MULTILINGUAL_E5
+      legacy_envs: []
+    runtime:
+      api_endpoint: /v1/embeddings
+      port: 8105
+      ctx_size_default: 512
+      gpu_layers_default: 0
+  xlmr_xnli_embedder:
+    model_id: xlm-roberta-large-xnli-embedding
+    display_name: XLM Roberta Large XNLI Embedding
+    kind: classifier_embedder
+    runtime_type: st
+    user_selectable: false
+    capabilities:
+      supports_tools: false
+      supports_vision: false
+      supports_structured_output: false
+    generation_defaults: {}
+    load_defaults:
+      ctx_size: 512
+      gpu_layers: 0
+    path:
+      canonical_env: MODEL_PATH_XLMR_XNLI
+      legacy_envs: []
+    runtime:
+      api_endpoint: /v1/embeddings
+      port: 8106
+      ctx_size_default: 512
+      gpu_layers_default: 0
 
 roles:
   llm.default_chat:
@@ -116,8 +472,8 @@ roles:
     fallback_override_env: CHAINLIT_FALLBACK_LLM_MODEL
   llm.low_vram:
     role_label: low vram llm
-    primary_model: qwen14b_llm
-    fallback_model: qwen14b_llm
+    primary_model: phi3_mini_q4_llm
+    fallback_model: phi3_mini_q4_llm
     primary_override_env: CHAINLIT_MODEL_PROFILE_LOW_VRAM_MODEL
     fallback_override_env: CHAINLIT_FALLBACK_LLM_MODEL
   embedder.intent.default:
@@ -165,7 +521,7 @@ roles:
 
 tiers:
   tier_1:
-    llm_model_id: qwen-7b-llm
+    llm_model_id: phi-3-mini-q4
     embedding_backend: onnx
     embedding_device: cpu
     embedding_model_label: LaBSE
@@ -196,18 +552,18 @@ tiers:
     embedding_model_label: Qwen3-Embedding-0.6B
     rag_mode: agentic
     retrieval_top_k: 10
-    use_reranker: true
+    use_reranker: false
     use_bm25: true
     workflow_batch_size: 10
     max_concurrent_llm: 1
   tier_4:
-    llm_model_id: qwen-72b-llm
+    llm_model_id: qwen-32b-llm
     embedding_backend: pytorch
     embedding_device: cuda
     embedding_model_label: BGE-M3
     rag_mode: multi-agent
     retrieval_top_k: 15
-    use_reranker: true
+    use_reranker: false
     use_bm25: true
     workflow_batch_size: 20
     max_concurrent_llm: 4
@@ -220,6 +576,17 @@ runtime:
     - embedder.intent.default
   component_kinds:
     qwen-14b-llm: llm
+    qwen-32b-llm: llm
+    llama-3.1-8b: llm
+    mistral-7b: llm
+    phi-3-mini-q4: llm
+    saiga-yandexgpt-8b: llm
+    yandexgpt-lite-8b: llm
     qwen-vl-8b: llm
     labse-embedding: retrieval_embedder
     qwen3-embedding-0.6b: intent_embedder
+    e5-legal-embedding: legal_embedder
+    rubert-embedding: classifier_embedder
+    bge-m3-embedding: retrieval_embedder
+    multilingual-e5-large-instruct-embedding: retrieval_embedder
+    xlm-roberta-large-xnli-embedding: classifier_embedder

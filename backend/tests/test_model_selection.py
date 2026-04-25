@@ -3,7 +3,11 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from services.model_manager.model_selection import resolve_execution_plan, resolve_model_selection
+from services.model_manager.model_selection import (
+    resolve_execution_plan,
+    resolve_model_selection,
+    resolve_user_model_selection,
+)
 
 
 def test_model_selection_prefers_primary_env(monkeypatch):
@@ -81,3 +85,31 @@ def test_execution_plan_treats_registered_role_key_as_role_not_model_id(monkeypa
     assert selection.primary_model_id == "qwen-14b-llm"
     assert selection.resolved_model_id == "qwen-14b-llm"
     assert selection.source == "registry_primary"
+
+
+def test_user_model_selection_accepts_registered_selectable_model():
+    selection = resolve_user_model_selection("qwen-14b-llm", required_capabilities=["supports_tools"])
+
+    assert selection.exists_in_registry is True
+    assert selection.user_selectable is True
+    assert selection.compatible is True
+    assert selection.missing_capabilities == []
+    assert selection.capabilities["supports_tools"] is True
+
+
+def test_user_model_selection_rejects_service_only_model():
+    selection = resolve_user_model_selection("labse-embedding")
+
+    assert selection.exists_in_registry is True
+    assert selection.user_selectable is False
+    assert selection.compatible is False
+    assert selection.missing_capabilities == ["user_selectable"]
+
+
+def test_user_model_selection_reports_unknown_model_id():
+    selection = resolve_user_model_selection("unknown-model-id", required_capabilities=["supports_tools"])
+
+    assert selection.exists_in_registry is False
+    assert selection.compatible is False
+    assert selection.missing_capabilities == ["user_selectable", "supports_tools"]
+    assert "canonical registry" in str(selection.warning)

@@ -15,6 +15,20 @@ from services.model_manager.model_registry import (
 load_dotenv()
 
 
+DEFAULT_GENERATION_PARAMS = {
+    "temperature": float(os.getenv("TEMPERATURE", "0.5")),
+    "top_p": float(os.getenv("TOP_P", "0.9")),
+    "repetition_penalty": float(os.getenv("REPETITION_PENALTY", "1.2")),
+    "max_tokens": int(os.getenv("MAX_TOKENS", "2048")),
+}
+
+DEFAULT_MODEL_CAPABILITIES = {
+    "supports_tools": False,
+    "supports_vision": False,
+    "supports_structured_output": False,
+}
+
+
 def _pick_env_value(source: Mapping[str, str], *names: Optional[str]) -> Optional[str]:
     for name in names:
         if not name:
@@ -50,6 +64,24 @@ def get_model_path_env_contract(model_id: str, *, env: Optional[Mapping[str, str
     }
 
 
+def _resolve_generation_defaults(spec: Mapping[str, Any]) -> Dict[str, Any]:
+    payload = get_default_params()
+    payload.update(dict(spec.get("generation_defaults") or {}))
+    return payload
+
+
+def _resolve_capabilities(spec: Mapping[str, Any]) -> Dict[str, bool]:
+    payload = dict(DEFAULT_MODEL_CAPABILITIES)
+    payload.update(
+        {
+            key: bool(value)
+            for key, value in dict(spec.get("capabilities") or {}).items()
+            if key in DEFAULT_MODEL_CAPABILITIES
+        }
+    )
+    return payload
+
+
 def _build_model_config(*, env: Optional[Mapping[str, str]] = None) -> Dict[str, Dict[str, Any]]:
     source = env if env is not None else os.environ
     registry = get_model_registry(env=source)
@@ -64,8 +96,11 @@ def _build_model_config(*, env: Optional[Mapping[str, str]] = None) -> Dict[str,
 
         config: Dict[str, Any] = {
             "model_key": next((key for key, value in registry.models.items() if value is spec), None),
+            "display_name": str(spec.get("display_name") or model_id),
             "kind": model_kind,
             "runtime_type": runtime_type,
+            "user_selectable": bool(spec.get("user_selectable")),
+            "capabilities": _resolve_capabilities(spec),
             "path": path,
             "api_endpoint": runtime.get("api_endpoint"),
             "port": runtime.get("port"),
@@ -76,7 +111,16 @@ def _build_model_config(*, env: Optional[Mapping[str, str]] = None) -> Dict[str,
                 _pick_env_value(source, runtime.get("gpu_layers_env")) or runtime.get("gpu_layers_default") or 0
             ),
             "quant": runtime.get("quant_default"),
+            "generation_defaults": _resolve_generation_defaults(spec),
+            "load_defaults": dict(spec.get("load_defaults") or {}),
         }
+
+        if config["ctx_size"]:
+            config["load_defaults"]["ctx_size"] = config["ctx_size"]
+        if runtime.get("gpu_layers_env") or runtime.get("gpu_layers_default") is not None:
+            config["load_defaults"]["gpu_layers"] = config["gpu_layers"]
+        if config["quant"]:
+            config["load_defaults"]["quant"] = config["quant"]
 
         if model_kind == "llm":
             config["type"] = "text"
@@ -88,6 +132,8 @@ def _build_model_config(*, env: Optional[Mapping[str, str]] = None) -> Dict[str,
             config["n_gpu_layers"] = config["gpu_layers"]
             mmproj_envs = [str(item) for item in (runtime.get("mmproj_envs") or [])]
             config["mmproj_path"] = _pick_env_value(source, *mmproj_envs) or ""
+            if config["mmproj_path"]:
+                config["load_defaults"]["mmproj_path"] = config["mmproj_path"]
         elif "embedder" in model_kind or model_kind == "reranker":
             config["type"] = "embedding" if model_kind != "reranker" else "reranker"
             config["context_size"] = config["ctx_size"]
@@ -98,16 +144,6 @@ def _build_model_config(*, env: Optional[Mapping[str, str]] = None) -> Dict[str,
         payload[model_id] = config
 
     return payload
-
-
-DEFAULT_GENERATION_PARAMS = {
-    "temperature": float(os.getenv("TEMPERATURE", "0.5")),
-    "top_p": float(os.getenv("TOP_P", "0.9")),
-    "repetition_penalty": float(os.getenv("REPETITION_PENALTY", "1.2")),
-    "max_tokens": int(os.getenv("MAX_TOKENS", "2048")),
-}
-
-ACTIVE_MODEL_ID = os.getenv("ACTIVE_MODEL_ID", "none")
 
 
 def get_model_config(model_id: str, *, env: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:

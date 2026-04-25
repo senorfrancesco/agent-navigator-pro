@@ -11,6 +11,11 @@ import yaml
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MODEL_REGISTRY_PATH = BACKEND_ROOT / "config" / "models.yaml"
+DEFAULT_MODEL_CAPABILITIES = {
+    "supports_tools": False,
+    "supports_vision": False,
+    "supports_structured_output": False,
+}
 
 
 @dataclass(frozen=True)
@@ -72,6 +77,27 @@ def get_model_spec_by_id(model_id: str, *, env: Optional[Mapping[str, str]] = No
 
 def get_model_key_by_id(model_id: str, *, env: Optional[Mapping[str, str]] = None) -> str:
     return str(get_model_spec_by_id(model_id, env=env).get("model_key") or "")
+
+
+def get_model_display_name(model_id: str, *, env: Optional[Mapping[str, str]] = None) -> str:
+    spec = get_model_spec_by_id(model_id, env=env)
+    return str(spec.get("display_name") or spec.get("model_id") or model_id)
+
+
+def get_model_capabilities(model_id: str, *, env: Optional[Mapping[str, str]] = None) -> Dict[str, bool]:
+    spec = get_model_spec_by_id(model_id, env=env)
+    payload = dict(DEFAULT_MODEL_CAPABILITIES)
+    raw_capabilities = spec.get("capabilities") or {}
+    if isinstance(raw_capabilities, Mapping):
+        for key in DEFAULT_MODEL_CAPABILITIES:
+            if key in raw_capabilities:
+                payload[key] = bool(raw_capabilities.get(key))
+    return payload
+
+
+def is_user_selectable_model(model_id: str, *, env: Optional[Mapping[str, str]] = None) -> bool:
+    spec = get_model_spec_by_id(model_id, env=env)
+    return bool(spec.get("user_selectable"))
 
 
 def get_role_spec(role_key: str, *, env: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
@@ -163,6 +189,27 @@ def _validate_registry(path: Path, *, models: Dict[str, Dict[str, Any]], roles: 
                 f"Model registry {path} duplicates model_id {model_id!r} for keys {previous_key!r} and {model_key!r}"
             )
         seen_model_ids[model_id] = model_key
+
+        raw_capabilities = spec.get("capabilities")
+        if raw_capabilities is not None and not isinstance(raw_capabilities, Mapping):
+            raise ValueError(f"Model {model_key} in {path} defines non-mapping capabilities")
+        if raw_capabilities is not None:
+            for key in DEFAULT_MODEL_CAPABILITIES:
+                value = raw_capabilities.get(key)
+                if value is not None and not isinstance(value, bool):
+                    raise ValueError(f"Model {model_key} in {path} defines non-boolean capability {key!r}")
+
+        raw_user_selectable = spec.get("user_selectable")
+        if raw_user_selectable is not None and not isinstance(raw_user_selectable, bool):
+            raise ValueError(f"Model {model_key} in {path} defines non-boolean user_selectable")
+
+        raw_generation_defaults = spec.get("generation_defaults")
+        if raw_generation_defaults is not None and not isinstance(raw_generation_defaults, Mapping):
+            raise ValueError(f"Model {model_key} in {path} defines non-mapping generation_defaults")
+
+        raw_load_defaults = spec.get("load_defaults")
+        if raw_load_defaults is not None and not isinstance(raw_load_defaults, Mapping):
+            raise ValueError(f"Model {model_key} in {path} defines non-mapping load_defaults")
 
     for role_key, spec in roles.items():
         primary_model = str(spec.get("primary_model") or "").strip()
