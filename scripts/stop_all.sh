@@ -82,6 +82,7 @@ AGENT_API_PORT="${AGENT_API_PORT:-8000}"
 DOC_PORT="${DOC_PORT:-8001}"
 LEGAL_PORT="${LEGAL_PORT:-8002}"
 UMS_PORT="${UMS_PORT:-8090}"
+EMBEDDING_RUNTIME_PORT="${EMBEDDING_RUNTIME_PORT:-8092}"
 
 echo -e "${RED}=== Остановка системы llm-tools-platform ===${NC}"
 echo ""
@@ -121,6 +122,8 @@ kill_matching_processes "UMS" "services/model_manager/unified_model_server.py"
 kill_matching_processes "UMS" "$PROJECT_ROOT/backend/services/model_manager/unified_model_server.py"
 kill_matching_processes "llama-server runtime" "llama-server"
 kill_matching_processes "llama-server runtime" "llama-server.*$PROJECT_ROOT/backend/models/"
+kill_matching_processes "embedding runtime" "services/embedding_runtime/server.py"
+kill_matching_processes "embedding runtime" "$PROJECT_ROOT/backend/services/embedding_runtime/server.py"
 kill_matching_processes "embedding runtime" "services/model_manager/st_server.py"
 kill_matching_processes "embedding runtime" "$PROJECT_ROOT/backend/services/model_manager/st_server.py"
 kill_matching_processes "Document Server" "uvicorn mcp_document_server:app --host 0.0.0.0 --port $DOC_PORT"
@@ -131,8 +134,8 @@ kill_matching_processes "Chainlit" "chainlit run chainlit_app.py --host 0.0.0.0 
 # -------------------------------------------
 # 4. Подчистка зависших процессов (если tmux не убил)
 # -------------------------------------------
-PORTS=("$CHAINLIT_PORT" "$AGENT_API_PORT" "$DOC_PORT" "$LEGAL_PORT" "$UMS_PORT")
-PORT_NAMES=("Chainlit" "Agent API" "Document Server" "Legal Server" "UMS")
+PORTS=("$CHAINLIT_PORT" "$AGENT_API_PORT" "$DOC_PORT" "$LEGAL_PORT" "$UMS_PORT" "$EMBEDDING_RUNTIME_PORT")
+PORT_NAMES=("Chainlit" "Agent API" "Document Server" "Legal Server" "UMS" "Embedding Runtime")
 KILLED=0
 
 for i in "${!PORTS[@]}"; do

@@ -675,6 +675,27 @@ def _current_or_bootstrap_active_model_id() -> Optional[str]:
     return bootstrap_model_id
 
 
+def _is_heavy_runtime_model(model_id: str) -> bool:
+    try:
+        config = get_model_config(model_id)
+    except Exception:
+        return False
+    if not config:
+        return False
+    return str(config.get("type") or config.get("runtime_type") or "").strip() in {"gguf", "gguf-vl"}
+
+
+def _find_running_heavy_model(*, exclude_model_id: Optional[str] = None) -> Optional[str]:
+    for running_model_id, proc in list((state.get("processes") or {}).items()):
+        if exclude_model_id and running_model_id == exclude_model_id:
+            continue
+        if not _is_heavy_runtime_model(running_model_id):
+            continue
+        if _is_managed_process_alive(proc):
+            return running_model_id
+    return None
+
+
 def _activation_source_for_stage(stage: str) -> Optional[str]:
     normalized_stage = str(stage or "").strip().lower()
     if normalized_stage == "activate":
@@ -723,24 +744,37 @@ def _preload_sequence() -> List[str]:
     runtime_config = get_runtime_config()
     payload: List[str] = []
     seen: set[str] = set()
+    last_active_model_id = _current_or_bootstrap_active_model_id() if _preload_last_active_model_enabled() else None
+    replace_configured_heavy_model = bool(last_active_model_id and _is_heavy_runtime_model(last_active_model_id))
+
+    def append_candidate(candidate: str) -> None:
+        if candidate and candidate not in seen:
+            payload.append(candidate)
+            seen.add(candidate)
+
+    if last_active_model_id:
+        append_candidate(last_active_model_id)
+
     for item in list(runtime_config.get("preload_sequence") or []):
         candidate = str(item or "").strip()
         if not candidate:
             continue
         if candidate in STATIC_MODELS_CONFIG:
-            if candidate not in seen:
-                payload.append(candidate)
-                seen.add(candidate)
+            if replace_configured_heavy_model and candidate != last_active_model_id and _is_heavy_runtime_model(candidate):
+                continue
+            append_candidate(candidate)
             continue
         try:
             resolved_model_id = resolve_model_selection(candidate).resolved_model_id
-            if resolved_model_id not in seen:
-                payload.append(resolved_model_id)
-                seen.add(resolved_model_id)
+            if (
+                replace_configured_heavy_model
+                and resolved_model_id != last_active_model_id
+                and _is_heavy_runtime_model(resolved_model_id)
+            ):
+                continue
+            append_candidate(resolved_model_id)
         except Exception:
-            if candidate not in seen:
-                payload.append(candidate)
-                seen.add(candidate)
+            append_candidate(candidate)
     return payload
 
 
@@ -809,6 +843,10 @@ def _env_flag(name: str, default: bool = False) -> bool:
 
 def _allow_heavy_cpu_degrade_after_gpu_failure() -> bool:
     return _env_flag("UMS_ALLOW_HEAVY_CPU_DEGRADE_AFTER_GPU_FAILURE", False)
+
+
+def _preload_last_active_model_enabled() -> bool:
+    return _env_flag("UMS_PRELOAD_LAST_ACTIVE_MODEL", False)
 
 
 def _set_runtime_state(
@@ -899,6 +937,10 @@ def _set_model_load_job_state(
             job["state"] = state_value
             if state_value in _MODEL_LOAD_TERMINAL_STATES:
                 job["completed_at"] = now
+            if state_value == "ready":
+                job["percent"] = 100.0
+                if isinstance(job.get("bytes_total"), int) and int(job["bytes_total"]) > 0:
+                    job["bytes_loaded"] = int(job["bytes_total"])
         if phase is not None:
             job["phase"] = phase
         if detail is not None:
@@ -911,6 +953,14 @@ def _set_model_load_job_state(
             job["model"] = model
         job["updated_at"] = now
         return _serialize_model_load_job(job)
+
+
+def _set_current_model_load_job_phase(*, phase: str, detail: str) -> None:
+    job_id = getattr(_model_load_context, "job_id", None)
+    if not job_id:
+        return
+    with suppress(Exception):
+        _set_model_load_job_state(job_id, phase=phase, detail=detail)
 
 
 def _configured_gguf_paths_for_load(model_id: str, config: Dict[str, Any]) -> List[Path]:
@@ -972,6 +1022,8 @@ def _refresh_model_load_job_progress_unlocked(job: Dict[str, Any]) -> None:
     if state_value in {"ready", "failed", "cancelled"}:
         if state_value == "ready":
             job["percent"] = 100.0
+            if isinstance(job.get("bytes_total"), int) and int(job["bytes_total"]) > 0:
+                job["bytes_loaded"] = int(job["bytes_total"])
         return
 
     process = job.get("_process")
@@ -981,21 +1033,36 @@ def _refresh_model_load_job_progress_unlocked(job: Dict[str, Any]) -> None:
     now = _model_load_job_now()
 
     if bytes_loaded is not None:
-        job["bytes_loaded"] = max(0, int(bytes_loaded))
+        sampled_bytes_loaded = max(0, int(bytes_loaded))
+        previous_bytes_loaded = job.get("bytes_loaded")
+        if isinstance(previous_bytes_loaded, int):
+            bytes_loaded = max(previous_bytes_loaded, sampled_bytes_loaded)
+        else:
+            bytes_loaded = sampled_bytes_loaded
+        job["bytes_loaded"] = bytes_loaded
         if bytes_total:
-            job["percent"] = round(min(99.0, max(0.0, (float(bytes_loaded) / float(bytes_total)) * 100.0)), 1)
+            sampled_percent = round(
+                min(99.0, max(0.0, (float(bytes_loaded) / float(bytes_total)) * 100.0)),
+                1,
+            )
+            previous_percent = job.get("percent")
+            if isinstance(previous_percent, (float, int)):
+                sampled_percent = max(float(previous_percent), sampled_percent)
+            job["percent"] = sampled_percent
 
         last_bytes = job.get("_last_sample_bytes")
         last_time = job.get("_last_sample_time")
         if isinstance(last_bytes, int) and isinstance(last_time, (float, int)) and now > float(last_time):
             delta_bytes = max(0, int(bytes_loaded) - int(last_bytes))
             delta_seconds = max(0.001, now - float(last_time))
-            rate = float(delta_bytes) / delta_seconds
-            job["rate_bytes_per_sec"] = round(rate, 2)
-            if bytes_total and rate > 0:
-                remaining = max(0, int(bytes_total) - int(bytes_loaded))
-                job["eta_seconds"] = int(round(float(remaining) / rate))
-        job["_last_sample_bytes"] = int(bytes_loaded)
+            if delta_bytes > 0:
+                rate = float(delta_bytes) / delta_seconds
+                job["rate_bytes_per_sec"] = round(rate, 2)
+                if bytes_total and rate > 0:
+                    remaining = max(0, int(bytes_total) - int(bytes_loaded))
+                    job["eta_seconds"] = int(round(float(remaining) / rate))
+        last_sample_for_next = int(last_bytes) if isinstance(last_bytes, int) else 0
+        job["_last_sample_bytes"] = max(last_sample_for_next, int(bytes_loaded))
         job["_last_sample_time"] = now
 
     job["updated_at"] = _model_load_job_timestamp()
@@ -2099,6 +2166,7 @@ def _cleanup_failed_start_state(model_id: str) -> None:
     proc = state.setdefault("processes", {}).pop(model_id, None)
     _drop_process_log_buffer(getattr(proc, "pid", None) if proc is not None else None)
     state.setdefault("placements", {}).pop(model_id, None)
+    state.setdefault("launch_configs", {}).pop(model_id, None)
     state.setdefault("admission", {}).pop(model_id, None)
     if state.get("active_model") == model_id:
         _set_active_model_id(None)
@@ -2201,10 +2269,19 @@ def _should_attempt_model_failover(exc: Exception) -> bool:
     return True
 
 
-def _start_server_with_failover(model_id: str, device_mode: DeviceMode, *, stage: str = "startup") -> str:
+def _start_server_with_failover(
+    model_id: str,
+    device_mode: DeviceMode,
+    *,
+    stage: str = "startup",
+    launch_overrides: Optional[Dict[str, Any]] = None,
+) -> str:
     plan = _resolve_server_model_failover_plan(model_id)
+    start_kwargs: Dict[str, Any] = {"stage": stage}
+    if launch_overrides:
+        start_kwargs["launch_overrides"] = launch_overrides
     try:
-        return _start_server_once(model_id, device_mode, stage=stage)
+        return _start_server_once(model_id, device_mode, **start_kwargs)
     except Exception as primary_exc:
         if not plan.get("fallback_available") or not _should_attempt_model_failover(primary_exc):
             raise
@@ -2232,7 +2309,11 @@ def _start_server_with_failover(model_id: str, device_mode: DeviceMode, *, stage
             role_label=plan.get("role_label"),
         )
         try:
-            return _start_server_once(fallback_model_id, device_mode, stage=stage)
+            return _start_server_once(
+                fallback_model_id,
+                device_mode,
+                **start_kwargs,
+            )
         except Exception as fallback_exc:
             logger.error(
                 "Fallback model start failed for %s -> %s at stage=%s: %s",
@@ -2268,6 +2349,7 @@ def _stop_model(model_id: str):
             proc = state["processes"].pop(model_id)
             _drop_process_log_buffer(getattr(proc, "pid", None))
             state["placements"].pop(model_id, None)
+            state.setdefault("launch_configs", {}).pop(model_id, None)
             state.setdefault("admission", {}).pop(model_id, None)
             logger.info(f"Stopping server for {model_id}...")
             if isinstance(proc, _RemoteProcess):
@@ -2427,6 +2509,14 @@ def _build_heavy_llama_command(
         "-ngl",
         str(config["gpu_layers"] if device_mode != DeviceMode.CPU else 0),
     ]
+    if config.get("batch_size") is not None:
+        cmd.extend(["--batch-size", str(int(config["batch_size"]))])
+    if config.get("threads") is not None:
+        cmd.extend(["--threads", str(int(config["threads"]))])
+    if config.get("use_mlock") is True:
+        cmd.append("--mlock")
+    if config.get("use_mmap") is False:
+        cmd.append("--no-mmap")
     if placement.get("placement_mode") == "multi-gpu":
         tensor_split = placement.get("tensor_split") or []
         cmd.extend(["--tensor-split", ",".join(str(weight) for weight in tensor_split)])
@@ -2439,6 +2529,101 @@ def _build_heavy_llama_command(
             )
         cmd.extend(["--mmproj", resolve_model_path(mmproj_path)])
     return cmd
+
+
+_INFER_LAUNCH_PARAM_ALIASES = {
+    "num_ctx": "ctx_size",
+    "ctx_size": "ctx_size",
+    "num_batch": "batch_size",
+    "batch_size": "batch_size",
+    "num_thread": "threads",
+    "threads": "threads",
+    "num_gpu": "gpu_layers",
+    "gpu_layers": "gpu_layers",
+    "n_gpu_layers": "gpu_layers",
+    "use_mmap": "use_mmap",
+    "use_mlock": "use_mlock",
+}
+
+
+def _coerce_launch_int(
+    value: Any,
+    *,
+    allow_zero: bool = False,
+    allow_negative: bool = False,
+) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    result = int(value)
+    if result < 0:
+        return result if allow_negative else None
+    if result == 0 and not allow_zero:
+        return None
+    return result
+
+
+def _coerce_launch_bool(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if value is None or value == "":
+        return None
+    if isinstance(value, str):
+        raw = value.strip().lower()
+        if raw in {"1", "true", "yes", "on"}:
+            return True
+        if raw in {"0", "false", "no", "off"}:
+            return False
+    return bool(value)
+
+
+def _extract_infer_launch_overrides(payload: Dict[str, Any]) -> Dict[str, Any]:
+    overrides: Dict[str, Any] = {}
+    custom_params = payload.get("custom_params")
+    sources = [payload]
+    if isinstance(custom_params, dict):
+        sources.append(custom_params)
+
+    for source in sources:
+        for source_key, target_key in _INFER_LAUNCH_PARAM_ALIASES.items():
+            if source_key not in source:
+                continue
+            value = source.get(source_key)
+            if value is None or value == "":
+                continue
+            if target_key == "ctx_size":
+                overrides[target_key] = _coerce_launch_int(value, allow_zero=True)
+            elif target_key in {"batch_size", "threads"}:
+                overrides[target_key] = _coerce_launch_int(value)
+            elif target_key == "gpu_layers":
+                overrides[target_key] = _coerce_launch_int(value, allow_zero=True, allow_negative=True)
+            elif target_key in {"use_mmap", "use_mlock"}:
+                overrides[target_key] = _coerce_launch_bool(value)
+    return {key: value for key, value in overrides.items() if value is not None}
+
+
+def _apply_launch_overrides(config: Dict[str, Any], launch_overrides: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not launch_overrides:
+        return dict(config)
+    enriched = dict(config)
+    for key in ("ctx_size", "batch_size", "threads", "gpu_layers", "use_mmap", "use_mlock"):
+        if key in launch_overrides:
+            enriched[key] = launch_overrides[key]
+    load_defaults = dict(enriched.get("load_defaults") or {})
+    for key, value in launch_overrides.items():
+        load_defaults[key] = value
+    enriched["load_defaults"] = load_defaults
+    return enriched
+
+
+def _build_launch_signature(config: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "ctx_size": int(config.get("ctx_size") or 0),
+        "batch_size": config.get("batch_size"),
+        "threads": config.get("threads"),
+        "gpu_layers": int(config.get("gpu_layers", -1)),
+        "use_mmap": config.get("use_mmap"),
+        "use_mlock": config.get("use_mlock"),
+    }
 
 
 def _launch_heavy_process_with_port_retry(
@@ -2521,6 +2706,7 @@ def _start_heavy_local_model(
         if runtime_issue is None:
             state["processes"][model_id] = process
             state["placements"][model_id] = effective_placement
+            state.setdefault("launch_configs", {})[model_id] = _build_launch_signature(config)
             if activation_source:
                 _set_active_model_id(model_id, source=activation_source)
             _set_runtime_state(
@@ -2575,6 +2761,7 @@ def _start_heavy_local_model(
         )
         state["processes"][model_id] = process
         state["placements"][model_id] = effective_placement
+        state.setdefault("launch_configs", {})[model_id] = _build_launch_signature(degraded_config)
         if activation_source:
             _set_active_model_id(model_id, source=activation_source)
         _set_runtime_state(
@@ -2602,13 +2789,19 @@ def _start_heavy_local_model(
     )
 
 
-def _start_server_once(model_id: str, device_mode: DeviceMode, *, stage: str = "startup"):
+def _start_server_once(
+    model_id: str,
+    device_mode: DeviceMode,
+    *,
+    stage: str = "startup",
+    launch_overrides: Optional[Dict[str, Any]] = None,
+):
     with _get_model_start_lock(model_id):
         device_mode = _resolve_component_device_mode(model_id, device_mode)
         config = get_model_config(model_id)
         if not config:
             raise HTTPException(status_code=404, detail=f"Model {model_id} not found in filesystem.")
-        config = dict(config)
+        config = _apply_launch_overrides(dict(config), launch_overrides)
         _assert_model_runtime_is_supported(model_id, config)
         use_vllm_backend = _should_use_vllm_backend(config)
         activation_source = _activation_source_for_stage(stage)
@@ -2620,16 +2813,40 @@ def _start_server_once(model_id: str, device_mode: DeviceMode, *, stage: str = "
         existing_proc = state["processes"].get(model_id)
         if existing_proc is not None:
             if existing_proc.poll() is None:
-                if (state.get("runtime_states") or {}).get(model_id) is None:
-                    _set_runtime_state(
-                        model_id,
-                        _RUNTIME_STATE_AVAILABLE,
-                        reason="already_running",
-                        placement=(state.get("placements") or {}).get(model_id),
+                current_launch = (state.get("launch_configs") or {}).get(model_id)
+                desired_launch = _build_launch_signature(config)
+                if launch_overrides and (not current_launch or current_launch != desired_launch):
+                    logger.info("Restarting %s to apply launch parameter overrides", model_id)
+                    _stop_model(model_id)
+                    existing_proc = None
+                else:
+                    if (state.get("runtime_states") or {}).get(model_id) is None:
+                        _set_runtime_state(
+                            model_id,
+                            _RUNTIME_STATE_AVAILABLE,
+                            reason="already_running",
+                            placement=(state.get("placements") or {}).get(model_id),
+                        )
+                    return model_id  # Уже работает
+            if existing_proc is not None:
+                state["processes"].pop(model_id, None)
+                state["placements"].pop(model_id, None)
+                state.setdefault("launch_configs", {}).pop(model_id, None)
+
+        if is_heavy:
+            with _heavy_model_lifecycle_lock:
+                active_heavy = _find_running_heavy_model(exclude_model_id=model_id)
+                if active_heavy:
+                    logger.info(f"Stopping {active_heavy} before evaluating resources for {model_id}")
+                    _set_current_model_load_job_phase(
+                        phase="releasing_previous_model",
+                        detail="stopping_active_heavy_model",
                     )
-                return model_id  # Уже работает
-            state["processes"].pop(model_id, None)
-            state["placements"].pop(model_id, None)
+                    _stop_model(active_heavy)
+                    _set_current_model_load_job_phase(
+                        phase="refreshing_resources",
+                        detail="refreshing_gpu_resources",
+                    )
 
         available_gpus = _get_gpu_info()
         n_gpu = len(available_gpus)
@@ -2653,15 +2870,18 @@ def _start_server_once(model_id: str, device_mode: DeviceMode, *, stage: str = "
                 "warnings": [],
             }
             with _heavy_model_lifecycle_lock:
-                active_heavy = None
-                for pid in state["processes"]:
-                    p_config = get_model_config(pid)
-                    if p_config and p_config["type"] in ["gguf", "gguf-vl"]:
-                        active_heavy = pid
-                        break
+                active_heavy = _find_running_heavy_model(exclude_model_id=model_id)
                 if active_heavy and active_heavy != model_id:
                     logger.info(f"Detaching {active_heavy} before activating remote vLLM model {model_id}")
+                    _set_current_model_load_job_phase(
+                        phase="releasing_previous_model",
+                        detail="stopping_active_heavy_model",
+                    )
                     _stop_model(active_heavy)
+                    _set_current_model_load_job_phase(
+                        phase="refreshing_resources",
+                        detail="refreshing_runtime_resources",
+                    )
                 _ensure_vllm_backend(model_id)
                 state["processes"][model_id] = _RemoteProcess()
                 vllm_placement = _build_vllm_placement(model_id, config)
@@ -2730,25 +2950,34 @@ def _start_server_once(model_id: str, device_mode: DeviceMode, *, stage: str = "
 
         if is_heavy:
             with _heavy_model_lifecycle_lock:
-                active_heavy = None
-                for pid in state["processes"]:
-                    p_config = get_model_config(pid)
-                    if p_config and p_config["type"] in ["gguf", "gguf-vl"]:
-                        active_heavy = pid
-                        break
-                if active_heavy and active_heavy != model_id:
-                    logger.info(f"Stopping {active_heavy} to free memory for {model_id}")
-                    _stop_model(active_heavy)
                 _reap_stale_listener_on_port(config["port"], tracked_proc=existing_proc)
                 _set_runtime_state(model_id, _RUNTIME_STATE_LOADING, reason="startup", placement=placement)
-                return _start_heavy_local_model(
-                    model_id=model_id,
-                    config=config,
-                    placement=placement,
-                    model_path=model_path,
-                    device_mode=device_mode,
-                    activation_source=activation_source,
-                )
+                try:
+                    return _start_heavy_local_model(
+                        model_id=model_id,
+                        config=config,
+                        placement=placement,
+                        model_path=model_path,
+                        device_mode=device_mode,
+                        activation_source=activation_source,
+                    )
+                except Exception:
+                    runtime_state = str(
+                        ((state.get("runtime_states") or {}).get(model_id) or {}).get("runtime_state") or ""
+                    )
+                    if runtime_state not in {
+                        _RUNTIME_STATE_ERROR_GPU,
+                        _RUNTIME_STATE_DEGRADED_CPU,
+                        _RUNTIME_STATE_UNAVAILABLE,
+                    }:
+                        _set_runtime_state(
+                            model_id,
+                            _RUNTIME_STATE_UNAVAILABLE,
+                            reason="model_start_failed",
+                            placement=placement,
+                        )
+                    _cleanup_failed_start_state(model_id)
+                    raise
 
         _reap_stale_listener_on_port(config["port"], tracked_proc=existing_proc)
         preferred_device = str(placement.get("device_arg") or "cpu")
@@ -2837,8 +3066,19 @@ def _start_server_once(model_id: str, device_mode: DeviceMode, *, stage: str = "
         raise RuntimeError(f"Failed to start {model_id}: {last_error}")
 
 
-def _start_server(model_id: str, device_mode: DeviceMode, *, stage: str = "startup") -> str:
-    return _start_server_with_failover(model_id, device_mode, stage=stage)
+def _start_server(
+    model_id: str,
+    device_mode: DeviceMode,
+    *,
+    stage: str = "startup",
+    launch_overrides: Optional[Dict[str, Any]] = None,
+) -> str:
+    return _start_server_with_failover(
+        model_id,
+        device_mode,
+        stage=stage,
+        launch_overrides=launch_overrides,
+    )
 
 
 def _build_infer_readiness_payload(
@@ -3663,6 +3903,7 @@ async def infer(request: InferRequest):
         is_chat = "messages" in request.payload
         url = _build_infer_url(config, is_chat=is_chat)
         headers = _build_upstream_headers(config)
+        launch_overrides = _extract_infer_launch_overrides(request.payload)
 
         payload = _build_infer_payload(request.model_id, config, request.payload)
         if request.stream: payload["stream"] = True
@@ -3675,6 +3916,7 @@ async def infer(request: InferRequest):
                     request.model_id,
                     request.device_mode or state["device_mode"],
                     stage="infer",
+                    launch_overrides=launch_overrides,
                 )
             except Exception:
                 _release_runtime_slot(sem)
@@ -3698,6 +3940,7 @@ async def infer(request: InferRequest):
                     request.model_id,
                     request.device_mode or state["device_mode"],
                     stage="infer",
+                    launch_overrides=launch_overrides,
                 )
                 started_config = get_model_config(started_model_id)
                 if not started_config:
@@ -3883,6 +4126,38 @@ async def metrics():
     _update_runtime_observability_metrics()
     return PlainTextResponse(render_metrics_text(), media_type="text/plain; version=0.0.4; charset=utf-8")
 
+
+def _resolve_embedding_runtime_base_url() -> str:
+    explicit_url = str(os.getenv("EMBEDDING_RUNTIME_URL") or "").strip()
+    if explicit_url:
+        return explicit_url.rstrip("/")
+    port = str(os.getenv("EMBEDDING_RUNTIME_PORT") or "8092").strip() or "8092"
+    return f"http://127.0.0.1:{port}"
+
+
+async def _build_data_plane_status_snapshot() -> Dict[str, Any]:
+    embedding_base_url = _resolve_embedding_runtime_base_url()
+    embedding_model_id = str(os.getenv("EMBEDDING_MODEL_ID") or "labse-embedding").strip() or "labse-embedding"
+    embedding_snapshot: Dict[str, Any] = {
+        "kind": "embedding",
+        "base_url": embedding_base_url,
+        "model_id": embedding_model_id,
+        "status": "unknown",
+        "health": None,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=1.0) as client:
+            response = await client.get(f"{embedding_base_url}/health")
+            response.raise_for_status()
+            health_payload = response.json()
+        embedding_snapshot["status"] = str(health_payload.get("status") or "ok")
+        embedding_snapshot["health"] = health_payload
+    except Exception as exc:
+        embedding_snapshot["status"] = "unreachable"
+        embedding_snapshot["error"] = str(exc)
+    return {"embedding_runtime": embedding_snapshot}
+
+
 @app.get("/status")
 async def get_status():
     _prune_dead_processes()
@@ -3900,6 +4175,7 @@ async def get_status():
     runtime_budget = resolve_runtime_budget()
     _update_runtime_observability_metrics()
     concurrency_policy = _get_concurrency_policy_snapshot()
+    data_planes = await _build_data_plane_status_snapshot()
     return {
         "active_model_id": state["active_model"],
         "active_model_source": state.get("active_model_source"),
@@ -3908,6 +4184,7 @@ async def get_status():
         "placements": dict(state.get("placements") or {}),
         "admission": copy.deepcopy(state.get("admission") or {}),
         "runtime_states": copy.deepcopy(state.get("runtime_states") or {}),
+        "data_planes": data_planes,
         "last_fallback_event": copy.deepcopy(state.get("last_fallback_event")),
         "backend_mode": _resolve_backend_mode(),
         "prompt_cache_policy": _resolve_prompt_cache_policy(

@@ -138,8 +138,11 @@ def test_run_native_help_documents_primary_ui_flag():
     assert "--skip-openwebui" in result.stdout
     assert "--skip-chainlit" in result.stdout
     assert "--build-openwebui" in result.stdout
+    assert "--openwebui-dev" in result.stdout
+    assert "--openwebui-data-profile" in result.stdout
     assert "Не запускать контейнер `Open WebUI`" in result.stdout
     assert "Пересобрать контейнер `Open WebUI` из форка ../open-webui" in result.stdout
+    assert "запустить текущий форк ../open-webui без Docker build" in result.stdout
     assert "--skip-runtime-apply" in result.stdout
     assert "--apply-runtime" in result.stdout
     assert "./scripts/evaluate_runtime.sh recommend" in result.stdout
@@ -470,7 +473,7 @@ def test_run_native_prints_startup_config_summary_in_test_mode(tmp_path):
     assert result.returncode == 0
     assert "runtime: source=backend/.env conda=diploma_llm backend=llama-cpp-python profile=adaptive qdrant=on openwebui=on" in result.stdout
     assert "placement: llm=gpu vlm=gpu intent=cpu retrieval=cpu llm_gpus=0,1 embed_gpu=1" in result.stdout
-    assert "ports: api=8100 doc=8101 legal=8102 ums=8190 qdrant=6433 openwebui=3101" in result.stdout
+    assert "ports: api=8100 doc=8101 legal=8102 ums=8190 embedding=8092 qdrant=6433 openwebui=3101" in result.stdout
     assert "run_native:test-mode validated" in result.stdout
 
 
@@ -549,6 +552,147 @@ def test_run_native_build_openwebui_flag_is_reported_in_test_mode(tmp_path):
     assert result.returncode == 0
     assert "openwebui_build=build" in result.stdout
     assert "build_openwebui=true" in result.stdout.lower()
+
+
+def test_run_native_openwebui_dev_flag_is_reported_in_test_mode(tmp_path):
+    backend_env = tmp_path / ".env"
+    runtime_env = tmp_path / ".env.runtime"
+    uploads_dir = tmp_path / "uploads"
+    llm_file = tmp_path / "model.gguf"
+    llm_file.write_text("stub", encoding="utf-8")
+    intent_dir = tmp_path / "intent"
+    retrieval_dir = tmp_path / "retrieval"
+    intent_dir.mkdir()
+    retrieval_dir.mkdir()
+
+    backend_env.write_text("CHAINLIT_AUTH_SECRET='ok'\nCHAINLIT_ADMIN_PASSWORD='ok'\n", encoding="utf-8")
+    runtime_env.write_text(
+        "\n".join(
+            [
+                f"UPLOADS_DIR='{uploads_dir}'",
+                f"MODEL_PATH_LLM='{llm_file}'",
+                "MODEL_PATH_VLM=''",
+                "MMPROJ_PATH=''",
+                f"MODEL_PATH_EMBEDDING_INTENT='{intent_dir}'",
+                f"MODEL_PATH_EMBEDDING_RETRIEVAL='{retrieval_dir}'",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["LLM_TOOLS_PLATFORM_TEST_MODE"] = "1"
+    env["LLM_TOOLS_PLATFORM_SKIP_CONDA_CHECKS"] = "1"
+    env["LLM_TOOLS_PLATFORM_BACKEND_ENV_FILE"] = str(backend_env)
+    env["LLM_TOOLS_PLATFORM_RUNTIME_ENV_FILE"] = str(runtime_env)
+
+    result = _run_script("run_native.sh", "--apply-runtime", "--openwebui-dev", "--no-attach", env=env)
+
+    assert result.returncode == 0
+    assert "openwebui=dev" in result.stdout
+    assert "openwebui_build=dev-source" in result.stdout
+    assert "data_profile=dev" in result.stdout
+    assert "qdrant_prefix=anp-openwebui-dev" in result.stdout
+    assert "openwebui_dev=true" in result.stdout.lower()
+    assert "openwebui_data_profile=dev" in result.stdout
+    assert "openwebui_qdrant_prefix=anp-openwebui-dev" in result.stdout
+
+
+def test_run_native_openwebui_dev_smoke_profile_is_explicit(tmp_path):
+    backend_env = tmp_path / ".env"
+    runtime_env = tmp_path / ".env.runtime"
+    uploads_dir = tmp_path / "uploads"
+    llm_file = tmp_path / "model.gguf"
+    smoke_data_dir = tmp_path / "smoke-data"
+    llm_file.write_text("stub", encoding="utf-8")
+    intent_dir = tmp_path / "intent"
+    retrieval_dir = tmp_path / "retrieval"
+    intent_dir.mkdir()
+    retrieval_dir.mkdir()
+
+    backend_env.write_text("CHAINLIT_AUTH_SECRET='ok'\nCHAINLIT_ADMIN_PASSWORD='ok'\n", encoding="utf-8")
+    runtime_env.write_text(
+        "\n".join(
+            [
+                f"UPLOADS_DIR='{uploads_dir}'",
+                f"MODEL_PATH_LLM='{llm_file}'",
+                "MODEL_PATH_VLM=''",
+                "MMPROJ_PATH=''",
+                f"MODEL_PATH_EMBEDDING_INTENT='{intent_dir}'",
+                f"MODEL_PATH_EMBEDDING_RETRIEVAL='{retrieval_dir}'",
+                f"OPENWEBUI_SMOKE_DATA_DIR='{smoke_data_dir}'",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["LLM_TOOLS_PLATFORM_TEST_MODE"] = "1"
+    env["LLM_TOOLS_PLATFORM_SKIP_CONDA_CHECKS"] = "1"
+    env["LLM_TOOLS_PLATFORM_BACKEND_ENV_FILE"] = str(backend_env)
+    env["LLM_TOOLS_PLATFORM_RUNTIME_ENV_FILE"] = str(runtime_env)
+
+    result = _run_script(
+        "run_native.sh",
+        "--apply-runtime",
+        "--openwebui-dev",
+        "--openwebui-data-profile",
+        "smoke",
+        "--no-attach",
+        env=env,
+    )
+
+    assert result.returncode == 0
+    assert "data_profile=smoke" in result.stdout
+    assert f"data={smoke_data_dir}" in result.stdout
+    assert "qdrant_prefix=anp-openwebui-smoke" in result.stdout
+    assert "openwebui_data_profile=smoke" in result.stdout
+    assert f"openwebui_data_dir={smoke_data_dir}" in result.stdout
+
+
+def test_run_native_rejects_nonstable_compose_data_profile(tmp_path):
+    backend_env = tmp_path / ".env"
+    runtime_env = tmp_path / ".env.runtime"
+    uploads_dir = tmp_path / "uploads"
+    llm_file = tmp_path / "model.gguf"
+    llm_file.write_text("stub", encoding="utf-8")
+    intent_dir = tmp_path / "intent"
+    retrieval_dir = tmp_path / "retrieval"
+    intent_dir.mkdir()
+    retrieval_dir.mkdir()
+
+    backend_env.write_text("CHAINLIT_AUTH_SECRET='ok'\nCHAINLIT_ADMIN_PASSWORD='ok'\n", encoding="utf-8")
+    runtime_env.write_text(
+        "\n".join(
+            [
+                f"UPLOADS_DIR='{uploads_dir}'",
+                f"MODEL_PATH_LLM='{llm_file}'",
+                "MODEL_PATH_VLM=''",
+                "MMPROJ_PATH=''",
+                f"MODEL_PATH_EMBEDDING_INTENT='{intent_dir}'",
+                f"MODEL_PATH_EMBEDDING_RETRIEVAL='{retrieval_dir}'",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["LLM_TOOLS_PLATFORM_TEST_MODE"] = "1"
+    env["LLM_TOOLS_PLATFORM_SKIP_CONDA_CHECKS"] = "1"
+    env["LLM_TOOLS_PLATFORM_BACKEND_ENV_FILE"] = str(backend_env)
+    env["LLM_TOOLS_PLATFORM_RUNTIME_ENV_FILE"] = str(runtime_env)
+
+    result = _run_script("run_native.sh", "--apply-runtime", "--openwebui-data-profile", "smoke", env=env)
+
+    assert result.returncode == 1
+    assert "requires --openwebui-dev" in result.stderr
+
+
+def test_run_native_openwebui_dev_rejects_build_flag():
+    env = os.environ.copy()
+    env["LLM_TOOLS_PLATFORM_TEST_MODE"] = "1"
+
+    result = _run_script("run_native.sh", "--openwebui-dev", "--build-openwebui", env=env)
+
+    assert result.returncode == 1
+    assert "--openwebui-dev и --build-openwebui" in result.stderr
 
 
 def test_evaluate_runtime_defaults_to_plan(tmp_path):
@@ -1225,6 +1369,16 @@ def test_run_native_waits_for_infer_ready_before_starting_ui():
     assert "compose_args+=(--build)" in run_native
 
 
+def test_run_native_uses_standalone_embedding_runtime_for_openwebui_rag():
+    run_native = (SCRIPTS_DIR / "run_native.sh").read_text(encoding="utf-8")
+
+    assert 'EMBEDDING_RUNTIME_PORT="${EMBEDDING_RUNTIME_PORT:-8092}"' in run_native
+    assert "services/embedding_runtime/server.py" in run_native
+    assert "wait_for_service \"Embedding Runtime\" \"$EMBEDDING_RUNTIME_PORT\" \"/health\"" in run_native
+    assert "rag_api=http://127.0.0.1:${EMBEDDING_RUNTIME_PORT}/v1" in run_native
+    assert "RAG_OPENAI_API_BASE_URL='http://127.0.0.1:$EMBEDDING_RUNTIME_PORT/v1'" in run_native
+
+
 def test_stop_scripts_kill_detached_runtime_process_patterns():
     stop_native = (SCRIPTS_DIR / "stop_native.sh").read_text(encoding="utf-8")
     stop_all = (SCRIPTS_DIR / "stop_all.sh").read_text(encoding="utf-8")
@@ -1232,7 +1386,7 @@ def test_stop_scripts_kill_detached_runtime_process_patterns():
     native_expected_patterns = [
         'kill_matching_processes "UMS" "services/model_manager/unified_model_server.py"',
         'kill_matching_processes "llama-server runtime" "llama-server"',
-        'kill_matching_processes "embedding runtime" "services/model_manager/st_server.py"',
+        'kill_matching_processes "embedding runtime" "services/embedding_runtime/server.py"',
         'kill_matching_processes "Document Server" "uvicorn mcp_document_server:app --host 0.0.0.0 --port $DOC_PORT"',
         'kill_matching_processes "Legal Server" "uvicorn mcp_legal_server:app --host 0.0.0.0 --port $LEGAL_PORT"',
         'kill_matching_processes "Agent API" "python agent_api.py"',

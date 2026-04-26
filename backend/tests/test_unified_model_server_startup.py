@@ -77,6 +77,24 @@ class _FakePostAsyncClient:
         return self._response
 
 
+class _FakeGetAsyncClient:
+    def __init__(self, response, *, headers=None, timeout=None):
+        self._response = response
+        self.headers = headers or {}
+        self.timeout = timeout
+        self.calls = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def get(self, url):
+        self.calls.append({"url": url, "headers": dict(self.headers)})
+        return self._response
+
+
 class _FakeVLLMAsyncClient:
     def __init__(self, response, *, headers=None):
         self._response = response
@@ -147,12 +165,16 @@ def _reset_ums_state(monkeypatch, tmp_path):
         "UMS_ACTIVE_MODEL_STATE_PATH",
         "UMS_SCAN_FOLDERS_STATE_PATH",
         "UMS_BROWSE_ALLOWLIST_ROOTS",
+        "UMS_PRELOAD_LAST_ACTIVE_MODEL",
         "UMS_LLM_MAX_CONCURRENCY",
         "UMS_EMBED_MAX_CONCURRENCY",
         "UMS_LLM_CONCURRENCY",
         "UMS_EMBED_CONCURRENCY",
         "UMS_CONCURRENCY_ACQUIRE_TIMEOUT_S",
         "UMS_FAIL_FAST_ON_SATURATION",
+        "EMBEDDING_RUNTIME_URL",
+        "EMBEDDING_RUNTIME_PORT",
+        "EMBEDDING_MODEL_ID",
         "VLLM_BASE_URL",
         "VLLM_API_KEY",
         "VLLM_MODEL_ID_QWEN_14B_LLM",
@@ -486,6 +508,240 @@ def test_start_server_avoids_embedding_occupied_gpu_for_heavy_llm():
     assert ums_server.state["placements"]["qwen-14b-llm"]["gpu_indices"] == [0]
 
 
+def _heavy_switch_model_config(model_id):
+    if model_id == "qwen-14b-llm":
+        return {
+            "type": "gguf",
+            "runtime_type": "gguf",
+            "path": "./models/gguf/qwen.gguf",
+            "ctx_size": 8192,
+            "gpu_layers": -1,
+            "port": 8091,
+        }
+    if model_id == "qwen-vl-8b":
+        return {
+            "type": "gguf-vl",
+            "runtime_type": "gguf-vl",
+            "path": "./models/gguf/qwen-vl.gguf",
+            "mmproj": "./models/gguf/mmproj.gguf",
+            "ctx_size": 8192,
+            "gpu_layers": -1,
+            "port": 8092,
+        }
+    if model_id == "labse-embedding":
+        return {
+            "type": "st",
+            "runtime_type": "st",
+            "path": "./models/st/LaBSE",
+            "port": 8093,
+        }
+    return None
+
+
+def _heavy_switch_admission(*, requested_device, available_gpus, token_budget=None, **_kwargs):
+    return {
+        "component": "llm",
+        "requested_device": requested_device.value,
+        "resolved_device": ums_server.DeviceMode.HYBRID.value,
+        "admission": "ok",
+        "estimated_vram_gb": 9.0,
+        "available_vram_gb": sum(float(gpu.get("free_gb", 0.0)) for gpu in available_gpus),
+        "effective_token_budget": token_budget or 4096,
+        "effective_gpu_layers": 24,
+        "warnings": [],
+    }
+
+
+def test_switching_heavy_model_stops_old_runtime_before_gpu_admission():
+    events = []
+    ums_server.state["active_model"] = "qwen-14b-llm"
+    ums_server.state["active_model_source"] = "activation"
+    ums_server.state["processes"]["qwen-14b-llm"] = _FakeProcess(pid=111)
+    ums_server.state["placements"]["qwen-14b-llm"] = {"placement_mode": "single-gpu", "gpu_indices": [0]}
+    ums_server.state["model_load_jobs"]["switch-job"] = {
+        "job_id": "switch-job",
+        "model_id": "qwen-vl-8b",
+        "action": "activate",
+        "device_mode": "hybrid",
+        "state": "starting",
+        "phase": "validating",
+        "detail": "validating_model",
+        "created_at": int(time.time()),
+        "updated_at": int(time.time()),
+    }
+    ums_server._model_load_context.job_id = "switch-job"
+
+    def fake_stop(model_id):
+        events.append(f"stop:{model_id}")
+        ums_server.state["processes"].pop(model_id, None)
+        ums_server.state["placements"].pop(model_id, None)
+        if ums_server.state.get("active_model") == model_id:
+            ums_server._set_active_model_id(None)
+        ums_server._set_runtime_state(model_id, "unavailable", reason="stopped")
+
+    def fake_get_gpu_info():
+        events.append("gpu")
+        assert "stop:qwen-14b-llm" in events
+        return [{"index": 0, "free_gb": 14.0, "total_gb": 24.0}]
+
+    def fake_admission(**kwargs):
+        events.append("admission")
+        assert events.index("gpu") < events.index("admission")
+        return _heavy_switch_admission(**kwargs)
+
+    def fake_launch(cmd, port, health_timeout_s=120.0, env=None):
+        events.append("launch")
+        assert events.index("admission") < events.index("launch")
+        return _FakeProcess(pid=222)
+
+    try:
+        with patch.object(ums_server, "get_model_config", side_effect=_heavy_switch_model_config), patch.object(
+            ums_server,
+            "_stop_model",
+            side_effect=fake_stop,
+        ) as mock_stop, patch.object(
+            ums_server,
+            "_get_gpu_info",
+            side_effect=fake_get_gpu_info,
+        ), patch.object(
+            ums_server,
+            "_resolve_llm_admission",
+            side_effect=fake_admission,
+        ), patch.object(
+            ums_server,
+            "_launch_server_process",
+            side_effect=fake_launch,
+        ), patch.object(
+            ums_server,
+            "_detect_heavy_runtime_gpu_failure_reason",
+            return_value=None,
+        ):
+            started_model_id = ums_server._start_server_once("qwen-vl-8b", ums_server.DeviceMode.HYBRID, stage="activate")
+    finally:
+        ums_server._model_load_context.job_id = None
+
+    assert started_model_id == "qwen-vl-8b"
+    assert events == ["stop:qwen-14b-llm", "gpu", "admission", "launch"]
+    assert "qwen-14b-llm" not in ums_server.state["processes"]
+    assert "qwen-vl-8b" in ums_server.state["processes"]
+    assert ums_server.state["active_model"] == "qwen-vl-8b"
+    assert ums_server.state["model_load_jobs"]["switch-job"]["phase"] == "refreshing_resources"
+    assert ums_server.state["model_load_jobs"]["switch-job"]["detail"] == "refreshing_gpu_resources"
+    mock_stop.assert_called_once_with("qwen-14b-llm")
+
+
+def test_start_server_reuses_already_running_heavy_model_without_switch():
+    ums_server.state["active_model"] = "qwen-vl-8b"
+    ums_server.state["processes"]["qwen-vl-8b"] = _FakeProcess(pid=333)
+
+    with patch.object(ums_server, "get_model_config", side_effect=_heavy_switch_model_config), patch.object(
+        ums_server,
+        "_stop_model",
+        side_effect=AssertionError("already running model must not be stopped"),
+    ), patch.object(
+        ums_server,
+        "_get_gpu_info",
+        side_effect=AssertionError("already running model must not recalculate admission"),
+    ), patch.object(
+        ums_server,
+        "_launch_server_process",
+        side_effect=AssertionError("already running model must not relaunch"),
+    ):
+        started_model_id = ums_server._start_server_once("qwen-vl-8b", ums_server.DeviceMode.HYBRID, stage="activate")
+
+    assert started_model_id == "qwen-vl-8b"
+    assert ums_server.state["active_model"] == "qwen-vl-8b"
+
+
+def test_starting_heavy_model_does_not_stop_embedding_runtime():
+    launch_calls = []
+    ums_server.state["processes"]["labse-embedding"] = _FakeProcess(pid=444)
+    ums_server.state["placements"]["labse-embedding"] = {
+        "placement_mode": "single-gpu",
+        "gpu_indices": [1],
+        "device_arg": "cuda:1",
+    }
+
+    def fake_launch(cmd, port, health_timeout_s=120.0, env=None):
+        launch_calls.append(cmd)
+        return _FakeProcess(pid=445)
+
+    with patch.object(ums_server, "get_model_config", side_effect=_heavy_switch_model_config), patch.object(
+        ums_server,
+        "_stop_model",
+        side_effect=AssertionError("embedding runtime must not be stopped during heavy model switch"),
+    ), patch.object(
+        ums_server,
+        "_get_gpu_info",
+        return_value=[
+            {"index": 0, "free_gb": 14.0, "total_gb": 24.0},
+            {"index": 1, "free_gb": 8.0, "total_gb": 24.0},
+        ],
+    ), patch.object(
+        ums_server,
+        "_resolve_llm_admission",
+        side_effect=_heavy_switch_admission,
+    ), patch.object(
+        ums_server,
+        "_launch_server_process",
+        side_effect=fake_launch,
+    ), patch.object(
+        ums_server,
+        "_detect_heavy_runtime_gpu_failure_reason",
+        return_value=None,
+    ):
+        started_model_id = ums_server._start_server_once("qwen-14b-llm", ums_server.DeviceMode.HYBRID)
+
+    assert started_model_id == "qwen-14b-llm"
+    assert launch_calls
+    assert "labse-embedding" in ums_server.state["processes"]
+    assert "qwen-14b-llm" in ums_server.state["processes"]
+
+
+def test_failed_heavy_model_switch_leaves_runtime_state_consistent():
+    ums_server.state["active_model"] = "qwen-14b-llm"
+    ums_server.state["active_model_source"] = "activation"
+    ums_server.state["processes"]["qwen-14b-llm"] = _FakeProcess(pid=555)
+    ums_server.state["placements"]["qwen-14b-llm"] = {"placement_mode": "single-gpu", "gpu_indices": [0]}
+
+    def fake_stop(model_id):
+        ums_server.state["processes"].pop(model_id, None)
+        ums_server.state["placements"].pop(model_id, None)
+        if ums_server.state.get("active_model") == model_id:
+            ums_server._set_active_model_id(None)
+        ums_server._set_runtime_state(model_id, "unavailable", reason="stopped")
+
+    with patch.object(ums_server, "get_model_config", side_effect=_heavy_switch_model_config), patch.object(
+        ums_server,
+        "_stop_model",
+        side_effect=fake_stop,
+    ), patch.object(
+        ums_server,
+        "_get_gpu_info",
+        return_value=[{"index": 0, "free_gb": 14.0, "total_gb": 24.0}],
+    ), patch.object(
+        ums_server,
+        "_resolve_llm_admission",
+        side_effect=_heavy_switch_admission,
+    ), patch.object(
+        ums_server,
+        "_launch_server_process",
+        side_effect=RuntimeError("llama-server start failed"),
+    ), patch.object(
+        ums_server,
+        "_detect_heavy_runtime_gpu_failure_reason",
+        return_value=None,
+    ):
+        with pytest.raises(RuntimeError, match="llama-server start failed"):
+            ums_server._start_server_once("qwen-vl-8b", ums_server.DeviceMode.HYBRID, stage="activate")
+
+    assert "qwen-14b-llm" not in ums_server.state["processes"]
+    assert "qwen-vl-8b" not in ums_server.state["processes"]
+    assert ums_server.state["active_model"] is None
+    assert ums_server.state["runtime_states"]["qwen-vl-8b"]["runtime_state"] == "unavailable"
+    assert ums_server.state["runtime_states"]["qwen-vl-8b"]["reason"] == "model_start_failed"
+
+
 def test_start_server_honors_tier_cpu_preference_for_embeddings():
     fake_process = _FakeProcess()
     launch_calls = []
@@ -679,6 +935,36 @@ def test_status_exposes_last_fallback_event():
         ums_server.state["last_fallback_event"] = previous_event
 
     assert payload["last_fallback_event"] == fallback_event
+
+
+def test_status_observes_external_embedding_runtime(monkeypatch):
+    monkeypatch.setenv("EMBEDDING_RUNTIME_URL", "http://embedding-runtime:8092")
+    monkeypatch.setenv("EMBEDDING_MODEL_ID", "labse-embedding")
+    fake_client = _FakeGetAsyncClient(
+        _FakeJSONResponse(
+            {
+                "status": "ok",
+                "runtime": "embedding-runtime",
+                "model_loaded": True,
+                "model_id": "labse-embedding",
+            }
+        )
+    )
+
+    with patch(
+        "services.model_manager.unified_model_server.httpx.AsyncClient",
+        return_value=fake_client,
+    ):
+        payload = asyncio.run(ums_server.get_status())
+
+    embedding_runtime = payload["data_planes"]["embedding_runtime"]
+    assert embedding_runtime["base_url"] == "http://embedding-runtime:8092"
+    assert embedding_runtime["model_id"] == "labse-embedding"
+    assert embedding_runtime["status"] == "ok"
+    assert embedding_runtime["health"]["model_loaded"] is True
+    assert fake_client.calls == [
+        {"url": "http://embedding-runtime:8092/health", "headers": {}}
+    ]
 
 
 def test_status_respects_manual_runtime_budget(monkeypatch):
@@ -1328,6 +1614,68 @@ def test_resolve_bootstrap_active_model_falls_back_to_env_default(monkeypatch):
     assert source == "default_active_model_id"
 
 
+def test_preload_sequence_ignores_persisted_active_model_by_default():
+    state_path = Path(os.environ["UMS_ACTIVE_MODEL_STATE_PATH"])
+    state_path.write_text(
+        json.dumps(
+            {
+                "active_model_id": "custom-qwen",
+                "active_model_source": "activation",
+            }
+        ),
+        encoding="utf-8",
+    )
+    ums_server.state["dynamic_models"] = {
+        "custom-qwen": ums_server._normalize_dynamic_model_config(
+            "custom-qwen",
+            {
+                "type": "gguf",
+                "path": "/models/custom-qwen.gguf",
+                "port": 8100,
+                "display_name": "Custom Qwen",
+                "runtime_type": "gguf",
+            },
+        )
+    }
+
+    sequence = ums_server._preload_sequence()
+
+    assert sequence[0] == "qwen-14b-llm"
+    assert "custom-qwen" not in sequence
+
+
+def test_preload_sequence_prefers_persisted_active_model_when_enabled(monkeypatch):
+    state_path = Path(os.environ["UMS_ACTIVE_MODEL_STATE_PATH"])
+    state_path.write_text(
+        json.dumps(
+            {
+                "active_model_id": "custom-qwen",
+                "active_model_source": "activation",
+            }
+        ),
+        encoding="utf-8",
+    )
+    ums_server.state["dynamic_models"] = {
+        "custom-qwen": ums_server._normalize_dynamic_model_config(
+            "custom-qwen",
+            {
+                "type": "gguf",
+                "path": "/models/custom-qwen.gguf",
+                "port": 8100,
+                "display_name": "Custom Qwen",
+                "runtime_type": "gguf",
+            },
+        )
+    }
+    monkeypatch.setenv("UMS_PRELOAD_LAST_ACTIVE_MODEL", "true")
+
+    sequence = ums_server._preload_sequence()
+
+    assert sequence[0] == "custom-qwen"
+    assert "qwen-14b-llm" not in sequence
+    assert "qwen3-embedding-0.6b" in sequence
+
+
 def test_start_server_rejects_missing_canonical_model_path_env(monkeypatch):
     for env_name in (
         "MODEL_PATH_LLM",
@@ -1538,6 +1886,7 @@ def test_model_load_endpoint_creates_async_job_and_reports_ready(tmp_path):
 
     assert ready["phase"] == "ready"
     assert ready["percent"] == 100.0
+    assert ready["bytes_loaded"] == ready["bytes_total"]
     assert ready["model"]["model_id"] == "demo-llm"
 
 
@@ -1569,6 +1918,42 @@ def test_model_load_job_status_reports_memory_progress(monkeypatch):
     assert payload["bytes_loaded"] == 250
     assert payload["bytes_total"] == 1000
     assert payload["percent"] == 25.0
+
+
+def test_model_load_job_progress_does_not_regress_when_rss_sample_drops(monkeypatch):
+    job_id = "progress-regression-job"
+    ums_server.state["model_load_jobs"][job_id] = {
+        "job_id": job_id,
+        "model_id": "qwen-vl-8b",
+        "action": "activate",
+        "device_mode": "hybrid",
+        "state": "loading",
+        "phase": "loading_memory",
+        "detail": "loading_model_into_memory",
+        "process_pid": 654,
+        "bytes_loaded": 990,
+        "bytes_total": 1000,
+        "percent": 99.0,
+        "rate_bytes_per_sec": 123.0,
+        "eta_seconds": 1,
+        "created_at": int(time.time()),
+        "updated_at": int(time.time()),
+        "_last_sample_bytes": 990,
+        "_last_sample_time": time.time() - 1,
+        "_process": _FakeProcess(pid=654),
+    }
+    monkeypatch.setattr(ums_server, "_read_process_rss_bytes", lambda pid: 200 if pid == 654 else None)
+
+    response = asyncio.run(_api_request("GET", f"/model-load-jobs/{job_id}"))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["state"] == "loading"
+    assert payload["bytes_loaded"] == 990
+    assert payload["bytes_total"] == 1000
+    assert payload["percent"] == 99.0
+    assert payload["rate_bytes_per_sec"] == 123.0
+    assert payload["eta_seconds"] == 1
 
 
 def test_cancel_model_load_job_stops_loading_process():
@@ -2584,6 +2969,71 @@ async def test_non_stream_local_llama_infer_enables_cache_prompt_by_default():
             "headers": {},
         }
     ]
+
+
+def test_infer_launch_overrides_build_llama_server_flags():
+    payload = {
+        "prompt": "hello",
+        "num_ctx": 8192,
+        "num_batch": "1024",
+        "num_thread": 6,
+        "use_mmap": False,
+        "use_mlock": True,
+        "custom_params": {"gpu_layers": 22},
+    }
+    overrides = ums_server._extract_infer_launch_overrides(payload)
+    config = ums_server._apply_launch_overrides(
+        {"type": "gguf", "port": 8091, "ctx_size": 4096, "gpu_layers": -1},
+        overrides,
+    )
+
+    cmd = ums_server._build_heavy_llama_command(
+        model_path="/models/qwen.gguf",
+        config=config,
+        placement={"placement_mode": "single-gpu"},
+        device_mode=ums_server.DeviceMode.GPU,
+    )
+
+    assert cmd[cmd.index("-c") + 1] == "8192"
+    assert cmd[cmd.index("-ngl") + 1] == "22"
+    assert cmd[cmd.index("--batch-size") + 1] == "1024"
+    assert cmd[cmd.index("--threads") + 1] == "6"
+    assert "--no-mmap" in cmd
+    assert "--mlock" in cmd
+
+
+@pytest.mark.asyncio
+async def test_non_stream_infer_passes_launch_overrides_to_start():
+    fake_client = _FakePostAsyncClient(_FakeJSONResponse({"id": "cmpl-1"}))
+    captured = {}
+
+    def fake_start(model_id, device_mode, *, stage="startup", launch_overrides=None):
+        captured["model_id"] = model_id
+        captured["device_mode"] = device_mode
+        captured["stage"] = stage
+        captured["launch_overrides"] = launch_overrides
+        return model_id
+
+    with patch.object(ums_server, "_start_server", side_effect=fake_start), patch(
+        "services.model_manager.unified_model_server.httpx.AsyncClient",
+        return_value=fake_client,
+    ):
+        response = await ums_server.infer(
+            ums_server.InferRequest(
+                model_id="qwen-14b-llm",
+                payload={"prompt": "hello", "num_ctx": 8192, "num_batch": 1024, "use_mlock": True},
+                stream=False,
+            )
+        )
+
+    assert response["status"] == "success"
+    assert captured["model_id"] == "qwen-14b-llm"
+    assert captured["stage"] == "infer"
+    assert captured["launch_overrides"] == {
+        "ctx_size": 8192,
+        "batch_size": 1024,
+        "use_mlock": True,
+    }
 
 
 @pytest.mark.asyncio

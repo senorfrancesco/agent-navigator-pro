@@ -26,9 +26,16 @@ FROM_LAUNCHER=false
 SKIP_OPENWEBUI=false
 SKIP_CHAINLIT_ALIAS=false
 BUILD_OPENWEBUI=false
+OPENWEBUI_DEV=false
+OPENWEBUI_DATA_PROFILE_CLI=""
 case "${LLM_TOOLS_PLATFORM_BUILD_OPENWEBUI:-}" in
   1|true|TRUE|yes|YES)
     BUILD_OPENWEBUI=true
+    ;;
+esac
+case "${LLM_TOOLS_PLATFORM_OPENWEBUI_DEV:-}" in
+  1|true|TRUE|yes|YES)
+    OPENWEBUI_DEV=true
     ;;
 esac
 if [ -n "${LLM_TOOLS_PLATFORM_SKIP_RUNTIME_APPLY+x}" ]; then
@@ -67,6 +74,12 @@ run_native.sh
   --build-openwebui
       Пересобрать контейнер `Open WebUI` из форка ../open-webui перед запуском.
       Без этого флага native-запуск использует уже собранный образ.
+  --openwebui-dev
+      Временный режим разработки: запустить текущий форк ../open-webui без Docker build.
+      Backend `Open WebUI` стартует на host-порту 8080, frontend `vite` — на OPENWEBUI_PORT.
+  --openwebui-data-profile dev|stable|smoke
+      Явно выбрать контур данных `Open WebUI`. `dev` и `smoke` используются
+      только с --openwebui-dev; обычный Docker Compose путь использует `stable`.
   --skip-runtime-apply
       Явно не загружать backend/.env.runtime для этого запуска.
   --apply-runtime
@@ -78,13 +91,15 @@ run_native.sh
   ./scripts/run_native.sh
   ./scripts/run_native.sh --no-attach
   ./scripts/run_native.sh --skip-openwebui --no-attach
+  ./scripts/run_native.sh --openwebui-dev --openwebui-data-profile dev --no-attach
   ./scripts/run_native.sh --apply-runtime
   ./scripts/evaluate_runtime.sh recommend
   ./scripts/evaluate_runtime.sh plan
 EOF
 }
 
-for arg in "$@"; do
+while [ $# -gt 0 ]; do
+  arg="$1"
   case "$arg" in
     -h|--help)
       print_help
@@ -106,6 +121,20 @@ for arg in "$@"; do
     --build-openwebui)
       BUILD_OPENWEBUI=true
       ;;
+    --openwebui-dev)
+      OPENWEBUI_DEV=true
+      ;;
+    --openwebui-data-profile)
+      shift
+      if [ $# -eq 0 ]; then
+        echo "Флаг --openwebui-data-profile требует значение: dev, stable или smoke." >&2
+        exit 1
+      fi
+      OPENWEBUI_DATA_PROFILE_CLI="$1"
+      ;;
+    --openwebui-data-profile=*)
+      OPENWEBUI_DATA_PROFILE_CLI="${arg#*=}"
+      ;;
     --skip-runtime-apply)
       SKIP_RUNTIME_APPLY=true
       EXPLICIT_RUNTIME_ENV_SELECTION=true
@@ -125,7 +154,17 @@ for arg in "$@"; do
       exit 1
       ;;
   esac
+  shift
 done
+
+if [ "$OPENWEBUI_DEV" = true ] && [ "$BUILD_OPENWEBUI" = true ]; then
+  echo "Флаги --openwebui-dev и --build-openwebui нельзя использовать вместе." >&2
+  exit 1
+fi
+if [ "$OPENWEBUI_DEV" = true ] && [ "$SKIP_OPENWEBUI" = true ]; then
+  echo "Флаги --openwebui-dev и --skip-openwebui нельзя использовать вместе." >&2
+  exit 1
+fi
 
 if [ "$EXPLICIT_RUNTIME_ENV_SELECTION" != true ]; then
   SKIP_RUNTIME_APPLY=true
@@ -287,6 +326,8 @@ validate_native_runtime_env() {
   validate_file_path_var "MMPROJ_PATH"
   validate_dir_path_var "MODEL_PATH_EMBEDDING_INTENT"
   validate_dir_path_var "MODEL_PATH_EMBEDDING_RETRIEVAL"
+  EMBEDDING_MODEL_PATH="${EMBEDDING_MODEL_PATH:-$MODEL_PATH_EMBEDDING_RETRIEVAL}"
+  validate_dir_path_var "EMBEDDING_MODEL_PATH"
   UPLOADS_DIR="$(resolve_backend_relative_path "${UPLOADS_DIR:-$BACKEND_DIR/open_webui_uploads}")"
   ensure_writable_dir "${UPLOADS_DIR:-$BACKEND_DIR/open_webui_uploads}" "UPLOADS_DIR"
 }
@@ -298,8 +339,51 @@ AGENT_PORT="${AGENT_API_PORT:-8000}"
 DOC_PORT="${DOC_PORT:-8001}"
 LEGAL_PORT="${LEGAL_PORT:-8002}"
 UMS_PORT="${UMS_PORT:-8090}"
+EMBEDDING_RUNTIME_PORT="${EMBEDDING_RUNTIME_PORT:-8092}"
+EMBEDDING_MODEL_ID="${EMBEDDING_MODEL_ID:-${LEGAL_EMBEDDER_MODEL:-labse-embedding}}"
+EMBEDDING_DEVICE="${EMBEDDING_DEVICE:-${RETRIEVAL_EMBEDDER_DEVICE_MODE:-cpu}}"
+EMBEDDING_DIM="${EMBEDDING_DIM:-}"
+EMBEDDING_NORMALIZE="${EMBEDDING_NORMALIZE:-true}"
+EMBEDDING_MAX_BATCH_SIZE="${EMBEDDING_MAX_BATCH_SIZE:-8}"
+EMBEDDING_MAX_CONCURRENCY="${EMBEDDING_MAX_CONCURRENCY:-4}"
 OPENWEBUI_PORT="${OPENWEBUI_PORT:-3001}"
+OPENWEBUI_DEV_BACKEND_PORT="${OPENWEBUI_DEV_BACKEND_PORT:-8080}"
 QDRANT_PORT="${QDRANT_PORT:-6333}"
+OPENWEBUI_FORK_DIR="${OPENWEBUI_FORK_DIR:-$PROJECT_ROOT/../open-webui}"
+OPENWEBUI_DEV_DATA_DIR="${OPENWEBUI_DEV_DATA_DIR:-$BACKEND_DIR/.data/openwebui-dev}"
+OPENWEBUI_STABLE_DATA_DIR="${OPENWEBUI_STABLE_DATA_DIR:-$BACKEND_DIR/.data/openwebui-stable}"
+OPENWEBUI_SMOKE_DATA_DIR="${OPENWEBUI_SMOKE_DATA_DIR:-/tmp/openwebui-qdrant-smoke/data}"
+
+OPENWEBUI_DATA_PROFILE="${OPENWEBUI_DATA_PROFILE_CLI:-${LLM_TOOLS_PLATFORM_OPENWEBUI_DATA_PROFILE:-${OPENWEBUI_DATA_PROFILE:-}}}"
+if [ -z "$OPENWEBUI_DATA_PROFILE" ]; then
+  if [ "$OPENWEBUI_DEV" = true ]; then
+    OPENWEBUI_DATA_PROFILE="dev"
+  else
+    OPENWEBUI_DATA_PROFILE="stable"
+  fi
+fi
+
+case "$OPENWEBUI_DATA_PROFILE" in
+  dev)
+    OPENWEBUI_DATA_DIR="${OPENWEBUI_DATA_DIR:-$OPENWEBUI_DEV_DATA_DIR}"
+    OPENWEBUI_QDRANT_COLLECTION_PREFIX="${OPENWEBUI_QDRANT_COLLECTION_PREFIX:-anp-openwebui-dev}"
+    ;;
+  stable)
+    OPENWEBUI_DATA_DIR="${OPENWEBUI_DATA_DIR:-$OPENWEBUI_STABLE_DATA_DIR}"
+    OPENWEBUI_QDRANT_COLLECTION_PREFIX="${OPENWEBUI_QDRANT_COLLECTION_PREFIX:-anp-openwebui}"
+    ;;
+  smoke)
+    OPENWEBUI_DATA_DIR="${OPENWEBUI_DATA_DIR:-$OPENWEBUI_SMOKE_DATA_DIR}"
+    OPENWEBUI_QDRANT_COLLECTION_PREFIX="${OPENWEBUI_QDRANT_COLLECTION_PREFIX:-anp-openwebui-smoke}"
+    ;;
+  *)
+    die "env-invalid:OPENWEBUI_DATA_PROFILE:$OPENWEBUI_DATA_PROFILE expected=dev,stable,smoke"
+    ;;
+esac
+
+if [ "$OPENWEBUI_DEV" != true ] && [ "$SKIP_OPENWEBUI" != true ] && [ "$OPENWEBUI_DATA_PROFILE" != "stable" ]; then
+  die "env-invalid:OPENWEBUI_DATA_PROFILE:$OPENWEBUI_DATA_PROFILE requires --openwebui-dev"
+fi
 
 MCP_DOCUMENT_SERVER_URL="${MCP_DOCUMENT_SERVER_URL:-http://localhost:8001}"
 MCP_LEGAL_SERVER_URL="${MCP_LEGAL_SERVER_URL:-http://localhost:8002}"
@@ -328,15 +412,25 @@ print_startup_config_summary() {
   local retrieval_device_summary=""
   local llm_gpu_summary=""
   local embed_gpu_summary=""
+  local openwebui_data_summary="$OPENWEBUI_DATA_DIR"
 
   if [ "$SKIP_RUNTIME_APPLY" != true ]; then
     config_source="backend/.env + backend/.env.runtime"
   fi
   if [ "$SKIP_OPENWEBUI" = true ]; then
     openwebui_mode="off"
+  elif [ "$OPENWEBUI_DEV" = true ]; then
+    openwebui_mode="dev"
   fi
-  if [ "$BUILD_OPENWEBUI" = true ]; then
+  if [ "$OPENWEBUI_DEV" = true ]; then
+    openwebui_build_mode="dev-source"
+  elif [ "$BUILD_OPENWEBUI" = true ]; then
     openwebui_build_mode="build"
+  fi
+  if [ "$SKIP_OPENWEBUI" = true ]; then
+    openwebui_data_summary="off"
+  elif [ "$OPENWEBUI_DEV" != true ]; then
+    openwebui_data_summary="docker-volume:open-webui"
   fi
 
   llm_device_summary="$(first_non_empty "${LLM_DEVICE_MODE:-}" "${DEVICE_MODE:-}")"
@@ -348,8 +442,9 @@ print_startup_config_summary() {
 
   echo -e "${BLUE}Конфиг запуска:${NC}"
   echo "  runtime: source=${config_source} conda=${CONDA_ENV} backend=${BACKEND_MODE:-llama-cpp-python} profile=${UMS_RUNTIME_PROFILE:-adaptive} qdrant=on openwebui=${openwebui_mode} openwebui_build=${openwebui_build_mode}"
+  echo "  openwebui_config: data_profile=${OPENWEBUI_DATA_PROFILE} data=${openwebui_data_summary} qdrant_prefix=${OPENWEBUI_QDRANT_COLLECTION_PREFIX} openai_api=http://127.0.0.1:${AGENT_PORT}/v1 rag_api=http://127.0.0.1:${EMBEDDING_RUNTIME_PORT}/v1"
   echo "  placement: llm=${llm_device_summary} vlm=${vlm_device_summary} intent=${intent_device_summary} retrieval=${retrieval_device_summary} llm_gpus=${llm_gpu_summary} embed_gpu=${embed_gpu_summary}"
-  echo "  ports: api=${AGENT_PORT} doc=${DOC_PORT} legal=${LEGAL_PORT} ums=${UMS_PORT} qdrant=${QDRANT_PORT} openwebui=${OPENWEBUI_PORT}"
+  echo "  ports: api=${AGENT_PORT} doc=${DOC_PORT} legal=${LEGAL_PORT} ums=${UMS_PORT} embedding=${EMBEDDING_RUNTIME_PORT} qdrant=${QDRANT_PORT} openwebui=${OPENWEBUI_PORT}"
 }
 
 render_ums_status_summary() {
@@ -414,7 +509,7 @@ fi
 print_startup_config_summary
 
 if [ "${LLM_TOOLS_PLATFORM_TEST_MODE:-0}" = "1" ]; then
-  echo "run_native:test-mode validated conda_env=${CONDA_ENV} uploads_dir=${UPLOADS_DIR} skip_openwebui=${SKIP_OPENWEBUI} skip_chainlit_compat=${SKIP_CHAINLIT_ALIAS} build_openwebui=${BUILD_OPENWEBUI}"
+  echo "run_native:test-mode validated conda_env=${CONDA_ENV} uploads_dir=${UPLOADS_DIR} skip_openwebui=${SKIP_OPENWEBUI} skip_chainlit_compat=${SKIP_CHAINLIT_ALIAS} build_openwebui=${BUILD_OPENWEBUI} openwebui_dev=${OPENWEBUI_DEV} openwebui_data_profile=${OPENWEBUI_DATA_PROFILE} openwebui_data_dir=${OPENWEBUI_DATA_DIR} openwebui_qdrant_prefix=${OPENWEBUI_QDRANT_COLLECTION_PREFIX}"
   exit 0
 fi
 
@@ -424,10 +519,36 @@ ensure_docker_compose() {
 }
 
 ensure_openwebui_fork_context() {
-  local fork_dir="$PROJECT_ROOT/../open-webui"
-  if [ ! -f "$fork_dir/Dockerfile" ]; then
-    die "missing:open-webui-fork:$fork_dir"
+  if [ ! -f "$OPENWEBUI_FORK_DIR/Dockerfile" ]; then
+    die "missing:open-webui-fork:$OPENWEBUI_FORK_DIR"
   fi
+}
+
+quote_shell_arg() {
+  printf '%q' "$1"
+}
+
+start_embedding_runtime_service() {
+  local model_id_q
+  local model_path_q
+  local device_q
+  local dim_arg=""
+  local normalize_arg="--normalize"
+
+  model_id_q="$(quote_shell_arg "$EMBEDDING_MODEL_ID")"
+  model_path_q="$(quote_shell_arg "$EMBEDDING_MODEL_PATH")"
+  device_q="$(quote_shell_arg "$EMBEDDING_DEVICE")"
+  if [ -n "$EMBEDDING_DIM" ]; then
+    dim_arg=" --dim $(quote_shell_arg "$EMBEDDING_DIM")"
+  fi
+  case "$(printf '%s' "$EMBEDDING_NORMALIZE" | tr '[:upper:]' '[:lower:]')" in
+    0|false|no|off)
+      normalize_arg="--no-normalize"
+      ;;
+  esac
+
+  start_tmux_window "embedding-runtime" "cd $BACKEND_DIR && $ACTIVATE_CMD && export PYTHONPATH='$BACKEND_DIR' && python services/embedding_runtime/server.py --model-id $model_id_q --model $model_path_q --port $EMBEDDING_RUNTIME_PORT --device $device_q --max-batch-size $EMBEDDING_MAX_BATCH_SIZE --max-concurrency $EMBEDDING_MAX_CONCURRENCY $normalize_arg$dim_arg 2>&1 | tee services/embedding_runtime/embedding-runtime.log"
+  wait_for_service "Embedding Runtime" "$EMBEDDING_RUNTIME_PORT" "/health" 90 || SERVICES_OK=false
 }
 
 start_openwebui_compose_service() {
@@ -440,6 +561,40 @@ start_openwebui_compose_service() {
   fi
   compose_args+=(open-webui)
   docker compose "${compose_args[@]}"
+}
+
+ensure_openwebui_dev_context() {
+  ensure_openwebui_fork_context
+  if [ ! -x "$OPENWEBUI_FORK_DIR/node_modules/.bin/vite" ]; then
+    die "missing:open-webui-vite:$OPENWEBUI_FORK_DIR/node_modules/.bin/vite"
+  fi
+}
+
+start_openwebui_dev_service() {
+  local fork_dir_q
+  local env_file_q
+  local data_dir_q
+  local dev_uploads_dir="$OPENWEBUI_DATA_DIR/uploads"
+
+  ensure_openwebui_dev_context
+  mkdir -p "$OPENWEBUI_DATA_DIR"
+  if [ ! -e "$dev_uploads_dir" ]; then
+    ln -s "$UPLOADS_DIR" "$dev_uploads_dir"
+  elif [ -L "$dev_uploads_dir" ] && [ "$(readlink "$dev_uploads_dir")" != "$UPLOADS_DIR" ]; then
+    warn "Open WebUI dev uploads symlink points to $(readlink "$dev_uploads_dir"), expected $UPLOADS_DIR."
+  elif [ ! -L "$dev_uploads_dir" ]; then
+    warn "Open WebUI dev uploads directory already exists at $dev_uploads_dir; backend shared uploads remain $UPLOADS_DIR."
+  fi
+
+  fork_dir_q="$(quote_shell_arg "$OPENWEBUI_FORK_DIR")"
+  env_file_q="$(quote_shell_arg "$ENV_FILE")"
+  data_dir_q="$(quote_shell_arg "$OPENWEBUI_DATA_DIR")"
+
+  start_tmux_window "openwebui-api" "cd $fork_dir_q && $ACTIVATE_CMD && set -a && source $env_file_q && set +a && export OFFLINE_MODE='true' ENABLE_VERSION_UPDATE_CHECK='false' ENABLE_PIP_INSTALL_FRONTMATTER_REQUIREMENTS='false' ENABLE_BASE_MODELS_CACHE='false' HF_HUB_OFFLINE='1' DATA_DIR=$data_dir_q OPENAI_API_BASE_URL='http://127.0.0.1:$AGENT_PORT/v1' OPENAI_API_KEY='sk-dummy' ENABLE_AGENT_NAVIGATOR_RUNTIME_MODELS='True' ENABLE_FOLLOW_UP_GENERATION='False' ENABLE_RAG_WEB_SEARCH='False' ENABLE_RAG_LOCAL_WEB_FETCH='False' VECTOR_DB='qdrant' QDRANT_URI='http://127.0.0.1:$QDRANT_PORT' ENABLE_QDRANT_MULTITENANCY_MODE='true' QDRANT_COLLECTION_PREFIX='$OPENWEBUI_QDRANT_COLLECTION_PREFIX' RAG_EMBEDDING_ENGINE='openai' RAG_OPENAI_API_BASE_URL='http://127.0.0.1:$EMBEDDING_RUNTIME_PORT/v1' RAG_OPENAI_API_KEY='sk-dummy' RAG_EMBEDDING_MODEL='$EMBEDDING_MODEL_ID' RAG_RERANKING_ENGINE='' OPENWEBUI_SESSION_RAG_HANDOFF='preferred' && open-webui serve --host 127.0.0.1 --port $OPENWEBUI_DEV_BACKEND_PORT 2>&1 | tee openwebui-api.log"
+  wait_for_service "Open WebUI API" "$OPENWEBUI_DEV_BACKEND_PORT" "/health" 60 || SERVICES_OK=false
+
+  start_tmux_window "openwebui-ui" "cd $fork_dir_q && export ENV='dev' APP_BUILD_HASH='current-fork-dev' && ./node_modules/.bin/vite dev --host 127.0.0.1 --port $OPENWEBUI_PORT 2>&1 | tee openwebui-ui.log"
+  wait_for_service "Open WebUI UI" "$OPENWEBUI_PORT" "/" 60 || SERVICES_OK=false
 }
 
 normalize_native_qdrant_url() {
@@ -584,6 +739,10 @@ echo -e "${GREEN}Запуск UMS на порту $UMS_PORT...${NC}"
 start_tmux_window "ums" "cd $BACKEND_DIR && $ACTIVATE_CMD && export PYTHONPATH='$BACKEND_DIR' && python services/model_manager/unified_model_server.py 2>&1 | tee services/model_manager/ums.log"
 wait_for_service "UMS" "$UMS_PORT" "/health" 90 || SERVICES_OK=false
 
+# 3.1) Embedding Runtime
+echo -e "${GREEN}Запуск Embedding Runtime на порту $EMBEDDING_RUNTIME_PORT...${NC}"
+start_embedding_runtime_service
+
 echo ""
 echo -e "${YELLOW}Ожидание загрузки модели Qwen LLM (до 3 мин)...${NC}"
 wait_for_model 180 || SERVICES_OK=false
@@ -604,9 +763,12 @@ if [ "$UMS_INFER_READY" = true ]; then
   start_tmux_window "agent-api" "cd $BACKEND_DIR/orchestrator && $ACTIVATE_CMD && export MCP_DOCUMENT_SERVER_URL='$MCP_DOCUMENT_SERVER_URL' MCP_LEGAL_SERVER_URL='$MCP_LEGAL_SERVER_URL' UMS_URL='$UMS_URL' QDRANT_URL='$QDRANT_URL' UPLOADS_DIR='$UPLOADS_DIR' HOST_UPLOADS_DIR='$HOST_UPLOADS_DIR' && python agent_api.py 2>&1 | tee agent-api.log"
   wait_for_service "Agent API" "$AGENT_PORT" "/health" 30 || SERVICES_OK=false
 
-  # 5) Open WebUI (Docker)
+  # 5) Open WebUI
   if [ "$SKIP_OPENWEBUI" = true ]; then
     echo -e "${YELLOW}Пропуск запуска Open WebUI (--skip-openwebui).${NC}"
+  elif [ "$OPENWEBUI_DEV" = true ]; then
+    echo -e "${GREEN}Запуск текущего форка Open WebUI без Docker build: API :$OPENWEBUI_DEV_BACKEND_PORT, UI :$OPENWEBUI_PORT...${NC}"
+    start_openwebui_dev_service
   else
     if [ "$BUILD_OPENWEBUI" = true ]; then
       echo -e "${GREEN}Сборка и запуск Open WebUI из форка ../open-webui на порту $OPENWEBUI_PORT...${NC}"
@@ -624,7 +786,11 @@ else
 fi
 
 # 6) Monitor
-start_tmux_window "monitor" "cd $PROJECT_ROOT && echo 'Native mode: backend на host, Qdrant и Open WebUI через Docker Compose' && (docker compose ps || true) && (htop 2>/dev/null || top)"
+if [ "$OPENWEBUI_DEV" = true ]; then
+  start_tmux_window "monitor" "cd $PROJECT_ROOT && echo 'Native mode: backend на host, Qdrant через Docker Compose, Open WebUI из текущего fork source' && (docker compose ps || true) && (htop 2>/dev/null || top)"
+else
+  start_tmux_window "monitor" "cd $PROJECT_ROOT && echo 'Native mode: backend на host, Qdrant и Open WebUI через Docker Compose' && (docker compose ps || true) && (htop 2>/dev/null || top)"
+fi
 
 if [ "$SERVICES_OK" = true ]; then
   SYSTEM_STATUS="${GREEN}ГОТОВА К РАБОТЕ${NC}"

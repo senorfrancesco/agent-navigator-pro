@@ -211,7 +211,7 @@ services:
       - ENABLE_QDRANT_MULTITENANCY_MODE=true
       - QDRANT_COLLECTION_PREFIX=anp-openwebui
       - RAG_EMBEDDING_ENGINE=openai
-      - RAG_OPENAI_API_BASE_URL=http://host.docker.internal:8090/v1
+      - RAG_OPENAI_API_BASE_URL=http://host.docker.internal:8092/v1
       - RAG_OPENAI_API_KEY=sk-dummy
       - RAG_EMBEDDING_MODEL=labse-embedding
       - RAG_RERANKING_ENGINE=
