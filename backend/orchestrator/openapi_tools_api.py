@@ -282,6 +282,43 @@ def _extract_forwarded_openwebui_context(request: Request) -> Dict[str, str]:
     return context
 
 
+def _normalize_current_model_id(value: Any) -> Optional[str]:
+    model_id = str(value or "").strip()
+    if not model_id or model_id == "llm-tools-platform":
+        return None
+    return model_id
+
+
+def _extract_current_model_id_from_user_inputs(user_inputs: Dict[str, Any]) -> Optional[str]:
+    for key in ("current_model_id", "model_id", "resolved_model_id"):
+        model_id = _normalize_current_model_id(user_inputs.get(key))
+        if model_id:
+            return model_id
+    return None
+
+
+def _extract_forwarded_model_id(request: Request) -> Optional[str]:
+    for header_name in (
+        "X-OpenWebUI-Model-Id",
+        "X-Open-WebUI-Model-Id",
+        "X-OpenWebUI-Selected-Model-Id",
+    ):
+        model_id = _normalize_current_model_id(request.headers.get(header_name))
+        if model_id:
+            return model_id
+    return None
+
+
+def _apply_current_model_to_tool_payload(payload: Dict[str, Any], model_id: str) -> None:
+    normalized_model_id = _normalize_current_model_id(model_id)
+    if not normalized_model_id:
+        return
+    payload["resolved_model_id"] = normalized_model_id
+    ui_state = dict(payload.get("ui_state") or {})
+    ui_state["current_model_id"] = normalized_model_id
+    payload["ui_state"] = ui_state
+
+
 def _build_orchestration_payload(tool_request: ToolRequest) -> Dict[str, Any]:
     normalized_document_refs = _normalize_document_refs(tool_request.document_refs)
     active_doc_ids = [ref_id for ref_id in (_extract_ref_identity(item) for item in normalized_document_refs) if ref_id]
@@ -301,6 +338,7 @@ def _build_orchestration_payload(tool_request: ToolRequest) -> Dict[str, Any]:
     user_inputs = dict(tool_request.user_inputs or {})
     user_inputs["session_docs"] = _normalize_session_docs(user_inputs.get("session_docs"))
     user_inputs["attachments_meta"] = _normalize_attachments_meta(user_inputs.get("attachments_meta"))
+    current_model_id = _extract_current_model_id_from_user_inputs(user_inputs)
     payload: Dict[str, Any] = {
         "message": _build_tool_message(tool_request),
         "requested_tool": tool_request.tool_name,
@@ -329,6 +367,8 @@ def _build_orchestration_payload(tool_request: ToolRequest) -> Dict[str, Any]:
     ):
         if key in user_inputs and user_inputs[key] is not None:
             payload[key] = user_inputs[key]
+    if current_model_id:
+        _apply_current_model_to_tool_payload(payload, current_model_id)
     return payload
 
 
@@ -534,6 +574,10 @@ def create_openapi_tools_router(
     async def _execute_tool(tool_request: ToolRequest, http_request: Request) -> Dict[str, Any]:
         payload = _build_orchestration_payload(tool_request)
         payload.update(_extract_forwarded_openwebui_context(http_request))
+        if not _normalize_current_model_id(payload.get("resolved_model_id")):
+            forwarded_model_id = _extract_forwarded_model_id(http_request)
+            if forwarded_model_id:
+                _apply_current_model_to_tool_payload(payload, forwarded_model_id)
         orchestration_request = orchestration_request_model(**payload)
         response = await execute_orchestration_request(orchestration_request, http_request)
         if response.get("status") == "accepted":

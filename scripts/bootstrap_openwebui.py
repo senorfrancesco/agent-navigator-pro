@@ -20,6 +20,7 @@ DEFAULT_OPENWEBUI_BASE_URL = "http://127.0.0.1:3001"
 DEFAULT_OPENWEBUI_MODEL = "raw.qwen-14b-llm"
 DEFAULT_FUNCTION_CALLING_MODE = "native"
 DEFAULT_TOOL_SERVER_TOKEN = "llm-tools-platform-tool-server-dev-token"
+INTERNAL_CHAT_MODEL_IDS = {"llm-tools-platform"}
 DEFAULT_WORKSPACE_TOOL_RUNTIME = "container"
 BOOTSTRAP_CONNECTION_ID = "llm_tools_platform_openapi_tool_server"
 TOOL_SERVER_TOKEN_PLACEHOLDER = "SET_OPENAPI_TOOL_SERVER_TOKEN"
@@ -623,17 +624,37 @@ def reconcile_default_model(
     current_model_params = dict(current.get("DEFAULT_MODEL_PARAMS") or {})
     desired_model_params = dict(current_model_params)
     desired_model_params["function_calling"] = DEFAULT_FUNCTION_CALLING_MODE
+
+    current_order = list(current.get("MODEL_ORDER_LIST") or [])
+    desired_order = [item for item in current_order if str(item).strip() not in INTERNAL_CHAT_MODEL_IDS]
+    if len(desired_order) != len(current_order) and model_id not in desired_order:
+        desired_order.append(model_id)
+
+    current_metadata = dict(current.get("DEFAULT_MODEL_METADATA") or {})
+    desired_metadata = {
+        key: value
+        for key, value in current_metadata.items()
+        if str(key).strip() not in INTERNAL_CHAT_MODEL_IDS
+    }
+    if len(desired_metadata) != len(current_metadata) and model_id not in desired_metadata:
+        desired_metadata[model_id] = {"hidden": False}
+
     desired = {
         "DEFAULT_MODELS": model_id,
         "DEFAULT_PINNED_MODELS": current.get("DEFAULT_PINNED_MODELS"),
-        "MODEL_ORDER_LIST": current.get("MODEL_ORDER_LIST") or [],
-        "DEFAULT_MODEL_METADATA": current.get("DEFAULT_MODEL_METADATA") or {},
+        "MODEL_ORDER_LIST": desired_order,
+        "DEFAULT_MODEL_METADATA": desired_metadata,
         "DEFAULT_MODEL_PARAMS": desired_model_params,
     }
     applied_changes = _diff_paths(
         current,
         desired,
-        ("DEFAULT_MODELS", "DEFAULT_MODEL_PARAMS.function_calling"),
+        (
+            "DEFAULT_MODELS",
+            "MODEL_ORDER_LIST",
+            "DEFAULT_MODEL_METADATA",
+            "DEFAULT_MODEL_PARAMS.function_calling",
+        ),
     )
     summary = {
         "action": "updated" if applied_changes else "noop",

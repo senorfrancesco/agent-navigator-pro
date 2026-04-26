@@ -225,6 +225,7 @@ class OrchestrationRequest(BaseModel):
         ]
     ] = None
     generation_overrides: Optional[GenerationOverrides] = None
+    resolved_model_id: Optional[str] = None
     custom_system_prompt: Optional[str] = None
     tool_scope: Optional[Literal["chat", "coding", "agentic", "domain_tasks", "document_qa"]] = None
     ui_state: Optional[Dict[str, Any]] = None
@@ -461,6 +462,19 @@ def _collect_request_control_plane_with_payload_overrides(
         ):
             raw_control_plane[key] = request_payload[key]
     return raw_control_plane
+
+
+def _normalize_runtime_model_override(value: Any) -> Optional[str]:
+    model_id = str(value or "").strip()
+    if not model_id or model_id == "llm-tools-platform":
+        return None
+    return model_id
+
+
+def _apply_runtime_model_override(effective_settings: Dict[str, Any], model_id: Any) -> None:
+    normalized_model_id = _normalize_runtime_model_override(model_id)
+    if normalized_model_id:
+        effective_settings["resolved_model_id"] = normalized_model_id
 
 
 def _build_api_prompt(query: str, history: List[Dict[str, Any]], system_msg: str = "") -> str:
@@ -1334,11 +1348,19 @@ def _compute_openai_dedup_key(
 
 async def _stream_openai_compat_response(execution_response: Dict[str, Any]) -> AsyncGenerator[str, None]:
     yield "data: " + json.dumps({"choices": [{"delta": {"role": "assistant"}, "finish_reason": None}]}) + "\n\n"
-    text = str(execution_response.get("assistant_message") or "")
+    text = _strip_openai_compat_telemetry_footer(str(execution_response.get("assistant_message") or ""))
     if text:
         yield "data: " + json.dumps({"choices": [{"delta": {"content": text}, "finish_reason": None}]}) + "\n\n"
     yield "data: " + json.dumps({"choices": [{"delta": {}, "finish_reason": "stop"}]}) + "\n\n"
     yield "data: [DONE]\n\n"
+
+
+def _strip_openai_compat_telemetry_footer(text: str) -> str:
+    marker = "\n\n---\nTiming / Quality"
+    value = str(text or "")
+    if marker not in value:
+        return value
+    return value.split(marker, 1)[0].rstrip()
 
 
 def _build_openai_chat_completion_response(*, target_model: str, text: str) -> Dict[str, Any]:
@@ -1351,7 +1373,7 @@ def _build_openai_chat_completion_response(*, target_model: str, text: str) -> D
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": text},
+                "message": {"role": "assistant", "content": _strip_openai_compat_telemetry_footer(text)},
                 "finish_reason": "stop",
             }
         ],
@@ -1390,16 +1412,71 @@ def _build_raw_busy_stream_response(*, detail: Any) -> Dict[str, Any]:
     return {"assistant_message": _extract_busy_message(detail)}
 
 
+_CHAT_VISIBLE_MODEL_STATUSES = {"ready", "running"}
+_CHAT_VISIBLE_RUNTIME_TYPES = {"gguf", "gguf-vl"}
+
+
+def _load_ums_model_catalog() -> Optional[Dict[str, Dict[str, Any]]]:
+    try:
+        response = httpx.get(f"{ums_client.base_url.rstrip('/')}/models", timeout=2.0)
+        response.raise_for_status()
+        models = response.json().get("models")
+    except Exception as exc:
+        logger.debug("failed to load UMS model catalog for OpenAI model listing: %s", exc)
+        return None
+    if not isinstance(models, list):
+        return None
+    catalog: Dict[str, Dict[str, Any]] = {}
+    for item in models:
+        if not isinstance(item, dict):
+            continue
+        model_id = str(item.get("model_id") or item.get("id") or "").strip()
+        if model_id:
+            catalog[model_id] = item
+    return catalog
+
+
+def _is_chat_visible_model(model_id: str, config: Dict[str, Any], *, require_catalog_status: bool) -> bool:
+    if model_id == "llm-tools-platform":
+        return False
+    kind = str(config.get("kind") or "").strip()
+    if kind not in {"llm", "vision"}:
+        return False
+    user_selectable = config.get("user_selectable")
+    if user_selectable is None:
+        user_selectable = True
+    if not bool(user_selectable):
+        return False
+
+    status = str(config.get("status") or "").strip().lower()
+    if require_catalog_status:
+        return status in _CHAT_VISIBLE_MODEL_STATUSES
+    if status and status not in _CHAT_VISIBLE_MODEL_STATUSES:
+        return False
+
+    runtime_type = str(config.get("runtime_type") or config.get("type") or "").strip().lower()
+    if runtime_type not in _CHAT_VISIBLE_RUNTIME_TYPES:
+        return False
+    model_path = str(config.get("path") or config.get("resolved_path") or "").strip()
+    if not model_path:
+        return False
+    if not require_catalog_status and not Path(model_path).exists():
+        return False
+    if not config.get("port"):
+        return False
+    return True
+
+
 def _list_raw_chat_capable_models() -> List[Dict[str, Any]]:
     payload: List[Dict[str, Any]] = []
-    for model_id, config in get_all_models().items():
-        kind = str(config.get("kind") or "")
-        if kind not in {"llm", "vision"}:
-            continue
-        user_selectable = config.get("user_selectable")
-        if user_selectable is None:
-            user_selectable = True
-        if not bool(user_selectable):
+    ums_catalog = _load_ums_model_catalog()
+    catalog = ums_catalog if ums_catalog is not None else get_all_models()
+    for model_id, config in catalog.items():
+        if not _is_chat_visible_model(
+            model_id,
+            config,
+            require_catalog_status=ums_catalog is not None,
+        ):
             continue
         payload.append(
             {
@@ -1453,7 +1530,8 @@ def _resolve_default_user_model_id(*, available_ids: set[str]) -> str:
         ).strip()
         if active_model_id and active_model_id in available_ids:
             return active_model_id
-    return str(resolve_model_selection("llm.default_chat").resolved_model_id or "").strip()
+    default_model_id = str(resolve_model_selection("llm.default_chat").resolved_model_id or "").strip()
+    return default_model_id if default_model_id in available_ids else ""
 
 
 def _resolve_user_facing_model_id(
@@ -1499,6 +1577,13 @@ def _resolve_raw_model_id(data: Dict[str, Any]) -> str:
 def _should_passthrough_native_tool_request(data: Dict[str, Any]) -> bool:
     tools = data.get("tools")
     return isinstance(tools, list) and len(tools) > 0
+
+
+def _has_openai_tool_result_message(data: Dict[str, Any]) -> bool:
+    messages = data.get("messages")
+    if not isinstance(messages, list):
+        return False
+    return any(isinstance(item, dict) and item.get("role") == "tool" for item in messages)
 
 
 def _resolve_native_tool_passthrough_model_id(data: Dict[str, Any]) -> str:
@@ -1626,6 +1711,37 @@ async def _proxy_raw_openai_stream(response: httpx.Response) -> AsyncGenerator[b
         with suppress(Exception):
             await response.aclose()
 
+
+async def _proxy_raw_openai_completion(
+    data: Dict[str, Any],
+    *,
+    target_model: str,
+    response_model: Optional[str] = None,
+):
+    payload = _build_raw_openai_payload(data, target_model=target_model)
+    stream_mode = bool(data.get("stream", True))
+    visible_model = response_model or target_model
+
+    if not stream_mode:
+        try:
+            response = await _request_raw_openai_infer(target_model=target_model, payload=payload)
+        except HTTPException as exc:
+            if _is_busy_http_error(exc):
+                return _build_raw_busy_non_stream_response(target_model=visible_model, detail=exc.detail)
+            raise
+        return _sanitize_raw_openai_response(response, target_model=visible_model)
+
+    try:
+        stream_response = await _open_raw_openai_stream(target_model=target_model, payload=payload)
+    except HTTPException as exc:
+        if _is_busy_http_error(exc):
+            return StreamingResponse(
+                _stream_openai_compat_response(_build_raw_busy_stream_response(detail=exc.detail)),
+                media_type="text/event-stream",
+            )
+        raise
+    return StreamingResponse(_proxy_raw_openai_stream(stream_response), media_type="text/event-stream")
+
 # === Health ===
 
 @app.get("/health")
@@ -1645,6 +1761,7 @@ async def orchestrate(request: OrchestrationRequest, http_request: Optional[Requ
     apply_tool_contract_to_payload(payload)
     payload.setdefault("execution_surface", "agent_mode")
     effective_settings = resolve_effective_settings(_collect_request_control_plane_with_payload_overrides(request, payload))
+    _apply_runtime_model_override(effective_settings, payload.get("resolved_model_id"))
     response = decide_orchestration(
         query=str(payload.get("message", request.message)),
         trace_id=request.trace_id,
@@ -1681,6 +1798,7 @@ async def execute_orchestration_api(request: OrchestrationRequest, http_request:
     apply_tool_contract_to_payload(payload)
     payload.setdefault("execution_surface", "agent_mode")
     effective_settings = resolve_effective_settings(_collect_request_control_plane_with_payload_overrides(request, payload))
+    _apply_runtime_model_override(effective_settings, payload.get("resolved_model_id"))
     deps = _build_api_execution_dependencies(request, effective_settings)
     payload["runtime_mode"] = resolve_request_runtime_mode(payload, effective_settings)
     payload["effective_settings"] = effective_settings
@@ -1784,84 +1902,45 @@ def list_raw_models():
 async def raw_openai_completions(request: Request):
     data = await request.json()
     target_model = _resolve_raw_model_id(data)
-    payload = _build_raw_openai_payload(data, target_model=target_model)
-    stream_mode = bool(data.get("stream", True))
-
-    if not stream_mode:
-        try:
-            response = await _request_raw_openai_infer(target_model=target_model, payload=payload)
-        except HTTPException as exc:
-            if _is_busy_http_error(exc):
-                return _build_raw_busy_non_stream_response(target_model=target_model, detail=exc.detail)
-            raise
-        return _sanitize_raw_openai_response(response, target_model=target_model)
-
-    try:
-        stream_response = await _open_raw_openai_stream(target_model=target_model, payload=payload)
-    except HTTPException as exc:
-        if _is_busy_http_error(exc):
-            return StreamingResponse(
-                _stream_openai_compat_response(_build_raw_busy_stream_response(detail=exc.detail)),
-                media_type="text/event-stream",
-            )
-        raise
-    return StreamingResponse(_proxy_raw_openai_stream(stream_response), media_type="text/event-stream")
+    return await _proxy_raw_openai_completion(data, target_model=target_model)
 
 @app.get("/v1/models")
 def list_models():
     """Возвращает список пользовательских моделей из канонического backend-каталога."""
-    models = [
-        {"id": "llm-tools-platform", "object": "model", "created": int(time.time()), "owned_by": "llm-tools-platform"}
-    ]
-    models.extend(_list_raw_chat_capable_models())
-    return {"object": "list", "data": models}
+    return {"object": "list", "data": _list_raw_chat_capable_models()}
 
 @app.post("/v1/chat/completions")
 async def openai_completions(request: Request):
     data = await request.json()
     stream_mode = bool(data.get("stream", True))
-    messages = data.get("messages", [])
-    requested_target_model = str(data.get("model") or "llm-tools-platform").strip() or "llm-tools-platform"
-    target_model = requested_target_model
+    requested_target_model = str(data.get("model") or "").strip()
 
     if _should_passthrough_native_tool_request(data):
         raw_target_model = _resolve_native_tool_passthrough_model_id(data)
-        payload = _build_raw_openai_payload(data, target_model=raw_target_model)
+        visible_model = (
+            requested_target_model
+            if requested_target_model and requested_target_model != "llm-tools-platform"
+            else raw_target_model
+        )
+        return await _proxy_raw_openai_completion(
+            data,
+            target_model=raw_target_model,
+            response_model=visible_model,
+        )
 
-        if not stream_mode:
-            try:
-                response = await _request_raw_openai_infer(target_model=raw_target_model, payload=payload)
-            except HTTPException as exc:
-                if _is_busy_http_error(exc):
-                    return _build_raw_busy_non_stream_response(target_model=str(target_model), detail=exc.detail)
-                raise
-            return _sanitize_raw_openai_response(response, target_model=str(target_model))
+    if requested_target_model != "llm-tools-platform" or _has_openai_tool_result_message(data):
+        raw_target_model = _resolve_raw_model_id(data)
+        return await _proxy_raw_openai_completion(data, target_model=raw_target_model)
 
-        try:
-            stream_response = await _open_raw_openai_stream(target_model=raw_target_model, payload=payload)
-        except HTTPException as exc:
-            if _is_busy_http_error(exc):
-                return StreamingResponse(
-                    _stream_openai_compat_response(_build_raw_busy_stream_response(detail=exc.detail)),
-                    media_type="text/event-stream",
-                )
-            raise
-        return StreamingResponse(_proxy_raw_openai_stream(stream_response), media_type="text/event-stream")
-
-    if requested_target_model != "llm-tools-platform":
-        direct_required_capabilities: List[str] = []
-        if _request_requires_vision(data):
-            direct_required_capabilities.append("supports_vision")
-        target_model = _resolve_user_facing_model_id(data, required_capabilities=direct_required_capabilities)
+    messages = data.get("messages", [])
+    target_model = "llm-tools-platform"
 
     user_query = _extract_latest_user_query(messages)
-    forwarded_context = _extract_openwebui_forwarded_context(data, request)
-    found_files = [] if forwarded_context["session_docs"] else _discover_openai_attachments(user_query)
+    found_files: List[FileAttachment] = []
     dedup_key = _compute_openai_dedup_key(
         target_model=target_model,
         user_query=user_query,
         attachments=found_files,
-        forwarded_file_tokens=forwarded_context["dedup_tokens"],
     )
     now_ts = time.time()
     if dedup_key in _active_workflows and now_ts - _active_workflows[dedup_key] < DEDUP_WINDOW_SEC:
@@ -1888,11 +1967,6 @@ async def openai_completions(request: Request):
         if now_ts - _active_workflows[k] > 600:
             del _active_workflows[k]
 
-    session_docs = (
-        dict(forwarded_context["session_docs"])
-        if forwarded_context["session_docs"]
-        else await _load_openai_session_docs(found_files)
-    )
     if not stream_mode:
         try:
             compat_request = _build_openai_compat_request(
@@ -1900,10 +1974,7 @@ async def openai_completions(request: Request):
                 messages=messages,
                 user_query=user_query,
                 attachments=found_files,
-                session_docs=session_docs,
-                attachments_meta=forwarded_context["attachments_meta"] or None,
-                active_doc_ids=forwarded_context["active_doc_ids"] or None,
-                thread_id=forwarded_context["thread_id"],
+                session_docs={},
             )
             _materialize_request_document_context(compat_request)
             effective_settings = resolve_effective_settings(_collect_request_control_plane(compat_request))
@@ -1932,10 +2003,7 @@ async def openai_completions(request: Request):
                 messages=messages,
                 user_query=user_query,
                 attachments=found_files,
-                session_docs=session_docs,
-                attachments_meta=forwarded_context["attachments_meta"] or None,
-                active_doc_ids=forwarded_context["active_doc_ids"] or None,
-                thread_id=forwarded_context["thread_id"],
+                session_docs={},
             )
             _materialize_request_document_context(compat_request)
             effective_settings = resolve_effective_settings(_collect_request_control_plane(compat_request))

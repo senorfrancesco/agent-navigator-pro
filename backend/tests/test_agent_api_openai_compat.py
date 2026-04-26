@@ -31,6 +31,10 @@ async def _read_streaming_body(response: StreamingResponse) -> str:
     return "".join(chunks)
 
 
+def _raw_model_item(model_id: str = "qwen-14b-llm") -> Dict[str, Any]:
+    return {"id": model_id, "object": "model", "created": 1, "owned_by": "llm-tools-platform-raw-provider"}
+
+
 @pytest.mark.asyncio
 async def test_openai_chat_completions_routes_through_execute_orchestration(monkeypatch):
     captured: Dict[str, Any] = {}
@@ -72,22 +76,13 @@ async def test_openai_chat_completions_routes_through_execute_orchestration(monk
 
 
 @pytest.mark.asyncio
-async def test_openai_chat_completions_preserves_direct_model_override(monkeypatch):
-    captured: Dict[str, Any] = {}
-
+async def test_openai_chat_completions_strips_timing_footer_from_compat_non_streaming(monkeypatch):
     async def fake_execute(request: Dict[str, Any], *, deps=None):
-        captured["request"] = request
         return {
-            "assistant_message": "coder answer",
-            "trace_id": "trace-2",
-            "state_ref": "trace:trace-2",
-            "pending_action_id": None,
-            "ui_effects": {"clear_pending_action": True},
+            "assistant_message": "compat answer\n\n---\nTiming / Quality\n- Полный ответ: 10 мс",
+            "trace_id": "trace-footer-1",
             "sources": [],
-            "effective_settings": request["effective_settings"],
-            "rag_scope": "off",
-            "knowledge_collection_id": None,
-            "source_scope_summary": "off",
+            "telemetry": {"elapsed_ms": 10, "quality_summary": "LLM: да"},
         }
 
     monkeypatch.setattr(agent_api, "execute_orchestration", fake_execute)
@@ -97,31 +92,215 @@ async def test_openai_chat_completions_preserves_direct_model_override(monkeypat
     response = await agent_api.openai_completions(
         _FakeRequest(
             {
-                "model": "qwen-vl-8b",
-                "messages": [{"role": "user", "content": "Напиши функцию"}],
+                "model": "llm-tools-platform",
+                "messages": [{"role": "user", "content": "Привет"}],
+                "stream": False,
+            }
+        )
+    )
+
+    content = response["choices"][0]["message"]["content"]
+    assert content == "compat answer"
+    assert "Timing / Quality" not in content
+    assert "Полный ответ" not in content
+
+
+@pytest.mark.asyncio
+async def test_openai_chat_completions_strips_timing_footer_from_compat_streaming(monkeypatch):
+    async def fake_execute(request: Dict[str, Any], *, deps=None):
+        return {
+            "assistant_message": "compat stream answer\n\n---\nTiming / Quality\n- Полный ответ: 15 мс",
+            "trace_id": "trace-footer-2",
+            "sources": [],
+            "telemetry": {"elapsed_ms": 15, "quality_summary": "LLM: да"},
+        }
+
+    monkeypatch.setattr(agent_api, "execute_orchestration", fake_execute)
+    monkeypatch.setattr(agent_api, "_discover_openai_attachments", lambda user_query: [])
+    agent_api._active_workflows.clear()
+
+    response = await agent_api.openai_completions(
+        _FakeRequest(
+            {
+                "model": "llm-tools-platform",
+                "messages": [{"role": "user", "content": "Привет"}],
             }
         )
     )
     body = await _read_streaming_body(response)
 
-    assert captured["request"]["runtime_mode"] == "chat_only"
-    assert captured["request"]["effective_settings"]["resolved_model_id"] == "qwen-vl-8b"
-    assert "coder answer" in body
+    assert "compat stream answer" in body
+    assert "Timing / Quality" not in body
+    assert "Полный ответ" not in body
+    assert "data: [DONE]" in body
+
+
+@pytest.mark.asyncio
+async def test_openai_chat_completions_without_tools_proxies_direct_model_to_raw_ums(monkeypatch):
+    captured: Dict[str, Any] = {}
+
+    async def fake_execute(request: Dict[str, Any], *, deps=None):
+        raise AssertionError("execute_orchestration не должен вызываться для обычной raw-модели")
+
+    async def fake_request_raw_openai_infer(*, target_model: str, payload: Dict[str, Any]):
+        captured["model_id"] = target_model
+        captured["payload"] = payload
+        return {
+            "id": "chatcmpl-direct",
+            "object": "chat.completion",
+            "created": 123,
+            "model": "backend-model-label",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "raw direct answer"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+        }
+
+    monkeypatch.setattr(agent_api, "execute_orchestration", fake_execute)
+    monkeypatch.setattr(
+        agent_api,
+        "_discover_openai_attachments",
+        lambda user_query: (_ for _ in ()).throw(AssertionError("raw path should not discover attachments")),
+    )
+    monkeypatch.setattr(agent_api, "_list_raw_chat_capable_models", lambda: [_raw_model_item("qwen-vl-8b")])
+    monkeypatch.setattr(agent_api, "_request_raw_openai_infer", fake_request_raw_openai_infer)
+    agent_api._active_workflows.clear()
+
+    response = await agent_api.openai_completions(
+        _FakeRequest(
+            {
+                "model": "qwen-vl-8b",
+                "messages": [{"role": "user", "content": "Напиши функцию"}],
+                "stream": False,
+            }
+        )
+    )
+
+    assert response["model"] == "qwen-vl-8b"
+    assert response["choices"][0]["message"]["content"] == "raw direct answer"
+    assert "Timing / Quality" not in response["choices"][0]["message"]["content"]
+    assert captured["model_id"] == "qwen-vl-8b"
+    assert captured["payload"]["model"] == "qwen-vl-8b"
+
+
+@pytest.mark.asyncio
+async def test_openai_chat_completions_without_tools_streams_raw_chunks(monkeypatch):
+    captured: Dict[str, Any] = {}
+
+    async def fake_execute(request: Dict[str, Any], *, deps=None):
+        raise AssertionError("execute_orchestration не должен вызываться для обычной raw-модели")
+
+    async def fake_compat_stream(response: Dict[str, Any]):
+        raise AssertionError("обычная raw-модель не должна склеиваться через compat stream")
+
+    async def fake_open_stream(*, target_model: str, payload: Dict[str, Any]):
+        captured["model_id"] = target_model
+        captured["payload"] = payload
+        return object()
+
+    async def fake_stream(_response):
+        yield "data: {\"choices\":[{\"delta\":{\"content\":\"Пр\"},\"finish_reason\":null}]}\n\n".encode("utf-8")
+        yield "data: {\"choices\":[{\"delta\":{\"content\":\"ивет\"},\"finish_reason\":null}]}\n\n".encode("utf-8")
+        yield b"data: [DONE]\n\n"
+
+    monkeypatch.setattr(agent_api, "execute_orchestration", fake_execute)
+    monkeypatch.setattr(agent_api, "_stream_openai_compat_response", fake_compat_stream)
+    monkeypatch.setattr(agent_api, "_list_raw_chat_capable_models", lambda: [_raw_model_item("qwen-14b-llm")])
+    monkeypatch.setattr(agent_api, "_open_raw_openai_stream", fake_open_stream)
+    monkeypatch.setattr(agent_api, "_proxy_raw_openai_stream", fake_stream)
+    agent_api._active_workflows.clear()
+
+    response = await agent_api.openai_completions(
+        _FakeRequest(
+            {
+                "model": "qwen-14b-llm",
+                "messages": [{"role": "user", "content": "Привет"}],
+            }
+        )
+    )
+    body = await _read_streaming_body(response)
+
+    assert isinstance(response, StreamingResponse)
+    assert captured["model_id"] == "qwen-14b-llm"
+    assert captured["payload"]["model"] == "qwen-14b-llm"
+    assert "\"content\":\"Пр\"" in body
+    assert "\"content\":\"ивет\"" in body
+    assert "Timing / Quality" not in body
+    assert "data: [DONE]" in body
 
 
 def test_list_models_uses_registry_catalog_only(monkeypatch):
     monkeypatch.setattr(
         agent_api,
         "_list_raw_chat_capable_models",
-        lambda: [
-            {"id": "qwen-14b-llm", "object": "model", "created": 1, "owned_by": "llm-tools-platform-raw-provider"}
-        ],
+        lambda: [_raw_model_item()],
     )
 
     response = agent_api.list_models()
 
     assert response["object"] == "list"
-    assert [item["id"] for item in response["data"]] == ["llm-tools-platform", "qwen-14b-llm"]
+    assert [item["id"] for item in response["data"]] == ["qwen-14b-llm"]
+
+
+def test_raw_models_filters_ums_catalog_to_ready_chat_models(monkeypatch):
+    monkeypatch.setattr(
+        agent_api,
+        "_load_ums_model_catalog",
+        lambda: {
+            "qwen-14b-llm": {"model_id": "qwen-14b-llm", "kind": "llm", "user_selectable": True, "status": "ready"},
+            "qwen-vl-8b": {"model_id": "qwen-vl-8b", "kind": "vision", "user_selectable": True, "status": "ready"},
+            "llama-3.1-8b": {"model_id": "llama-3.1-8b", "kind": "llm", "user_selectable": True, "status": "incomplete"},
+            "qwen-72b-llm": {"model_id": "qwen-72b-llm", "kind": "llm", "user_selectable": True, "status": "unsupported"},
+            "ambiguous-qwen": {"model_id": "ambiguous-qwen", "kind": "llm", "user_selectable": True, "status": "ambiguous"},
+            "labse-embedding": {"model_id": "labse-embedding", "kind": "retrieval_embedder", "status": "ready"},
+            "llm-tools-platform": {"model_id": "llm-tools-platform", "kind": "llm", "user_selectable": True, "status": "ready"},
+        },
+    )
+
+    response = agent_api.list_raw_models()
+
+    assert [item["id"] for item in response["data"]] == ["qwen-14b-llm", "qwen-vl-8b"]
+
+
+def test_raw_models_local_fallback_is_conservative(tmp_path, monkeypatch):
+    model_path = tmp_path / "qwen.gguf"
+    model_path.write_text("fake", encoding="utf-8")
+    monkeypatch.setattr(agent_api, "_load_ums_model_catalog", lambda: None)
+    monkeypatch.setattr(
+        agent_api,
+        "get_all_models",
+        lambda: {
+            "qwen-14b-llm": {
+                "kind": "llm",
+                "runtime_type": "gguf",
+                "path": str(model_path),
+                "port": 8091,
+                "user_selectable": True,
+            },
+            "llama-3.1-8b": {
+                "kind": "llm",
+                "runtime_type": "gguf",
+                "path": "",
+                "port": 8096,
+                "user_selectable": True,
+            },
+            "qwen-72b-llm": {
+                "kind": "llm",
+                "runtime_type": "dynamic",
+                "path": str(model_path),
+                "port": 8097,
+                "user_selectable": True,
+            },
+        },
+    )
+
+    response = agent_api.list_raw_models()
+
+    assert [item["id"] for item in response["data"]] == ["qwen-14b-llm"]
 
 
 def test_resolve_raw_model_id_prefers_active_ums_model(monkeypatch):
@@ -129,8 +308,8 @@ def test_resolve_raw_model_id_prefers_active_ums_model(monkeypatch):
         agent_api,
         "_list_raw_chat_capable_models",
         lambda: [
-            {"id": "qwen-14b-llm", "object": "model", "created": 1, "owned_by": "x"},
-            {"id": "qwen-vl-8b", "object": "model", "created": 1, "owned_by": "x"},
+            _raw_model_item("qwen-14b-llm"),
+            _raw_model_item("qwen-vl-8b"),
         ],
     )
     monkeypatch.setattr(agent_api.ums_client, "get_status", lambda: {"active_model_id": "qwen-vl-8b"})
@@ -142,9 +321,7 @@ def test_resolve_native_tool_passthrough_model_rejects_incompatible_model(monkey
     monkeypatch.setattr(
         agent_api,
         "_list_raw_chat_capable_models",
-        lambda: [
-            {"id": "qwen-14b-llm", "object": "model", "created": 1, "owned_by": "x"},
-        ],
+        lambda: [_raw_model_item("qwen-14b-llm")],
     )
     monkeypatch.setattr(
         agent_api,
@@ -322,7 +499,7 @@ async def test_openai_chat_completions_native_tools_passthrough_non_streaming(mo
         }
 
     monkeypatch.setattr(agent_api, "execute_orchestration", fake_execute)
-    monkeypatch.setattr(agent_api, "get_all_models", lambda: {"qwen-14b-llm": {"kind": "llm"}})
+    monkeypatch.setattr(agent_api, "_list_raw_chat_capable_models", lambda: [_raw_model_item("qwen-14b-llm")])
     monkeypatch.setattr(
         agent_api,
         "resolve_model_selection",
@@ -334,7 +511,7 @@ async def test_openai_chat_completions_native_tools_passthrough_non_streaming(mo
     response = await agent_api.openai_completions(
         _FakeRequest(
             {
-                "model": "llm-tools-platform",
+                "model": "qwen-14b-llm",
                 "messages": [{"role": "user", "content": "Сделай глубокий анализ"}],
                 "stream": False,
                 "tools": [
@@ -354,7 +531,69 @@ async def test_openai_chat_completions_native_tools_passthrough_non_streaming(mo
     assert captured["model_id"] == "qwen-14b-llm"
     assert captured["payload"]["model"] == "qwen-14b-llm"
     assert captured["payload"]["tools"][0]["function"]["name"] == "equipment_deep_tool"
-    assert response["model"] == "llm-tools-platform"
+    assert response["model"] == "qwen-14b-llm"
+    assert response["choices"][0]["finish_reason"] == "tool_calls"
+
+
+@pytest.mark.asyncio
+async def test_openai_chat_completions_native_tools_legacy_model_label_resolves_to_raw_model(monkeypatch):
+    async def fake_execute(request: Dict[str, Any], *, deps=None):
+        raise AssertionError("execute_orchestration не должен вызываться для native tool passthrough")
+
+    async def fake_request_raw_openai_infer(*, target_model: str, payload: Dict[str, Any]):
+        return {
+            "id": "chatcmpl-native-tools",
+            "object": "chat.completion",
+            "created": 123,
+            "model": "llm-tools-platform",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": "call_123",
+                                "type": "function",
+                                "function": {"name": "equipment_deep_tool", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    monkeypatch.setattr(agent_api, "execute_orchestration", fake_execute)
+    monkeypatch.setattr(agent_api, "_list_raw_chat_capable_models", lambda: [_raw_model_item("qwen-14b-llm")])
+    monkeypatch.setattr(
+        agent_api,
+        "resolve_model_selection",
+        lambda role_key: type("Selection", (), {"resolved_model_id": "qwen-14b-llm"})(),
+    )
+    monkeypatch.setattr(agent_api, "_request_raw_openai_infer", fake_request_raw_openai_infer)
+
+    response = await agent_api.openai_completions(
+        _FakeRequest(
+            {
+                "model": "llm-tools-platform",
+                "messages": [{"role": "user", "content": "Сделай глубокий анализ"}],
+                "stream": False,
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "equipment_deep_tool",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
+            }
+        )
+    )
+
+    assert response["model"] == "qwen-14b-llm"
     assert response["choices"][0]["finish_reason"] == "tool_calls"
 
 
@@ -378,7 +617,7 @@ async def test_openai_chat_completions_native_tools_passthrough_streaming(monkey
         yield b"data: [DONE]\n\n"
 
     monkeypatch.setattr(agent_api, "execute_orchestration", fake_execute)
-    monkeypatch.setattr(agent_api, "get_all_models", lambda: {"qwen-14b-llm": {"kind": "llm"}})
+    monkeypatch.setattr(agent_api, "_list_raw_chat_capable_models", lambda: [_raw_model_item("qwen-14b-llm")])
     monkeypatch.setattr(
         agent_api,
         "resolve_model_selection",
@@ -391,7 +630,7 @@ async def test_openai_chat_completions_native_tools_passthrough_streaming(monkey
     response = await agent_api.openai_completions(
         _FakeRequest(
             {
-                "model": "llm-tools-platform",
+                "model": "qwen-14b-llm",
                 "messages": [{"role": "user", "content": "Сделай глубокий анализ"}],
                 "tools": [
                     {
@@ -417,45 +656,94 @@ async def test_openai_chat_completions_native_tools_passthrough_streaming(monkey
 
 
 @pytest.mark.asyncio
-async def test_openai_chat_completions_loads_attachment_text_into_session_docs(monkeypatch):
+async def test_openai_chat_completions_tool_result_followup_uses_raw_model(monkeypatch):
+    captured: Dict[str, Any] = {}
+
+    async def fake_execute(request: Dict[str, Any], *, deps=None):
+        raise AssertionError("execute_orchestration не должен вызываться для tool result follow-up")
+
+    async def fake_request_raw_openai_infer(*, target_model: str, payload: Dict[str, Any]):
+        captured["model_id"] = target_model
+        captured["payload"] = payload
+        return {
+            "id": "chatcmpl-tool-followup",
+            "object": "chat.completion",
+            "created": 123,
+            "model": target_model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "Итог по инструменту"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    monkeypatch.setattr(agent_api, "execute_orchestration", fake_execute)
+    monkeypatch.setattr(agent_api, "_list_raw_chat_capable_models", lambda: [_raw_model_item("qwen-14b-llm")])
+    monkeypatch.setattr(
+        agent_api,
+        "resolve_model_selection",
+        lambda role_key: type("Selection", (), {"resolved_model_id": "qwen-14b-llm"})(),
+    )
+    monkeypatch.setattr(agent_api, "_request_raw_openai_infer", fake_request_raw_openai_infer)
+
+    response = await agent_api.openai_completions(
+        _FakeRequest(
+            {
+                "model": "llm-tools-platform",
+                "stream": False,
+                "messages": [
+                    {"role": "user", "content": "Сделай анализ"},
+                    {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": "call_123",
+                                "type": "function",
+                                "function": {"name": "equipment_deep_tool", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                    {"role": "tool", "tool_call_id": "call_123", "content": "tool result"},
+                ],
+            }
+        )
+    )
+
+    assert captured["model_id"] == "qwen-14b-llm"
+    assert captured["payload"]["model"] == "qwen-14b-llm"
+    assert response["model"] == "qwen-14b-llm"
+    assert response["choices"][0]["message"]["content"] == "Итог по инструменту"
+
+
+@pytest.mark.asyncio
+async def test_openai_chat_completions_plain_compat_does_not_discover_or_load_session_docs(monkeypatch):
     captured: Dict[str, Any] = {}
 
     async def fake_execute(request: Dict[str, Any], *, deps=None):
         captured["request"] = request
         return {
-            "assistant_message": "summary",
-            "trace_id": "trace-summary",
-            "state_ref": "trace:trace-summary",
-            "pending_action_id": None,
-            "ui_effects": {"clear_pending_action": True},
+            "assistant_message": "plain answer",
+            "trace_id": "trace-plain-no-rag",
             "sources": [],
             "effective_settings": request["effective_settings"],
-            "rag_scope": "session_rag",
+            "rag_scope": "off",
             "knowledge_collection_id": None,
-            "source_scope_summary": "session",
+            "source_scope_summary": "off",
         }
 
     async def fake_load_session_docs(attachments):
-        return {
-            "contract.pdf": {
-                "document_id": "contract.pdf",
-                "path": "/tmp/contract.pdf",
-                "text": "Штраф составляет 10 процентов.",
-            }
-        }
+        raise AssertionError("plain OpenAI-compatible chat не должен загружать session docs")
 
     monkeypatch.setattr(agent_api, "execute_orchestration", fake_execute)
     monkeypatch.setattr(
         agent_api,
         "_discover_openai_attachments",
-        lambda user_query: [
-            agent_api.FileAttachment(
-                name="contract.pdf",
-                path="/tmp/contract.pdf",
-                size=10,
-                type="application/pdf",
-            )
-        ],
+        lambda user_query: (_ for _ in ()).throw(
+            AssertionError("plain OpenAI-compatible chat не должен искать вложения")
+        ),
     )
     monkeypatch.setattr(agent_api, "_load_openai_session_docs", fake_load_session_docs, raising=False)
     agent_api._active_workflows.clear()
@@ -464,45 +752,42 @@ async def test_openai_chat_completions_loads_attachment_text_into_session_docs(m
         _FakeRequest(
             {
                 "model": "llm-tools-platform",
-                "messages": [{"role": "user", "content": "Сделай сводку по документам"}],
+                "messages": [{"role": "user", "content": "Привет"}],
                 "stream": False,
             }
         )
     )
 
-    assert response["choices"][0]["message"]["content"] == "summary"
-    assert captured["request"]["has_session_docs"] is True
-    assert captured["request"]["session_docs"]["contract.pdf"]["text"] == "Штраф составляет 10 процентов."
+    assert response["choices"][0]["message"]["content"] == "plain answer"
+    assert captured["request"]["has_session_docs"] is False
+    assert captured["request"]["session_docs"] == {}
+    assert captured["request"]["attachments_meta"] == []
+    assert captured["request"]["active_doc_ids"] == []
+    assert captured["request"]["effective_settings"]["rag_scope"] == "off"
+    assert "rag_scope" not in captured["request"]
 
 
 @pytest.mark.asyncio
-async def test_openai_chat_completions_prefers_forwarded_openwebui_files_for_session_docs(monkeypatch):
+async def test_openai_chat_completions_ignores_forwarded_openwebui_files_in_plain_compat_chat(monkeypatch):
     captured: Dict[str, Any] = {}
-    discover_calls = {"count": 0}
-    load_calls = {"count": 0}
 
     async def fake_execute(request: Dict[str, Any], *, deps=None):
         captured["request"] = request
         return {
-            "assistant_message": "summary",
-            "trace_id": "trace-forwarded",
-            "state_ref": "trace:trace-forwarded",
-            "pending_action_id": None,
-            "ui_effects": {"clear_pending_action": True},
+            "assistant_message": "plain forwarded answer",
+            "trace_id": "trace-forwarded-no-rag",
             "sources": [],
             "effective_settings": request["effective_settings"],
-            "rag_scope": "session_rag",
+            "rag_scope": "off",
             "knowledge_collection_id": None,
-            "source_scope_summary": "session",
+            "source_scope_summary": "off",
         }
 
     def fake_discover_openai_attachments(user_query: str):
-        discover_calls["count"] += 1
-        return []
+        raise AssertionError("plain OpenAI-compatible chat не должен искать вложения")
 
     async def fake_load_session_docs(_attachments):
-        load_calls["count"] += 1
-        return {}
+        raise AssertionError("plain OpenAI-compatible chat не должен загружать session docs")
 
     monkeypatch.setattr(agent_api, "execute_orchestration", fake_execute)
     monkeypatch.setattr(agent_api, "_discover_openai_attachments", fake_discover_openai_attachments)
@@ -536,28 +821,25 @@ async def test_openai_chat_completions_prefers_forwarded_openwebui_files_for_ses
         )
     )
 
-    assert response["choices"][0]["message"]["content"] == "summary"
-    assert discover_calls["count"] == 0
-    assert load_calls["count"] == 0
-    assert captured["request"]["thread_id"] == "chat-123"
-    assert captured["request"]["rag_scope"] == "session_rag"
-    assert captured["request"]["document_bindings"][0]["thread_id"] == "chat-123"
-    assert captured["request"]["document_bindings"][0]["document_id"] == "file-contract-1"
-    assert captured["request"]["has_session_docs"] is True
-    assert captured["request"]["active_doc_ids"] == ["file-contract-1"]
-    assert captured["request"]["attachments_meta"][0]["name"] == "contract.pdf"
-    assert captured["request"]["session_docs"]["contract.pdf"]["document_id"] == "file-contract-1"
-    assert captured["request"]["session_docs"]["contract.pdf"]["text"] == "Штраф составляет 10 процентов."
+    assert response["choices"][0]["message"]["content"] == "plain forwarded answer"
+    assert "thread_id" not in captured["request"]
+    assert "document_bindings" not in captured["request"]
+    assert "rag_scope" not in captured["request"]
+    assert captured["request"]["has_session_docs"] is False
+    assert captured["request"]["active_doc_ids"] == []
+    assert captured["request"]["attachments_meta"] == []
+    assert captured["request"]["session_docs"] == {}
+    assert captured["request"]["effective_settings"]["rag_scope"] == "off"
 
 
 def test_raw_models_lists_chat_capable_models_without_agent_wrapper(monkeypatch):
     monkeypatch.setattr(
         agent_api,
-        "get_all_models",
+        "_load_ums_model_catalog",
         lambda: {
-            "qwen-14b-llm": {"kind": "llm"},
-            "qwen-vl-8b": {"kind": "vision"},
-            "labse-embedding": {"kind": "retrieval_embedder"},
+            "qwen-14b-llm": {"model_id": "qwen-14b-llm", "kind": "llm", "status": "ready"},
+            "qwen-vl-8b": {"model_id": "qwen-vl-8b", "kind": "vision", "status": "ready"},
+            "labse-embedding": {"model_id": "labse-embedding", "kind": "retrieval_embedder", "status": "ready"},
         },
     )
 
@@ -584,7 +866,7 @@ async def test_raw_chat_completions_non_streaming_proxies_to_ums(monkeypatch):
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         }
 
-    monkeypatch.setattr(agent_api, "get_all_models", lambda: {"qwen-14b-llm": {"kind": "llm"}})
+    monkeypatch.setattr(agent_api, "_list_raw_chat_capable_models", lambda: [_raw_model_item("qwen-14b-llm")])
     monkeypatch.setattr(
         agent_api,
         "resolve_model_selection",
@@ -619,7 +901,7 @@ async def test_raw_chat_completions_non_streaming_surfaces_runtime_unavailable(m
             },
         )
 
-    monkeypatch.setattr(agent_api, "get_all_models", lambda: {"qwen-14b-llm": {"kind": "llm"}})
+    monkeypatch.setattr(agent_api, "_list_raw_chat_capable_models", lambda: [_raw_model_item("qwen-14b-llm")])
     monkeypatch.setattr(
         agent_api,
         "resolve_model_selection",
@@ -655,7 +937,7 @@ async def test_raw_chat_completions_streaming_proxies_to_ums(monkeypatch):
         yield "data: {\"choices\":[{\"delta\":{\"content\":\"ивет\"},\"finish_reason\":null}]}\n\n".encode("utf-8")
         yield b"data: [DONE]\n\n"
 
-    monkeypatch.setattr(agent_api, "get_all_models", lambda: {"qwen-14b-llm": {"kind": "llm"}})
+    monkeypatch.setattr(agent_api, "_list_raw_chat_capable_models", lambda: [_raw_model_item("qwen-14b-llm")])
     monkeypatch.setattr(
         agent_api,
         "resolve_model_selection",
@@ -715,7 +997,7 @@ async def test_raw_chat_completions_returns_busy_stream_response_before_stream_s
     async def fake_get_shared_client():
         return _FakeClient()
 
-    monkeypatch.setattr(agent_api, "get_all_models", lambda: {"qwen-14b-llm": {"kind": "llm"}})
+    monkeypatch.setattr(agent_api, "_list_raw_chat_capable_models", lambda: [_raw_model_item("qwen-14b-llm")])
     monkeypatch.setattr(
         agent_api,
         "resolve_model_selection",
@@ -770,7 +1052,7 @@ async def test_raw_chat_completions_returns_busy_non_stream_response(monkeypatch
     async def fake_get_shared_client():
         return _FakeClient()
 
-    monkeypatch.setattr(agent_api, "get_all_models", lambda: {"qwen-14b-llm": {"kind": "llm"}})
+    monkeypatch.setattr(agent_api, "_list_raw_chat_capable_models", lambda: [_raw_model_item("qwen-14b-llm")])
     monkeypatch.setattr(
         agent_api,
         "resolve_model_selection",
@@ -826,7 +1108,7 @@ async def test_raw_chat_completions_returns_runtime_unavailable_before_stream_st
     async def fake_get_shared_client():
         return _FakeClient()
 
-    monkeypatch.setattr(agent_api, "get_all_models", lambda: {"qwen-14b-llm": {"kind": "llm"}})
+    monkeypatch.setattr(agent_api, "_list_raw_chat_capable_models", lambda: [_raw_model_item("qwen-14b-llm")])
     monkeypatch.setattr(
         agent_api,
         "resolve_model_selection",
@@ -850,7 +1132,7 @@ async def test_raw_chat_completions_returns_runtime_unavailable_before_stream_st
 
 @pytest.mark.asyncio
 async def test_raw_chat_completions_rejects_unknown_model(monkeypatch):
-    monkeypatch.setattr(agent_api, "get_all_models", lambda: {"qwen-14b-llm": {"kind": "llm"}})
+    monkeypatch.setattr(agent_api, "_list_raw_chat_capable_models", lambda: [_raw_model_item("qwen-14b-llm")])
     monkeypatch.setattr(
         agent_api,
         "resolve_model_selection",

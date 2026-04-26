@@ -136,6 +136,102 @@ def test_sync_tool_route_returns_completed_contract(monkeypatch):
     assert captured["request"].requested_tool == "ask_document"
     assert captured["request"].routing_mode == "explicit"
     assert captured["request"].active_doc_ids == ["doc-1"]
+    assert captured["request"].resolved_model_id is None
+
+
+def test_tool_route_passes_current_model_from_user_inputs(monkeypatch):
+    captured: Dict[str, Any] = {}
+
+    async def fake_execute(orchestration_request, http_request=None):
+        captured["request"] = orchestration_request
+        return {
+            "assistant_message": "Готово",
+            "trace_id": "trace-tool-model-1",
+            "route": "equipment",
+            "source_scope_summary": "off",
+            "sources": [],
+        }
+
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_TOKEN", "tool-secret")
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_ALLOWED_ORIGINS", "http://localhost:3001")
+    monkeypatch.setattr(agent_api, "execute_orchestration_api", fake_execute)
+
+    client = TestClient(agent_api.app)
+    response = client.post(
+        "/tools/analyze_equipment_fast",
+        headers=_auth_headers(),
+        json={
+            "equipment_query": "Проверь оборудование",
+            "user_inputs": {"current_model_id": "qwen-14b-llm"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["request"].resolved_model_id == "qwen-14b-llm"
+    assert captured["request"].ui_state["current_model_id"] == "qwen-14b-llm"
+
+
+def test_tool_route_current_model_reaches_execution_effective_settings(monkeypatch):
+    captured: Dict[str, Any] = {}
+
+    async def fake_execute(payload, deps=None):
+        captured["payload"] = payload
+        return {
+            "assistant_message": "Готово",
+            "trace_id": "trace-tool-model-effective",
+            "route": "equipment",
+            "source_scope_summary": "off",
+            "sources": [],
+            "effective_settings": payload["effective_settings"],
+        }
+
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_TOKEN", "tool-secret")
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_ALLOWED_ORIGINS", "http://localhost:3001")
+    monkeypatch.setattr(agent_api, "_build_api_execution_dependencies", lambda request, settings: object())
+    monkeypatch.setattr(agent_api, "execute_orchestration", fake_execute)
+
+    client = TestClient(agent_api.app)
+    response = client.post(
+        "/tools/analyze_equipment_fast",
+        headers=_auth_headers(),
+        json={
+            "equipment_query": "Проверь оборудование",
+            "user_inputs": {"current_model_id": "qwen-vl-8b"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["payload"]["resolved_model_id"] == "qwen-vl-8b"
+    assert captured["payload"]["effective_settings"]["resolved_model_id"] == "qwen-vl-8b"
+
+
+def test_tool_route_passes_current_model_from_forwarded_header(monkeypatch):
+    captured: Dict[str, Any] = {}
+
+    async def fake_execute(orchestration_request, http_request=None):
+        captured["request"] = orchestration_request
+        return {
+            "assistant_message": "Готово",
+            "trace_id": "trace-tool-model-2",
+            "route": "equipment",
+            "source_scope_summary": "off",
+            "sources": [],
+        }
+
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_TOKEN", "tool-secret")
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_ALLOWED_ORIGINS", "http://localhost:3001")
+    monkeypatch.setattr(agent_api, "execute_orchestration_api", fake_execute)
+
+    client = TestClient(agent_api.app)
+    response = client.post(
+        "/tools/analyze_equipment_fast",
+        headers={**_auth_headers(), "X-OpenWebUI-Model-Id": "qwen-vl-8b"},
+        json={"equipment_query": "Проверь оборудование"},
+    )
+
+    assert response.status_code == 200
+    assert captured["request"].resolved_model_id == "qwen-vl-8b"
+    assert captured["request"].ui_state["current_model_id"] == "qwen-vl-8b"
 
 
 def test_async_tool_route_returns_accepted_contract(monkeypatch):

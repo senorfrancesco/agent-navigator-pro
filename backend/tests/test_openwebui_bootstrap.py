@@ -472,8 +472,8 @@ def test_ensure_default_model_preserves_existing_model_config(monkeypatch):
             {
                 "DEFAULT_MODELS": "raw.qwen-14b-llm",
                 "DEFAULT_PINNED_MODELS": None,
-                "MODEL_ORDER_LIST": ["llm-tools-platform"],
-                "DEFAULT_MODEL_METADATA": {"llm-tools-platform": {"hidden": False}},
+                "MODEL_ORDER_LIST": ["raw.qwen-14b-llm"],
+                "DEFAULT_MODEL_METADATA": {"raw.qwen-14b-llm": {"hidden": False}},
                 "DEFAULT_MODEL_PARAMS": {"temperature": 0.2, "function_calling": "native"},
             },
         ),
