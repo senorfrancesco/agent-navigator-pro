@@ -250,6 +250,7 @@
   - backend `agent-api` в контейнерном контуре использует `QDRANT_URL=http://qdrant:6333`;
   - `scripts/run_all.sh` и `./scripts/launcher.sh --target container` теперь поднимают `Open WebUI` + backend + `Qdrant`; `Chainlit` в этом контуре больше не стартует по умолчанию;
   - `scripts/run_native.sh`, `scripts/stop_native.sh` и `./scripts/launcher.sh --target native` теперь поднимают host-side backend вместе с `Qdrant`, а `Open WebUI` запускают как primary UI; `--skip-openwebui` становится каноническим флагом, а `--skip-chainlit` остаётся только совместимым алиасом;
+  - временный dev-контур для проверки текущего форка без пересборки образа закреплён как `./scripts/run_native.sh --openwebui-dev`: backend `Open WebUI` запускается из `../open-webui` на host-порту `8080`, frontend `vite` — на `OPENWEBUI_PORT`, runtime/RAG/Qdrant параметры повторяют compose-контракт, а `DATA_DIR/uploads` связывается с backend `UPLOADS_DIR`;
   - подготовлено операторское руководство по bootstrap и ручной настройке `Knowledge`/`session` на одном `Qdrant`.
   Verification 2026-04-13:
   - `docker compose config`

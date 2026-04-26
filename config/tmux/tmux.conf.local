@@ -493,23 +493,15 @@ tmux_conf_theme_status_right=""
 tmux_conf_theme_status_bg="#191724"
 # tmux_conf_theme_status_bg="#221F30"
 
-# Использовать vi-режим в copy-mode
-
+# Использовать vi-режим в copy-mode.
 set -g mode-keys vi
 
-# Включить копирование в системный буфер (требуется `xclip` или `pbcopy`)
+# Разрешить tmux работать с системным clipboard, если терминал это умеет.
+set -g set-clipboard on
 
-bind-key -T copy-mode-vi y send -X copy-pipe-and-cancel "xclip -selection clipboard -i"
-
-# Альтернативный вариант для macOS
-# bind-key -T copy-mode-vi y send -X copy-pipe-and-cancel "pbcopy"
-
-# Удобный способ входа в copy-mode
+# Удобный способ входа в copy-mode и запуска выделения.
 bind-key [ copy-mode
-
-# Настройка кнопок для навигации (опционально)
 bind-key -T copy-mode-vi v send -X begin-selection
-bind-key -T copy-mode-vi y send -X copy-selection-and-cancel
 
 tmux_conf_24b_colour=true
 

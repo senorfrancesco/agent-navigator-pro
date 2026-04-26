@@ -38,6 +38,8 @@ launch_codex_tmux_workspace.sh
   - окно `codex-helper`: 2 панели с вертикальным разделением:
       - слева обычный терминал
       - справа `codex` помощник
+  - в `copy-mode` клавиша `y` копирует в системный буфер через `wl-copy`,
+    `xclip` или `xsel`, если доступен один из этих инструментов
 
 Использование:
   ./scripts/launch_codex_tmux_workspace.sh
@@ -157,7 +159,39 @@ build_codex_command() {
   fi
 }
 
+detect_tmux_clipboard_command() {
+  if [ "${XDG_SESSION_TYPE:-}" = "wayland" ] && command -v wl-copy >/dev/null 2>&1; then
+    printf '%s' 'wl-copy'
+    return 0
+  fi
+  if command -v xclip >/dev/null 2>&1; then
+    printf '%s' 'xclip -selection clipboard -in >/dev/null 2>&1'
+    return 0
+  fi
+  if command -v xsel >/dev/null 2>&1; then
+    printf '%s' 'xsel -i -b >/dev/null 2>&1'
+    return 0
+  fi
+  return 1
+}
+
+configure_tmux_copy_mode() {
+  local clipboard_cmd=""
+  tmux set-option -g set-clipboard on
+  tmux set-window-option -g mode-keys vi
+  tmux bind-key [ copy-mode
+  tmux bind-key -T copy-mode-vi v send -X begin-selection
+  if clipboard_cmd="$(detect_tmux_clipboard_command)"; then
+    tmux bind-key -T copy-mode-vi y send -X copy-pipe-and-cancel "$clipboard_cmd"
+    echo "tmux-clipboard:system command=$clipboard_cmd"
+  else
+    tmux bind-key -T copy-mode-vi y send -X copy-selection-and-cancel
+    echo "tmux-clipboard:tmux-buffer-only"
+  fi
+}
+
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+  configure_tmux_copy_mode
   echo "tmux-session-exists:$SESSION_NAME"
   echo "attach with: tmux attach -t $SESSION_NAME"
   exit 0
@@ -189,6 +223,8 @@ helper_root_pane="$(tmux display-message -p -t "$SESSION_NAME:$HELPER_WINDOW_NAM
 tmux split-window -h -t "$helper_root_pane" -l 50%
 helper_right_pane="$(tmux display-message -p -t "$SESSION_NAME:$HELPER_WINDOW_NAME" '#{pane_id}')"
 helper_left_pane="$helper_root_pane"
+
+configure_tmux_copy_mode
 
 tmux select-pane -t "$grid_top_left_pane" -T "codex-1"
 tmux select-pane -t "$grid_top_right_pane" -T "codex-2"

@@ -136,14 +136,14 @@ tmux new -s my-session
 
 ### Копирование текста (vi-режим)
 
-Конфиг использует vi-навигацию в copy-mode, копирование через `xclip` в системный буфер.
+Конфиг использует vi-навигацию в copy-mode. Для workspace-сессии `Codex`, поднятой через [launch_codex_tmux_workspace.sh](/home/seral/HDD/proj/agent-navigator-pro/scripts/launch_codex_tmux_workspace.sh:32), клавиша `y` копирует выделение в буфер `tmux` и сразу пробует системный clipboard в таком порядке: `wl-copy` на `Wayland`, затем `xclip`, затем `xsel`.
 
 | Действие | Комбинация |
 |----------|-----------|
 | Войти в режим копирования | `<P> Enter` или `<P> [` |
 | Начать выделение | `v` |
 | Прямоугольное выделение | `C-v` |
-| Копировать выделение (и выйти) | `y` → копируется в буфер tmux и xclip (системный) |
+| Копировать выделение (и выйти) | `y` → копируется в буфер tmux и в доступный системный clipboard helper |
 | Начало строки | `H` |
 | Конец строки | `L` |
 | Выход из copy-mode | `Escape` или `q` |
@@ -198,7 +198,8 @@ nvidia-smi -l 1
 | `tmux_conf_24b_colour` | `true` | True color (24-bit) |
 | `tmux_conf_theme_status_bg` | `#191724` | Тёмный фон статус-бара (Rosé Pine) |
 | `mode-keys` | `vi` | Vi-навигация в copy-mode |
-| Copy bind (`y`) | `xclip` | Копирование в системный буфер |
+| `set-clipboard` | `on` | Разрешает tmux пробрасывать clipboard наружу |
+| Launcher clipboard bind | `y` | Для Codex workspace использует `wl-copy` / `xclip` / `xsel` |
 | `tmux_conf_new_pane_retain_current_path` | `true` | Новая панель в той же директории |
 | Сепараторы | powerline-символы | Требуют Nerd Font или patched шрифт |
 
@@ -223,6 +224,15 @@ export TERM=xterm-256color
 **`y` не копирует в системный буфер:**
 ```bash
 sudo apt-get install -y xclip
+# для нативного Wayland-варианта вместо XWayland fallback:
+sudo apt-get install -y wl-clipboard
+```
+
+**Нужно вручную переложить текущий `tmux` buffer в системный clipboard:**
+```bash
+tmux save-buffer - | xclip -selection clipboard -in
+# или, если установлен Wayland helper:
+tmux save-buffer - | wl-copy
 ```
 
 **Конфиг не применяется после правок:**
