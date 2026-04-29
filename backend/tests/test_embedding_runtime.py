@@ -16,8 +16,8 @@ class _FakeEmbeddingModel:
 def test_embedding_runtime_exposes_openai_embeddings_and_status():
     app = create_app(
         EmbeddingRuntimeConfig(
-            model_id="labse-embedding",
-            model_path="/models/st/LaBSE",
+            model_id="qwen3-embedding-0.6b",
+            model_path="/models/st/Qwen3-Embedding-0.6B",
             device="cpu",
             embedding_dim=2,
             normalize=True,
@@ -34,8 +34,8 @@ def test_embedding_runtime_exposes_openai_embeddings_and_status():
         "status": "ok",
         "runtime": "embedding-runtime",
         "model_loaded": True,
-        "model_id": "labse-embedding",
-        "model_path": "/models/st/LaBSE",
+        "model_id": "qwen3-embedding-0.6b",
+        "model_path": "/models/st/Qwen3-Embedding-0.6B",
         "device": "cpu",
         "embedding_dim": 2,
         "normalize": True,
@@ -44,13 +44,13 @@ def test_embedding_runtime_exposes_openai_embeddings_and_status():
     }
 
     models = client.get("/models").json()
-    assert models["data"][0]["id"] == "labse-embedding"
+    assert models["data"][0]["id"] == "qwen3-embedding-0.6b"
     assert models["data"][0]["runtime"] == "embedding-runtime"
     assert models["data"][0]["embedding_dimension"] == 2
 
     response = client.post(
         "/v1/embeddings",
-        json={"model": "labse-embedding", "input": ["alpha", "beta"]},
+        json={"model": "qwen3-embedding-0.6b", "input": ["alpha", "beta"]},
     )
 
     assert response.status_code == 200
@@ -60,14 +60,14 @@ def test_embedding_runtime_exposes_openai_embeddings_and_status():
             {"object": "embedding", "embedding": [0.0, 5.0], "index": 0},
             {"object": "embedding", "embedding": [1.0, 4.0], "index": 1},
         ],
-        "model": "labse-embedding",
+        "model": "qwen3-embedding-0.6b",
         "usage": {"prompt_tokens": 2, "total_tokens": 2},
     }
 
 
 def test_embedding_runtime_rejects_unknown_model_id():
     app = create_app(
-        EmbeddingRuntimeConfig(model_id="labse-embedding", model_path="/models/st/LaBSE"),
+        EmbeddingRuntimeConfig(model_id="qwen3-embedding-0.6b", model_path="/models/st/Qwen3-Embedding-0.6B"),
         model=_FakeEmbeddingModel(),
     )
     client = TestClient(app)

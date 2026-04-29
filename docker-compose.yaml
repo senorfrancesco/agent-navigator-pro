@@ -199,23 +199,25 @@ services:
       - open-webui:/app/backend/data
       - ./backend/open_webui_uploads:/app/backend/data/uploads
     environment:
-      - OPENAI_API_BASE_URL=http://host.docker.internal:8000/v1
-      - OPENAI_API_KEY=sk-dummy
-      - ENABLE_AGENT_NAVIGATOR_RUNTIME_MODELS=True
-      - ENABLE_FOLLOW_UP_GENERATION=False
-      - HF_HUB_OFFLINE=1
-      - ENABLE_RAG_WEB_SEARCH=False
-      - ENABLE_RAG_LOCAL_WEB_FETCH=False
-      - VECTOR_DB=qdrant
-      - QDRANT_URI=http://qdrant:6333
-      - ENABLE_QDRANT_MULTITENANCY_MODE=true
-      - QDRANT_COLLECTION_PREFIX=anp-openwebui
-      - RAG_EMBEDDING_ENGINE=openai
-      - RAG_OPENAI_API_BASE_URL=http://host.docker.internal:8092/v1
-      - RAG_OPENAI_API_KEY=sk-dummy
-      - RAG_EMBEDDING_MODEL=labse-embedding
-      - RAG_RERANKING_ENGINE=
-      - OPENWEBUI_SESSION_RAG_HANDOFF=preferred
+      - DATA_DIR=${OPENWEBUI_CONTAINER_DATA_DIR:-/app/backend/data}
+      - DATABASE_URL=${OPENWEBUI_DATABASE_URL:-sqlite:////app/backend/data/webui.db}
+      - OPENAI_API_BASE_URL=${OPENWEBUI_OPENAI_API_BASE_URL:-http://host.docker.internal:8000/v1}
+      - OPENAI_API_KEY=${OPENWEBUI_OPENAI_API_KEY:-sk-dummy}
+      - ENABLE_AGENT_NAVIGATOR_RUNTIME_MODELS=${OPENWEBUI_ENABLE_AGENT_NAVIGATOR_RUNTIME_MODELS:-True}
+      - ENABLE_FOLLOW_UP_GENERATION=${OPENWEBUI_ENABLE_FOLLOW_UP_GENERATION:-False}
+      - HF_HUB_OFFLINE=${OPENWEBUI_HF_HUB_OFFLINE:-1}
+      - ENABLE_RAG_WEB_SEARCH=${OPENWEBUI_ENABLE_RAG_WEB_SEARCH:-False}
+      - ENABLE_RAG_LOCAL_WEB_FETCH=${OPENWEBUI_ENABLE_RAG_LOCAL_WEB_FETCH:-False}
+      - VECTOR_DB=${OPENWEBUI_VECTOR_DB:-qdrant}
+      - QDRANT_URI=${OPENWEBUI_QDRANT_URI:-http://qdrant:6333}
+      - ENABLE_QDRANT_MULTITENANCY_MODE=${OPENWEBUI_ENABLE_QDRANT_MULTITENANCY_MODE:-true}
+      - QDRANT_COLLECTION_PREFIX=${OPENWEBUI_QDRANT_COLLECTION_PREFIX:-anp-openwebui}
+      - RAG_EMBEDDING_ENGINE=${OPENWEBUI_RAG_EMBEDDING_ENGINE:-openai}
+      - RAG_OPENAI_API_BASE_URL=${OPENWEBUI_RAG_OPENAI_API_BASE_URL:-http://host.docker.internal:8092/v1}
+      - RAG_OPENAI_API_KEY=${OPENWEBUI_RAG_OPENAI_API_KEY:-sk-dummy}
+      - RAG_EMBEDDING_MODEL=${OPENWEBUI_RAG_EMBEDDING_MODEL:-qwen3-embedding-0.6b}
+      - RAG_RERANKING_ENGINE=${OPENWEBUI_RAG_RERANKING_ENGINE:-}
+      - OPENWEBUI_SESSION_RAG_HANDOFF=${OPENWEBUI_SESSION_RAG_HANDOFF:-off}
     restart: always
     networks:
       - anp-backend

@@ -116,9 +116,9 @@ python scripts/bootstrap_openwebui.py \
 - `ENABLE_QDRANT_MULTITENANCY_MODE=true`
 - `QDRANT_COLLECTION_PREFIX=anp-openwebui`
 - `RAG_EMBEDDING_ENGINE=openai`
-- `RAG_OPENAI_API_BASE_URL=http://host.docker.internal:8090/v1`
+- `RAG_OPENAI_API_BASE_URL=http://host.docker.internal:8092/v1`
 - `RAG_OPENAI_API_KEY=sk-dummy`
-- `RAG_EMBEDDING_MODEL=labse-embedding`
+- `RAG_EMBEDDING_MODEL=qwen3-embedding-0.6b`
 
 Ручные шаги администратора:
 
@@ -128,13 +128,14 @@ python scripts/bootstrap_openwebui.py \
 4. Убедитесь, что используется `QDRANT_URI=http://qdrant:6333`.
 5. Проверьте, что включён `Enable Qdrant Multitenancy Mode`.
 6. Проверьте префикс коллекций `anp-openwebui`.
-7. Проверьте, что движок эмбеддингов установлен в `openai`, а модель — `labse-embedding`.
+7. Проверьте, что движок эмбеддингов установлен в `openai`, а модель — `qwen3-embedding-0.6b`.
 8. Если вы мигрируете со старой схемы `Qdrant`, заранее снимите резервную копию или снимок состояния, затем при необходимости выполните `Reindex Knowledge Base`.
 
 Важно:
 
 - `Open WebUI` считает `Qdrant` интеграцией, поддерживаемой сообществом. Перед обновлением `Open WebUI` или сменой режима multitenancy снимайте резервную копию и проверяйте схему коллекций.
 - `Reindex Knowledge Base` переносит только native базу знаний. Он не мигрирует backend `session RAG`.
+- `labse-embedding` остаётся отдельным специализированным профилем для legal/documentation сценариев; общий `Knowledge/RAG` не должен молча переключаться на него без переиндексации коллекций.
 - Для контейнерного контура не используйте `host.docker.internal:6333` как адрес `Qdrant`; он остаётся только для хостовых сервисов, которым действительно нужен доступ к backend на хосте.
 
 ## 6. Ручная проверка backend `session RAG`

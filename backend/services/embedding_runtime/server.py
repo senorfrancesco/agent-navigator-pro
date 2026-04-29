@@ -12,7 +12,7 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
 
-DEFAULT_MODEL_ID = "labse-embedding"
+DEFAULT_MODEL_ID = "qwen3-embedding-0.6b"
 DEFAULT_PORT = 8092
 
 
@@ -277,4 +277,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

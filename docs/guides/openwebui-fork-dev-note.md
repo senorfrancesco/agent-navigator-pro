@@ -52,20 +52,21 @@ ENABLE_QDRANT_MULTITENANCY_MODE=true
 QDRANT_COLLECTION_PREFIX=anp-openwebui
 
 RAG_EMBEDDING_ENGINE=openai
-RAG_OPENAI_API_BASE_URL=http://host.docker.internal:8090/v1
+RAG_OPENAI_API_BASE_URL=http://host.docker.internal:8092/v1
 RAG_OPENAI_API_KEY=sk-dummy
-RAG_EMBEDDING_MODEL=labse-embedding
+RAG_EMBEDDING_MODEL=qwen3-embedding-0.6b
 RAG_RERANKING_ENGINE=
 
-OPENWEBUI_SESSION_RAG_HANDOFF=preferred
+OPENWEBUI_SESSION_RAG_HANDOFF=off
 ```
 
 Текущий контейнерный runtime больше не использует upstream-образ с runtime-патчем. Теперь сервис `open-webui` в [docker-compose.yaml](../../docker-compose.yaml) собирается прямо из локального форка `/home/seral/HDD/proj/open-webui`.
 
-Из этого следуют два правила:
+Из этого следуют три правила:
 
 - все рабочие runtime-параметры по-прежнему сначала берём из `agent-navigator-pro`;
-- поведение long-running панели, `session RAG handoff` и guard неподтверждённого запуска теперь должно жить в самом форке, а не в `entrypoint.sh` и не в monkeypatch-слое.
+- поведение long-running панели, guard неподтверждённого запуска и legacy/debug `session RAG handoff` теперь должно жить в самом форке, а не в `entrypoint.sh` и не в monkeypatch-слое.
+- нативный `Knowledge/RAG` остаётся владельцем `Open WebUI`; `session RAG handoff` включается только явно для совместимого отладочного контура.
 
 Это означает:
 
