@@ -12,7 +12,7 @@ import orchestrator.knowledge_base_store as knowledge_base_store_module
 import orchestrator.qdrant_knowledge_base_store as qdrant_store_module
 from orchestrator.knowledge_base_ingestion import ingest_text_source_sync
 from orchestrator.knowledge_base_retrieval import retrieve_merged_chunks
-from orchestrator.knowledge_base_store import SQLiteKnowledgeBaseStore
+from orchestrator.knowledge_base_store import EmbeddingProjectionMismatch, SQLiteKnowledgeBaseStore
 from orchestrator.qdrant_knowledge_base_store import QdrantKnowledgeBaseStore
 
 
@@ -232,6 +232,314 @@ def test_qdrant_store_indexes_and_searches_chunks(monkeypatch, tmp_path):
     assert [match.chunk.chunk_id for match in matches] == ["chunk-1", "chunk-2"]
     assert matches[0].payload["collection_id"] == "legal"
     assert matches[0].payload["document_id"] == source.source_id
+
+
+def test_qdrant_store_records_active_embedding_projection(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        qdrant_store_module,
+        "_load_qdrant_dependencies",
+        lambda: (_FakeQdrantClient, _build_fake_models()),
+    )
+
+    store = QdrantKnowledgeBaseStore(
+        db_url=f"sqlite:///{tmp_path}/kb_store.db",
+        qdrant_url="http://fake-qdrant",
+        collection_name="rag_chunks_v1",
+    )
+    source = store.register_source_sync(
+        collection_id="legal",
+        display_name="policy.txt",
+        content_hash="hash-projection",
+        mime_type="text/plain",
+        index_version="v1",
+        embedding_model_id="labse",
+        chunking_version="legal_v1",
+    )
+    store.replace_chunks_sync(
+        source_id=source.source_id,
+        chunks=[
+            {
+                "chunk_id": "chunk-1",
+                "chunk_index": 0,
+                "text": "Сервисное обслуживание на площадке заказчика.",
+                "metadata_json": {"section": "1.1"},
+                "source_origin": "knowledge_base",
+                "embedding": np.array([0.0, 1.0, 0.0], dtype=np.float32),
+                "embedding_model_id": "labse",
+            }
+        ],
+    )
+
+    projection = store.get_active_projection_sync("legal")
+
+    assert projection is not None
+    assert projection.collection_id == "legal"
+    assert projection.physical_collection_name == "rag_chunks_v1"
+    assert projection.embedding_model_id == "labse"
+    assert projection.embedding_dim == 3
+    assert projection.embedding_distance == "Cosine"
+    assert projection.status == "active"
+    assert projection.version == 1
+
+
+def test_qdrant_store_rejects_embedding_model_drift_on_index(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        qdrant_store_module,
+        "_load_qdrant_dependencies",
+        lambda: (_FakeQdrantClient, _build_fake_models()),
+    )
+
+    store = QdrantKnowledgeBaseStore(
+        db_url=f"sqlite:///{tmp_path}/kb_store.db",
+        qdrant_url="http://fake-qdrant",
+        collection_name="rag_chunks_v1",
+    )
+    source = store.register_source_sync(
+        collection_id="legal",
+        display_name="policy.txt",
+        content_hash="hash-labse",
+        mime_type="text/plain",
+        index_version="v1",
+        embedding_model_id="labse",
+        chunking_version="legal_v1",
+    )
+    store.replace_chunks_sync(
+        source_id=source.source_id,
+        chunks=[
+            {
+                "chunk_id": "chunk-1",
+                "chunk_index": 0,
+                "text": "Сервисное обслуживание на площадке заказчика.",
+                "metadata_json": {"section": "1.1"},
+                "source_origin": "knowledge_base",
+                "embedding": np.array([0.0, 1.0, 0.0], dtype=np.float32),
+                "embedding_model_id": "labse",
+            }
+        ],
+    )
+    drift_source = store.register_source_sync(
+        collection_id="legal",
+        display_name="policy-qwen.txt",
+        content_hash="hash-qwen",
+        mime_type="text/plain",
+        index_version="v1",
+        embedding_model_id="qwen3-embedding-0.6b",
+        chunking_version="legal_v1",
+    )
+
+    with pytest.raises(EmbeddingProjectionMismatch, match="expected embedding model labse"):
+        store.replace_chunks_sync(
+            source_id=drift_source.source_id,
+            chunks=[
+                {
+                    "chunk_id": "chunk-qwen",
+                    "chunk_index": 0,
+                    "text": "Сервисное обслуживание на площадке заказчика.",
+                    "metadata_json": {"section": "1.1"},
+                    "source_origin": "knowledge_base",
+                    "embedding": np.array([0.0, 1.0, 0.0], dtype=np.float32),
+                    "embedding_model_id": "qwen3-embedding-0.6b",
+                }
+            ],
+        )
+
+
+def test_qdrant_store_rejects_embedding_model_drift_on_search(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        qdrant_store_module,
+        "_load_qdrant_dependencies",
+        lambda: (_FakeQdrantClient, _build_fake_models()),
+    )
+
+    store = QdrantKnowledgeBaseStore(
+        db_url=f"sqlite:///{tmp_path}/kb_store.db",
+        qdrant_url="http://fake-qdrant",
+        collection_name="rag_chunks_v1",
+    )
+    source = store.register_source_sync(
+        collection_id="legal",
+        display_name="policy.txt",
+        content_hash="hash-search-drift",
+        mime_type="text/plain",
+        index_version="v1",
+        embedding_model_id="labse",
+        chunking_version="legal_v1",
+    )
+    store.replace_chunks_sync(
+        source_id=source.source_id,
+        chunks=[
+            {
+                "chunk_id": "chunk-1",
+                "chunk_index": 0,
+                "text": "Сервисное обслуживание на площадке заказчика.",
+                "metadata_json": {"section": "1.1"},
+                "source_origin": "knowledge_base",
+                "embedding": np.array([0.0, 1.0, 0.0], dtype=np.float32),
+                "embedding_model_id": "labse",
+            }
+        ],
+    )
+
+    with pytest.raises(EmbeddingProjectionMismatch, match="expected embedding model labse"):
+        store.search_chunks_sync(
+            collection_id="legal",
+            query_text="Где описано сервисное обслуживание?",
+            query_embedding=np.array([0.0, 1.0, 0.0], dtype=np.float32),
+            query_embedding_model_id="qwen3-embedding-0.6b",
+            top_k=2,
+            filters={"source_scope": "knowledge"},
+        )
+
+
+def test_qdrant_store_reindex_building_projection_switches_only_after_publish(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        qdrant_store_module,
+        "_load_qdrant_dependencies",
+        lambda: (_FakeQdrantClient, _build_fake_models()),
+    )
+
+    store = QdrantKnowledgeBaseStore(
+        db_url=f"sqlite:///{tmp_path}/kb_store.db",
+        qdrant_url="http://fake-qdrant",
+        collection_name="rag_chunks_v1",
+    )
+    active_source = store.register_source_sync(
+        collection_id="legal",
+        display_name="active-policy.txt",
+        content_hash="hash-active",
+        mime_type="text/plain",
+        index_version="v1",
+        embedding_model_id="labse",
+        chunking_version="legal_v1",
+    )
+    store.replace_chunks_sync(
+        source_id=active_source.source_id,
+        chunks=[
+            {
+                "chunk_id": "active-chunk",
+                "chunk_index": 0,
+                "text": "Активный фрагмент.",
+                "metadata_json": {},
+                "source_origin": "knowledge_base",
+                "embedding": np.array([1.0, 0.0, 0.0], dtype=np.float32),
+                "embedding_model_id": "labse",
+            }
+        ],
+    )
+    building = store.create_building_projection_sync(
+        collection_id="legal",
+        embedding_model_id="qwen3-embedding-0.6b",
+        embedding_dim=3,
+        chunking_version="legal_v2",
+    )
+    store.replace_chunks_sync(
+        source_id=active_source.source_id,
+        projection_id=building.projection_id,
+        chunks=[
+            {
+                "chunk_id": "active-chunk",
+                "chunk_index": 0,
+                "text": "Переиндексированный фрагмент.",
+                "metadata_json": {},
+                "source_origin": "knowledge_base",
+                "embedding": np.array([0.0, 1.0, 0.0], dtype=np.float32),
+                "embedding_model_id": "qwen3-embedding-0.6b",
+            }
+        ],
+    )
+
+    assert "rag_chunks_v1" in store._client.collections
+    assert building.physical_collection_name in store._client.collections
+    before_publish = store.search_chunks_sync(
+        collection_id="legal",
+        query_text="Что активно?",
+        query_embedding=np.array([1.0, 0.0, 0.0], dtype=np.float32),
+        query_embedding_model_id="labse",
+        top_k=1,
+        filters={"source_scope": "knowledge"},
+    )
+
+    published = store.publish_projection_sync(building.projection_id)
+    after_publish = store.search_chunks_sync(
+        collection_id="legal",
+        query_text="Что активно?",
+        query_embedding=np.array([0.0, 1.0, 0.0], dtype=np.float32),
+        query_embedding_model_id="qwen3-embedding-0.6b",
+        top_k=1,
+        filters={"source_scope": "knowledge"},
+    )
+
+    assert before_publish[0].chunk.chunk_id == "active-chunk"
+    assert published.status == "active"
+    assert store.get_projection_sync(before_publish[0].chunk.projection_id).status == "superseded"
+    assert after_publish[0].chunk.chunk_id == f"active-chunk:{building.projection_id}"
+    assert after_publish[0].chunk.text == "Переиндексированный фрагмент."
+    assert after_publish[0].payload["embedding_projection_id"] == building.projection_id
+
+
+def test_qdrant_store_attaches_external_collection_with_profile(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        qdrant_store_module,
+        "_load_qdrant_dependencies",
+        lambda: (_FakeQdrantClient, _build_fake_models()),
+    )
+
+    store = QdrantKnowledgeBaseStore(
+        db_url=f"sqlite:///{tmp_path}/kb_store.db",
+        qdrant_url="http://fake-qdrant",
+        collection_name="rag_chunks_v1",
+    )
+    projection = store.attach_external_projection_sync(
+        collection_id="external-legal",
+        physical_collection_name="external_vectors",
+        embedding_model_id="qwen3-embedding-0.6b",
+        embedding_dim=3,
+        chunking_version="external_v1",
+    )
+
+    matches = store.search_chunks_sync(
+        collection_id="external-legal",
+        query_text="Что есть в базе?",
+        query_embedding=np.array([1.0, 0.0, 0.0], dtype=np.float32),
+        query_embedding_model_id="qwen3-embedding-0.6b",
+        top_k=3,
+        filters={"source_scope": "knowledge"},
+    )
+
+    assert projection.status == "active"
+    assert projection.source_mode == "attached"
+    assert projection.physical_collection_name == "external_vectors"
+    assert matches == []
+
+
+def test_qdrant_store_rejects_external_collection_without_profile(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        qdrant_store_module,
+        "_load_qdrant_dependencies",
+        lambda: (_FakeQdrantClient, _build_fake_models()),
+    )
+
+    store = QdrantKnowledgeBaseStore(
+        db_url=f"sqlite:///{tmp_path}/kb_store.db",
+        qdrant_url="http://fake-qdrant",
+        collection_name="rag_chunks_v1",
+    )
+    projection = store.attach_external_projection_sync(
+        collection_id="external-legal",
+        physical_collection_name="external_vectors",
+    )
+
+    with pytest.raises(EmbeddingProjectionMismatch, match="requires an explicit embedding profile"):
+        store.search_chunks_sync(
+            collection_id="external-legal",
+            query_text="Что есть в базе?",
+            query_embedding=np.array([1.0, 0.0, 0.0], dtype=np.float32),
+            top_k=3,
+            filters={"source_scope": "knowledge"},
+        )
+
+    assert projection.status == "needs_profile"
+    assert store.get_active_projection_sync("external-legal") is None
 
 
 def test_qdrant_store_supports_session_scope_search_and_delete(monkeypatch, tmp_path):

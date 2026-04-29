@@ -2565,6 +2565,7 @@ async def _execute_doc_question(
             kb_store=deps.get_knowledge_base_store(),
             top_k=max(20, int(getattr(deps.get_rag_pipeline() or object(), "top_k", 5)) * 4) if target_doc_name else 20,
             candidate_budget_per_scope=12,
+            query_embedding_model_id=str(effective_settings.get("resolved_retrieval_embedder_model_id") or ""),
         )
         record_current_duration(
             name="retrieve_merged_chunks",

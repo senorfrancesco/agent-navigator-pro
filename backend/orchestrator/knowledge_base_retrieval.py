@@ -83,6 +83,7 @@ def _search_store_entries(
     collection_id: Optional[str],
     query: str,
     query_embedding: np.ndarray,
+    query_embedding_model_id: Optional[str],
     top_k: int,
     mode: str,
     embed_fn: Optional[Callable],
@@ -99,6 +100,7 @@ def _search_store_entries(
         filters=filters,
         mode=mode,
         embed_fn=embed_fn,
+        query_embedding_model_id=query_embedding_model_id,
     ):
         chunk = match.chunk
         payload = dict(match.payload or {})
@@ -271,6 +273,7 @@ def retrieve_merged_chunks(
     candidate_budget_per_scope: int = KB_RETRIEVAL_CANDIDATE_BUDGET_PER_SCOPE,
     mode: str = "hybrid",
     rerank_fn: Optional[Callable[[str, List[Dict[str, Any]]], List[float]]] = None,
+    query_embedding_model_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     if embed_fn is None:
         return {"chunks": [], "source_scope_summary": "off"}
@@ -288,6 +291,7 @@ def retrieve_merged_chunks(
             collection_id=session_collection_id,
             query=query,
             query_embedding=query_embedding,
+            query_embedding_model_id=query_embedding_model_id,
             top_k=candidate_budget_per_scope,
             mode=mode,
             embed_fn=embed_fn,
@@ -308,6 +312,7 @@ def retrieve_merged_chunks(
             collection_id=knowledge_collection_id,
             query=query,
             query_embedding=query_embedding,
+            query_embedding_model_id=query_embedding_model_id,
             top_k=candidate_budget_per_scope,
             mode=mode,
             embed_fn=embed_fn,

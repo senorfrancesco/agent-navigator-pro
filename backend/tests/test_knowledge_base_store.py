@@ -2,12 +2,14 @@ import os
 import sys
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from orchestrator.knowledge_base_ingestion import ingest_text_source_sync
 from orchestrator.knowledge_base_retrieval import retrieve_merged_chunks
 from orchestrator.knowledge_base_store import (
+    EmbeddingProjectionMismatch,
     KnowledgeBaseChunkRecord,
     KnowledgeBaseChunkMatchRecord,
     KnowledgeBaseSourceRecord,
@@ -92,7 +94,7 @@ class InMemoryKnowledgeBaseStore:
         self._sources[source.source_id] = source
         return source
 
-    def replace_chunks_sync(self, *, source_id, chunks):
+    def replace_chunks_sync(self, *, source_id, chunks, projection_id=None):
         source = self._sources[source_id]
         materialized = []
         for chunk in chunks:
@@ -159,6 +161,7 @@ class InMemoryKnowledgeBaseStore:
         filters=None,
         mode="hybrid",
         embed_fn=None,
+        query_embedding_model_id=None,
     ):
         self.search_calls.append(
             {
@@ -167,6 +170,7 @@ class InMemoryKnowledgeBaseStore:
                 "top_k": top_k,
                 "mode": mode,
                 "filters": dict(filters or {}),
+                "query_embedding_model_id": query_embedding_model_id,
             }
         )
         matches = []
@@ -181,6 +185,9 @@ class InMemoryKnowledgeBaseStore:
             )
         matches.sort(key=lambda item: item.raw_score, reverse=True)
         return matches[:top_k]
+
+    def get_active_projection_sync(self, collection_id):
+        return None
 
     def delete_chunks_sync(self, *, collection_id, source_ids=None, filters=None):
         target_source_ids = set(source_ids or [])
@@ -201,8 +208,8 @@ class InMemoryKnowledgeBaseStore:
     async def register_source(self, **kwargs):
         return self.register_source_sync(**kwargs)
 
-    async def replace_chunks(self, *, source_id, chunks):
-        self.replace_chunks_sync(source_id=source_id, chunks=chunks)
+    async def replace_chunks(self, *, source_id, chunks, projection_id=None):
+        self.replace_chunks_sync(source_id=source_id, chunks=chunks, projection_id=projection_id)
 
     async def list_sources(self, collection_id):
         return self.list_sources_sync(collection_id)
@@ -225,6 +232,7 @@ class InMemoryKnowledgeBaseStore:
         filters=None,
         mode="hybrid",
         embed_fn=None,
+        query_embedding_model_id=None,
     ):
         return self.search_chunks_sync(
             collection_id=collection_id,
@@ -235,6 +243,7 @@ class InMemoryKnowledgeBaseStore:
             filters=filters,
             mode=mode,
             embed_fn=embed_fn,
+            query_embedding_model_id=query_embedding_model_id,
         )
 
     async def delete_chunks(self, *, collection_id, source_ids=None, filters=None):
@@ -349,7 +358,85 @@ def test_kb_store_persists_chunk_embeddings_when_requested(tmp_path):
     assert chunks[0].embedding_model_id == "labse"
     assert chunks[0].embedding_dim == 3
     assert chunks[0].embedding is not None
+    assert chunks[0].projection_id == store.get_active_projection_sync("legal").projection_id
     np.testing.assert_allclose(chunks[0].embedding, np.array([0.1, 0.2, 0.3], dtype=np.float32))
+
+
+def test_kb_store_building_projection_does_not_replace_active_until_publish(tmp_path):
+    store = SQLiteKnowledgeBaseStore(db_url=f"sqlite:///{tmp_path}/kb_store.db")
+    source = store.register_source_sync(
+        collection_id="legal",
+        display_name="policy.txt",
+        content_hash="hash-active",
+        mime_type="text/plain",
+        index_version="v1",
+        embedding_model_id="labse",
+        chunking_version="legal_v1",
+    )
+    store.replace_chunks_sync(
+        source_id=source.source_id,
+        chunks=[
+            {
+                "chunk_id": "active-chunk",
+                "chunk_index": 0,
+                "text": "Активный фрагмент.",
+                "metadata_json": {},
+                "embedding": np.array([1.0, 0.0, 0.0], dtype=np.float32),
+                "embedding_model_id": "labse",
+            }
+        ],
+    )
+    active = store.get_active_projection_sync("legal")
+
+    building = store.create_building_projection_sync(
+        collection_id="legal",
+        embedding_model_id="qwen3-embedding-0.6b",
+        embedding_dim=3,
+        chunking_version="legal_v2",
+    )
+    published = store.publish_projection_sync(building.projection_id)
+
+    assert active is not None
+    assert building.status == "building"
+    assert store.get_projection_sync(active.projection_id).status == "superseded"
+    assert published.status == "active"
+    assert store.get_active_projection_sync("legal").projection_id == building.projection_id
+
+
+def test_kb_store_search_rejects_external_projection_without_profile(tmp_path):
+    store = SQLiteKnowledgeBaseStore(db_url=f"sqlite:///{tmp_path}/kb_store.db")
+    projection = store.attach_external_projection_sync(
+        collection_id="attached",
+        physical_collection_name="external_vectors",
+    )
+
+    with pytest.raises(EmbeddingProjectionMismatch, match="requires an explicit embedding profile"):
+        store.search_chunks_sync(
+            collection_id="attached",
+            query_text="Что есть в базе?",
+            query_embedding=np.array([1.0, 0.0, 0.0], dtype=np.float32),
+            top_k=3,
+        )
+
+    assert projection.status == "needs_profile"
+    assert store.get_active_projection_sync("attached") is None
+
+
+def test_kb_store_attaches_external_projection_with_explicit_profile(tmp_path):
+    store = SQLiteKnowledgeBaseStore(db_url=f"sqlite:///{tmp_path}/kb_store.db")
+
+    projection = store.attach_external_projection_sync(
+        collection_id="attached",
+        physical_collection_name="external_vectors",
+        embedding_model_id="qwen3-embedding-0.6b",
+        embedding_dim=3,
+        chunking_version="external_v1",
+    )
+
+    assert projection.status == "active"
+    assert projection.source_mode == "attached"
+    assert projection.physical_collection_name == "external_vectors"
+    assert store.get_active_projection_sync("attached").projection_id == projection.projection_id
 
 
 def test_sqlite_store_satisfies_runtime_protocol(tmp_path):
@@ -399,6 +486,7 @@ def test_retrieval_accepts_store_double_via_protocol_boundary():
         session_docs={},
         active_doc_ids=[],
         embed_fn=_protocol_embed_fn,
+        query_embedding_model_id="labse",
         kb_store=store,
         top_k=2,
         candidate_budget_per_scope=2,
@@ -411,6 +499,7 @@ def test_retrieval_accepts_store_double_via_protocol_boundary():
     assert store.search_calls[0]["collection_id"] == "legal"
     assert store.search_calls[0]["query_text"] == "Где описано сервисное обслуживание?"
     assert store.search_calls[0]["filters"] == {"source_scope": "knowledge"}
+    assert store.search_calls[0]["query_embedding_model_id"] == "labse"
 
 
 def test_kb_store_search_returns_ranked_matches(tmp_path):

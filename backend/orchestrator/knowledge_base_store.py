@@ -47,6 +47,7 @@ class KnowledgeBaseChunkRecord:
     embedding: Optional[np.ndarray] = None
     embedding_dim: Optional[int] = None
     embedding_model_id: Optional[str] = None
+    projection_id: Optional[str] = None
 
 
 @dataclass
@@ -55,6 +56,29 @@ class KnowledgeBaseChunkMatchRecord:
     raw_score: float
     source_scope: str
     payload: Dict[str, Any]
+
+
+@dataclass
+class KnowledgeBaseProjectionRecord:
+    projection_id: str
+    collection_id: str
+    physical_collection_name: str
+    embedding_model_id: str
+    embedding_dim: int
+    embedding_distance: str
+    embedding_revision: Optional[str]
+    normalize: bool
+    embedding_runtime_id: Optional[str]
+    chunking_version: str
+    source_mode: str
+    status: str
+    version: int
+    created_at: float
+    updated_at: float
+
+
+class EmbeddingProjectionMismatch(ValueError):
+    """Raised when an embedding vector is incompatible with the active KB projection."""
 
 
 @runtime_checkable
@@ -72,7 +96,13 @@ class KnowledgeBaseStoreProtocol(Protocol):
         status: str = "indexed",
     ) -> KnowledgeBaseSourceRecord: ...
 
-    def replace_chunks_sync(self, *, source_id: str, chunks: List[Dict[str, Any]]) -> None: ...
+    def replace_chunks_sync(
+        self,
+        *,
+        source_id: str,
+        chunks: List[Dict[str, Any]],
+        projection_id: Optional[str] = None,
+    ) -> None: ...
 
     def list_sources_sync(self, collection_id: str) -> List[KnowledgeBaseSourceRecord]: ...
 
@@ -94,7 +124,10 @@ class KnowledgeBaseStoreProtocol(Protocol):
         filters: Optional[Dict[str, Any]] = None,
         mode: str = "hybrid",
         embed_fn: Optional[Callable] = None,
+        query_embedding_model_id: Optional[str] = None,
     ) -> List[KnowledgeBaseChunkMatchRecord]: ...
+
+    def get_active_projection_sync(self, collection_id: str) -> Optional[KnowledgeBaseProjectionRecord]: ...
 
     def delete_chunks_sync(
         self,
@@ -106,7 +139,13 @@ class KnowledgeBaseStoreProtocol(Protocol):
 
     async def register_source(self, **kwargs: Any) -> KnowledgeBaseSourceRecord: ...
 
-    async def replace_chunks(self, *, source_id: str, chunks: List[Dict[str, Any]]) -> None: ...
+    async def replace_chunks(
+        self,
+        *,
+        source_id: str,
+        chunks: List[Dict[str, Any]],
+        projection_id: Optional[str] = None,
+    ) -> None: ...
 
     async def list_sources(self, collection_id: str) -> List[KnowledgeBaseSourceRecord]: ...
 
@@ -128,6 +167,7 @@ class KnowledgeBaseStoreProtocol(Protocol):
         filters: Optional[Dict[str, Any]] = None,
         mode: str = "hybrid",
         embed_fn: Optional[Callable] = None,
+        query_embedding_model_id: Optional[str] = None,
     ) -> List[KnowledgeBaseChunkMatchRecord]: ...
 
     async def delete_chunks(
@@ -175,6 +215,15 @@ def _deserialize_embedding(blob: Optional[bytes], dim: Optional[int]) -> Optiona
     if array.size != dim:
         return None
     return array.copy()
+
+
+def _normalize_embedding_model_id(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _normalize_embedding_distance(value: Any) -> str:
+    distance = str(value or "Cosine").strip()
+    return distance or "Cosine"
 
 
 def _normalize_source_scope(value: Any, *, collection_id: Optional[str] = None) -> str:
@@ -267,6 +316,7 @@ class SQLiteKnowledgeBaseStore:
         CREATE TABLE IF NOT EXISTS kb_chunks (
             chunk_id TEXT PRIMARY KEY,
             source_id TEXT NOT NULL,
+            projection_id TEXT,
             chunk_index INTEGER NOT NULL,
             text TEXT NOT NULL,
             metadata_json TEXT NOT NULL,
@@ -281,6 +331,7 @@ class SQLiteKnowledgeBaseStore:
 
         CREATE TABLE IF NOT EXISTS kb_chunk_embeddings (
             chunk_id TEXT PRIMARY KEY,
+            projection_id TEXT,
             embedding_blob BLOB NOT NULL,
             embedding_dim INTEGER NOT NULL,
             embedding_model_id TEXT NOT NULL,
@@ -289,10 +340,49 @@ class SQLiteKnowledgeBaseStore:
 
         CREATE INDEX IF NOT EXISTS idx_kb_chunk_embeddings_model
             ON kb_chunk_embeddings(embedding_model_id);
+
+        CREATE TABLE IF NOT EXISTS kb_index_projections (
+            projection_id TEXT PRIMARY KEY,
+            collection_id TEXT NOT NULL,
+            physical_collection_name TEXT NOT NULL,
+            embedding_model_id TEXT NOT NULL,
+            embedding_dim INTEGER NOT NULL,
+            embedding_distance TEXT NOT NULL,
+            embedding_revision TEXT,
+            normalize INTEGER NOT NULL,
+            embedding_runtime_id TEXT,
+            chunking_version TEXT NOT NULL,
+            source_mode TEXT NOT NULL,
+            status TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            UNIQUE(collection_id, version)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_kb_index_projections_collection
+            ON kb_index_projections(collection_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_kb_index_projections_active
+            ON kb_index_projections(collection_id)
+            WHERE status = 'active';
         """
         with self._connect() as conn:
             conn.executescript(schema)
+            self._ensure_column(conn, "kb_chunks", "projection_id", "TEXT")
+            self._ensure_column(conn, "kb_chunk_embeddings", "projection_id", "TEXT")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_kb_chunks_projection_id ON kb_chunks(projection_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_kb_chunk_embeddings_projection_id ON kb_chunk_embeddings(projection_id)"
+            )
             conn.commit()
+
+    def _ensure_column(self, conn: sqlite3.Connection, table_name: str, column_name: str, column_type: str) -> None:
+        rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        existing_columns = {str(row["name"]) for row in rows}
+        if column_name not in existing_columns:
+            conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
 
     def _row_to_source(self, row: sqlite3.Row) -> KnowledgeBaseSourceRecord:
         return KnowledgeBaseSourceRecord(
@@ -324,7 +414,436 @@ class SQLiteKnowledgeBaseStore:
             else None,
             embedding_dim=int(row["embedding_dim"]) if "embedding_dim" in row.keys() and row["embedding_dim"] is not None else None,
             embedding_model_id=str(row["embedding_model_id"]) if "embedding_model_id" in row.keys() and row["embedding_model_id"] is not None else None,
+            projection_id=str(row["projection_id"]) if "projection_id" in row.keys() and row["projection_id"] is not None else None,
         )
+
+    def _row_to_projection(self, row: sqlite3.Row) -> KnowledgeBaseProjectionRecord:
+        return KnowledgeBaseProjectionRecord(
+            projection_id=str(row["projection_id"]),
+            collection_id=str(row["collection_id"]),
+            physical_collection_name=str(row["physical_collection_name"]),
+            embedding_model_id=str(row["embedding_model_id"]),
+            embedding_dim=int(row["embedding_dim"]),
+            embedding_distance=str(row["embedding_distance"]),
+            embedding_revision=str(row["embedding_revision"]) if row["embedding_revision"] is not None else None,
+            normalize=bool(int(row["normalize"])),
+            embedding_runtime_id=str(row["embedding_runtime_id"]) if row["embedding_runtime_id"] is not None else None,
+            chunking_version=str(row["chunking_version"]),
+            source_mode=str(row["source_mode"]),
+            status=str(row["status"]),
+            version=int(row["version"]),
+            created_at=float(row["created_at"]),
+            updated_at=float(row["updated_at"]),
+        )
+
+    def _source_record_sync(self, source_id: str) -> KnowledgeBaseSourceRecord:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM kb_sources WHERE source_id = ?",
+                (source_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown-source:{source_id}")
+        return self._row_to_source(row)
+
+    def _projection_physical_collection_name(self, collection_id: str) -> str:
+        return f"sqlite:{collection_id}"
+
+    def _managed_projection_physical_collection_name(self, collection_id: str, version: int) -> str:
+        return f"{self._projection_physical_collection_name(collection_id)}__v{int(version)}"
+
+    def _projection_source_mode(self, collection_id: str) -> str:
+        return "session" if str(collection_id).startswith("session:") else "managed"
+
+    def get_active_projection_sync(self, collection_id: str) -> Optional[KnowledgeBaseProjectionRecord]:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM kb_index_projections
+                WHERE collection_id = ? AND status = 'active'
+                ORDER BY version DESC
+                LIMIT 1
+                """,
+                (collection_id,),
+            ).fetchone()
+        return self._row_to_projection(row) if row is not None else None
+
+    def get_projection_sync(self, projection_id: str) -> Optional[KnowledgeBaseProjectionRecord]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM kb_index_projections WHERE projection_id = ?",
+                (projection_id,),
+            ).fetchone()
+        return self._row_to_projection(row) if row is not None else None
+
+    def get_latest_projection_sync(self, collection_id: str) -> Optional[KnowledgeBaseProjectionRecord]:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM kb_index_projections
+                WHERE collection_id = ?
+                ORDER BY version DESC
+                LIMIT 1
+                """,
+                (collection_id,),
+            ).fetchone()
+        return self._row_to_projection(row) if row is not None else None
+
+    def _next_projection_version_sync(self, collection_id: str) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT MAX(version) AS max_version FROM kb_index_projections WHERE collection_id = ?",
+                (collection_id,),
+            ).fetchone()
+        return int((row["max_version"] if row is not None else None) or 0) + 1
+
+    def _insert_projection_sync(
+        self,
+        *,
+        collection_id: str,
+        physical_collection_name: str,
+        embedding_model_id: str,
+        embedding_dim: int,
+        chunking_version: str,
+        embedding_distance: str = "Cosine",
+        embedding_revision: Optional[str] = None,
+        normalize: bool = True,
+        embedding_runtime_id: Optional[str] = None,
+        source_mode: Optional[str] = None,
+        status: str = "active",
+        version: Optional[int] = None,
+    ) -> KnowledgeBaseProjectionRecord:
+        normalized_status = str(status or "").strip().lower()
+        if normalized_status not in {"active", "building", "superseded", "needs_profile"}:
+            raise ValueError(f"unsupported projection status: {status}")
+        normalized_model = _normalize_embedding_model_id(embedding_model_id)
+        if not normalized_model and normalized_status != "needs_profile":
+            raise ValueError("embedding_model_id is required for a knowledge base projection")
+        normalized_dim = int(embedding_dim)
+        if normalized_dim <= 0 and normalized_status != "needs_profile":
+            raise ValueError("embedding_dim must be positive for a knowledge base projection")
+        normalized_distance = _normalize_embedding_distance(embedding_distance)
+        mode = str(source_mode or self._projection_source_mode(collection_id))
+        projection_version = int(version or self._next_projection_version_sync(collection_id))
+        now = time.time()
+        projection_id = str(uuid.uuid4())
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO kb_index_projections (
+                    projection_id, collection_id, physical_collection_name, embedding_model_id,
+                    embedding_dim, embedding_distance, embedding_revision, normalize,
+                    embedding_runtime_id, chunking_version, source_mode, status, version,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    projection_id,
+                    collection_id,
+                    physical_collection_name,
+                    normalized_model,
+                    max(0, normalized_dim),
+                    normalized_distance,
+                    embedding_revision,
+                    1 if normalize else 0,
+                    embedding_runtime_id,
+                    str(chunking_version or ""),
+                    mode,
+                    normalized_status,
+                    projection_version,
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM kb_index_projections WHERE projection_id = ?",
+                (projection_id,),
+            ).fetchone()
+        return self._row_to_projection(row)
+
+    def ensure_projection_sync(
+        self,
+        *,
+        collection_id: str,
+        physical_collection_name: str,
+        embedding_model_id: str,
+        embedding_dim: int,
+        chunking_version: str,
+        embedding_distance: str = "Cosine",
+        embedding_revision: Optional[str] = None,
+        normalize: bool = True,
+        embedding_runtime_id: Optional[str] = None,
+        source_mode: Optional[str] = None,
+    ) -> KnowledgeBaseProjectionRecord:
+        normalized_model = _normalize_embedding_model_id(embedding_model_id)
+        if not normalized_model:
+            raise ValueError("embedding_model_id is required for a knowledge base projection")
+        normalized_distance = _normalize_embedding_distance(embedding_distance)
+        normalized_dim = int(embedding_dim)
+        if normalized_dim <= 0:
+            raise ValueError("embedding_dim must be positive for a knowledge base projection")
+
+        mode = str(source_mode or self._projection_source_mode(collection_id))
+        active = self.get_active_projection_sync(collection_id)
+        if active is not None:
+            same_projection = (
+                active.embedding_model_id == normalized_model
+                and active.embedding_dim == normalized_dim
+                and active.embedding_distance == normalized_distance
+                and active.physical_collection_name == physical_collection_name
+            )
+            if same_projection:
+                return active
+            if active.source_mode != "session" and mode != "session":
+                raise EmbeddingProjectionMismatch(
+                    f"Collection `{collection_id}` expected embedding model {active.embedding_model_id} "
+                    f"with dimension {active.embedding_dim}, but received embedding model {normalized_model} "
+                    f"with dimension {normalized_dim}."
+                )
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    UPDATE kb_index_projections
+                    SET status = 'superseded', updated_at = ?
+                    WHERE projection_id = ?
+                    """,
+                    (time.time(), active.projection_id),
+                )
+                conn.commit()
+
+        return self._insert_projection_sync(
+            collection_id=collection_id,
+            physical_collection_name=physical_collection_name,
+            embedding_model_id=normalized_model,
+            embedding_dim=normalized_dim,
+            chunking_version=chunking_version,
+            embedding_distance=normalized_distance,
+            embedding_revision=embedding_revision,
+            normalize=normalize,
+            embedding_runtime_id=embedding_runtime_id,
+            source_mode=mode,
+            status="active",
+        )
+
+    def create_building_projection_sync(
+        self,
+        *,
+        collection_id: str,
+        embedding_model_id: str,
+        embedding_dim: int,
+        chunking_version: str,
+        embedding_distance: str = "Cosine",
+        embedding_revision: Optional[str] = None,
+        normalize: bool = True,
+        embedding_runtime_id: Optional[str] = None,
+        physical_collection_name: Optional[str] = None,
+    ) -> KnowledgeBaseProjectionRecord:
+        version = self._next_projection_version_sync(collection_id)
+        return self._insert_projection_sync(
+            collection_id=collection_id,
+            physical_collection_name=physical_collection_name
+            or self._managed_projection_physical_collection_name(collection_id, version),
+            embedding_model_id=embedding_model_id,
+            embedding_dim=embedding_dim,
+            chunking_version=chunking_version,
+            embedding_distance=embedding_distance,
+            embedding_revision=embedding_revision,
+            normalize=normalize,
+            embedding_runtime_id=embedding_runtime_id,
+            source_mode="managed",
+            status="building",
+            version=version,
+        )
+
+    def publish_projection_sync(self, projection_id: str) -> KnowledgeBaseProjectionRecord:
+        projection = self.get_projection_sync(projection_id)
+        if projection is None:
+            raise KeyError(f"unknown-projection:{projection_id}")
+        if not projection.embedding_model_id or projection.embedding_dim <= 0:
+            raise EmbeddingProjectionMismatch(
+                f"Projection `{projection_id}` requires an explicit embedding profile before publish."
+            )
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE kb_index_projections
+                SET status = 'superseded', updated_at = ?
+                WHERE collection_id = ? AND status = 'active' AND projection_id <> ?
+                """,
+                (now, projection.collection_id, projection_id),
+            )
+            conn.execute(
+                """
+                UPDATE kb_index_projections
+                SET status = 'active', updated_at = ?
+                WHERE projection_id = ?
+                """,
+                (now, projection_id),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM kb_index_projections WHERE projection_id = ?",
+                (projection_id,),
+            ).fetchone()
+        return self._row_to_projection(row)
+
+    def attach_external_projection_sync(
+        self,
+        *,
+        collection_id: str,
+        physical_collection_name: str,
+        embedding_model_id: Optional[str] = None,
+        embedding_dim: Optional[int] = None,
+        chunking_version: str = "external",
+        embedding_distance: str = "Cosine",
+        embedding_revision: Optional[str] = None,
+        normalize: bool = True,
+        embedding_runtime_id: Optional[str] = None,
+    ) -> KnowledgeBaseProjectionRecord:
+        has_profile = bool(_normalize_embedding_model_id(embedding_model_id)) and int(embedding_dim or 0) > 0
+        projection = self._insert_projection_sync(
+            collection_id=collection_id,
+            physical_collection_name=physical_collection_name,
+            embedding_model_id=_normalize_embedding_model_id(embedding_model_id) if has_profile else "",
+            embedding_dim=int(embedding_dim or 0),
+            chunking_version=chunking_version,
+            embedding_distance=embedding_distance,
+            embedding_revision=embedding_revision,
+            normalize=normalize,
+            embedding_runtime_id=embedding_runtime_id,
+            source_mode="attached",
+            status="building" if has_profile else "needs_profile",
+        )
+        return self.publish_projection_sync(projection.projection_id) if has_profile else projection
+
+    def _projection_inputs_for_chunks(
+        self,
+        *,
+        source: KnowledgeBaseSourceRecord,
+        chunks: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        vector_chunks = [chunk for chunk in chunks if chunk.get("embedding") is not None]
+        if not vector_chunks:
+            return None
+
+        expected_model = _normalize_embedding_model_id(source.embedding_model_id)
+        embedding_dim: Optional[int] = None
+        for chunk in vector_chunks:
+            chunk_model = _normalize_embedding_model_id(chunk.get("embedding_model_id") or expected_model)
+            if expected_model and chunk_model != expected_model:
+                raise EmbeddingProjectionMismatch(
+                    f"Source `{source.source_id}` expected embedding model {expected_model}, "
+                    f"but chunk `{chunk.get('chunk_id')}` uses embedding model {chunk_model}."
+                )
+            array = np.asarray(chunk["embedding"], dtype=np.float32)
+            if array.ndim != 1:
+                raise ValueError("Chunk embedding must be a 1D vector")
+            chunk_dim = int(array.shape[0])
+            if embedding_dim is None:
+                embedding_dim = chunk_dim
+            elif embedding_dim != chunk_dim:
+                raise EmbeddingProjectionMismatch(
+                    f"Source `{source.source_id}` contains mixed embedding dimensions "
+                    f"{embedding_dim} and {chunk_dim}."
+                )
+
+        return {
+            "collection_id": source.collection_id,
+            "physical_collection_name": self._projection_physical_collection_name(source.collection_id),
+            "embedding_model_id": expected_model,
+            "embedding_dim": int(embedding_dim or 0),
+            "chunking_version": source.chunking_version,
+            "source_mode": self._projection_source_mode(source.collection_id),
+        }
+
+    def _ensure_projection_for_chunks_sync(
+        self,
+        *,
+        source: KnowledgeBaseSourceRecord,
+        chunks: List[Dict[str, Any]],
+    ) -> Optional[KnowledgeBaseProjectionRecord]:
+        projection_inputs = self._projection_inputs_for_chunks(source=source, chunks=chunks)
+        if projection_inputs is None:
+            return None
+        return self.ensure_projection_sync(**projection_inputs)
+
+    def _validate_chunks_for_projection_sync(
+        self,
+        *,
+        projection: KnowledgeBaseProjectionRecord,
+        chunks: List[Dict[str, Any]],
+    ) -> None:
+        if projection.status == "needs_profile":
+            raise EmbeddingProjectionMismatch(
+                f"Projection `{projection.projection_id}` requires an explicit embedding profile before indexing."
+            )
+        for chunk in chunks:
+            if chunk.get("embedding") is None:
+                continue
+            chunk_model = _normalize_embedding_model_id(chunk.get("embedding_model_id") or projection.embedding_model_id)
+            if chunk_model != projection.embedding_model_id:
+                raise EmbeddingProjectionMismatch(
+                    f"Projection `{projection.projection_id}` expected embedding model {projection.embedding_model_id}, "
+                    f"but chunk `{chunk.get('chunk_id')}` uses embedding model {chunk_model}."
+                )
+            array = np.asarray(chunk["embedding"], dtype=np.float32)
+            if array.ndim != 1:
+                raise ValueError("Chunk embedding must be a 1D vector")
+            if int(array.shape[0]) != projection.embedding_dim:
+                raise EmbeddingProjectionMismatch(
+                    f"Projection `{projection.projection_id}` expected embedding dimension {projection.embedding_dim}, "
+                    f"but chunk `{chunk.get('chunk_id')}` uses dimension {int(array.shape[0])}."
+                )
+
+    def _namespace_chunks_for_projection(
+        self,
+        chunks: List[Dict[str, Any]],
+        projection_id: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        if not projection_id:
+            return chunks
+        suffix = f":{projection_id}"
+        namespaced_chunks: List[Dict[str, Any]] = []
+        for chunk in chunks:
+            materialized = dict(chunk)
+            chunk_id = str(materialized["chunk_id"])
+            if not chunk_id.endswith(suffix):
+                materialized["chunk_id"] = f"{chunk_id}{suffix}"
+            namespaced_chunks.append(materialized)
+        return namespaced_chunks
+
+    def _validate_query_projection_sync(
+        self,
+        *,
+        collection_id: str,
+        query_embedding: np.ndarray,
+        query_embedding_model_id: Optional[str],
+    ) -> Optional[KnowledgeBaseProjectionRecord]:
+        projection = self.get_active_projection_sync(collection_id)
+        if projection is None:
+            latest = self.get_latest_projection_sync(collection_id)
+            if latest is not None and latest.status == "needs_profile":
+                raise EmbeddingProjectionMismatch(
+                    f"Collection `{collection_id}` requires an explicit embedding profile before search."
+                )
+            return None
+        query_vector = np.asarray(query_embedding, dtype=np.float32)
+        if query_vector.ndim != 1:
+            raise ValueError("query_embedding must be a 1D vector")
+        if int(query_vector.shape[0]) != projection.embedding_dim:
+            raise EmbeddingProjectionMismatch(
+                f"Collection `{collection_id}` expected embedding dimension {projection.embedding_dim}, "
+                f"but received dimension {int(query_vector.shape[0])}."
+            )
+        query_model = _normalize_embedding_model_id(query_embedding_model_id)
+        if query_model and query_model != projection.embedding_model_id:
+            raise EmbeddingProjectionMismatch(
+                f"Collection `{collection_id}` expected embedding model {projection.embedding_model_id}, "
+                f"but received embedding model {query_model}."
+            )
+        return projection
 
     def register_source_sync(
         self,
@@ -396,24 +915,62 @@ class SQLiteKnowledgeBaseStore:
             row = conn.execute("SELECT * FROM kb_sources WHERE source_id = ?", (source_id,)).fetchone()
         return self._row_to_source(row)
 
-    def replace_chunks_sync(self, *, source_id: str, chunks: List[Dict[str, Any]]) -> None:
+    def replace_chunks_sync(
+        self,
+        *,
+        source_id: str,
+        chunks: List[Dict[str, Any]],
+        projection_id: Optional[str] = None,
+    ) -> None:
+        source = self._source_record_sync(source_id)
+        projection: Optional[KnowledgeBaseProjectionRecord] = None
+        if projection_id is not None:
+            projection = self.get_projection_sync(projection_id)
+            if projection is None:
+                raise KeyError(f"unknown-projection:{projection_id}")
+            if projection.collection_id != source.collection_id:
+                raise EmbeddingProjectionMismatch(
+                    f"Projection `{projection_id}` belongs to collection `{projection.collection_id}`, "
+                    f"but source `{source_id}` belongs to `{source.collection_id}`."
+                )
+            self._validate_chunks_for_projection_sync(projection=projection, chunks=chunks)
+        else:
+            projection = self._ensure_projection_for_chunks_sync(source=source, chunks=chunks)
+        target_projection_id = projection.projection_id if projection is not None else None
+        delete_legacy_null_projection = bool(projection is not None and projection.status == "active")
+        chunks_to_store = self._namespace_chunks_for_projection(chunks, target_projection_id if projection_id else None)
         with self._connect() as conn:
-            conn.execute(
-                "DELETE FROM kb_chunk_embeddings WHERE chunk_id IN (SELECT chunk_id FROM kb_chunks WHERE source_id = ?)",
-                (source_id,),
-            )
-            conn.execute("DELETE FROM kb_chunks WHERE source_id = ?", (source_id,))
-            for chunk in chunks:
+            if target_projection_id is None:
+                conn.execute(
+                    "DELETE FROM kb_chunk_embeddings WHERE chunk_id IN (SELECT chunk_id FROM kb_chunks WHERE source_id = ?)",
+                    (source_id,),
+                )
+                conn.execute("DELETE FROM kb_chunks WHERE source_id = ?", (source_id,))
+            else:
+                projection_clause = "projection_id = ?"
+                params: tuple[Any, ...] = (source_id, target_projection_id)
+                if delete_legacy_null_projection:
+                    projection_clause = "(projection_id = ? OR projection_id IS NULL)"
+                conn.execute(
+                    f"DELETE FROM kb_chunk_embeddings WHERE chunk_id IN (SELECT chunk_id FROM kb_chunks WHERE source_id = ? AND {projection_clause})",
+                    params,
+                )
+                conn.execute(
+                    f"DELETE FROM kb_chunks WHERE source_id = ? AND {projection_clause}",
+                    params,
+                )
+            for chunk in chunks_to_store:
                 chunk_id = str(chunk["chunk_id"])
                 conn.execute(
                     """
                     INSERT INTO kb_chunks (
-                        chunk_id, source_id, chunk_index, text, metadata_json, source_origin
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                        chunk_id, source_id, projection_id, chunk_index, text, metadata_json, source_origin
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         chunk_id,
                         source_id,
+                        target_projection_id,
                         int(chunk["chunk_index"]),
                         str(chunk["text"]),
                         _json_dump(dict(chunk.get("metadata_json") or {})),
@@ -425,11 +982,12 @@ class SQLiteKnowledgeBaseStore:
                     conn.execute(
                         """
                         INSERT INTO kb_chunk_embeddings (
-                            chunk_id, embedding_blob, embedding_dim, embedding_model_id
-                        ) VALUES (?, ?, ?, ?)
+                            chunk_id, projection_id, embedding_blob, embedding_dim, embedding_model_id
+                        ) VALUES (?, ?, ?, ?, ?)
                         """,
                         (
                             chunk_id,
+                            target_projection_id,
                             embedding_blob,
                             int(np.asarray(chunk["embedding"], dtype=np.float32).shape[0]),
                             str(chunk.get("embedding_model_id") or ""),
@@ -451,6 +1009,20 @@ class SQLiteKnowledgeBaseStore:
         source_ids: Optional[List[str]] = None,
         include_embeddings: bool = False,
     ) -> List[KnowledgeBaseChunkRecord]:
+        return self._list_chunks_sync(
+            collection_id=collection_id,
+            source_ids=source_ids,
+            include_embeddings=include_embeddings,
+        )
+
+    def _list_chunks_sync(
+        self,
+        *,
+        collection_id: str,
+        source_ids: Optional[List[str]] = None,
+        include_embeddings: bool = False,
+        projection: Optional[KnowledgeBaseProjectionRecord] = None,
+    ) -> List[KnowledgeBaseChunkRecord]:
         select_columns = "c.*, s.collection_id, s.display_name"
         join_clause = ""
         if include_embeddings:
@@ -468,6 +1040,12 @@ class SQLiteKnowledgeBaseStore:
             placeholders = ",".join("?" for _ in source_ids)
             query += f" AND c.source_id IN ({placeholders})"
             params.extend(source_ids)
+        if projection is not None:
+            if projection.version == 1 and projection.status == "active":
+                query += " AND (c.projection_id = ? OR c.projection_id IS NULL)"
+            else:
+                query += " AND c.projection_id = ?"
+            params.append(projection.projection_id)
         query += " ORDER BY s.display_name, c.chunk_index"
         with self._connect() as conn:
             rows = conn.execute(query, tuple(params)).fetchall()
@@ -484,11 +1062,22 @@ class SQLiteKnowledgeBaseStore:
         filters: Optional[Dict[str, Any]] = None,
         mode: str = "hybrid",
         embed_fn: Optional[Callable] = None,
+        query_embedding_model_id: Optional[str] = None,
     ) -> List[KnowledgeBaseChunkMatchRecord]:
-        chunks = self.list_chunks_sync(
+        query_vector = np.asarray(query_embedding, dtype=np.float32)
+        projection = self._validate_query_projection_sync(
+            collection_id=collection_id,
+            query_embedding=query_vector,
+            query_embedding_model_id=query_embedding_model_id,
+        )
+        if query_vector.ndim != 1:
+            raise ValueError("query_embedding must be a 1D vector")
+
+        chunks = self._list_chunks_sync(
             collection_id=collection_id,
             source_ids=source_ids,
             include_embeddings=True,
+            projection=projection,
         )
         chunks = [
             chunk
@@ -497,10 +1086,6 @@ class SQLiteKnowledgeBaseStore:
         ]
         if not chunks:
             return []
-
-        query_vector = np.asarray(query_embedding, dtype=np.float32)
-        if query_vector.ndim != 1:
-            raise ValueError("query_embedding must be a 1D vector")
 
         def _search_embed_fn(texts: List[str]) -> np.ndarray:
             if len(texts) == 1 and str(texts[0]) == query_text:
@@ -579,8 +1164,14 @@ class SQLiteKnowledgeBaseStore:
     async def register_source(self, **kwargs: Any) -> KnowledgeBaseSourceRecord:
         return self.register_source_sync(**kwargs)
 
-    async def replace_chunks(self, *, source_id: str, chunks: List[Dict[str, Any]]) -> None:
-        self.replace_chunks_sync(source_id=source_id, chunks=chunks)
+    async def replace_chunks(
+        self,
+        *,
+        source_id: str,
+        chunks: List[Dict[str, Any]],
+        projection_id: Optional[str] = None,
+    ) -> None:
+        self.replace_chunks_sync(source_id=source_id, chunks=chunks, projection_id=projection_id)
 
     async def list_sources(self, collection_id: str) -> List[KnowledgeBaseSourceRecord]:
         return self.list_sources_sync(collection_id)
@@ -604,6 +1195,7 @@ class SQLiteKnowledgeBaseStore:
         filters: Optional[Dict[str, Any]] = None,
         mode: str = "hybrid",
         embed_fn: Optional[Callable] = None,
+        query_embedding_model_id: Optional[str] = None,
     ) -> List[KnowledgeBaseChunkMatchRecord]:
         return self.search_chunks_sync(
             collection_id=collection_id,
@@ -614,6 +1206,7 @@ class SQLiteKnowledgeBaseStore:
             filters=filters,
             mode=mode,
             embed_fn=embed_fn,
+            query_embedding_model_id=query_embedding_model_id,
         )
 
     async def delete_chunks(

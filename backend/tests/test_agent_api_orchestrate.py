@@ -1182,7 +1182,7 @@ async def test_execute_orchestration_api_reads_knowledge_base_via_unified_core(m
         display_name="kb_policy.txt",
         text="За просрочку поставки применяется штраф 3 процента.",
         store=store,
-        embedding_model_id="labse-embedding",
+        embedding_model_id="qwen3-embedding-0.6b",
         embed_fn=_stub_embed_fn,
     )
 
@@ -1224,7 +1224,7 @@ async def test_execute_orchestration_api_reads_knowledge_base_via_unified_core_w
         display_name="kb_policy.txt",
         text="За просрочку поставки применяется штраф 3 процента.",
         store=store,
-        embedding_model_id="labse-embedding",
+        embedding_model_id="qwen3-embedding-0.6b",
         embed_fn=_stub_embed_fn,
     )
 
@@ -1260,6 +1260,7 @@ async def test_execute_orchestration_api_reads_knowledge_base_via_unified_core_w
         collection_id="legal",
         query_text="Какой штраф за просрочку поставки?",
         query_embedding=_stub_embed_fn(["Какой штраф за просрочку поставки?"])[0],
+        query_embedding_model_id="qwen3-embedding-0.6b",
         top_k=3,
         filters={"source_scope": "knowledge"},
     )

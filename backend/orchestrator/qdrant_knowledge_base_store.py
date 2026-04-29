@@ -9,6 +9,8 @@ import numpy as np
 
 from orchestrator.knowledge_base_store import (
     DEFAULT_KB_DB_URL,
+    EmbeddingProjectionMismatch,
+    KnowledgeBaseProjectionRecord,
     KnowledgeBaseChunkMatchRecord,
     KnowledgeBaseChunkRecord,
     SQLiteKnowledgeBaseStore,
@@ -45,11 +47,24 @@ class QdrantKnowledgeBaseStore(SQLiteKnowledgeBaseStore):
         self._client = client_class(url=qdrant_url)
         self.collection_name = collection_name
 
-    def _existing_collection_vector_size(self) -> Optional[int]:
+    def _projection_physical_collection_name(self, collection_id: str) -> str:
+        return self.collection_name
+
+    def _managed_projection_physical_collection_name(self, collection_id: str, version: int) -> str:
+        safe_collection_id = "".join(
+            char if char.isalnum() or char in {"_", "-"} else "_"
+            for char in str(collection_id)
+        ).strip("_")
+        if not safe_collection_id:
+            safe_collection_id = "kb"
+        return f"{self.collection_name}__{safe_collection_id}__v{int(version)}"
+
+    def _existing_collection_vector_size(self, *, collection_name: Optional[str] = None) -> Optional[int]:
+        target_collection = collection_name or self.collection_name
         get_collection = getattr(self._client, "get_collection", None)
         if get_collection is None:
             return None
-        collection_info = get_collection(self.collection_name)
+        collection_info = get_collection(target_collection)
         current: Any = collection_info
         for attr in ("config", "params", "vectors"):
             if current is None:
@@ -66,18 +81,24 @@ class QdrantKnowledgeBaseStore(SQLiteKnowledgeBaseStore):
             size = getattr(current, "size", None)
         return int(size) if size is not None else None
 
-    def _count_collection_points(self, *, point_filter: Optional[Any] = None) -> int:
+    def _count_collection_points(
+        self,
+        *,
+        collection_name: Optional[str] = None,
+        point_filter: Optional[Any] = None,
+    ) -> int:
+        target_collection = collection_name or self.collection_name
         count_method = getattr(self._client, "count", None)
         if callable(count_method):
             response = count_method(
-                collection_name=self.collection_name,
+                collection_name=target_collection,
                 count_filter=point_filter,
                 exact=True,
             )
             return int(getattr(response, "count", 0) or 0)
         return 0
 
-    def _count_points_by_scope(self, source_scope: str) -> int:
+    def _count_points_by_scope(self, source_scope: str, *, collection_name: Optional[str] = None) -> int:
         scope_filter = self._models.Filter(
             must=[
                 self._models.FieldCondition(
@@ -86,51 +107,54 @@ class QdrantKnowledgeBaseStore(SQLiteKnowledgeBaseStore):
                 )
             ]
         )
-        return self._count_collection_points(point_filter=scope_filter)
+        return self._count_collection_points(collection_name=collection_name, point_filter=scope_filter)
 
-    def _can_recreate_collection_for_dimension_mismatch(self) -> bool:
-        total_points = self._count_collection_points()
+    def _can_recreate_collection_for_dimension_mismatch(self, *, collection_name: Optional[str] = None) -> bool:
+        target_collection = collection_name or self.collection_name
+        total_points = self._count_collection_points(collection_name=target_collection)
         if total_points == 0:
             return True
-        knowledge_points = self._count_points_by_scope("knowledge")
-        session_points = self._count_points_by_scope("session")
+        knowledge_points = self._count_points_by_scope("knowledge", collection_name=target_collection)
+        session_points = self._count_points_by_scope("session", collection_name=target_collection)
         return knowledge_points == 0 and total_points == session_points
 
-    def _recreate_collection(self, embedding_dim: int) -> None:
+    def _recreate_collection(self, embedding_dim: int, *, collection_name: Optional[str] = None) -> None:
+        target_collection = collection_name or self.collection_name
         delete_collection = getattr(self._client, "delete_collection", None)
         if not callable(delete_collection):
             raise RuntimeError(
-                f"Qdrant collection `{self.collection_name}` requires recreation, but delete_collection is unavailable."
+                f"Qdrant collection `{target_collection}` requires recreation, but delete_collection is unavailable."
             )
-        delete_collection(self.collection_name)
+        delete_collection(target_collection)
         self._client.create_collection(
-            self.collection_name,
+            target_collection,
             vectors_config=self._models.VectorParams(
                 size=int(embedding_dim),
                 distance=self._models.Distance.COSINE,
             ),
         )
 
-    def _ensure_collection(self, embedding_dim: int) -> None:
-        if self._client.collection_exists(self.collection_name):
-            existing_size = self._existing_collection_vector_size()
+    def _ensure_collection(self, embedding_dim: int, *, collection_name: Optional[str] = None) -> None:
+        target_collection = collection_name or self.collection_name
+        if self._client.collection_exists(target_collection):
+            existing_size = self._existing_collection_vector_size(collection_name=target_collection)
             if existing_size is not None and existing_size != int(embedding_dim):
-                if self._can_recreate_collection_for_dimension_mismatch():
+                if self._can_recreate_collection_for_dimension_mismatch(collection_name=target_collection):
                     logger.warning(
                         "Recreating Qdrant collection %s due to session-only vector size mismatch %s -> %s",
-                        self.collection_name,
+                        target_collection,
                         existing_size,
                         int(embedding_dim),
                     )
-                    self._recreate_collection(int(embedding_dim))
+                    self._recreate_collection(int(embedding_dim), collection_name=target_collection)
                     return
                 raise RuntimeError(
-                    f"Qdrant collection `{self.collection_name}` expects vector size {existing_size}, "
+                    f"Qdrant collection `{target_collection}` expects vector size {existing_size}, "
                     f"but received {int(embedding_dim)}."
                 )
             return
         self._client.create_collection(
-            self.collection_name,
+            target_collection,
             vectors_config=self._models.VectorParams(
                 size=int(embedding_dim),
                 distance=self._models.Distance.COSINE,
@@ -251,19 +275,64 @@ class QdrantKnowledgeBaseStore(SQLiteKnowledgeBaseStore):
         chunks_by_id = {chunk.chunk_id: chunk for chunk in (self._row_to_chunk(row) for row in rows)}
         return [chunks_by_id[chunk_id] for chunk_id in chunk_ids if chunk_id in chunks_by_id]
 
-    def replace_chunks_sync(self, *, source_id: str, chunks: List[Dict[str, Any]]) -> None:
-        super().replace_chunks_sync(source_id=source_id, chunks=chunks)
-        sources = {source.source_id: source for source in self.list_sources_sync(collection_id=self._source_collection_id(source_id))}
-        source = sources.get(source_id)
-        if source is None:
-            return
-
+    def replace_chunks_sync(
+        self,
+        *,
+        source_id: str,
+        chunks: List[Dict[str, Any]],
+        projection_id: Optional[str] = None,
+    ) -> None:
+        source = self._source_record_sync(source_id)
         vector_chunks = [chunk for chunk in chunks if chunk.get("embedding") is not None]
+        projection: Optional[KnowledgeBaseProjectionRecord] = None
         if vector_chunks:
-            embedding_dim = int(np.asarray(vector_chunks[0]["embedding"], dtype=np.float32).shape[0])
-            self._ensure_collection(embedding_dim)
+            if projection_id is not None:
+                projection = self.get_projection_sync(projection_id)
+                if projection is None:
+                    raise KeyError(f"unknown-projection:{projection_id}")
+                if projection.collection_id != source.collection_id:
+                    raise EmbeddingProjectionMismatch(
+                        f"Projection `{projection_id}` belongs to collection `{projection.collection_id}`, "
+                        f"but source `{source_id}` belongs to `{source.collection_id}`."
+                    )
+                self._validate_chunks_for_projection_sync(projection=projection, chunks=chunks)
+                self._ensure_collection(
+                    int(projection.embedding_dim),
+                    collection_name=projection.physical_collection_name,
+                )
+            else:
+                projection_inputs = self._projection_inputs_for_chunks(source=source, chunks=chunks)
+                if projection_inputs is None:
+                    return
+                active_projection = self.get_active_projection_sync(source.collection_id)
+                if active_projection is None:
+                    self._ensure_collection(
+                        int(projection_inputs["embedding_dim"]),
+                        collection_name=str(projection_inputs["physical_collection_name"]),
+                    )
+                    projection = self.ensure_projection_sync(**projection_inputs)
+                else:
+                    projection = self.ensure_projection_sync(**projection_inputs)
+                    self._ensure_collection(
+                        int(projection.embedding_dim),
+                        collection_name=projection.physical_collection_name,
+                    )
+
+        target_projection_id = projection.projection_id if projection is not None else projection_id
+        chunks_to_store = self._namespace_chunks_for_projection(chunks, target_projection_id if projection_id else None)
+
+        super().replace_chunks_sync(
+            source_id=source_id,
+            chunks=chunks_to_store,
+            projection_id=projection_id,
+        )
+        if projection is None and projection_id is not None:
+            projection = self.get_projection_sync(projection_id)
+        if projection is None:
+            projection = self.get_active_projection_sync(source.collection_id)
+        target_collection = projection.physical_collection_name if projection is not None else self.collection_name
         self._client.delete(
-            collection_name=self.collection_name,
+            collection_name=target_collection,
             points_selector=self._models.Filter(
                 must=[
                     self._models.FieldCondition(
@@ -273,10 +342,12 @@ class QdrantKnowledgeBaseStore(SQLiteKnowledgeBaseStore):
                 ]
             ),
         )
+        vector_chunks = [chunk for chunk in chunks_to_store if chunk.get("embedding") is not None]
         if not vector_chunks:
             return
         points = []
         for chunk in vector_chunks:
+            embedding_model_id = str(chunk.get("embedding_model_id") or source.embedding_model_id)
             payload = {
                 "chunk_id": str(chunk["chunk_id"]),
                 "collection_id": source.collection_id,
@@ -286,7 +357,12 @@ class QdrantKnowledgeBaseStore(SQLiteKnowledgeBaseStore):
                 "display_name": source.display_name,
                 "source_scope": "knowledge",
                 "source_origin": str(chunk.get("source_origin") or "knowledge_base"),
-                "embedding_model_id": str(chunk.get("embedding_model_id") or source.embedding_model_id),
+                "embedding_model_id": embedding_model_id,
+                "embedding_projection_id": projection.projection_id if projection is not None else None,
+                "embedding_dim": projection.embedding_dim
+                if projection is not None
+                else int(np.asarray(chunk["embedding"], dtype=np.float32).shape[0]),
+                "embedding_distance": projection.embedding_distance if projection is not None else "Cosine",
                 "chunk_index": int(chunk.get("chunk_index") or 0),
             }
             payload.update(dict(chunk.get("metadata_json") or {}))
@@ -297,7 +373,7 @@ class QdrantKnowledgeBaseStore(SQLiteKnowledgeBaseStore):
                     payload=payload,
                 )
             )
-        self._client.upsert(collection_name=self.collection_name, points=points)
+        self._client.upsert(collection_name=target_collection, points=points)
 
     def _source_collection_id(self, source_id: str) -> str:
         with self._connect() as conn:
@@ -320,10 +396,20 @@ class QdrantKnowledgeBaseStore(SQLiteKnowledgeBaseStore):
         filters: Optional[Dict[str, Any]] = None,
         mode: str = "hybrid",
         embed_fn: Optional[Any] = None,
+        query_embedding_model_id: Optional[str] = None,
     ) -> List[KnowledgeBaseChunkMatchRecord]:
         source_scope = _normalize_source_scope((filters or {}).get("source_scope"), collection_id=collection_id)
         normalized_source_ids = [str(item) for item in (source_ids or []) if item is not None]
-        query_vector = np.asarray(query_embedding, dtype=np.float32).tolist()
+        query_array = np.asarray(query_embedding, dtype=np.float32)
+        projection = self._validate_query_projection_sync(
+            collection_id=collection_id,
+            query_embedding=query_array,
+            query_embedding_model_id=query_embedding_model_id,
+        )
+        target_collection = projection.physical_collection_name if projection is not None else self.collection_name
+        if query_array.ndim != 1:
+            raise ValueError("query_embedding must be a 1D vector")
+        query_vector = query_array.tolist()
         source_id_batches: List[Optional[List[str]]] = [None]
         if len(normalized_source_ids) == 1:
             source_id_batches = [normalized_source_ids]
@@ -338,7 +424,7 @@ class QdrantKnowledgeBaseStore(SQLiteKnowledgeBaseStore):
                 filters=filters,
             )
             results = self._client.query_points(
-                collection_name=self.collection_name,
+                collection_name=target_collection,
                 query=query_vector,
                 query_filter=filter_obj,
                 limit=int(top_k),
@@ -383,6 +469,8 @@ class QdrantKnowledgeBaseStore(SQLiteKnowledgeBaseStore):
         source_ids: Optional[List[str]] = None,
         filters: Optional[Dict[str, Any]] = None,
     ) -> int:
+        projection = self.get_active_projection_sync(collection_id)
+        target_collection = projection.physical_collection_name if projection is not None else self.collection_name
         normalized_source_ids = [str(item) for item in (source_ids or []) if item is not None]
         source_id_batches: List[Optional[List[str]]] = [None]
         if len(normalized_source_ids) == 1:
@@ -392,7 +480,7 @@ class QdrantKnowledgeBaseStore(SQLiteKnowledgeBaseStore):
 
         for source_id_batch in source_id_batches:
             self._client.delete(
-                collection_name=self.collection_name,
+                collection_name=target_collection,
                 points_selector=self._build_filter(
                     collection_id=collection_id,
                     source_ids=source_id_batch,
