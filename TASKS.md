@@ -2538,8 +2538,13 @@ DOCUMENT_ANALYSIS_SUMMARIZE_MAX_TOKENS=512
   - raw provider `agent_api` больше не использует retrying `ums_client` для `raw/v1/chat/completions` non-stream path и пробрасывает `503/409` availability errors как explicit upstream state вместо silent `502`;
   - targeted regression verification: `pytest backend/tests/test_unified_model_server_startup.py backend/tests/test_agent_api_openai_compat.py -q` -> `98 passed`;
   - live verification на user-managed `./scripts/run_native.sh` подтвердила healthy runtime path: `nvidia-smi` показывает `llama-server` на GPU0/GPU1, `UMS /status` отдаёт `runtime_state=available` для `qwen-14b-llm`, а хвост `tmux` фиксирует успешные `POST /infer -> 200` без silent CPU relaunch.
+  Progress 2026-04-28:
+  - `GET /ready/infer` стал чистой проверкой состояния: без `autostart=true` он больше не запускает heavy runtime и не провоцирует cold-start из health/readiness path;
+  - log-reader `UMS` теперь немедленно останавливает heavy `llama-server` при маркерах `ggml_cuda_init` / CPU-only offload warning, поэтому процесс не успевает перейти к загрузке GGUF tensors в CPU/RAM после отказа CUDA;
+  - `run_native.sh` больше не считает модель загруженной по одному наличию `qwen-14b-llm` в `/status`; проверяется реальный `active_heavy_model`, а при неактивной модели выводится ссылка на `/status`;
+  - live verification: `./scripts/run_native.sh --openwebui-dev --openwebui-data-profile dev --no-attach` поднимает `Open WebUI` на `http://localhost:3001`, `UMS /health` остаётся `ok` после `GET /ready/infer -> 503 error_gpu`, в свежем `ums.log` нет `CPU_Mapped model buffer` / `load_tensors` для heavy LLM после CUDA fault.
   Remaining:
-  - отдельно снять `tmux`/`nvidia-smi` после следующего induced CUDA fault и убедиться, что `qwen-14b-llm` больше не остаётся в ложном `multi-gpu` state.
+  - отдельно починить host `llama-server` / `llama.cpp` CUDA runtime: текущий live-контур всё ещё возвращает `ggml_cuda_init: failed`, поэтому heavy LLM честно остаётся в `error_gpu`, а не в готовом inference-состоянии.
 
 ### 2026-03-18 — B3.41: SQLite autoCollapse — причина и диагноз
 

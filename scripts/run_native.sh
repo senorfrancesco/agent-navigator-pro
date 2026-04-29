@@ -326,7 +326,20 @@ validate_native_runtime_env() {
   validate_file_path_var "MMPROJ_PATH"
   validate_dir_path_var "MODEL_PATH_EMBEDDING_INTENT"
   validate_dir_path_var "MODEL_PATH_EMBEDDING_RETRIEVAL"
-  EMBEDDING_MODEL_PATH="${EMBEDDING_MODEL_PATH:-$MODEL_PATH_EMBEDDING_RETRIEVAL}"
+  local embedding_model_id="${EMBEDDING_MODEL_ID:-qwen3-embedding-0.6b}"
+  if [ -z "${EMBEDDING_MODEL_PATH:-}" ]; then
+    case "$embedding_model_id" in
+      qwen3-embedding-0.6b)
+        EMBEDDING_MODEL_PATH="$MODEL_PATH_EMBEDDING_INTENT"
+        ;;
+      labse-embedding)
+        EMBEDDING_MODEL_PATH="$MODEL_PATH_EMBEDDING_RETRIEVAL"
+        ;;
+      *)
+        EMBEDDING_MODEL_PATH="${MODEL_PATH_EMBEDDING_INTENT:-$MODEL_PATH_EMBEDDING_RETRIEVAL}"
+        ;;
+    esac
+  fi
   validate_dir_path_var "EMBEDDING_MODEL_PATH"
   UPLOADS_DIR="$(resolve_backend_relative_path "${UPLOADS_DIR:-$BACKEND_DIR/open_webui_uploads}")"
   ensure_writable_dir "${UPLOADS_DIR:-$BACKEND_DIR/open_webui_uploads}" "UPLOADS_DIR"
@@ -340,7 +353,7 @@ DOC_PORT="${DOC_PORT:-8001}"
 LEGAL_PORT="${LEGAL_PORT:-8002}"
 UMS_PORT="${UMS_PORT:-8090}"
 EMBEDDING_RUNTIME_PORT="${EMBEDDING_RUNTIME_PORT:-8092}"
-EMBEDDING_MODEL_ID="${EMBEDDING_MODEL_ID:-${LEGAL_EMBEDDER_MODEL:-labse-embedding}}"
+EMBEDDING_MODEL_ID="${EMBEDDING_MODEL_ID:-qwen3-embedding-0.6b}"
 EMBEDDING_DEVICE="${EMBEDDING_DEVICE:-${RETRIEVAL_EMBEDDER_DEVICE_MODE:-cpu}}"
 EMBEDDING_DIM="${EMBEDDING_DIM:-}"
 EMBEDDING_NORMALIZE="${EMBEDDING_NORMALIZE:-true}"
@@ -353,6 +366,7 @@ OPENWEBUI_FORK_DIR="${OPENWEBUI_FORK_DIR:-$PROJECT_ROOT/../open-webui}"
 OPENWEBUI_DEV_DATA_DIR="${OPENWEBUI_DEV_DATA_DIR:-$BACKEND_DIR/.data/openwebui-dev}"
 OPENWEBUI_STABLE_DATA_DIR="${OPENWEBUI_STABLE_DATA_DIR:-$BACKEND_DIR/.data/openwebui-stable}"
 OPENWEBUI_SMOKE_DATA_DIR="${OPENWEBUI_SMOKE_DATA_DIR:-/tmp/openwebui-qdrant-smoke/data}"
+OPENWEBUI_DEV_FRONTEND_BUILD_DIR="${OPENWEBUI_DEV_FRONTEND_BUILD_DIR:-$OPENWEBUI_FORK_DIR/build}"
 
 OPENWEBUI_DATA_PROFILE="${OPENWEBUI_DATA_PROFILE_CLI:-${LLM_TOOLS_PLATFORM_OPENWEBUI_DATA_PROFILE:-${OPENWEBUI_DATA_PROFILE:-}}}"
 if [ -z "$OPENWEBUI_DATA_PROFILE" ]; then
@@ -461,7 +475,7 @@ component_models = [
     ("llm", "qwen-14b-llm"),
     ("vlm", "qwen-vl-8b"),
     ("intent", "qwen3-embedding-0.6b"),
-    ("retrieval", "labse-embedding"),
+    ("retrieval", "qwen3-embedding-0.6b"),
 ]
 parts = []
 for label, model_id in component_models:
@@ -574,10 +588,14 @@ start_openwebui_dev_service() {
   local fork_dir_q
   local env_file_q
   local data_dir_q
+  local static_dir_q
+  local frontend_build_dir_q
+  local openwebui_dev_cors_origin_q
   local dev_uploads_dir="$OPENWEBUI_DATA_DIR/uploads"
+  local dev_static_dir="$OPENWEBUI_DATA_DIR/static"
 
   ensure_openwebui_dev_context
-  mkdir -p "$OPENWEBUI_DATA_DIR"
+  mkdir -p "$OPENWEBUI_DATA_DIR" "$dev_static_dir"
   if [ ! -e "$dev_uploads_dir" ]; then
     ln -s "$UPLOADS_DIR" "$dev_uploads_dir"
   elif [ -L "$dev_uploads_dir" ] && [ "$(readlink "$dev_uploads_dir")" != "$UPLOADS_DIR" ]; then
@@ -585,12 +603,18 @@ start_openwebui_dev_service() {
   elif [ ! -L "$dev_uploads_dir" ]; then
     warn "Open WebUI dev uploads directory already exists at $dev_uploads_dir; backend shared uploads remain $UPLOADS_DIR."
   fi
+  if [ ! -d "$OPENWEBUI_DEV_FRONTEND_BUILD_DIR/static" ]; then
+    warn "Open WebUI frontend build static directory is missing at $OPENWEBUI_DEV_FRONTEND_BUILD_DIR/static; runtime static assets may be incomplete until the fork is built."
+  fi
 
   fork_dir_q="$(quote_shell_arg "$OPENWEBUI_FORK_DIR")"
   env_file_q="$(quote_shell_arg "$ENV_FILE")"
   data_dir_q="$(quote_shell_arg "$OPENWEBUI_DATA_DIR")"
+  static_dir_q="$(quote_shell_arg "$dev_static_dir")"
+  frontend_build_dir_q="$(quote_shell_arg "$OPENWEBUI_DEV_FRONTEND_BUILD_DIR")"
+  openwebui_dev_cors_origin_q="$(quote_shell_arg "http://127.0.0.1:$OPENWEBUI_PORT;http://localhost:$OPENWEBUI_PORT")"
 
-  start_tmux_window "openwebui-api" "cd $fork_dir_q && $ACTIVATE_CMD && set -a && source $env_file_q && set +a && export OFFLINE_MODE='true' ENABLE_VERSION_UPDATE_CHECK='false' ENABLE_PIP_INSTALL_FRONTMATTER_REQUIREMENTS='false' ENABLE_BASE_MODELS_CACHE='false' HF_HUB_OFFLINE='1' DATA_DIR=$data_dir_q OPENAI_API_BASE_URL='http://127.0.0.1:$AGENT_PORT/v1' OPENAI_API_KEY='sk-dummy' ENABLE_AGENT_NAVIGATOR_RUNTIME_MODELS='True' ENABLE_FOLLOW_UP_GENERATION='False' ENABLE_RAG_WEB_SEARCH='False' ENABLE_RAG_LOCAL_WEB_FETCH='False' VECTOR_DB='qdrant' QDRANT_URI='http://127.0.0.1:$QDRANT_PORT' ENABLE_QDRANT_MULTITENANCY_MODE='true' QDRANT_COLLECTION_PREFIX='$OPENWEBUI_QDRANT_COLLECTION_PREFIX' RAG_EMBEDDING_ENGINE='openai' RAG_OPENAI_API_BASE_URL='http://127.0.0.1:$EMBEDDING_RUNTIME_PORT/v1' RAG_OPENAI_API_KEY='sk-dummy' RAG_EMBEDDING_MODEL='$EMBEDDING_MODEL_ID' RAG_RERANKING_ENGINE='' OPENWEBUI_SESSION_RAG_HANDOFF='preferred' && open-webui serve --host 127.0.0.1 --port $OPENWEBUI_DEV_BACKEND_PORT 2>&1 | tee openwebui-api.log"
+  start_tmux_window "openwebui-api" "cd $fork_dir_q && $ACTIVATE_CMD && set -a && source $env_file_q && set +a && export OFFLINE_MODE='true' ENABLE_VERSION_UPDATE_CHECK='false' ENABLE_PIP_INSTALL_FRONTMATTER_REQUIREMENTS='false' ENABLE_BASE_MODELS_CACHE='false' HF_HUB_OFFLINE='1' DATA_DIR=$data_dir_q STATIC_DIR=$static_dir_q FRONTEND_BUILD_DIR=$frontend_build_dir_q CORS_ALLOW_ORIGIN=$openwebui_dev_cors_origin_q OPENAI_API_BASE_URL='http://127.0.0.1:$AGENT_PORT/v1' OPENAI_API_KEY='sk-dummy' ENABLE_AGENT_NAVIGATOR_RUNTIME_MODELS='True' ENABLE_FOLLOW_UP_GENERATION='False' ENABLE_RAG_WEB_SEARCH='False' ENABLE_RAG_LOCAL_WEB_FETCH='False' VECTOR_DB='qdrant' QDRANT_URI='http://127.0.0.1:$QDRANT_PORT' ENABLE_QDRANT_MULTITENANCY_MODE='true' QDRANT_COLLECTION_PREFIX='$OPENWEBUI_QDRANT_COLLECTION_PREFIX' RAG_EMBEDDING_ENGINE='openai' RAG_OPENAI_API_BASE_URL='http://127.0.0.1:$EMBEDDING_RUNTIME_PORT/v1' RAG_OPENAI_API_KEY='sk-dummy' RAG_EMBEDDING_MODEL='$EMBEDDING_MODEL_ID' RAG_RERANKING_ENGINE='' OPENWEBUI_SESSION_RAG_HANDOFF='off' && open-webui serve --host 127.0.0.1 --port $OPENWEBUI_DEV_BACKEND_PORT 2>&1 | tee openwebui-api.log"
   wait_for_service "Open WebUI API" "$OPENWEBUI_DEV_BACKEND_PORT" "/health" 60 || SERVICES_OK=false
 
   start_tmux_window "openwebui-ui" "cd $fork_dir_q && export ENV='dev' APP_BUILD_HASH='current-fork-dev' && ./node_modules/.bin/vite dev --host 127.0.0.1 --port $OPENWEBUI_PORT 2>&1 | tee openwebui-ui.log"
@@ -662,14 +686,14 @@ wait_for_model() {
   while [ $elapsed -lt $timeout ]; do
     local status
     status=$(curl -sf "http://localhost:$UMS_PORT/status" 2>/dev/null || true)
-    if [ -n "$status" ] && echo "$status" | grep -q '"qwen-14b-llm"'; then
+    if [ -n "$status" ] && echo "$status" | grep -q '"active_heavy_model":"qwen-14b-llm"'; then
       echo -e "${GREEN}✓ загружена${NC}"
       return 0
     fi
     sleep 3
     elapsed=$((elapsed + 3))
   done
-  echo -e "${YELLOW}⚠ не загружена за ${timeout}с (загрузится при первом запросе)${NC}"
+  echo -e "${YELLOW}⚠ не активна за ${timeout}с (см. /status для причины)${NC}"
   return 0
 }
 
@@ -683,6 +707,10 @@ wait_for_infer_ready() {
     if [ "$http_code" = "200" ]; then
       echo -e "${GREEN}✓ готов${NC}"
       return 0
+    fi
+    if [ "$http_code" = "503" ]; then
+      echo -e "${YELLOW}⚠ недоступен (HTTP 503)${NC}"
+      return 1
     fi
     sleep 3
     elapsed=$((elapsed + 3))
@@ -744,45 +772,42 @@ echo -e "${GREEN}Запуск Embedding Runtime на порту $EMBEDDING_RUNTI
 start_embedding_runtime_service
 
 echo ""
-echo -e "${YELLOW}Ожидание загрузки модели Qwen LLM (до 3 мин)...${NC}"
-wait_for_model 180 || SERVICES_OK=false
+echo -e "${YELLOW}Проверка статуса модели Qwen LLM...${NC}"
+wait_for_model 6 || SERVICES_OK=false
 
 echo ""
-echo -e "${YELLOW}Проверка готовности UMS к первому infer (до 3 мин)...${NC}"
+echo -e "${YELLOW}Проверка готовности UMS к первому infer...${NC}"
 UMS_INFER_READY=true
 wait_for_infer_ready 180 || UMS_INFER_READY=false
 if [ "$UMS_INFER_READY" = false ]; then
   SERVICES_OK=false
+  echo -e "${YELLOW}UMS infer-ready не подтвержден. Agent API и Open WebUI стартуют, но первые LLM-запросы могут вернуть ошибку готовности модели.${NC}"
 else
   print_ums_status_summary
 fi
 
 # 4) Agent API
-if [ "$UMS_INFER_READY" = true ]; then
-  echo -e "${GREEN}Запуск Agent API на порту $AGENT_PORT...${NC}"
-  start_tmux_window "agent-api" "cd $BACKEND_DIR/orchestrator && $ACTIVATE_CMD && export MCP_DOCUMENT_SERVER_URL='$MCP_DOCUMENT_SERVER_URL' MCP_LEGAL_SERVER_URL='$MCP_LEGAL_SERVER_URL' UMS_URL='$UMS_URL' QDRANT_URL='$QDRANT_URL' UPLOADS_DIR='$UPLOADS_DIR' HOST_UPLOADS_DIR='$HOST_UPLOADS_DIR' && python agent_api.py 2>&1 | tee agent-api.log"
-  wait_for_service "Agent API" "$AGENT_PORT" "/health" 30 || SERVICES_OK=false
+echo -e "${GREEN}Запуск Agent API на порту $AGENT_PORT...${NC}"
+start_tmux_window "agent-api" "cd $BACKEND_DIR/orchestrator && $ACTIVATE_CMD && export MCP_DOCUMENT_SERVER_URL='$MCP_DOCUMENT_SERVER_URL' MCP_LEGAL_SERVER_URL='$MCP_LEGAL_SERVER_URL' UMS_URL='$UMS_URL' QDRANT_URL='$QDRANT_URL' UPLOADS_DIR='$UPLOADS_DIR' HOST_UPLOADS_DIR='$HOST_UPLOADS_DIR' && python agent_api.py 2>&1 | tee agent-api.log"
+wait_for_service "Agent API" "$AGENT_PORT" "/health" 30 || SERVICES_OK=false
 
-  # 5) Open WebUI
-  if [ "$SKIP_OPENWEBUI" = true ]; then
-    echo -e "${YELLOW}Пропуск запуска Open WebUI (--skip-openwebui).${NC}"
-  elif [ "$OPENWEBUI_DEV" = true ]; then
-    echo -e "${GREEN}Запуск текущего форка Open WebUI без Docker build: API :$OPENWEBUI_DEV_BACKEND_PORT, UI :$OPENWEBUI_PORT...${NC}"
-    start_openwebui_dev_service
-  else
-    if [ "$BUILD_OPENWEBUI" = true ]; then
-      echo -e "${GREEN}Сборка и запуск Open WebUI из форка ../open-webui на порту $OPENWEBUI_PORT...${NC}"
-    else
-      echo -e "${GREEN}Запуск Open WebUI через Docker Compose на порту $OPENWEBUI_PORT...${NC}"
-    fi
-    (
-      cd "$PROJECT_ROOT"
-      start_openwebui_compose_service
-    )
-    wait_for_service "Open WebUI" "$OPENWEBUI_PORT" "/health" 60 || SERVICES_OK=false
-  fi
+# 5) Open WebUI
+if [ "$SKIP_OPENWEBUI" = true ]; then
+  echo -e "${YELLOW}Пропуск запуска Open WebUI (--skip-openwebui).${NC}"
+elif [ "$OPENWEBUI_DEV" = true ]; then
+  echo -e "${GREEN}Запуск текущего форка Open WebUI без Docker build: API :$OPENWEBUI_DEV_BACKEND_PORT, UI :$OPENWEBUI_PORT...${NC}"
+  start_openwebui_dev_service
 else
-  echo -e "${YELLOW}Пропуск запуска Agent API и Open WebUI: UMS infer-ready не подтвержден.${NC}"
+  if [ "$BUILD_OPENWEBUI" = true ]; then
+    echo -e "${GREEN}Сборка и запуск Open WebUI из форка ../open-webui на порту $OPENWEBUI_PORT...${NC}"
+  else
+    echo -e "${GREEN}Запуск Open WebUI через Docker Compose на порту $OPENWEBUI_PORT...${NC}"
+  fi
+  (
+    cd "$PROJECT_ROOT"
+    start_openwebui_compose_service
+  )
+  wait_for_service "Open WebUI" "$OPENWEBUI_PORT" "/health" 60 || SERVICES_OK=false
 fi
 
 # 6) Monitor

@@ -9,8 +9,6 @@ import sys
 import json
 import time
 import copy
-import hashlib
-import re
 import signal
 import subprocess
 import asyncio
@@ -23,7 +21,7 @@ from collections import deque
 from contextlib import suppress
 from contextlib import asynccontextmanager as async_cm
 from enum import Enum
-from typing import Dict, List, Optional, Any, AsyncGenerator, Tuple
+from typing import Callable, Dict, List, Optional, Any, AsyncGenerator, Tuple
 from pathlib import Path
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
@@ -96,11 +94,6 @@ class _RemoteProcess:
         return self.returncode
 
 MODELS_DIR = BACKEND_ROOT / "models" / "gguf"
-MODELS_ROOT = BACKEND_ROOT / "models"
-
-_SPLIT_GGUF_RE = re.compile(r"^(?P<base>.+)-(?P<index>\d{5})-of-(?P<total>\d{5})\.gguf$", re.IGNORECASE)
-_MODEL_HINT_FILENAMES = {"config.json", "adapter_config.json", "modules.json", "sentence_bert_config.json"}
-_ADAPTER_HINT_FILENAMES = {"adapter_config.json", "adapter_model.safetensors"}
 
 def _build_static_model_entry(model_id: str) -> Optional[Dict[str, Any]]:
     try:
@@ -178,448 +171,6 @@ def _save_active_model_runtime_state() -> None:
     }
     with _active_model_state_path().open("w", encoding="utf-8") as fh:
         json.dump(payload, fh, ensure_ascii=False, indent=2, sort_keys=True)
-
-
-def _scan_folders_state_path() -> Path:
-    return Path(
-        os.getenv("UMS_SCAN_FOLDERS_STATE_PATH", str(BACKEND_ROOT / ".data" / "ums_scan_folders.json"))
-    )
-
-
-def _ensure_scan_folders_state_parent() -> None:
-    _scan_folders_state_path().parent.mkdir(parents=True, exist_ok=True)
-
-
-def _normalize_existing_path(path_str: str) -> Path:
-    normalized = Path(path_str).expanduser().resolve()
-    if not normalized.exists():
-        raise HTTPException(status_code=422, detail=f"Path not found: {normalized}")
-    return normalized
-
-
-def _path_is_within(candidate: Path, root: Path) -> bool:
-    try:
-        candidate.relative_to(root)
-        return True
-    except ValueError:
-        return False
-
-
-def _scan_folder_id(path: Path) -> str:
-    return hashlib.sha1(str(path).encode("utf-8")).hexdigest()[:12]
-
-
-def _normalize_scan_folder_entry(path: Path, *, added_at: Optional[int] = None) -> Dict[str, Any]:
-    return {
-        "id": _scan_folder_id(path),
-        "path": str(path),
-        "added_at": int(added_at or time.time()),
-    }
-
-
-def _load_scan_folders_state() -> List[Dict[str, Any]]:
-    path = _scan_folders_state_path()
-    if not path.exists():
-        return []
-    try:
-        with path.open("r", encoding="utf-8") as fh:
-            payload = json.load(fh)
-    except Exception as exc:
-        logger.warning("Failed to load scan folders state: %s", exc)
-        return []
-    folders = payload.get("folders") if isinstance(payload, dict) else None
-    if not isinstance(folders, list):
-        return []
-    normalized: List[Dict[str, Any]] = []
-    seen: set[str] = set()
-    for entry in folders:
-        if not isinstance(entry, dict):
-            continue
-        raw_path = str(entry.get("path") or "").strip()
-        if not raw_path:
-            continue
-        try:
-            resolved_path = _normalize_existing_path(raw_path)
-        except HTTPException:
-            continue
-        folder_id = _scan_folder_id(resolved_path)
-        if folder_id in seen:
-            continue
-        normalized.append(_normalize_scan_folder_entry(resolved_path, added_at=int(entry.get("added_at") or time.time())))
-        seen.add(folder_id)
-    return normalized
-
-
-def _save_scan_folders_state() -> None:
-    _ensure_scan_folders_state_parent()
-    payload = {
-        "folders": copy.deepcopy(state.get("scan_folders") or []),
-        "updated_at": int(time.time()),
-    }
-    with _scan_folders_state_path().open("w", encoding="utf-8") as fh:
-        json.dump(payload, fh, ensure_ascii=False, indent=2, sort_keys=True)
-
-
-def _browse_allowlist_roots() -> List[Path]:
-    roots: List[Path] = []
-    candidate_paths: List[Path] = [MODELS_ROOT, Path.home()]
-    extra_roots_raw = str(os.getenv("UMS_BROWSE_ALLOWLIST_ROOTS") or "").strip()
-    if extra_roots_raw:
-        for token in extra_roots_raw.split(os.pathsep):
-            token = token.strip()
-            if token:
-                candidate_paths.append(Path(token).expanduser())
-    for folder in list(state.get("scan_folders") or []):
-        raw_path = str((folder or {}).get("path") or "").strip()
-        if raw_path:
-            candidate_paths.append(Path(raw_path))
-    seen: set[str] = set()
-    for candidate in candidate_paths:
-        try:
-            resolved = candidate.resolve()
-        except Exception:
-            continue
-        if not resolved.exists() or not resolved.is_dir():
-            continue
-        key = str(resolved)
-        if key in seen:
-            continue
-        roots.append(resolved)
-        seen.add(key)
-    return sorted(roots, key=lambda item: str(item))
-
-
-def _assert_browse_allowed(path: Path) -> Path:
-    resolved = _normalize_existing_path(str(path))
-    if not resolved.is_dir():
-        raise HTTPException(status_code=422, detail=f"Directory expected: {resolved}")
-    for root in _browse_allowlist_roots():
-        if _path_is_within(resolved, root):
-            return resolved
-    raise HTTPException(status_code=403, detail=f"Path is outside allowed roots: {resolved}")
-
-
-def _count_model_file_hints(directory: Path) -> int:
-    try:
-        children = list(directory.iterdir())
-    except OSError:
-        return 0
-    hint_count = 0
-    for child in children:
-        if child.is_file():
-            name = child.name.lower()
-            if child.suffix.lower() in {".gguf", ".safetensors"}:
-                hint_count += 1
-    return hint_count
-
-
-def _browse_folder_signals(directory: Path) -> Dict[str, bool]:
-    signals = {
-        "has_gguf": False,
-        "has_safetensors": False,
-        "has_adapter": False,
-        "has_config": False,
-    }
-    try:
-        children = list(directory.iterdir())
-    except OSError:
-        return signals
-    for child in children:
-        try:
-            if not child.is_file():
-                continue
-        except OSError:
-            continue
-        name = child.name.lower()
-        suffix = child.suffix.lower()
-        if suffix == ".gguf":
-            signals["has_gguf"] = True
-        if suffix == ".safetensors":
-            signals["has_safetensors"] = True
-        if name == "config.json":
-            signals["has_config"] = True
-        if name in {"adapter_config.json", "adapter_model.safetensors"}:
-            signals["has_adapter"] = True
-    return signals
-
-
-def _browse_folder_tags(signals: Dict[str, bool]) -> List[str]:
-    tags: List[str] = []
-    if bool(signals.get("has_gguf")):
-        tags.append("GGUF")
-    if bool(signals.get("has_adapter")):
-        tags.append("Adapter")
-    if bool(signals.get("has_safetensors")):
-        tags.append("Safetensors")
-    if bool(signals.get("has_config")):
-        tags.append("Config")
-    return tags
-
-
-def _browse_entry_payload(directory: Path, *, source: str = "directory") -> Dict[str, Any]:
-    hint_count = _count_model_file_hints(directory)
-    signals = _browse_folder_signals(directory)
-    return {
-        "name": directory.name or str(directory),
-        "path": str(directory),
-        "source": source,
-        "looks_like_model_dir": any(bool(value) for value in signals.values()),
-        "model_file_count_hint": hint_count,
-        "folder_signals": signals,
-        "folder_tags": _browse_folder_tags(signals),
-    }
-
-
-def _split_family_key(name: str) -> str:
-    raw_name = Path(name).name
-    stem = raw_name[:-5] if raw_name.lower().endswith(".gguf") else raw_name
-    stem = stem.lower()
-    match = _SPLIT_GGUF_RE.match(raw_name)
-    if match:
-        stem = match.group("base").lower()
-    suffix_re = re.compile(r"-(q\d+(_k|_\d+)?(_[a-z])?|f16|fp16|bf16|q4|q5|q6|q8|merged|instruct|chat)$")
-    while True:
-        updated = suffix_re.sub("", stem)
-        if updated == stem:
-            break
-        stem = updated
-    stem = stem.replace("mmproj-", "")
-    stem = stem.replace("projector-", "")
-    return re.sub(r"[^a-z0-9]+", "-", stem).strip("-")
-
-
-def _slugify_candidate_id(name: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "model"
-
-
-def _display_name_from_path(path: Path) -> str:
-    raw_name = path.name
-    stem = raw_name[:-5] if raw_name.lower().endswith(".gguf") else raw_name
-    return stem.replace("_", " ").replace("-", " ").strip() or raw_name
-
-
-def _is_mmproj_artifact(path: Path) -> bool:
-    name = path.name.lower()
-    return "mmproj" in name or "projector" in name
-
-
-def _looks_like_vision_model(path: Path) -> bool:
-    stem = path.stem.lower()
-    return bool(re.search(r"(^|[-_])vl([_-]|$)", stem)) or "vision" in stem
-
-
-def _match_mmproj_candidates(model_path: Path, mmproj_files: List[Path]) -> List[Path]:
-    if not mmproj_files:
-        return []
-    model_key = _split_family_key(model_path.name)
-    exact_matches = [candidate for candidate in mmproj_files if _split_family_key(candidate.name) == model_key]
-    if exact_matches:
-        return exact_matches
-    loose_matches = [
-        candidate
-        for candidate in mmproj_files
-        if model_key and (
-            _split_family_key(candidate.name) in model_key or model_key in _split_family_key(candidate.name)
-        )
-    ]
-    if loose_matches:
-        return loose_matches
-    if len(mmproj_files) == 1:
-        return list(mmproj_files)
-    return []
-
-
-def _split_group_payload(shards: List[Path]) -> Dict[str, Any]:
-    ordered = sorted(shards, key=lambda item: item.name.lower())
-    match = _SPLIT_GGUF_RE.match(ordered[0].name)
-    total = int(match.group("total")) if match else len(ordered)
-    base_name = match.group("base") if match else ordered[0].stem
-    family_key = _split_family_key(base_name)
-    complete = len(ordered) == total and {
-        int(_SPLIT_GGUF_RE.match(item.name).group("index"))  # type: ignore[union-attr]
-        for item in ordered
-        if _SPLIT_GGUF_RE.match(item.name)
-    } == set(range(1, total + 1))
-    return {
-        "family_key": family_key,
-        "display_name": _display_name_from_path(Path(base_name)),
-        "primary_path": str(ordered[0]),
-        "shards": [str(item) for item in ordered],
-        "complete": complete,
-        "total": total,
-    }
-
-
-def _preview_entry_payload(
-    *,
-    candidate_id: str,
-    display_name: str,
-    kind: str,
-    runtime_type: str,
-    status: str,
-    status_reason: str,
-    user_selectable: bool,
-    resolved_source: Dict[str, Any],
-) -> Dict[str, Any]:
-    return {
-        "candidate_id": candidate_id,
-        "display_name": display_name,
-        "kind": kind,
-        "runtime_type": runtime_type,
-        "status": status,
-        "status_reason": status_reason,
-        "user_selectable": user_selectable,
-        "resolved_source": resolved_source,
-    }
-
-
-def _preview_model_directory(path_str: str) -> Dict[str, Any]:
-    source_path = _assert_browse_allowed(Path(path_str))
-    warnings_payload: List[Dict[str, str]] = []
-    entries: List[Dict[str, Any]] = []
-
-    files = [item for item in source_path.rglob("*") if item.is_file()]
-    adapter_artifacts = [item for item in files if item.name.lower() in _ADAPTER_HINT_FILENAMES]
-    if adapter_artifacts:
-        entries.append(
-            _preview_entry_payload(
-                candidate_id=_slugify_candidate_id(f"{source_path.name}-adapter"),
-                display_name=f"{source_path.name} adapter",
-                kind="adapter",
-                runtime_type="transformers-adapter",
-                status=_MODEL_CATALOG_STATUS_UNSUPPORTED,
-                status_reason="adapter_followup_slice",
-                user_selectable=False,
-                resolved_source={"adapter_path": str(source_path)},
-            )
-        )
-
-    gguf_files = [item.resolve() for item in files if item.suffix.lower() == ".gguf"]
-    mmproj_files = [item for item in gguf_files if _is_mmproj_artifact(item)]
-    candidate_gguf_files = [item for item in gguf_files if not _is_mmproj_artifact(item)]
-
-    split_groups: Dict[str, List[Path]] = {}
-    standalone_gguf: List[Path] = []
-    for item in candidate_gguf_files:
-        match = _SPLIT_GGUF_RE.match(item.name)
-        if match:
-            family_key = _split_family_key(match.group("base"))
-            split_groups.setdefault(family_key, []).append(item)
-            continue
-        standalone_gguf.append(item)
-
-    preferred_family_keys: set[str] = set()
-    for model_path in sorted(standalone_gguf, key=lambda item: item.name.lower()):
-        family_key = _split_family_key(model_path.name)
-        preferred_family_keys.add(family_key)
-        display_name = _display_name_from_path(model_path)
-        if _looks_like_vision_model(model_path):
-            mmproj_candidates = _match_mmproj_candidates(model_path, mmproj_files)
-            if len(mmproj_candidates) > 1:
-                entries.append(
-                    _preview_entry_payload(
-                        candidate_id=_slugify_candidate_id(family_key or model_path.stem),
-                        display_name=display_name,
-                        kind="vision",
-                        runtime_type="gguf-vl",
-                        status=_MODEL_CATALOG_STATUS_AMBIGUOUS,
-                        status_reason="multiple_mmproj_candidates",
-                        user_selectable=False,
-                        resolved_source={
-                            "gguf_path": str(model_path),
-                            "mmproj_candidates": [str(item) for item in mmproj_candidates],
-                        },
-                    )
-                )
-                continue
-            if not mmproj_candidates:
-                entries.append(
-                    _preview_entry_payload(
-                        candidate_id=_slugify_candidate_id(family_key or model_path.stem),
-                        display_name=display_name,
-                        kind="vision",
-                        runtime_type="gguf-vl",
-                        status=_MODEL_CATALOG_STATUS_INCOMPLETE,
-                        status_reason="missing_mmproj_path",
-                        user_selectable=False,
-                        resolved_source={"gguf_path": str(model_path)},
-                    )
-                )
-                continue
-            entries.append(
-                _preview_entry_payload(
-                    candidate_id=_slugify_candidate_id(family_key or model_path.stem),
-                    display_name=display_name,
-                    kind="vision",
-                    runtime_type="gguf-vl",
-                    status=_MODEL_CATALOG_STATUS_READY,
-                    status_reason="configured",
-                    user_selectable=True,
-                    resolved_source={
-                        "gguf_path": str(model_path),
-                        "mmproj_path": str(mmproj_candidates[0]),
-                    },
-                )
-            )
-            continue
-        entries.append(
-            _preview_entry_payload(
-                candidate_id=_slugify_candidate_id(family_key or model_path.stem),
-                display_name=display_name,
-                kind="llm",
-                runtime_type="gguf",
-                status=_MODEL_CATALOG_STATUS_READY,
-                status_reason="configured",
-                user_selectable=True,
-                resolved_source={"gguf_path": str(model_path)},
-            )
-        )
-
-    for family_key, shards in sorted(split_groups.items(), key=lambda item: item[0]):
-        group = _split_group_payload(shards)
-        if family_key in preferred_family_keys:
-            warnings_payload.append(
-                {
-                    "code": "split_candidate_omitted",
-                    "message": f"Split GGUF for {group['display_name']} omitted because merged artifact is preferred",
-                }
-            )
-            continue
-        entries.append(
-            _preview_entry_payload(
-                candidate_id=_slugify_candidate_id(group["family_key"]),
-                display_name=str(group["display_name"]),
-                kind="llm",
-                runtime_type="gguf",
-                status=_MODEL_CATALOG_STATUS_READY if bool(group["complete"]) else _MODEL_CATALOG_STATUS_INCOMPLETE,
-                status_reason="configured" if bool(group["complete"]) else "missing_split_shards",
-                user_selectable=bool(group["complete"]),
-                resolved_source={
-                    "primary_path": str(group["primary_path"]),
-                    "shards": list(group["shards"]),
-                },
-            )
-        )
-
-    if not entries and (source_path / "config.json").exists():
-        entries.append(
-            _preview_entry_payload(
-                candidate_id=_slugify_candidate_id(source_path.name),
-                display_name=source_path.name,
-                kind="embedding",
-                runtime_type="st",
-                status=_MODEL_CATALOG_STATUS_UNSUPPORTED,
-                status_reason="st_followup_slice",
-                user_selectable=False,
-                resolved_source={"directory_path": str(source_path)},
-            )
-        )
-
-    return {
-        "source_path": str(source_path),
-        "entries": entries,
-        "warnings": warnings_payload,
-    }
 
 
 def _set_active_model_id(
@@ -792,7 +343,6 @@ state = {
     "runtime_budget": {},
     "dynamic_ports": 8100, # Начальный порт для динамических моделей
     "dynamic_models": {},
-    "scan_folders": [],
     "discovered_model_ports": {},
     "reserved_ports": set(),
     "port_owners": {},
@@ -804,6 +354,7 @@ _model_start_locks: Dict[str, threading.Lock] = {}
 _model_start_locks_guard = threading.Lock()
 _heavy_model_lifecycle_lock = threading.RLock()
 _process_log_buffers: Dict[int, deque[str]] = {}
+_process_runtime_warnings: Dict[int, set[str]] = {}
 _model_load_jobs_lock = threading.RLock()
 _model_load_context = threading.local()
 
@@ -884,6 +435,12 @@ class _ModelLoadCancelled(RuntimeError):
     pass
 
 
+class _RuntimeStartupFailure(RuntimeError):
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(f"Runtime startup failure: {reason}")
+
+
 def _model_load_job_now() -> float:
     return time.time()
 
@@ -906,6 +463,9 @@ def _serialize_model_load_job(job: Dict[str, Any]) -> Dict[str, Any]:
         "process_pid",
         "bytes_loaded",
         "bytes_total",
+        "artifact_bytes_total",
+        "process_rss_bytes",
+        "bytes_loaded_source",
         "percent",
         "rate_bytes_per_sec",
         "eta_seconds",
@@ -977,6 +537,17 @@ def _configured_gguf_paths_for_load(model_id: str, config: Dict[str, Any]) -> Li
     for raw_shard in raw_shards:
         paths.append(Path(resolve_model_path(str(raw_shard))))
 
+    load_defaults = config.get("load_defaults") or {}
+    raw_mmproj_path = str(
+        config.get("mmproj_path")
+        or config.get("mmproj")
+        or load_defaults.get("mmproj_path")
+        or load_defaults.get("mmproj")
+        or ""
+    ).strip()
+    if raw_mmproj_path:
+        paths.append(Path(resolve_model_path(raw_mmproj_path)))
+
     deduped: List[Path] = []
     seen: set[str] = set()
     for path in paths:
@@ -1029,13 +600,22 @@ def _refresh_model_load_job_progress_unlocked(job: Dict[str, Any]) -> None:
     process = job.get("_process")
     pid = int(getattr(process, "pid", 0) or job.get("process_pid") or 0)
     bytes_total = job.get("bytes_total")
-    bytes_loaded = _read_process_rss_bytes(pid) if pid > 0 else None
+    process_rss_bytes = _read_process_rss_bytes(pid) if pid > 0 else None
     now = _model_load_job_now()
 
-    if bytes_loaded is not None:
-        sampled_bytes_loaded = max(0, int(bytes_loaded))
+    if process_rss_bytes is not None:
+        sampled_rss_bytes = max(0, int(process_rss_bytes))
+        job["process_rss_bytes"] = sampled_rss_bytes
+        if isinstance(bytes_total, int) and bytes_total > 0:
+            sampled_bytes_loaded = min(sampled_rss_bytes, int(bytes_total))
+            job["bytes_loaded_source"] = "process_rss_capped"
+        else:
+            sampled_bytes_loaded = sampled_rss_bytes
+            job["bytes_loaded_source"] = "process_rss"
         previous_bytes_loaded = job.get("bytes_loaded")
         if isinstance(previous_bytes_loaded, int):
+            if isinstance(bytes_total, int) and bytes_total > 0:
+                previous_bytes_loaded = min(previous_bytes_loaded, int(bytes_total))
             bytes_loaded = max(previous_bytes_loaded, sampled_bytes_loaded)
         else:
             bytes_loaded = sampled_bytes_loaded
@@ -1050,10 +630,12 @@ def _refresh_model_load_job_progress_unlocked(job: Dict[str, Any]) -> None:
                 sampled_percent = max(float(previous_percent), sampled_percent)
             job["percent"] = sampled_percent
 
-        last_bytes = job.get("_last_sample_bytes")
+        last_bytes = job.get("_last_sample_rss_bytes")
+        if not isinstance(last_bytes, int):
+            last_bytes = job.get("_last_sample_bytes")
         last_time = job.get("_last_sample_time")
         if isinstance(last_bytes, int) and isinstance(last_time, (float, int)) and now > float(last_time):
-            delta_bytes = max(0, int(bytes_loaded) - int(last_bytes))
+            delta_bytes = max(0, int(sampled_rss_bytes) - int(last_bytes))
             delta_seconds = max(0.001, now - float(last_time))
             if delta_bytes > 0:
                 rate = float(delta_bytes) / delta_seconds
@@ -1062,7 +644,7 @@ def _refresh_model_load_job_progress_unlocked(job: Dict[str, Any]) -> None:
                     remaining = max(0, int(bytes_total) - int(bytes_loaded))
                     job["eta_seconds"] = int(round(float(remaining) / rate))
         last_sample_for_next = int(last_bytes) if isinstance(last_bytes, int) else 0
-        job["_last_sample_bytes"] = max(last_sample_for_next, int(bytes_loaded))
+        job["_last_sample_rss_bytes"] = max(last_sample_for_next, int(sampled_rss_bytes))
         job["_last_sample_time"] = now
 
     job["updated_at"] = _model_load_job_timestamp()
@@ -1178,6 +760,7 @@ def _create_or_get_model_load_job(model_id: str, *, device_mode: DeviceMode, act
 
         if model_id in (state.get("processes") or {}):
             job_id = str(uuid.uuid4())
+            artifact_bytes_total = _local_model_load_total_bytes(model_id, config)
             ready_job = {
                 "job_id": job_id,
                 "model_id": model_id,
@@ -1186,8 +769,9 @@ def _create_or_get_model_load_job(model_id: str, *, device_mode: DeviceMode, act
                 "state": "ready",
                 "phase": "ready",
                 "detail": "model_already_running",
-                "bytes_loaded": None,
-                "bytes_total": _local_model_load_total_bytes(model_id, config),
+                "bytes_loaded": artifact_bytes_total,
+                "bytes_total": artifact_bytes_total,
+                "artifact_bytes_total": artifact_bytes_total,
                 "percent": 100.0,
                 "created_at": _model_load_job_timestamp(),
                 "started_at": _model_load_job_timestamp(),
@@ -1200,6 +784,7 @@ def _create_or_get_model_load_job(model_id: str, *, device_mode: DeviceMode, act
             return _serialize_model_load_job(ready_job)
 
         job_id = str(uuid.uuid4())
+        artifact_bytes_total = _local_model_load_total_bytes(model_id, config)
         job = {
             "job_id": job_id,
             "model_id": model_id,
@@ -1209,7 +794,8 @@ def _create_or_get_model_load_job(model_id: str, *, device_mode: DeviceMode, act
             "phase": "queued",
             "detail": "queued",
             "bytes_loaded": None,
-            "bytes_total": _local_model_load_total_bytes(model_id, config),
+            "bytes_total": artifact_bytes_total,
+            "artifact_bytes_total": artifact_bytes_total,
             "percent": 0.0,
             "rate_bytes_per_sec": None,
             "eta_seconds": None,
@@ -2355,14 +1941,7 @@ def _stop_model(model_id: str):
             if isinstance(proc, _RemoteProcess):
                 logger.info(f"Remote runtime detached for {model_id}")
             else:
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                    proc.wait(timeout=5)
-                except:
-                    try:
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    except:
-                        pass
+                _terminate_process(proc)
             if state["active_model"] == model_id:
                 _set_active_model_id(None)
     _set_runtime_state(model_id, _RUNTIME_STATE_UNAVAILABLE, reason="stopped")
@@ -2377,28 +1956,60 @@ def _stop_all_servers():
 def _terminate_process(proc: subprocess.Popen) -> None:
     """Останавливает дочерний процесс и его process group."""
     try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        process_group_id = os.getpgid(proc.pid)
+        if process_group_id == os.getpgrp():
+            proc.terminate()
+        else:
+            os.killpg(process_group_id, signal.SIGTERM)
         proc.wait(timeout=5)
     except Exception:
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            process_group_id = os.getpgid(proc.pid)
+            if process_group_id == os.getpgrp():
+                proc.kill()
+            else:
+                os.killpg(process_group_id, signal.SIGKILL)
         except Exception:
             pass
 
 
-def _register_process_log_reader(process: subprocess.Popen) -> None:
+def _record_process_log_line(pid: int, line: str, *, buffer: Optional[deque[str]] = None) -> Optional[str]:
+    if pid <= 0:
+        return None
+    normalized = str(line).rstrip("\n")
+    target_buffer = buffer if buffer is not None else _process_log_buffers.get(int(pid))
+    if target_buffer is not None:
+        target_buffer.append(normalized)
+
+    lowered = normalized.lower()
+    for marker in _HEAVY_GPU_RUNTIME_FAILURE_MARKERS:
+        if marker in lowered:
+            _process_runtime_warnings.setdefault(int(pid), set()).add(marker)
+            return marker
+    return None
+
+
+def _register_process_log_reader(
+    process: subprocess.Popen,
+    *,
+    terminate_on_gpu_runtime_failure: bool = False,
+) -> None:
     stream = getattr(process, "stdout", None)
     if stream is None:
         return
     buffer = deque(maxlen=400)
     _process_log_buffers[int(process.pid)] = buffer
+    _process_runtime_warnings.pop(int(process.pid), None)
 
     def _reader() -> None:
         try:
             for line in iter(stream.readline, ""):
                 if not line:
                     break
-                buffer.append(str(line).rstrip("\n"))
+                runtime_failure_marker = _record_process_log_line(int(process.pid), line, buffer=buffer)
+                if terminate_on_gpu_runtime_failure and runtime_failure_marker:
+                    with suppress(Exception):
+                        _terminate_process(process)
                 try:
                     sys.stdout.write(line)
                     sys.stdout.flush()
@@ -2415,6 +2026,7 @@ def _drop_process_log_buffer(pid: Optional[int]) -> None:
         return
     with suppress(Exception):
         _process_log_buffers.pop(int(pid), None)
+        _process_runtime_warnings.pop(int(pid), None)
 
 
 def _get_recent_process_log_lines(proc: Any, *, limit: int = 120) -> List[str]:
@@ -2434,6 +2046,12 @@ def _detect_heavy_runtime_gpu_failure_reason(
 ) -> Optional[str]:
     if str((placement or {}).get("placement_mode") or "") == "cpu":
         return None
+    pid = int(getattr(process, "pid", 0) or 0)
+    if pid > 0:
+        retained_markers = _process_runtime_warnings.get(pid) or set()
+        for marker in _HEAVY_GPU_RUNTIME_FAILURE_MARKERS:
+            if marker in retained_markers:
+                return marker
     log_blob = "\n".join(_get_recent_process_log_lines(process)).lower()
     if not log_blob:
         return None
@@ -2456,6 +2074,7 @@ def _launch_server_process(
     port: int,
     health_timeout_s: float = 120.0,
     env: Optional[Dict[str, str]] = None,
+    runtime_failure_checker: Optional[Callable[[subprocess.Popen], Optional[str]]] = None,
 ) -> subprocess.Popen:
     """Запускает сервер и ждет его readiness по /health."""
     process = subprocess.Popen(
@@ -2467,12 +2086,19 @@ def _launch_server_process(
         text=True,
         bufsize=1,
     )
-    _register_process_log_reader(process)
+    _register_process_log_reader(
+        process,
+        terminate_on_gpu_runtime_failure=runtime_failure_checker is not None,
+    )
     _attach_current_model_load_process(process)
     try:
         start_time = time.time()
         while time.time() - start_time < health_timeout_s:
             _raise_if_current_model_load_cancelled(process)
+            if runtime_failure_checker is not None:
+                runtime_failure = runtime_failure_checker(process)
+                if runtime_failure:
+                    raise _RuntimeStartupFailure(runtime_failure)
             if process.poll() is not None:
                 raise RuntimeError(f"Server exited with code {process.returncode}")
             try:
@@ -2643,8 +2269,18 @@ def _launch_heavy_process_with_port_retry(
     )
     logger.info(f"Executing: {' '.join(cmd)}")
     try:
-        process = _launch_server_process(cmd, config["port"], env=child_env)
+        process = _launch_server_process(
+            cmd,
+            config["port"],
+            env=child_env,
+            runtime_failure_checker=lambda proc: _detect_heavy_runtime_gpu_failure_reason(
+                process=proc,
+                placement=placement,
+            ),
+        )
         return process, dict(placement)
+    except _RuntimeStartupFailure:
+        raise
     except Exception as exc:
         detail = str(exc)
         fallback_port = _reassign_model_port(model_id, int(config["port"]))
@@ -2659,7 +2295,15 @@ def _launch_heavy_process_with_port_retry(
             fallback_port,
             detail,
         )
-        process = _launch_server_process(retry_cmd, fallback_port, env=child_env)
+        process = _launch_server_process(
+            retry_cmd,
+            fallback_port,
+            env=child_env,
+            runtime_failure_checker=lambda proc: _detect_heavy_runtime_gpu_failure_reason(
+                process=proc,
+                placement=retry_placement,
+            ),
+        )
         return process, retry_placement
 
 
@@ -2692,13 +2336,33 @@ def _start_heavy_local_model(
     attempt_count = 2 if device_mode != DeviceMode.CPU else 1
 
     for attempt_index in range(attempt_count):
-        process, effective_placement = _launch_heavy_process_with_port_retry(
-            model_id=model_id,
-            config=config,
-            placement=placement,
-            model_path=model_path,
-            device_mode=device_mode,
-        )
+        try:
+            process, effective_placement = _launch_heavy_process_with_port_retry(
+                model_id=model_id,
+                config=config,
+                placement=placement,
+                model_path=model_path,
+                device_mode=device_mode,
+            )
+        except _RuntimeStartupFailure as exc:
+            runtime_issue = exc.reason
+            logger.warning(
+                "Heavy model %s reported GPU runtime failure during startup: %s",
+                model_id,
+                runtime_issue,
+            )
+            _cleanup_failed_start_state(model_id)
+            inc_metric_counter(
+                "llm_tools_platform_fallback_events_total",
+                labels={
+                    "component": "ums",
+                    "fallback": "heavy_gpu_retry",
+                    "source": "unified_model_server",
+                },
+            )
+            if attempt_index + 1 < attempt_count:
+                continue
+            break
         runtime_issue = _detect_heavy_runtime_gpu_failure_reason(
             process=process,
             placement=effective_placement,
@@ -3116,7 +2780,7 @@ class InferRequest(BaseModel):
 class EmbeddingRequest(BaseModel):
     """OpenAI-compatible /v1/embeddings request."""
     input: Any  # str | List[str]
-    model: str = "labse-embedding"
+    model: str = "qwen3-embedding-0.6b"
     encoding_format: Optional[str] = "float"
 
 
@@ -3146,18 +2810,10 @@ class ModelRegistrationRequest(BaseModel):
     status_reason: Optional[str] = None
 
 
-class ScanFolderRequest(BaseModel):
-    path: str
-
-
-class PreviewPathRequest(BaseModel):
-    path: str
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # T3.7: Hardware profiling при старте
     state["dynamic_models"] = _load_dynamic_models_registry()
-    state["scan_folders"] = _load_scan_folders_state()
     _align_dynamic_port_counter()
     bootstrap_active_model_id, bootstrap_active_model_source = _resolve_bootstrap_active_model()
     _set_active_model_id(bootstrap_active_model_id, source=bootstrap_active_model_source, persist=False)
@@ -3664,98 +3320,6 @@ def _save_dynamic_models_registry() -> None:
         json.dump(payload, fh, ensure_ascii=False, indent=2, sort_keys=True)
 
 
-def _list_scan_folders() -> List[Dict[str, Any]]:
-    return copy.deepcopy(state.get("scan_folders") or [])
-
-
-def _add_scan_folder(path_str: str) -> Dict[str, Any]:
-    resolved_path = _normalize_existing_path(path_str)
-    if not resolved_path.is_dir():
-        raise HTTPException(status_code=422, detail=f"Directory expected: {resolved_path}")
-    folders = list(state.get("scan_folders") or [])
-    normalized_entry = _normalize_scan_folder_entry(resolved_path)
-    for existing in folders:
-        if str(existing.get("id") or "") == normalized_entry["id"]:
-            return copy.deepcopy(existing)
-    folders.append(normalized_entry)
-    folders.sort(key=lambda item: str(item.get("path") or ""))
-    state["scan_folders"] = folders
-    _save_scan_folders_state()
-    return copy.deepcopy(normalized_entry)
-
-
-def _delete_scan_folder(folder_id: str) -> None:
-    normalized_id = str(folder_id or "").strip()
-    folders = list(state.get("scan_folders") or [])
-    filtered = [folder for folder in folders if str(folder.get("id") or "") != normalized_id]
-    if len(filtered) == len(folders):
-        raise HTTPException(status_code=404, detail=f"Scan folder {normalized_id} not found")
-    state["scan_folders"] = filtered
-    _save_scan_folders_state()
-
-
-def _browse_folders(path_str: Optional[str], *, show_hidden: bool = False) -> Dict[str, Any]:
-    if path_str:
-        current_path = _assert_browse_allowed(Path(path_str))
-        try:
-            children = sorted(
-                [
-                    child for child in current_path.iterdir()
-                    if child.is_dir() and (show_hidden or not child.name.startswith("."))
-                ],
-                key=lambda item: item.name.lower(),
-            )
-        except OSError as exc:
-            raise HTTPException(status_code=422, detail=f"Failed to read directory: {exc}") from exc
-        parent_path = current_path.parent
-        return {
-            "current_path": str(current_path),
-            "parent_path": str(parent_path) if any(_path_is_within(parent_path, root) for root in _browse_allowlist_roots()) else None,
-            "entries": [_browse_entry_payload(child) for child in children],
-        }
-
-    roots = _browse_allowlist_roots()
-    return {
-        "current_path": None,
-        "parent_path": None,
-        "entries": [_browse_entry_payload(root, source="allowlist_root") for root in roots],
-    }
-
-
-def _recommended_folder_roots() -> List[str]:
-    candidates: List[Path] = [MODELS_ROOT, Path.home() / "models"]
-    for env_name, env_value in os.environ.items():
-        if not env_name.startswith("MODEL_PATH_"):
-            continue
-        raw_value = str(env_value or "").strip()
-        if not raw_value:
-            continue
-        try:
-            candidate = Path(raw_value).expanduser()
-            candidate = (BACKEND_ROOT / candidate).resolve() if not candidate.is_absolute() else candidate.resolve()
-        except Exception:
-            continue
-        if candidate.is_file():
-            candidates.append(candidate.parent)
-        elif candidate.is_dir():
-            candidates.append(candidate)
-    recommended: List[str] = []
-    seen: set[str] = set()
-    for candidate in candidates:
-        try:
-            resolved = candidate.resolve()
-        except Exception:
-            continue
-        if not resolved.exists() or not resolved.is_dir():
-            continue
-        key = str(resolved)
-        if key in seen:
-            continue
-        seen.add(key)
-        recommended.append(key)
-    return recommended
-
-
 def _align_dynamic_port_counter() -> None:
     _sync_port_registry()
     reserved = set(state.get("reserved_ports") or set())
@@ -3779,6 +3343,20 @@ def _resolve_registration_path(path_str: str, *, expected_type: Optional[str] = 
     if expected_type == "st" and not resolved_path.is_dir():
         raise HTTPException(status_code=422, detail="ST models require an existing directory")
     return resolved
+
+
+def _normalize_registration_source_path(path_str: Optional[str]) -> Optional[str]:
+    raw_value = str(path_str or "").strip()
+    if not raw_value:
+        return None
+    try:
+        candidate = Path(raw_value).expanduser()
+        candidate = (BACKEND_ROOT / candidate).resolve() if not candidate.is_absolute() else candidate.resolve()
+    except Exception:
+        return None
+    if candidate.exists() and candidate.is_dir():
+        return str(candidate)
+    return None
 
 
 def _allocate_dynamic_port() -> int:
@@ -3845,8 +3423,9 @@ def _register_dynamic_model(request: ModelRegistrationRequest) -> Dict[str, Any]
         config["kind"] = str(request.kind)
     if request.runtime_type is not None:
         config["runtime_type"] = str(request.runtime_type)
-    if request.source_path is not None:
-        config["source_path"] = str(_assert_browse_allowed(Path(request.source_path)))
+    source_path = _normalize_registration_source_path(request.source_path)
+    if source_path is not None:
+        config["source_path"] = source_path
     if request.port is not None:
         state["dynamic_ports"] = max(int(state.get("dynamic_ports") or 8100), int(request.port) + 1)
     if request.ctx_size is not None:
@@ -3973,38 +3552,6 @@ async def list_available_models():
         "active_model_source": state.get("active_model_source"),
         "active_heavy_model": state.get("active_model"),
     }
-
-
-@app.get("/models/scan-folders")
-async def list_scan_folders():
-    return {"folders": _list_scan_folders()}
-
-
-@app.post("/models/scan-folders")
-async def add_scan_folder(request: ScanFolderRequest):
-    folder = _add_scan_folder(request.path)
-    return {"status": "success", "folder": folder}
-
-
-@app.delete("/models/scan-folders/{folder_id}")
-async def delete_scan_folder(folder_id: str):
-    _delete_scan_folder(folder_id)
-    return {"status": "success", "folder_id": folder_id}
-
-
-@app.get("/models/browse-folders")
-async def browse_folders(path: Optional[str] = None, show_hidden: bool = False):
-    return _browse_folders(path, show_hidden=show_hidden)
-
-
-@app.get("/models/recommended-folders")
-async def recommended_folders():
-    return {"folders": _recommended_folder_roots()}
-
-
-@app.post("/models/preview-path")
-async def preview_model_path(request: PreviewPathRequest):
-    return _preview_model_directory(request.path)
 
 
 @app.get("/models/running")
@@ -4137,7 +3684,7 @@ def _resolve_embedding_runtime_base_url() -> str:
 
 async def _build_data_plane_status_snapshot() -> Dict[str, Any]:
     embedding_base_url = _resolve_embedding_runtime_base_url()
-    embedding_model_id = str(os.getenv("EMBEDDING_MODEL_ID") or "labse-embedding").strip() or "labse-embedding"
+    embedding_model_id = str(os.getenv("EMBEDDING_MODEL_ID") or "qwen3-embedding-0.6b").strip() or "qwen3-embedding-0.6b"
     embedding_snapshot: Dict[str, Any] = {
         "kind": "embedding",
         "base_url": embedding_base_url,
@@ -4203,7 +3750,7 @@ async def get_status():
 
 
 @app.get("/ready/infer")
-async def ready_infer(model_id: Optional[str] = None):
+async def ready_infer(model_id: Optional[str] = None, autostart: bool = False):
     requested_model_id = str(model_id or _current_or_bootstrap_active_model_id() or _default_heavy_model_id())
     config = get_model_config(requested_model_id)
     if not config:
@@ -4214,6 +3761,35 @@ async def ready_infer(model_id: Optional[str] = None):
                 infer_ready=False,
                 reason="model_not_found",
             ),
+        )
+
+    runtime_state_payload = _get_runtime_state(requested_model_id) or {}
+    runtime_state = str(runtime_state_payload.get("runtime_state") or "").strip().lower()
+    reason = str(runtime_state_payload.get("reason") or "").strip()
+    process = (state.get("processes") or {}).get(requested_model_id)
+    is_running = _is_managed_process_alive(process)
+
+    if is_running and runtime_state in {"", _RUNTIME_STATE_AVAILABLE, _RUNTIME_STATE_DEGRADED_CPU}:
+        return _build_infer_readiness_payload(
+            requested_model_id=requested_model_id,
+            ready_model_id=requested_model_id,
+            infer_ready=True,
+            runtime_state=runtime_state or _RUNTIME_STATE_AVAILABLE,
+            reason=reason or "ok",
+        )
+
+    if not autostart:
+        effective_runtime_state = runtime_state or _RUNTIME_STATE_UNAVAILABLE
+        return PlainTextResponse(
+            content=json.dumps(
+                _build_runtime_unavailable_payload(
+                    requested_model_id=requested_model_id,
+                    runtime_state=effective_runtime_state,
+                    reason=reason or ("model_not_ready" if is_running else "model_not_running"),
+                )
+            ),
+            media_type="application/json",
+            status_code=503,
         )
 
     try:

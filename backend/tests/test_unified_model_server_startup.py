@@ -29,6 +29,21 @@ class _FakeProcess:
         return self.returncode
 
 
+class _TerminatableFakeProcess(_FakeProcess):
+    def __init__(self, pid=12345, returncode=None):
+        super().__init__(pid=pid, returncode=returncode)
+        self.terminated = False
+        self.killed = False
+
+    def terminate(self):
+        self.terminated = True
+        self.returncode = -15
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+
+
 class _FakeJSONResponse:
     def __init__(self, payload, status_code=200):
         self._payload = payload
@@ -163,8 +178,6 @@ def _reset_ums_state(monkeypatch, tmp_path):
         "UMS_GENERATION_TOKENS_RESERVE",
         "UMS_DYNAMIC_MODELS_REGISTRY_PATH",
         "UMS_ACTIVE_MODEL_STATE_PATH",
-        "UMS_SCAN_FOLDERS_STATE_PATH",
-        "UMS_BROWSE_ALLOWLIST_ROOTS",
         "UMS_PRELOAD_LAST_ACTIVE_MODEL",
         "UMS_LLM_MAX_CONCURRENCY",
         "UMS_EMBED_MAX_CONCURRENCY",
@@ -195,14 +208,12 @@ def _reset_ums_state(monkeypatch, tmp_path):
         monkeypatch.delenv(env_name, raising=False)
     monkeypatch.setenv("UMS_DYNAMIC_MODELS_REGISTRY_PATH", str(tmp_path / "ums_dynamic_models.json"))
     monkeypatch.setenv("UMS_ACTIVE_MODEL_STATE_PATH", str(tmp_path / "ums_active_model_state.json"))
-    monkeypatch.setenv("UMS_SCAN_FOLDERS_STATE_PATH", str(tmp_path / "ums_scan_folders.json"))
     ums_server.state["processes"].clear()
     ums_server.state["placements"].clear()
     ums_server.state["active_model"] = None
     ums_server.state["active_model_source"] = None
     ums_server.state["tier_config"] = None
     ums_server.state["dynamic_models"] = {}
-    ums_server.state["scan_folders"] = []
     ums_server.state["discovered_model_ports"] = {}
     ums_server.state["dynamic_ports"] = 8100
     ums_server.state["reserved_ports"] = set()
@@ -210,6 +221,9 @@ def _reset_ums_state(monkeypatch, tmp_path):
     ums_server.state["released_dynamic_ports"] = []
     ums_server.state["concurrency_policy"] = {}
     ums_server.state["model_load_jobs"] = {}
+    ums_server._process_log_buffers.clear()
+    if hasattr(ums_server, "_process_runtime_warnings"):
+        ums_server._process_runtime_warnings.clear()
     monkeypatch.setattr(ums_server, "_find_listener_pids", lambda port: [])
     ums_server._llm_semaphore = asyncio.Semaphore(1)
     ums_server._embed_semaphore = asyncio.Semaphore(4)
@@ -227,7 +241,7 @@ def test_start_server_falls_back_to_cpu_for_st_model():
     fake_process = _FakeProcess()
     launch_calls = []
 
-    def fake_launch(cmd, port, health_timeout_s=120.0, env=None):
+    def fake_launch(cmd, port, health_timeout_s=120.0, env=None, **kwargs):
         launch_calls.append(cmd)
         if "--device" in cmd and cmd[cmd.index("--device") + 1].startswith("cuda"):
             raise RuntimeError("CUDA out of memory")
@@ -259,7 +273,7 @@ def test_start_server_keeps_cpu_for_st_model_when_requested():
     fake_process = _FakeProcess()
     launch_calls = []
 
-    def fake_launch(cmd, port, health_timeout_s=120.0, env=None):
+    def fake_launch(cmd, port, health_timeout_s=120.0, env=None, **kwargs):
         launch_calls.append(cmd)
         return fake_process
 
@@ -287,7 +301,7 @@ def test_start_server_records_cpu_placement_after_st_fallback():
     fake_process = _FakeProcess()
     launch_calls = []
 
-    def fake_launch(cmd, port, health_timeout_s=120.0, env=None):
+    def fake_launch(cmd, port, health_timeout_s=120.0, env=None, **kwargs):
         launch_calls.append(cmd)
         if "--device" in cmd and cmd[cmd.index("--device") + 1] == "cuda:0":
             raise RuntimeError("CUDA out of memory")
@@ -322,7 +336,7 @@ def test_start_server_uses_weighted_tensor_split_for_multi_gpu_gguf(monkeypatch)
     fake_process = _FakeProcess()
     launch_calls = []
 
-    def fake_launch(cmd, port, health_timeout_s=120.0, env=None):
+    def fake_launch(cmd, port, health_timeout_s=120.0, env=None, **kwargs):
         launch_calls.append(cmd)
         return fake_process
 
@@ -357,7 +371,7 @@ def test_start_server_keeps_cpu_path_for_gguf_when_cpu_requested():
     fake_process = _FakeProcess()
     launch_calls = []
 
-    def fake_launch(cmd, port, health_timeout_s=120.0, env=None):
+    def fake_launch(cmd, port, health_timeout_s=120.0, env=None, **kwargs):
         launch_calls.append(cmd)
         return fake_process
 
@@ -388,7 +402,7 @@ def test_start_server_marks_error_gpu_when_heavy_runtime_falls_back_to_cpu_only(
     launch_calls = []
     runtime_failures = iter(["ggml_cuda_init: failed", "ggml_cuda_init: failed"])
 
-    def fake_launch(cmd, port, health_timeout_s=120.0, env=None):
+    def fake_launch(cmd, port, health_timeout_s=120.0, env=None, **kwargs):
         launch_calls.append({"cmd": list(cmd), "port": port, "env": env})
         return fake_processes[len(launch_calls) - 1]
 
@@ -427,7 +441,7 @@ def test_start_server_can_explicitly_degrade_heavy_runtime_to_cpu(monkeypatch):
     launch_calls = []
     runtime_failures = iter(["ggml_cuda_init: failed", "ggml_cuda_init: failed", None])
 
-    def fake_launch(cmd, port, health_timeout_s=120.0, env=None):
+    def fake_launch(cmd, port, health_timeout_s=120.0, env=None, **kwargs):
         launch_calls.append({"cmd": list(cmd), "port": port, "env": env})
         return fake_processes[len(launch_calls) - 1]
 
@@ -465,7 +479,7 @@ def test_start_server_avoids_embedding_occupied_gpu_for_heavy_llm():
     fake_process = _FakeProcess(pid=404)
     launch_calls = []
 
-    def fake_launch(cmd, port, health_timeout_s=120.0, env=None):
+    def fake_launch(cmd, port, health_timeout_s=120.0, env=None, **kwargs):
         launch_calls.append(cmd)
         return fake_process
 
@@ -589,7 +603,7 @@ def test_switching_heavy_model_stops_old_runtime_before_gpu_admission():
         assert events.index("gpu") < events.index("admission")
         return _heavy_switch_admission(**kwargs)
 
-    def fake_launch(cmd, port, health_timeout_s=120.0, env=None):
+    def fake_launch(cmd, port, health_timeout_s=120.0, env=None, **kwargs):
         events.append("launch")
         assert events.index("admission") < events.index("launch")
         return _FakeProcess(pid=222)
@@ -662,7 +676,7 @@ def test_starting_heavy_model_does_not_stop_embedding_runtime():
         "device_arg": "cuda:1",
     }
 
-    def fake_launch(cmd, port, health_timeout_s=120.0, env=None):
+    def fake_launch(cmd, port, health_timeout_s=120.0, env=None, **kwargs):
         launch_calls.append(cmd)
         return _FakeProcess(pid=445)
 
@@ -746,7 +760,7 @@ def test_start_server_honors_tier_cpu_preference_for_embeddings():
     fake_process = _FakeProcess()
     launch_calls = []
 
-    def fake_launch(cmd, port, health_timeout_s=120.0, env=None):
+    def fake_launch(cmd, port, health_timeout_s=120.0, env=None, **kwargs):
         launch_calls.append(cmd)
         return fake_process
 
@@ -775,7 +789,7 @@ def test_start_server_places_embeddings_on_non_llm_gpu_when_available():
     fake_process = _FakeProcess()
     launch_calls = []
 
-    def fake_launch(cmd, port, health_timeout_s=120.0, env=None):
+    def fake_launch(cmd, port, health_timeout_s=120.0, env=None, **kwargs):
         launch_calls.append(cmd)
         return fake_process
 
@@ -812,7 +826,7 @@ def test_start_server_serializes_concurrent_model_startup():
     launch_calls = []
     ready = threading.Event()
 
-    def fake_launch(cmd, port, health_timeout_s=120.0, env=None):
+    def fake_launch(cmd, port, health_timeout_s=120.0, env=None, **kwargs):
         launch_calls.append(cmd)
         ready.wait(timeout=1.0)
         return fake_process
@@ -858,7 +872,7 @@ def test_start_server_reaps_stale_listener_before_launch():
     fake_process = _FakeProcess(pid=22222)
     launch_calls = []
 
-    def fake_launch(cmd, port, health_timeout_s=120.0, env=None):
+    def fake_launch(cmd, port, health_timeout_s=120.0, env=None, **kwargs):
         launch_calls.append((cmd, port))
         return fake_process
 
@@ -939,14 +953,14 @@ def test_status_exposes_last_fallback_event():
 
 def test_status_observes_external_embedding_runtime(monkeypatch):
     monkeypatch.setenv("EMBEDDING_RUNTIME_URL", "http://embedding-runtime:8092")
-    monkeypatch.setenv("EMBEDDING_MODEL_ID", "labse-embedding")
+    monkeypatch.delenv("EMBEDDING_MODEL_ID", raising=False)
     fake_client = _FakeGetAsyncClient(
         _FakeJSONResponse(
             {
                 "status": "ok",
                 "runtime": "embedding-runtime",
                 "model_loaded": True,
-                "model_id": "labse-embedding",
+                "model_id": "qwen3-embedding-0.6b",
             }
         )
     )
@@ -959,7 +973,7 @@ def test_status_observes_external_embedding_runtime(monkeypatch):
 
     embedding_runtime = payload["data_planes"]["embedding_runtime"]
     assert embedding_runtime["base_url"] == "http://embedding-runtime:8092"
-    assert embedding_runtime["model_id"] == "labse-embedding"
+    assert embedding_runtime["model_id"] == "qwen3-embedding-0.6b"
     assert embedding_runtime["status"] == "ok"
     assert embedding_runtime["health"]["model_loaded"] is True
     assert fake_client.calls == [
@@ -1371,7 +1385,11 @@ def test_status_exposes_backend_mode_for_vllm(monkeypatch):
 
 
 def test_ready_infer_reports_ready_for_default_heavy_model():
-    with patch.object(ums_server, "_start_server", return_value="qwen-14b-llm") as mock_start:
+    ums_server.state["active_model"] = "qwen-14b-llm"
+    ums_server.state["processes"]["qwen-14b-llm"] = _FakeProcess(pid=111)
+    ums_server._set_runtime_state("qwen-14b-llm", "available", reason="ok")
+
+    with patch.object(ums_server, "_start_server") as mock_start:
         response = asyncio.run(_api_request("GET", "/ready/infer"))
 
     assert response.status_code == 200
@@ -1382,12 +1400,12 @@ def test_ready_infer_reports_ready_for_default_heavy_model():
     assert payload["requested_model_id"] == "qwen-14b-llm"
     assert payload["ready_model_id"] == "qwen-14b-llm"
     assert payload["fallback_used"] is False
-    mock_start.assert_called_once()
+    mock_start.assert_not_called()
 
 
-def test_ready_infer_reports_fallback_when_server_switches_model():
+def test_ready_infer_autostart_reports_fallback_when_server_switches_model():
     with patch.object(ums_server, "_start_server", return_value="qwen-7b-llm") as mock_start:
-        response = asyncio.run(_api_request("GET", "/ready/infer"))
+        response = asyncio.run(_api_request("GET", "/ready/infer?autostart=true"))
 
     assert response.status_code == 200
     payload = response.json()
@@ -1400,9 +1418,24 @@ def test_ready_infer_reports_fallback_when_server_switches_model():
     mock_start.assert_called_once()
 
 
-def test_ready_infer_returns_503_when_startup_is_not_ready():
-    with patch.object(ums_server, "_start_server", side_effect=RuntimeError("startup timeout")):
+def test_ready_infer_does_not_autostart_when_model_is_not_running():
+    with patch.object(ums_server, "_start_server") as mock_start:
         response = asyncio.run(_api_request("GET", "/ready/infer"))
+
+    assert response.status_code == 503
+    payload = response.json()
+    assert payload["status"] == "unavailable"
+    assert payload["runtime_state"] == "unavailable"
+    assert payload["infer_ready"] is False
+    assert payload["requested_model_id"] == "qwen-14b-llm"
+    assert payload["ready_model_id"] is None
+    assert payload["reason"] == "model_not_running"
+    mock_start.assert_not_called()
+
+
+def test_ready_infer_autostart_returns_503_when_startup_is_not_ready():
+    with patch.object(ums_server, "_start_server", side_effect=RuntimeError("startup timeout")):
+        response = asyncio.run(_api_request("GET", "/ready/infer?autostart=true"))
 
     assert response.status_code == 503
     payload = response.json()
@@ -1426,24 +1459,17 @@ def test_ready_infer_returns_404_for_unknown_model():
 
 
 def test_ready_infer_returns_error_gpu_payload_when_startup_failed():
-    detail = {
-        "status": "error_gpu",
-        "infer_ready": False,
-        "requested_model_id": "qwen-14b-llm",
-        "ready_model_id": None,
-        "backend_mode": "llama-cpp-python",
-        "fallback_used": False,
-        "reason": "ggml_cuda_init: failed",
-        "runtime_state": "error_gpu",
-    }
-    with patch.object(ums_server, "_start_server", side_effect=ums_server.HTTPException(status_code=503, detail=detail)):
+    ums_server._set_runtime_state("qwen-14b-llm", "error_gpu", reason="ggml_cuda_init: failed")
+
+    with patch.object(ums_server, "_start_server") as mock_start:
         response = asyncio.run(_api_request("GET", "/ready/infer"))
 
     assert response.status_code == 503
     payload = response.json()
-    assert payload["detail"]["status"] == "error_gpu"
-    assert payload["detail"]["runtime_state"] == "error_gpu"
-    assert payload["detail"]["reason"] == "ggml_cuda_init: failed"
+    assert payload["status"] == "error_gpu"
+    assert payload["runtime_state"] == "error_gpu"
+    assert payload["reason"] == "ggml_cuda_init: failed"
+    mock_start.assert_not_called()
 
 
 def test_status_exposes_prompt_cache_policy_for_local_llama():
@@ -1890,6 +1916,23 @@ def test_model_load_endpoint_creates_async_job_and_reports_ready(tmp_path):
     assert ready["model"]["model_id"] == "demo-llm"
 
 
+def test_model_load_total_bytes_includes_vl_mmproj(tmp_path):
+    model_path = tmp_path / "qwen-vl.gguf"
+    mmproj_path = tmp_path / "mmproj.gguf"
+    model_path.write_bytes(b"m" * 10)
+    mmproj_path.write_bytes(b"p" * 7)
+    fake_config = {
+        "type": "gguf-vl",
+        "runtime_type": "gguf-vl",
+        "path": str(model_path),
+        "load_defaults": {
+            "mmproj_path": str(mmproj_path),
+        },
+    }
+
+    assert ums_server._local_model_load_total_bytes("qwen-vl-8b", fake_config) == 17
+
+
 def test_model_load_job_status_reports_memory_progress(monkeypatch):
     job_id = "progress-job"
     ums_server.state["model_load_jobs"][job_id] = {
@@ -1917,7 +1960,41 @@ def test_model_load_job_status_reports_memory_progress(monkeypatch):
     assert payload["state"] == "loading"
     assert payload["bytes_loaded"] == 250
     assert payload["bytes_total"] == 1000
+    assert payload["process_rss_bytes"] == 250
+    assert payload["bytes_loaded_source"] == "process_rss_capped"
     assert payload["percent"] == 25.0
+
+
+def test_model_load_job_status_caps_memory_progress_at_artifact_total(monkeypatch):
+    job_id = "progress-overflow-job"
+    ums_server.state["model_load_jobs"][job_id] = {
+        "job_id": job_id,
+        "model_id": "qwen-vl-8b",
+        "action": "activate",
+        "device_mode": "hybrid",
+        "state": "loading",
+        "phase": "loading_memory",
+        "detail": "loading_model_into_memory",
+        "process_pid": 987,
+        "bytes_loaded": None,
+        "bytes_total": 1000,
+        "percent": 0.0,
+        "created_at": int(time.time()),
+        "updated_at": int(time.time()),
+        "_process": _FakeProcess(pid=987),
+    }
+    monkeypatch.setattr(ums_server, "_read_process_rss_bytes", lambda pid: 1250 if pid == 987 else None)
+
+    response = asyncio.run(_api_request("GET", f"/model-load-jobs/{job_id}"))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["state"] == "loading"
+    assert payload["bytes_loaded"] == 1000
+    assert payload["bytes_total"] == 1000
+    assert payload["process_rss_bytes"] == 1250
+    assert payload["bytes_loaded_source"] == "process_rss_capped"
+    assert payload["percent"] == 99.0
 
 
 def test_model_load_job_progress_does_not_regress_when_rss_sample_drops(monkeypatch):
@@ -1951,9 +2028,116 @@ def test_model_load_job_progress_does_not_regress_when_rss_sample_drops(monkeypa
     assert payload["state"] == "loading"
     assert payload["bytes_loaded"] == 990
     assert payload["bytes_total"] == 1000
+    assert payload["process_rss_bytes"] == 200
+    assert payload["bytes_loaded_source"] == "process_rss_capped"
     assert payload["percent"] == 99.0
     assert payload["rate_bytes_per_sec"] == 123.0
     assert payload["eta_seconds"] == 1
+
+
+def test_gpu_runtime_failure_marker_is_retained_after_log_buffer_rolls_over():
+    fake_process = _FakeProcess(pid=876)
+    ums_server._process_log_buffers[fake_process.pid] = ums_server.deque(maxlen=4)
+
+    ums_server._record_process_log_line(
+        fake_process.pid,
+        "ggml_cuda_init: failed to initialize CUDA: unknown error",
+    )
+    for index in range(10):
+        ums_server._record_process_log_line(fake_process.pid, f"metadata line {index}")
+
+    reason = ums_server._detect_heavy_runtime_gpu_failure_reason(
+        process=fake_process,
+        placement={"placement_mode": "multi-gpu"},
+    )
+
+    assert reason == "ggml_cuda_init: failed"
+
+
+def test_process_log_reader_terminates_heavy_runtime_on_gpu_failure(monkeypatch):
+    fake_process = _FakeProcess(pid=913)
+    terminate_process = MagicMock()
+
+    class _FakeStream:
+        def __init__(self):
+            self.lines = [
+                "ggml_cuda_init: failed to initialize CUDA: unknown error\n",
+                "",
+            ]
+
+        def readline(self):
+            return self.lines.pop(0)
+
+    class _ImmediateThread:
+        def __init__(self, target, **kwargs):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    fake_process.stdout = _FakeStream()
+    monkeypatch.setattr(ums_server, "_terminate_process", terminate_process)
+    monkeypatch.setattr(ums_server.threading, "Thread", _ImmediateThread)
+
+    ums_server._register_process_log_reader(
+        fake_process,
+        terminate_on_gpu_runtime_failure=True,
+    )
+
+    terminate_process.assert_called_once_with(fake_process)
+
+
+def test_launch_server_process_aborts_runtime_failure_before_health_ready(monkeypatch):
+    fake_process = _FakeProcess(pid=912)
+    terminate_process = MagicMock()
+    checks = iter([None, "ggml_cuda_init: failed"])
+    clock = iter([0.0, 0.0, 1.0])
+
+    class _FakeClient:
+        def __init__(self, timeout=1.0):
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, url):
+            return SimpleNamespace(status_code=503)
+
+    monkeypatch.setattr(ums_server.subprocess, "Popen", lambda *args, **kwargs: fake_process)
+    monkeypatch.setattr(ums_server, "_register_process_log_reader", lambda process, **kwargs: None)
+    monkeypatch.setattr(ums_server, "_attach_current_model_load_process", lambda process: None)
+    monkeypatch.setattr(ums_server, "_terminate_process", terminate_process)
+    monkeypatch.setattr(ums_server.httpx, "Client", _FakeClient)
+    monkeypatch.setattr(ums_server.time, "time", lambda: next(clock, 2.0))
+    monkeypatch.setattr(ums_server.time, "sleep", lambda seconds: None)
+
+    with pytest.raises(RuntimeError, match="ggml_cuda_init: failed"):
+        ums_server._launch_server_process(
+            ["llama-server", "--port", "8123"],
+            8123,
+            runtime_failure_checker=lambda process: next(checks),
+        )
+
+    terminate_process.assert_called_once_with(fake_process)
+
+
+def test_terminate_process_does_not_signal_current_process_group(monkeypatch):
+    fake_process = _TerminatableFakeProcess(pid=913)
+    current_pgid = 777
+    killpg = MagicMock()
+
+    monkeypatch.setattr(ums_server.os, "getpgid", lambda pid: current_pgid)
+    monkeypatch.setattr(ums_server.os, "getpgrp", lambda: current_pgid)
+    monkeypatch.setattr(ums_server.os, "killpg", killpg)
+
+    ums_server._terminate_process(fake_process)
+
+    assert fake_process.terminated is True
+    assert fake_process.killed is False
+    killpg.assert_not_called()
 
 
 def test_cancel_model_load_job_stops_loading_process():
@@ -2298,257 +2482,58 @@ def test_raw_filesystem_models_are_not_discovered_into_catalog(tmp_path):
         assert "dynamic-qwen" not in ums_server._discover_available_model_ids()
 
 
-def test_browse_folders_lists_only_directories_with_model_hints(tmp_path, monkeypatch):
-    monkeypatch.setenv("UMS_BROWSE_ALLOWLIST_ROOTS", str(tmp_path))
-    model_dir = tmp_path / "qwen-folder"
-    model_dir.mkdir()
-    (model_dir / "model.gguf").write_text("stub", encoding="utf-8")
-    (model_dir / "adapter_config.json").write_text("{}", encoding="utf-8")
-    plain_dir = tmp_path / "plain-folder"
-    plain_dir.mkdir()
-    (tmp_path / "not-a-directory.gguf").write_text("stub", encoding="utf-8")
-
-    response = asyncio.run(_api_request("GET", f"/models/browse-folders?path={tmp_path}"))
-
-    assert response.status_code == 200
-    payload = response.json()
-    entries = {item["name"]: item for item in payload["entries"]}
-    assert set(entries) == {"plain-folder", "qwen-folder"}
-    assert entries["qwen-folder"]["looks_like_model_dir"] is True
-    assert entries["qwen-folder"]["model_file_count_hint"] == 1
-    assert entries["qwen-folder"]["folder_tags"] == ["GGUF", "Adapter"]
-    assert entries["qwen-folder"]["folder_signals"]["has_gguf"] is True
-    assert entries["qwen-folder"]["folder_signals"]["has_adapter"] is True
-    assert entries["plain-folder"]["looks_like_model_dir"] is False
-    assert entries["plain-folder"]["folder_tags"] == []
+def test_folder_browsing_endpoints_are_not_ums_contract():
+    for method, path, payload in (
+        ("GET", "/models/scan-folders", None),
+        ("POST", "/models/scan-folders", {"path": "/tmp"}),
+        ("GET", "/models/browse-folders", None),
+        ("GET", "/models/recommended-folders", None),
+        ("POST", "/models/preview-path", {"path": "/tmp"}),
+    ):
+        response = asyncio.run(_api_request(method, path, json=payload))
+        assert response.status_code == 404
 
 
-def test_recommended_folders_include_models_root_and_model_path_parents(tmp_path, monkeypatch):
-    monkeypatch.setenv("UMS_BROWSE_ALLOWLIST_ROOTS", str(tmp_path))
-    custom_root = tmp_path / "external-models"
-    custom_root.mkdir()
-    model_file = custom_root / "phi3.gguf"
-    model_file.write_text("stub", encoding="utf-8")
-    home_models = Path.home() / "models"
-    home_models.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("MODEL_PATH_TEST_INVENTORY", str(model_file))
-
-    response = asyncio.run(_api_request("GET", "/models/recommended-folders"))
-
-    assert response.status_code == 200
-    folders = response.json()["folders"]
-    assert str(ums_server.MODELS_ROOT.resolve()) in folders
-    assert str(custom_root.resolve()) in folders
-    assert str(home_models.resolve()) in folders
-
-
-def test_browse_folders_rejects_paths_outside_allowlist(tmp_path, monkeypatch):
-    monkeypatch.setenv("UMS_BROWSE_ALLOWLIST_ROOTS", str(tmp_path))
-    outside_dir = tmp_path.parent / f"{tmp_path.name}-outside"
-    outside_dir.mkdir(exist_ok=True)
-
-    response = asyncio.run(_api_request("GET", f"/models/browse-folders?path={outside_dir}"))
-
-    assert response.status_code == 403
-
-
-def test_scan_folders_can_be_added_listed_and_removed(tmp_path, monkeypatch):
-    monkeypatch.setenv("UMS_BROWSE_ALLOWLIST_ROOTS", str(tmp_path))
-    scan_dir = tmp_path / "scan-root"
-    scan_dir.mkdir()
-
-    add_response = asyncio.run(_api_request("POST", "/models/scan-folders", json={"path": str(scan_dir)}))
-    assert add_response.status_code == 200
-    folder = add_response.json()["folder"]
-
-    list_response = asyncio.run(_api_request("GET", "/models/scan-folders"))
-    assert list_response.status_code == 200
-    assert list_response.json()["folders"] == [folder]
-
-    persisted = json.loads(Path(os.environ["UMS_SCAN_FOLDERS_STATE_PATH"]).read_text(encoding="utf-8"))
-    assert persisted["folders"][0]["path"] == str(scan_dir.resolve())
-
-    delete_response = asyncio.run(_api_request("DELETE", f"/models/scan-folders/{folder['id']}"))
-    assert delete_response.status_code == 200
-    assert asyncio.run(_api_request("GET", "/models/scan-folders")).json()["folders"] == []
-
-
-def test_scan_folders_accept_new_root_outside_current_allowlist(tmp_path, monkeypatch):
-    monkeypatch.setenv("UMS_BROWSE_ALLOWLIST_ROOTS", str(tmp_path))
-    external_root = tmp_path.parent / f"{tmp_path.name}-external-root"
-    external_root.mkdir(exist_ok=True)
-
-    add_response = asyncio.run(_api_request("POST", "/models/scan-folders", json={"path": str(external_root)}))
-
-    assert add_response.status_code == 200
-    folder = add_response.json()["folder"]
-    browse_response = asyncio.run(_api_request("GET", f"/models/browse-folders?path={external_root}"))
-    assert browse_response.status_code == 200
-    assert browse_response.json()["current_path"] == str(external_root.resolve())
-    assert any(item["id"] == folder["id"] for item in asyncio.run(_api_request("GET", "/models/scan-folders")).json()["folders"])
-
-
-def test_preview_path_returns_ready_entry_for_single_gguf(tmp_path, monkeypatch):
-    monkeypatch.setenv("UMS_BROWSE_ALLOWLIST_ROOTS", str(tmp_path))
-    model_dir = tmp_path / "single-gguf"
-    model_dir.mkdir()
-    gguf_path = model_dir / "qwen2.5-14b-instruct-q4_k_m.gguf"
-    gguf_path.write_text("stub", encoding="utf-8")
-
-    response = asyncio.run(_api_request("POST", "/models/preview-path", json={"path": str(model_dir)}))
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["warnings"] == []
-    assert len(payload["entries"]) == 1
-    entry = payload["entries"][0]
-    assert entry["runtime_type"] == "gguf"
-    assert entry["status"] == "ready"
-    assert entry["resolved_source"]["gguf_path"] == str(gguf_path.resolve())
-
-
-def test_preview_path_returns_ready_entry_for_gguf_vl_with_mmproj(tmp_path, monkeypatch):
-    monkeypatch.setenv("UMS_BROWSE_ALLOWLIST_ROOTS", str(tmp_path))
-    model_dir = tmp_path / "qwen-vl"
-    model_dir.mkdir()
-    gguf_path = model_dir / "Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
-    mmproj_path = model_dir / "mmproj-Qwen3-VL-8B-Instruct-F16.gguf"
-    gguf_path.write_text("stub", encoding="utf-8")
-    mmproj_path.write_text("stub", encoding="utf-8")
-
-    response = asyncio.run(_api_request("POST", "/models/preview-path", json={"path": str(model_dir)}))
-
-    assert response.status_code == 200
-    entry = response.json()["entries"][0]
-    assert entry["runtime_type"] == "gguf-vl"
-    assert entry["status"] == "ready"
-    assert entry["resolved_source"]["mmproj_path"] == str(mmproj_path.resolve())
-
-
-def test_preview_path_marks_gguf_vl_without_mmproj_as_incomplete(tmp_path, monkeypatch):
-    monkeypatch.setenv("UMS_BROWSE_ALLOWLIST_ROOTS", str(tmp_path))
-    model_dir = tmp_path / "qwen-vl-missing-mmproj"
-    model_dir.mkdir()
-    (model_dir / "Qwen3-VL-8B-Instruct-Q4_K_M.gguf").write_text("stub", encoding="utf-8")
-
-    response = asyncio.run(_api_request("POST", "/models/preview-path", json={"path": str(model_dir)}))
-
-    assert response.status_code == 200
-    entry = response.json()["entries"][0]
-    assert entry["runtime_type"] == "gguf-vl"
-    assert entry["status"] == "incomplete"
-    assert entry["status_reason"] == "missing_mmproj_path"
-
-
-def test_preview_path_collapses_split_gguf_into_single_entry(tmp_path, monkeypatch):
-    monkeypatch.setenv("UMS_BROWSE_ALLOWLIST_ROOTS", str(tmp_path))
-    model_dir = tmp_path / "split-gguf"
-    model_dir.mkdir()
-    for index in range(1, 4):
-        (model_dir / f"qwen2.5-32b-instruct-q4-0000{index}-of-00003.gguf").write_text("stub", encoding="utf-8")
-
-    response = asyncio.run(_api_request("POST", "/models/preview-path", json={"path": str(model_dir)}))
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert len(payload["entries"]) == 1
-    entry = payload["entries"][0]
-    assert entry["status"] == "ready"
-    assert len(entry["resolved_source"]["shards"]) == 3
-    assert entry["resolved_source"]["primary_path"].endswith("00001-of-00003.gguf")
-
-
-def test_preview_path_prefers_merged_gguf_over_split_candidate(tmp_path, monkeypatch):
-    monkeypatch.setenv("UMS_BROWSE_ALLOWLIST_ROOTS", str(tmp_path))
-    model_dir = tmp_path / "merged-and-split"
-    model_dir.mkdir()
-    merged = model_dir / "qwen2.5-32b-instruct-q4-merged.gguf"
-    merged.write_text("stub", encoding="utf-8")
-    for index in range(1, 4):
-        (model_dir / f"qwen2.5-32b-instruct-q4-0000{index}-of-00003.gguf").write_text("stub", encoding="utf-8")
-
-    response = asyncio.run(_api_request("POST", "/models/preview-path", json={"path": str(model_dir)}))
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert len(payload["entries"]) == 1
-    assert payload["entries"][0]["resolved_source"]["gguf_path"] == str(merged.resolve())
-    assert payload["warnings"][0]["code"] == "split_candidate_omitted"
-
-
-def test_preview_path_marks_adapter_contour_as_unsupported(tmp_path, monkeypatch):
-    monkeypatch.setenv("UMS_BROWSE_ALLOWLIST_ROOTS", str(tmp_path))
-    model_dir = tmp_path / "adapter-dir"
-    model_dir.mkdir()
-    (model_dir / "adapter_config.json").write_text("{}", encoding="utf-8")
-    (model_dir / "adapter_model.safetensors").write_text("stub", encoding="utf-8")
-
-    response = asyncio.run(_api_request("POST", "/models/preview-path", json={"path": str(model_dir)}))
-
-    assert response.status_code == 200
-    entry = response.json()["entries"][0]
-    assert entry["status"] == "unsupported"
-    assert entry["status_reason"] == "adapter_followup_slice"
-
-
-def test_preview_path_marks_st_directory_as_unsupported(tmp_path, monkeypatch):
-    monkeypatch.setenv("UMS_BROWSE_ALLOWLIST_ROOTS", str(tmp_path))
-    model_dir = tmp_path / "st-dir"
-    model_dir.mkdir()
-    (model_dir / "config.json").write_text("{}", encoding="utf-8")
-
-    response = asyncio.run(_api_request("POST", "/models/preview-path", json={"path": str(model_dir)}))
-
-    assert response.status_code == 200
-    entry = response.json()["entries"][0]
-    assert entry["runtime_type"] == "st"
-    assert entry["status"] == "unsupported"
-    assert entry["status_reason"] == "st_followup_slice"
-    assert entry["user_selectable"] is False
-
-
-def test_register_model_accepts_ready_preview_payload_and_rejects_incomplete_preview(tmp_path, monkeypatch):
+def test_register_model_accepts_ready_payload_and_rejects_incomplete_preview(tmp_path, monkeypatch):
     registry_path = tmp_path / "ums_dynamic_models.json"
     monkeypatch.setenv("UMS_DYNAMIC_MODELS_REGISTRY_PATH", str(registry_path))
-    monkeypatch.setenv("UMS_BROWSE_ALLOWLIST_ROOTS", str(tmp_path))
-    model_dir = tmp_path / "register-from-preview"
+    model_dir = tmp_path / "register-direct"
     model_dir.mkdir()
     gguf_path = model_dir / "qwen2.5-14b-instruct-q4_k_m.gguf"
     gguf_path.write_text("stub", encoding="utf-8")
 
-    preview_response = asyncio.run(_api_request("POST", "/models/preview-path", json={"path": str(model_dir)}))
-    preview_entry = preview_response.json()["entries"][0]
     ready_register = asyncio.run(
         _api_request(
             "POST",
             "/models/register",
             json={
-                "model_id": "preview-qwen",
+                "model_id": "direct-qwen",
                 "type": "gguf",
-                "path": preview_entry["resolved_source"]["gguf_path"],
-                "display_name": preview_entry["display_name"],
-                "runtime_type": preview_entry["runtime_type"],
-                "kind": preview_entry["kind"],
-                "user_selectable": preview_entry["user_selectable"],
+                "path": str(gguf_path),
+                "display_name": "Qwen direct",
+                "runtime_type": "gguf",
+                "kind": "llm",
+                "user_selectable": True,
                 "source_path": str(model_dir),
-                "preview_status": preview_entry["status"],
-                "status_reason": preview_entry["status_reason"],
+                "preview_status": "ready",
+                "status_reason": "configured",
             },
         )
     )
 
     assert ready_register.status_code == 200
     models_response = asyncio.run(_api_request("GET", "/models"))
-    assert "preview-qwen" in {item["model_id"] for item in models_response.json()["models"]}
+    assert "direct-qwen" in {item["model_id"] for item in models_response.json()["models"]}
+    assert ums_server.state["dynamic_models"]["direct-qwen"]["source_path"] == str(model_dir.resolve())
 
     rejected = asyncio.run(
         _api_request(
             "POST",
             "/models/register",
             json={
-                "model_id": "preview-qwen-incomplete",
+                "model_id": "direct-qwen-incomplete",
                 "type": "gguf-vl",
-                "path": preview_entry["resolved_source"]["gguf_path"],
+                "path": str(gguf_path),
                 "preview_status": "incomplete",
                 "status_reason": "missing_mmproj_path",
             },
@@ -2558,82 +2543,106 @@ def test_register_model_accepts_ready_preview_payload_and_rejects_incomplete_pre
     assert rejected.json()["detail"]["status"] == "preview_not_registerable"
 
 
-def test_register_model_accepts_ready_gguf_vl_preview_payload(tmp_path, monkeypatch):
+def test_register_model_ignores_unavailable_source_path_metadata(tmp_path, monkeypatch):
     registry_path = tmp_path / "ums_dynamic_models.json"
     monkeypatch.setenv("UMS_DYNAMIC_MODELS_REGISTRY_PATH", str(registry_path))
-    monkeypatch.setenv("UMS_BROWSE_ALLOWLIST_ROOTS", str(tmp_path))
-    model_dir = tmp_path / "register-vl-from-preview"
+    model_dir = tmp_path / "register-with-missing-source"
+    model_dir.mkdir()
+    gguf_path = model_dir / "model.gguf"
+    gguf_path.write_text("stub", encoding="utf-8")
+
+    register_response = asyncio.run(
+        _api_request(
+            "POST",
+            "/models/register",
+            json={
+                "model_id": "direct-missing-source",
+                "type": "gguf",
+                "path": str(gguf_path),
+                "source_path": str(tmp_path / "missing-ui-path"),
+                "preview_status": "ready",
+                "status_reason": "configured",
+            },
+        )
+    )
+
+    assert register_response.status_code == 200
+    payload = register_response.json()["model"]
+    assert payload["model_id"] == "direct-missing-source"
+    assert "source_path" not in ums_server.state["dynamic_models"]["direct-missing-source"]
+
+
+def test_register_model_accepts_ready_gguf_vl_payload(tmp_path, monkeypatch):
+    registry_path = tmp_path / "ums_dynamic_models.json"
+    monkeypatch.setenv("UMS_DYNAMIC_MODELS_REGISTRY_PATH", str(registry_path))
+    model_dir = tmp_path / "register-vl-direct"
     model_dir.mkdir()
     gguf_path = model_dir / "Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
     mmproj_path = model_dir / "mmproj-Qwen3-VL-8B-Instruct-F16.gguf"
     gguf_path.write_text("stub", encoding="utf-8")
     mmproj_path.write_text("stub", encoding="utf-8")
 
-    preview_response = asyncio.run(_api_request("POST", "/models/preview-path", json={"path": str(model_dir)}))
-    entry = preview_response.json()["entries"][0]
-
     register_response = asyncio.run(
         _api_request(
             "POST",
             "/models/register",
             json={
-                "model_id": "preview-vl",
+                "model_id": "direct-vl",
                 "type": "gguf-vl",
-                "path": entry["resolved_source"]["gguf_path"],
-                "mmproj": entry["resolved_source"]["mmproj_path"],
-                "display_name": entry["display_name"],
-                "runtime_type": entry["runtime_type"],
-                "kind": entry["kind"],
-                "user_selectable": entry["user_selectable"],
+                "path": str(gguf_path),
+                "mmproj": str(mmproj_path),
+                "display_name": "Qwen VL direct",
+                "runtime_type": "gguf-vl",
+                "kind": "vision",
+                "user_selectable": True,
                 "source_path": str(model_dir),
-                "preview_status": entry["status"],
-                "status_reason": entry["status_reason"],
+                "preview_status": "ready",
+                "status_reason": "configured",
             },
         )
     )
 
     assert register_response.status_code == 200
     payload = register_response.json()["model"]
-    assert payload["model_id"] == "preview-vl"
+    assert payload["model_id"] == "direct-vl"
     assert payload["runtime_type"] == "gguf-vl"
     assert payload["load_defaults"]["mmproj_path"] == str(mmproj_path.resolve())
 
 
-def test_register_model_accepts_ready_split_gguf_preview_payload(tmp_path, monkeypatch):
+def test_register_model_accepts_ready_split_gguf_payload(tmp_path, monkeypatch):
     registry_path = tmp_path / "ums_dynamic_models.json"
     monkeypatch.setenv("UMS_DYNAMIC_MODELS_REGISTRY_PATH", str(registry_path))
-    monkeypatch.setenv("UMS_BROWSE_ALLOWLIST_ROOTS", str(tmp_path))
-    model_dir = tmp_path / "register-split-from-preview"
+    model_dir = tmp_path / "register-split-direct"
     model_dir.mkdir()
+    shards = []
     for index in range(1, 4):
-        (model_dir / f"qwen2.5-32b-instruct-q4-0000{index}-of-00003.gguf").write_text("stub", encoding="utf-8")
-
-    preview_response = asyncio.run(_api_request("POST", "/models/preview-path", json={"path": str(model_dir)}))
-    entry = preview_response.json()["entries"][0]
+        shard = model_dir / f"qwen2.5-32b-instruct-q4-0000{index}-of-00003.gguf"
+        shard.write_text("stub", encoding="utf-8")
+        shards.append(shard)
 
     register_response = asyncio.run(
         _api_request(
             "POST",
             "/models/register",
             json={
-                "model_id": "preview-split",
+                "model_id": "direct-split",
                 "type": "gguf",
-                "path": entry["resolved_source"]["primary_path"],
-                "shards": entry["resolved_source"]["shards"],
-                "display_name": entry["display_name"],
-                "runtime_type": entry["runtime_type"],
-                "kind": entry["kind"],
-                "user_selectable": entry["user_selectable"],
+                "path": str(shards[0]),
+                "shards": [str(item) for item in shards],
+                "display_name": "Qwen split direct",
+                "runtime_type": "gguf",
+                "kind": "llm",
+                "user_selectable": True,
                 "source_path": str(model_dir),
-                "preview_status": entry["status"],
-                "status_reason": entry["status_reason"],
+                "preview_status": "ready",
+                "status_reason": "configured",
             },
         )
     )
 
     assert register_response.status_code == 200
     payload = register_response.json()["model"]
-    assert payload["model_id"] == "preview-split"
+    assert payload["model_id"] == "direct-split"
     assert payload["runtime_type"] == "gguf"
     assert len(payload["load_defaults"]["shards"]) == 3
 
@@ -2642,7 +2651,7 @@ def test_start_server_falls_back_when_static_requested_port_is_occupied(monkeypa
     fake_process = _FakeProcess()
     launch_calls = []
 
-    def fake_launch(cmd, port, health_timeout_s=120.0, env=None):
+    def fake_launch(cmd, port, health_timeout_s=120.0, env=None, **kwargs):
         launch_calls.append((cmd, port))
         return fake_process
 
@@ -2673,7 +2682,7 @@ def test_start_server_retries_on_bind_failure_with_fallback_port():
     fake_process = _FakeProcess()
     launch_calls = []
 
-    def fake_launch(cmd, port, health_timeout_s=120.0, env=None):
+    def fake_launch(cmd, port, health_timeout_s=120.0, env=None, **kwargs):
         launch_calls.append((list(cmd), port))
         if int(port) == 8091:
             raise RuntimeError("Server exited with code 1: couldn't bind HTTP server socket")

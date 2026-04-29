@@ -1358,12 +1358,14 @@ def test_run_all_waits_for_infer_ready_endpoint():
     assert 'up --no-build --no-deps -d "${PHASE2_SERVICES[@]}"' in run_all
 
 
-def test_run_native_waits_for_infer_ready_before_starting_ui():
+def test_run_native_warns_on_infer_not_ready_without_blocking_ui():
     run_native = (SCRIPTS_DIR / "run_native.sh").read_text(encoding="utf-8")
 
     assert "wait_for_infer_ready" in run_native
     assert "/ready/infer" in run_native
-    assert 'echo -e "${YELLOW}Пропуск запуска Agent API и Open WebUI: UMS infer-ready не подтвержден.${NC}"' in run_native
+    assert 'if [ "$http_code" = "503" ]; then' in run_native
+    assert 'Open WebUI стартуют, но первые LLM-запросы могут вернуть ошибку готовности модели' in run_native
+    assert "Пропуск запуска Agent API и Open WebUI: UMS infer-ready не подтвержден" not in run_native
     assert "start_openwebui_compose_service" in run_native
     assert "compose_args+=(--no-build)" in run_native
     assert "compose_args+=(--build)" in run_native
@@ -1377,6 +1379,27 @@ def test_run_native_uses_standalone_embedding_runtime_for_openwebui_rag():
     assert "wait_for_service \"Embedding Runtime\" \"$EMBEDDING_RUNTIME_PORT\" \"/health\"" in run_native
     assert "rag_api=http://127.0.0.1:${EMBEDDING_RUNTIME_PORT}/v1" in run_native
     assert "RAG_OPENAI_API_BASE_URL='http://127.0.0.1:$EMBEDDING_RUNTIME_PORT/v1'" in run_native
+
+
+def test_run_native_openwebui_dev_allows_vite_origin_for_credentials():
+    run_native = (SCRIPTS_DIR / "run_native.sh").read_text(encoding="utf-8")
+
+    assert "openwebui_dev_cors_origin_q" in run_native
+    assert "http://127.0.0.1:$OPENWEBUI_PORT;http://localhost:$OPENWEBUI_PORT" in run_native
+    assert "CORS_ALLOW_ORIGIN=$openwebui_dev_cors_origin_q" in run_native
+
+
+def test_openwebui_rag_defaults_stay_native_for_runtime_models():
+    run_native = (SCRIPTS_DIR / "run_native.sh").read_text(encoding="utf-8")
+    compose = (PROJECT_ROOT / "docker-compose.yaml").read_text(encoding="utf-8")
+
+    assert "OPENWEBUI_SESSION_RAG_HANDOFF='off'" in run_native
+    assert "RAG_OPENAI_API_BASE_URL='http://127.0.0.1:$EMBEDDING_RUNTIME_PORT/v1'" in run_native
+    assert "DATABASE_URL=${OPENWEBUI_DATABASE_URL:-sqlite:////app/backend/data/webui.db}" in compose
+    assert "VECTOR_DB=${OPENWEBUI_VECTOR_DB:-qdrant}" in compose
+    assert "QDRANT_COLLECTION_PREFIX=${OPENWEBUI_QDRANT_COLLECTION_PREFIX:-anp-openwebui}" in compose
+    assert "OPENWEBUI_SESSION_RAG_HANDOFF=${OPENWEBUI_SESSION_RAG_HANDOFF:-off}" in compose
+    assert "RAG_OPENAI_API_BASE_URL=${OPENWEBUI_RAG_OPENAI_API_BASE_URL:-http://host.docker.internal:8092/v1}" in compose
 
 
 def test_stop_scripts_kill_detached_runtime_process_patterns():
