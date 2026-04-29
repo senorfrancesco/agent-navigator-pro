@@ -859,6 +859,12 @@ def _build_openwebui_workspace_tool_code(
                 return template.format(**kwargs)
             return template
 
+        def _accepted_confirmation(locale, label, job_id, status_url):
+            return (
+                _locale_text(locale, "accepted", label=label)
+                + f"\\njob_id: {job_id}\\nstatus_url: {status_url}"
+            )
+
         async def _request_json(method, url, token, payload=None):
             def _do_request():
                 data = None if payload is None else json.dumps(payload).encode("utf-8")
@@ -1753,8 +1759,8 @@ def _build_openwebui_workspace_tool_code(
                     job_id = str(response.get("job_id", "unknown"))
                     if not status_url or not job_id or job_id == "unknown":
                         return _locale_text(locale, "missing_confirmation", label=target_action_label)
+                    normalized_status_url = _absolute_status_url(self.valves.tool_server_base_url, status_url)
                     if __request__ is not None and __chat_id__ and __message_id__:
-                        normalized_status_url = _absolute_status_url(self.valves.tool_server_base_url, status_url)
                         registry = _poller_registry(__request__.app.state)
                         key = _poller_key(str(__chat_id__), str(__message_id__), job_id)
                         existing = registry.get(key)
@@ -1784,7 +1790,7 @@ def _build_openwebui_workspace_tool_code(
                             entry["task"] = task
                             registry[key] = entry
 
-                    return _locale_text(locale, "accepted", label=target_action_label)
+                    return _accepted_confirmation(locale, target_action_label, job_id, status_url)
 
                 assistant_message = str(response.get("assistant_message") or "").strip()
                 if assistant_message:

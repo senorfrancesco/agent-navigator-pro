@@ -104,6 +104,51 @@ def test_tool_job_store_persists_extended_status_payload_and_terminal_result():
     assert "Модель занята" in reloaded_job.result_payload["assistant_message"]
 
 
+def test_tool_job_store_strips_timing_footer_from_completed_result():
+    store = tool_job_store_module.get_tool_job_store()
+    job = store.create_job(
+        tool_name="analyze_document_deep",
+        route_prefix="/tool-server",
+        request_payload={"requested_tool": "analyze_document_deep"},
+        execution_metadata={"execution_mode": "async"},
+    )
+    store.finish_completed(
+        job.job_id,
+        {
+            "assistant_message": "Готово\n\n---\nTiming / Quality\n- Полный ответ: 10 мс",
+            "telemetry": {"elapsed_ms": 10},
+        },
+    )
+
+    reloaded_job = store.get(job.job_id)
+
+    assert reloaded_job is not None
+    assert reloaded_job.response["assistant_message"] == "Готово"
+    assert reloaded_job.result_payload["assistant_message"] == "Готово"
+    assert reloaded_job.result_preview == "Готово"
+    assert reloaded_job.result_payload["telemetry"]["elapsed_ms"] == 10
+
+
+def test_tool_job_store_strips_timing_footer_from_cancel_reason():
+    store = tool_job_store_module.get_tool_job_store()
+    job = store.create_job(
+        tool_name="analyze_equipment_deep",
+        route_prefix="/tool-server",
+        request_payload={"requested_tool": "analyze_equipment_deep"},
+        execution_metadata={"execution_mode": "async"},
+    )
+    store.finish_cancelled(
+        job.job_id,
+        error_summary="The request was stopped by the user.\n\n---\nTiming / Quality\n- Полный ответ: 10 мс",
+    )
+
+    reloaded_job = store.get(job.job_id)
+
+    assert reloaded_job is not None
+    assert reloaded_job.error_summary == "The request was stopped by the user."
+    assert "Timing / Quality" not in reloaded_job.result_payload["assistant_message"]
+
+
 def test_tool_job_store_records_terminal_delivery_idempotently():
     store = tool_job_store_module.get_tool_job_store()
     job = store.create_job(

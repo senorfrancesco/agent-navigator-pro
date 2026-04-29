@@ -234,6 +234,67 @@ def test_tool_route_passes_current_model_from_forwarded_header(monkeypatch):
     assert captured["request"].ui_state["current_model_id"] == "qwen-vl-8b"
 
 
+def test_tool_route_uses_forwarded_model_when_body_contains_legacy_wrapper(monkeypatch):
+    captured: Dict[str, Any] = {}
+
+    async def fake_execute(orchestration_request, http_request=None):
+        captured["request"] = orchestration_request
+        return {
+            "assistant_message": "Готово",
+            "trace_id": "trace-tool-model-legacy-wrapper",
+            "route": "equipment",
+            "source_scope_summary": "off",
+            "sources": [],
+        }
+
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_TOKEN", "tool-secret")
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_ALLOWED_ORIGINS", "http://localhost:3001")
+    monkeypatch.setattr(agent_api, "execute_orchestration_api", fake_execute)
+
+    client = TestClient(agent_api.app)
+    response = client.post(
+        "/tools/analyze_equipment_fast",
+        headers={**_auth_headers(), "X-OpenWebUI-Model-Id": "qwen-14b-llm"},
+        json={
+            "equipment_query": "Проверь оборудование",
+            "user_inputs": {"current_model_id": "llm-tools-platform"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["request"].resolved_model_id == "qwen-14b-llm"
+    assert captured["request"].ui_state["current_model_id"] == "qwen-14b-llm"
+
+
+def test_completed_tool_result_strips_timing_footer_but_keeps_telemetry(monkeypatch):
+    async def fake_execute(orchestration_request, http_request=None):
+        return {
+            "assistant_message": "Готово\n\n---\nTiming / Quality\n- Полный ответ: 10 мс",
+            "trace_id": "trace-tool-footer",
+            "route": "equipment",
+            "source_scope_summary": "off",
+            "sources": [],
+            "telemetry": {"elapsed_ms": 10, "quality_summary": "LLM: да"},
+        }
+
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_TOKEN", "tool-secret")
+    monkeypatch.setenv("OPENAPI_TOOL_SERVER_ALLOWED_ORIGINS", "http://localhost:3001")
+    monkeypatch.setattr(agent_api, "execute_orchestration_api", fake_execute)
+
+    client = TestClient(agent_api.app)
+    response = client.post(
+        "/tools/analyze_equipment_fast",
+        headers=_auth_headers(),
+        json={"equipment_query": "Проверь оборудование"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["assistant_message"] == "Готово"
+    assert "Timing / Quality" not in payload["assistant_message"]
+    assert payload["structured_result"]["telemetry"]["elapsed_ms"] == 10
+
+
 def test_async_tool_route_returns_accepted_contract(monkeypatch):
     async def fake_execute(orchestration_request, http_request=None):
         return {

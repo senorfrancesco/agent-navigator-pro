@@ -469,6 +469,14 @@ def _resolve_report_download_path(filename: str) -> Optional[Path]:
     return candidate
 
 
+def _strip_tool_telemetry_footer(text: str) -> str:
+    marker = "\n\n---\nTiming / Quality"
+    value = str(text or "")
+    if marker not in value:
+        return value
+    return value.split(marker, 1)[0].rstrip()
+
+
 def _build_completed_tool_result(tool_request: ToolRequest, response: Dict[str, Any]) -> Dict[str, Any]:
     telemetry = response.get("telemetry") if isinstance(response.get("telemetry"), dict) else None
     raw_execution_metadata = response.get("execution_metadata") if isinstance(response.get("execution_metadata"), dict) else {}
@@ -487,7 +495,7 @@ def _build_completed_tool_result(tool_request: ToolRequest, response: Dict[str, 
 
     result = CompletedToolResult(
         tool_name=tool_request.tool_name,
-        assistant_message=str(response.get("assistant_message") or ""),
+        assistant_message=_strip_tool_telemetry_footer(str(response.get("assistant_message") or "")),
         structured_result=structured_result,
         sources=_normalize_tool_sources(response.get("sources") or []),
         artifacts=_normalize_tool_artifacts(response, ui_locale=_normalize_ui_locale(tool_request.ui_locale)),

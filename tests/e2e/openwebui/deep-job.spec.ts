@@ -83,6 +83,9 @@ const ENV_VALUES = parseEnvFile(BACKEND_ENV_PATH);
 const OPENWEBUI_BASE_URL = normalizeBaseUrl(
   process.env.OPENWEBUI_BASE_URL || process.env.BASE_URL || 'http://127.0.0.1:3001'
 );
+const OPENWEBUI_API_BASE_URL = normalizeBaseUrl(
+  process.env.OPENWEBUI_API_BASE_URL || process.env.OPENWEBUI_BASE_URL || process.env.BASE_URL || 'http://127.0.0.1:3001'
+);
 const BACKEND_BASE_URL = normalizeBaseUrl(
   process.env.OPENWEBUI_BACKEND_BASE_URL || ENV_VALUES.AGENT_API_BASE_URL || 'http://127.0.0.1:8000'
 );
@@ -99,6 +102,7 @@ const MATRIX_POLL_INTERVAL_MS = parseInteger(process.env.OPENWEBUI_MATRIX_POLL_I
 const CONTROL_TIMEOUT_MS = parseInteger(process.env.OPENWEBUI_CONTROL_TIMEOUT_MS, 45_000);
 const LIVE_MODE = process.env.OPENWEBUI_LIVE_MODE?.trim() === '1';
 const AUTO_SYNC_ENABLED = process.env.OPENWEBUI_SKIP_AUTOSYNC?.trim() !== '1';
+const CONTAINER_PROBE_ENABLED = process.env.OPENWEBUI_SKIP_CONTAINER_PROBE?.trim() !== '1';
 const LIVE_PAUSE_MS = parseInteger(process.env.OPENWEBUI_LIVE_PAUSE_MS, 900);
 const LIVE_TYPING_DELAY_MS = parseInteger(process.env.OPENWEBUI_LIVE_TYPING_DELAY_MS, 85);
 const MANIFEST = loadManifestForExecution(MANIFEST_PATH);
@@ -806,6 +810,7 @@ function writeJson(filePath: string, value: unknown): void {
 async function runOpenWebUIRuntimePreflight(request: APIRequestContext): Promise<void> {
   const endpointTargets = [
     { name: 'openwebui', url: `${OPENWEBUI_BASE_URL}/` },
+    { name: 'openwebui-api', url: `${OPENWEBUI_API_BASE_URL}/health` },
     { name: 'agent-api', url: `${BACKEND_BASE_URL}/health` },
     { name: 'tool-server-openapi', url: `${BACKEND_BASE_URL}/tool-server/openapi.json` },
     { name: 'document-server', url: `${DOCUMENT_SERVER_BASE_URL}/health` },
@@ -842,30 +847,34 @@ async function runOpenWebUIRuntimePreflight(request: APIRequestContext): Promise
     failures.push(`native-processes:${missing.join(',') || processResult.status}`);
   }
 
-  const containerProbeScript = [
-    'import json, urllib.request',
-    `targets = ${JSON.stringify({
-      'agent-api': replaceHost(`${BACKEND_BASE_URL}/health`, 'host.docker.internal'),
-      ums: replaceHost(`${UMS_BASE_URL}/health`, 'host.docker.internal'),
-    })}`,
-    'results = {}',
-    'for name, url in targets.items():',
-    '    try:',
-    "        with urllib.request.urlopen(url, timeout=5) as response:",
-    "            results[name] = {'ok': True, 'status': getattr(response, 'status', 200), 'url': url}",
-    '    except Exception as exc:',
-    "        results[name] = {'ok': False, 'error': str(exc), 'url': url}",
-    'print(json.dumps(results, ensure_ascii=False))',
-  ].join('\n');
-  const containerResult = spawnSync(
-    'docker',
-    ['compose', '--profile', 'legacy', 'exec', '-T', 'open-webui', 'python', '-c', containerProbeScript],
-    {
-      cwd: REPO_ROOT,
-      encoding: 'utf-8',
-      env: process.env,
-    }
-  );
+  const containerProbeScript = CONTAINER_PROBE_ENABLED
+    ? [
+        'import json, urllib.request',
+        `targets = ${JSON.stringify({
+          'agent-api': replaceHost(`${BACKEND_BASE_URL}/health`, 'host.docker.internal'),
+          ums: replaceHost(`${UMS_BASE_URL}/health`, 'host.docker.internal'),
+        })}`,
+        'results = {}',
+        'for name, url in targets.items():',
+        '    try:',
+        "        with urllib.request.urlopen(url, timeout=5) as response:",
+        "            results[name] = {'ok': True, 'status': getattr(response, 'status', 200), 'url': url}",
+        '    except Exception as exc:',
+        "        results[name] = {'ok': False, 'error': str(exc), 'url': url}",
+        'print(json.dumps(results, ensure_ascii=False))',
+      ].join('\n')
+    : '';
+  const containerResult = CONTAINER_PROBE_ENABLED
+    ? spawnSync(
+        'docker',
+        ['compose', '--profile', 'legacy', 'exec', '-T', 'open-webui', 'python', '-c', containerProbeScript],
+        {
+          cwd: REPO_ROOT,
+          encoding: 'utf-8',
+          env: process.env,
+        }
+      )
+    : { status: 0, stdout: '{}', stderr: '' };
   let containerChecks: Record<string, unknown> = {};
   try {
     containerChecks = JSON.parse((containerResult.stdout || '').trim() || '{}') as Record<string, unknown>;
@@ -877,7 +886,7 @@ async function runOpenWebUIRuntimePreflight(request: APIRequestContext): Promise
   const containerOk =
     containerResult.status === 0 &&
     Object.values(containerChecks).every((value) => typeof value === 'object' && value !== null && Boolean((value as { ok?: boolean }).ok));
-  if (!containerOk) {
+  if (CONTAINER_PROBE_ENABLED && !containerOk) {
     failures.push('openwebui-container-probe');
   }
 
@@ -890,7 +899,7 @@ async function runOpenWebUIRuntimePreflight(request: APIRequestContext): Promise
       missing,
     },
     openwebui_container_probe: {
-      status: containerOk ? 'ok' : 'failed',
+      status: CONTAINER_PROBE_ENABLED ? (containerOk ? 'ok' : 'failed') : 'skipped',
       checks: containerChecks,
     },
   });
@@ -906,7 +915,7 @@ function runOpenWebUIBootstrapSync(): void {
     '--backend-base-url',
     BACKEND_BASE_URL,
     '--openwebui-base-url',
-    OPENWEBUI_BASE_URL,
+    OPENWEBUI_API_BASE_URL,
     '--env-file',
     BACKEND_ENV_PATH,
   ];
@@ -944,7 +953,7 @@ async function assertLegacyDeepJobActionFunctionsRemoved(
       request,
       token,
       'GET',
-      `${OPENWEBUI_BASE_URL}/api/v1/functions/id/${functionId}`
+      `${OPENWEBUI_API_BASE_URL}/api/v1/functions/id/${functionId}`
     );
     removalReport[functionId] = response.status;
     expect(response.ok).toBeFalsy();
@@ -960,7 +969,7 @@ function replaceHost(url: string, host: string): string {
 }
 
 async function signIn(request: APIRequestContext): Promise<string> {
-  const response = await request.post(`${OPENWEBUI_BASE_URL}/api/v1/auths/signin`, {
+  const response = await request.post(`${OPENWEBUI_API_BASE_URL}/api/v1/auths/signin`, {
     data: {
       email: ADMIN_EMAIL,
       password: ADMIN_PASSWORD,
@@ -1008,7 +1017,7 @@ async function apiJson(
 }
 
 async function createChat(request: APIRequestContext, token: string, title: string): Promise<Record<string, any>> {
-  const response = await apiJson(request, token, 'POST', `${OPENWEBUI_BASE_URL}/api/v1/chats/new`, {
+  const response = await apiJson(request, token, 'POST', `${OPENWEBUI_API_BASE_URL}/api/v1/chats/new`, {
     chat: {
       id: '',
       title,
@@ -1029,7 +1038,7 @@ async function createChat(request: APIRequestContext, token: string, title: stri
 }
 
 async function getChat(request: APIRequestContext, token: string, chatId: string): Promise<Record<string, any>> {
-  const response = await apiJson(request, token, 'GET', `${OPENWEBUI_BASE_URL}/api/v1/chats/${chatId}`);
+  const response = await apiJson(request, token, 'GET', `${OPENWEBUI_API_BASE_URL}/api/v1/chats/${chatId}`);
   expect(response.ok).toBeTruthy();
   if (!response.payload) {
     throw new Error(`Open WebUI get chat returned no payload for chat_id=${chatId}`);
@@ -1054,7 +1063,7 @@ async function updateChatHistory(
       currentId,
     },
   };
-  const response = await apiJson(request, token, 'POST', `${OPENWEBUI_BASE_URL}/api/v1/chats/${chatPayload.id}`, {
+  const response = await apiJson(request, token, 'POST', `${OPENWEBUI_API_BASE_URL}/api/v1/chats/${chatPayload.id}`, {
     chat: nextChat,
   });
   expect(response.ok).toBeTruthy();
@@ -1236,7 +1245,7 @@ async function uploadFileThroughUi(
   }
 
   const processStatus = await waitForFileProcessing(request, token, uploaded.id);
-  const contentResponse = await apiJson(request, token, 'GET', `${OPENWEBUI_BASE_URL}/api/v1/files/${uploaded.id}/data/content`);
+  const contentResponse = await apiJson(request, token, 'GET', `${OPENWEBUI_API_BASE_URL}/api/v1/files/${uploaded.id}/data/content`);
   const content = asOptionalString(contentResponse.payload?.content) || '';
   const fileName = uploaded.meta?.name || uploaded.filename || path.basename(filePath);
 
@@ -1272,7 +1281,7 @@ async function waitForFileProcessing(request: APIRequestContext, token: string, 
   let lastStatus = 'pending';
 
   while (Date.now() < deadline) {
-    const response = await apiJson(request, token, 'GET', `${OPENWEBUI_BASE_URL}/api/v1/files/${fileId}/process/status`);
+    const response = await apiJson(request, token, 'GET', `${OPENWEBUI_API_BASE_URL}/api/v1/files/${fileId}/process/status`);
     const status = asOptionalString(response.payload?.status) || 'pending';
     lastStatus = status;
     if (status === 'completed' || status === 'failed') {

@@ -43,6 +43,22 @@ def _build_body_with_last_user_message(text: str, *, ui_locale: str | None = Non
     return body
 
 
+def _accepted_deep_equipment_text(job_id: str, *, locale: str = "ru") -> str:
+    if locale == "en":
+        return (
+            "Accepted: Deep equipment analysis.\n"
+            "Progress is shown in the `Long-running tool` panel.\n"
+            f"job_id: {job_id}\n"
+            f"status_url: /tool-server/tool-jobs/{job_id}"
+        )
+    return (
+        "Принят в работу: Глубокий анализ оборудования.\n"
+        "Прогресс отображается в блоке `Инструмент долгого выполнения`.\n"
+        f"job_id: {job_id}\n"
+        f"status_url: /tool-server/tool-jobs/{job_id}"
+    )
+
+
 def _install_fake_openwebui_modules(monkeypatch, *, chat_store: dict[str, dict] | None = None):
     store = chat_store or {}
 
@@ -130,10 +146,7 @@ async def test_equipment_deep_workspace_tool_forwards_exact_prompt_as_equipment_
         "job_mode": "force_async",
         "ui_locale": "ru",
     }
-    assert response == (
-        "Принят в работу: Глубокий анализ оборудования.\n"
-        "Прогресс отображается в блоке `Инструмент долгого выполнения`."
-    )
+    assert response == _accepted_deep_equipment_text("job-tool-query-1")
 
 
 @pytest.mark.asyncio
@@ -161,10 +174,7 @@ async def test_equipment_deep_workspace_tool_localizes_acceptance_for_english(mo
         __metadata__={"ui_locale": "en-US"},
     )
 
-    assert response == (
-        "Accepted: Deep equipment analysis.\n"
-        "Progress is shown in the `Long-running tool` panel."
-    )
+    assert response == _accepted_deep_equipment_text("job-tool-query-en-1", locale="en")
 
 
 @pytest.mark.asyncio
@@ -398,10 +408,7 @@ async def test_equipment_deep_workspace_tool_autopolls_completed_job_and_persist
 
     accepted_message = chat_store["chat-deep-tool-1"]["history"]["messages"][accepted_message_id]
     result_message_id = accepted_message.get("result_message_id")
-    assert response == (
-        "Принят в работу: Глубокий анализ оборудования.\n"
-        "Прогресс отображается в блоке `Инструмент долгого выполнения`."
-    )
+    assert response == _accepted_deep_equipment_text("job-tool-auto-1")
     assert accepted_message["job_status"] == "completed"
     assert accepted_message["actions_disabled"] is True
     assert accepted_message["tool_job"]["status"] == "completed"
@@ -549,10 +556,7 @@ async def test_equipment_deep_workspace_tool_failed_job_emits_reload_meta_and_pe
     await asyncio.wait_for(poller_task, timeout=1)
 
     accepted_message = chat_store["chat-deep-tool-failed-1"]["history"]["messages"][accepted_message_id]
-    assert response == (
-        "Принят в работу: Глубокий анализ оборудования.\n"
-        "Прогресс отображается в блоке `Инструмент долгого выполнения`."
-    )
+    assert response == _accepted_deep_equipment_text("job-tool-failed-1")
     assert accepted_message["job_status"] == "failed"
     assert accepted_message["actions_disabled"] is True
     assert accepted_message["tool_job"]["status"] == "failed"
@@ -682,10 +686,7 @@ async def test_equipment_deep_workspace_tool_failed_job_waits_for_openwebui_mess
     accepted_message = chat_store["chat-deep-tool-settle-1"]["history"]["messages"][accepted_message_id]
     result_message_id = accepted_message.get("result_message_id")
 
-    assert response == (
-        "Принят в работу: Глубокий анализ оборудования.\n"
-        "Прогресс отображается в блоке `Инструмент долгого выполнения`."
-    )
+    assert response == _accepted_deep_equipment_text("job-tool-settle-1")
     assert accepted_message["job_status"] == "failed"
     assert accepted_message["actions_disabled"] is True
     assert accepted_message["tool_job"]["status"] == "failed"
@@ -808,10 +809,7 @@ async def test_equipment_deep_workspace_tool_resolves_visible_accepted_bubble_fr
     visible_message = chat_store["chat-deep-tool-resolve-1"]["history"]["messages"][visible_message_id]
     result_message_id = visible_message.get("result_message_id")
 
-    assert response == (
-        "Принят в работу: Глубокий анализ оборудования.\n"
-        "Прогресс отображается в блоке `Инструмент долгого выполнения`."
-    )
+    assert response == _accepted_deep_equipment_text("job-tool-resolve-1")
     assert stale_message.get("job_status") is None
     assert stale_message.get("result_message_id") is None
     assert stale_message["childrenIds"] == []

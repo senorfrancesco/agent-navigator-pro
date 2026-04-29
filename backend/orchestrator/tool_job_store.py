@@ -147,6 +147,8 @@ def _normalize_result_payload(
     embeds: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     normalized = dict(payload or {})
+    if "assistant_message" in normalized:
+        normalized["assistant_message"] = _strip_telemetry_footer(str(normalized.get("assistant_message") or ""))
     execution_metadata = dict(normalized.get("execution_metadata") or {})
     execution_metadata["status"] = status
     if reason:
@@ -159,6 +161,14 @@ def _normalize_result_payload(
     if embeds is not None:
         normalized.setdefault("embeds", list(embeds))
     return normalized
+
+
+def _strip_telemetry_footer(text: str) -> str:
+    marker = "\n\n---\nTiming / Quality"
+    value = str(text or "")
+    if marker not in value:
+        return value
+    return value.split(marker, 1)[0].rstrip()
 
 
 @dataclass
@@ -445,11 +455,11 @@ class SQLiteToolJobStore:
         )
 
     def finish_completed(self, job_id: str, response: Dict[str, Any]) -> ToolJobRecord:
-        assistant_message = str(response.get("assistant_message") or "").strip()
         current = self.get(job_id)
         if current is None:
             raise KeyError(job_id)
         result_payload = _normalize_result_payload(response, status="completed")
+        assistant_message = str(result_payload.get("assistant_message") or "").strip()
         return self._update_status(
             job_id,
             status="completed",
@@ -474,6 +484,7 @@ class SQLiteToolJobStore:
         current = self.get(job_id)
         if current is None:
             raise KeyError(job_id)
+        error_summary = _strip_telemetry_footer(error_summary)
         result_payload = _normalize_result_payload(
             {"assistant_message": f"deep-job завершён со статусом failed.\nerror: {error_summary}"},
             status="failed",
@@ -501,7 +512,7 @@ class SQLiteToolJobStore:
         current = self.get(job_id)
         if current is None:
             raise KeyError(job_id)
-        cancel_reason = error_summary or "cancelled-by-request"
+        cancel_reason = _strip_telemetry_footer(error_summary or "cancelled-by-request")
         result_payload = _normalize_result_payload(
             {
                 "assistant_message": (
@@ -854,11 +865,11 @@ class PostgresToolJobStore:
         )
 
     def finish_completed(self, job_id: str, response: Dict[str, Any]) -> ToolJobRecord:
-        assistant_message = str(response.get("assistant_message") or "").strip()
         current = self.get(job_id)
         if current is None:
             raise KeyError(job_id)
         result_payload = _normalize_result_payload(response, status="completed")
+        assistant_message = str(result_payload.get("assistant_message") or "").strip()
         return self._update_status(
             job_id,
             status="completed",
@@ -883,6 +894,7 @@ class PostgresToolJobStore:
         current = self.get(job_id)
         if current is None:
             raise KeyError(job_id)
+        error_summary = _strip_telemetry_footer(error_summary)
         result_payload = _normalize_result_payload(
             {"assistant_message": f"deep-job завершён со статусом failed.\nerror: {error_summary}"},
             status="failed",
@@ -910,7 +922,7 @@ class PostgresToolJobStore:
         current = self.get(job_id)
         if current is None:
             raise KeyError(job_id)
-        cancel_reason = error_summary or "cancelled-by-request"
+        cancel_reason = _strip_telemetry_footer(error_summary or "cancelled-by-request")
         result_payload = _normalize_result_payload(
             {
                 "assistant_message": (
