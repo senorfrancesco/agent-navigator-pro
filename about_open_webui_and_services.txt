@@ -1,0 +1,65 @@
+ А чем slim отличается от других? Мне нужна полноценная open web ui оболочка
+
+
+• USE_SLIM=true в Dockerfile не делает “урезанный интерфейс” Open WebUI. Фронтенд, админка, Workspace, Tools, Knowledge, модели, настройки и сама оболочка остаются полноценными.
+
+  Отличие в backend runtime: при USE_SLIM=true Docker-сборка пропускает предварительное скачивание тяжёлых локальных моделей и ресурсов:
+
+  - embedding model sentence-transformers/all-MiniLM-L6-v2;
+  - auxiliary embedding model TaylorAI/bge-micro-v2;
+  - Whisper model;
+  - tiktoken encoding;
+  - nltk punkt_tab.
+
+  То есть slim уменьшает образ и снижает сетевые скачивания на этапе сборки, но некоторые функции при первом использовании могут попытаться догрузить ресурсы или потребуют уже настроенный внешний сервис.
+
+  Если тебе нужна полноценная Open WebUI оболочка как UI, но без лишних скачиваний сейчас, я бы всё равно собирал с:
+
+  docker build --build-arg USE_SLIM=true -t open-webui:media-attachments-to-tools-v0.9.5 .
+
+  Если нужна именно “полная автономная сборка с локальным RAG/Whisper/embedding внутри контейнера”, тогда USE_SLIM=false, но это почти гарантированно полезет в интернет во время сборки, если кэшей Docker/Python/Hugging Face нет локально.
+
+  Для нашей текущей цели media_attachments_to_tools лучше USE_SLIM=true: мы проверяем оболочку и поведение файлов/tools, а не локальные embedding/Whisper модели внутри образа.
+
+
+› А потом как что оно всё докачает? Да и с нашим сервисом rag нельзя будет закрыть эти дыры  - embedding model sentence-transformers/all-MiniLM-L6-v2;
+    - auxiliary embedding model TaylorAI/bge-micro-v2;
+    - Whisper model;
+    - tiktoken encoding;
+    - nltk punkt_tab.
+
+
+• Да, часть этих “дыр” можно и лучше закрывать внешними сервисами, но не все одинаково.
+
+  По пунктам:
+
+  - embedding model sentence-transformers/all-MiniLM-L6-v2
+    Можно закрыть нашим RAG service / embedding-runtime. Для целевой архитектуры это даже правильнее: Open WebUI не должен сам держать embedding runtime, если мы выносим ingestion/retrieval наружу.
+  - auxiliary embedding model TaylorAI/bge-micro-v2
+    Тоже можно закрыть внешним embedding-runtime, если мы отключаем или не используем внутренний Open WebUI retrieval path. Если оставляем нативный Open WebUI Knowledge, тогда ему всё равно нужен свой embedding provider или локальная модель.
+  - Whisper model
+    Это уже не RAG. Его закрывает отдельный audio/transcription service, внешний STT endpoint или отключение локального STT в Open WebUI. Наш RAG service здесь не поможет.
+  - tiktoken encoding
+    Это не модель, а токенизатор/счётчик токенов. Обычно нужен для подсчёта контекста. Его лучше либо заранее положить в образ/кэш, либо настроить так, чтобы не было скачивания в рантайме. RAG service это не заменит полностью, потому что Open WebUI может
+    использовать подсчёт токенов в своём chat/RAG pipeline.
+  - nltk punkt_tab
+    Это ресурс для разбиения текста на предложения. Если ingestion/chunking у нас полностью во внешнем RAG service, то внутри Open WebUI он почти не нужен. Но если использовать нативный Open WebUI Knowledge/retrieval, он может понадобиться.
+
+  Как оно “потом докачает”:
+
+  - Если контейнер собран USE_SLIM=true, эти ресурсы не скачиваются на этапе сборки.
+  - При первом использовании соответствующей функции Open WebUI или зависимая библиотека может попытаться скачать ресурс в runtime cache внутри /app/backend/data/cache/....
+  - Если интернета нет, такая функция упадёт или деградирует.
+  - Если volume сохранён, после успешного первого скачивания ресурс останется в persistent data volume.
+
+  Практичный вывод для нас:
+
+  1. Для полноценной оболочки Open WebUI USE_SLIM=true подходит.
+  2. Для нативного Open WebUI Knowledge, локального STT и локального embedding внутри самого Open WebUI USE_SLIM=true не подходит без предварительного offline cache.
+  3. В нашей новой архитектуре лучше не полагаться на встроенные локальные embedding/Whisper в Open WebUI.
+  4. RAG закрываем внешним RAG service + embedding-runtime.
+  5. STT закрываем отдельным audio service или внешним provider.
+  6. tiktoken/nltk либо заранее кладём в offline bundle, либо отключаем пути, которые их требуют.
+
+  То есть “полноценная оболочка” и “полностью автономный локальный RAG/STT внутри контейнера Open WebUI” — это разные цели. Для нашего контура я бы делал полноценную оболочку, но тяжёлые runtime-вещи выносил наружу в сервисы.
+

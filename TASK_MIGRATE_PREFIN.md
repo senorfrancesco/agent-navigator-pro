@@ -1,385 +1,385 @@
-# TASK_MIGRATE_PREFIN - native Open WebUI tools contour
+# TASK_MIGRATE_PREFIN - Open WebUI deep tools contour
 
-> Предфинальный план выравнивания `Open WebUI`-контура: чистая выбранная модель, нативный чат, нативный `RAG`, потоковый инференс через `UMS` и наши инструменты как исполнительный слой, а не как отдельная псевдомодель.
+> Предфинальный план выравнивания `Open WebUI`-контура после архитектурного разворота: `Open WebUI` остаётся владельцем обычного чата, модель подключается через внешний `OpenAI-compatible` endpoint, а наши `LangGraph`-графы работают как инструменты через отдельный `Tool/Workflow Server`.
 
 ## Целевое решение
 
 `Open WebUI` остаётся владельцем чата, выбранной модели, истории, файлов, знаний, источников и пользовательского интерфейса.
 
-`UMS` отвечает за запуск и инференс выбранной модели.
+LLM/VL inference подключается как внешний `OpenAI-compatible` provider: `llama-server`, `LiteLLM`, cloud endpoint или другой совместимый backend.
 
-`LangGraph` исполняет наши инструменты, но не подменяет обычный чат целиком.
+Модель, путь к весам и runtime-флаги задаются в контейнере конкретного inference runtime через `docker-compose`, `.env` и command flags. `Open WebUI` не должен управлять этими флагами; он подключается к уже поднятому provider URL.
 
-Главная цель: не заставлять пользователя выбирать специальную модель `llm-tools-platform`. Пользователь выбирает любую доступную модель, а инструменты работают поверх неё.
+`Tool/Workflow Server` исполняет наши `LangGraph`-инструменты, ведёт состояние долгих заданий и отдаёт `OpenAPI`-схему для `Open WebUI`.
+
+`RAG-service` отвечает за ingestion, parsing, chunking, embeddings, reranking, работу с `Qdrant` и проверку embedding-профиля коллекций.
+
+Новый backend-код для целевого контура размещается в `backend/app`. Старый `backend/orchestrator` остаётся совместимым слоем до поэтапного переноса: новые клиенты, server инструментов, workflows, `RAG-service` и `document-runtime` не должны расширять старый монолит без отдельной причины.
+
+Главная цель: убрать псевдомодель `llm-tools-platform` и не делать отдельный чат-оркестратор. Пользователь выбирает обычную модель в `Open WebUI`; инструменты работают поверх неё, если они явно подключены и переданы модели.
 
 ## Почему нужен этот разворот
 
-Текущий слой совместимости смешал две роли:
+Старый предфинальный план привязывал обычный чат к backend raw proxy и считал `UMS` основным путём инференса. Это было полезным промежуточным шагом, но как целевой дизайн он оставляет слишком много лишней оркестрации:
 
-- обычная модель в `Open WebUI`;
-- скрытый агентный контур `execute_orchestration`.
+- `Open WebUI` зависит от backend model manager даже для обычного чата;
+- выбранная модель может снова смешаться с compatibility path;
+- форк `Open WebUI` начинает включать runtime model selector, folder scan и load/status UX вместо узкой поддержки долгих tools;
+- `Tool/Workflow Server` рискует стать второй псевдомоделью, а не исполнителем инструментов.
 
-Из-за этого выбранная модель вроде `qwen-14b-llm` проваливается в `execute_orchestration`, получает служебные блоки, теряет нормальный потоковый вывод и загрязняет историю чата текстом `Timing / Quality`.
-
-Целевое поведение должно быть ближе к нативному `Open WebUI`: модель отвечает как обычная LLM, `RAG` и источники остаются в штатном контуре `Open WebUI`, а наши инструменты вызываются только когда они действительно переданы модели как tools.
+Целевое поведение должно быть ближе к нативному `Open WebUI`: обычный чат идёт напрямую в выбранный `OpenAI-compatible` provider, native `Knowledge/RAG` остаётся в штатном контуре `Open WebUI`, а наши инструменты вызываются только через tool calling.
 
 ## Нормативный поток
 
-1. Пользователь выбирает модель в `Open WebUI`, например `qwen-14b-llm`.
-2. `Open WebUI` отправляет обычный `/v1/chat/completions`.
-3. Если `tools` не переданы, запрос идёт почти напрямую в `UMS` и возвращает потоковый ответ.
-4. Если `tools` переданы, модель получает описание инструментов.
-5. Когда модель вызывает инструмент, исполнение уходит в наш `LangGraph`.
-6. Если инструменту нужен LLM-вызов, он использует текущую выбранную модель.
-7. Финальный ответ снова генерирует выбранная модель и потоково возвращает его в `Open WebUI`.
+1. Пользователь выбирает модель в `Open WebUI`.
+2. `Open WebUI` отправляет обычный `/v1/chat/completions` во внешний provider.
+3. Если `tools` не переданы, ответ возвращается напрямую потоковой выдачей.
+4. Если `tools` переданы, модель получает описание инструментов из `OpenAPI Tool Server`.
+5. Когда модель вызывает инструмент, `Open WebUI` вызывает `Tool/Workflow Server`.
+6. `Tool/Workflow Server` запускает конкретный `LangGraph`-граф.
+7. Если инструмент быстрый, он возвращает результат сразу.
+8. Если инструмент долгий, он возвращает `job_id/status_url`, пишет прогресс и поддерживает отмену.
+9. Если инструменту нужен LLM/VL/RAG-вызов, он использует env-driven clients: `LLM_BASE_URL`, `LLM_MODEL_ID`, `VL_BASE_URL`, `RAG_SERVICE_URL`, `EMBEDDER_BASE_URL`, `RERANKER_BASE_URL`.
+10. Финальный ответ формирует выбранная модель в обычном `Open WebUI` tool calling loop.
+
+`LLM_MODEL_ID` в backend tools является fallback-моделью, а не способом запуска `llama-server`. Если `Open WebUI` передал текущую выбранную модель в tool context, tool использует её. Если текущая модель не передана, tool использует `LLM_MODEL_ID`. Если нет ни текущей модели, ни fallback, tool должен вернуть понятную configuration error.
 
 Это обычная LLM с `tool calling`, а не отдельный агентный чат.
 
-## Режимы на время миграции
+## Новые целевые режимы
 
-- [x] Обычный режим: выбранная модель без `tools` идёт прямым потоком в `UMS`.
-  Комментарий: выполнено; raw-запросы без `tools` идут через прямой `UMS` proxy, сохраняют потоковую выдачу и не вызывают `execute_orchestration`.
+- [ ] Обычный режим: выбранная модель без `tools` идёт напрямую в `OpenAI-compatible` provider.
+  Комментарий: старый raw proxy через backend считается промежуточным legacy path. Целевой путь: `Open WebUI -> llama-server/LiteLLM/другой provider`.
 
-- [x] Режим инструментов: выбранная модель с `tools` запускает лёгкий цикл `model -> tool call -> LangGraph tool executor -> model`.
-  Комментарий: выполнено для native tool calling; live `Playwright` smoke `2026-04-27` подтвердил `analyze_equipment_deep` поверх выбранной `qwen-14b-llm` без выбора `llm-tools-platform`.
+- [ ] Режим инструментов: выбранная модель с `tools` вызывает `Tool/Workflow Server`.
+  Комментарий: `Tool/Workflow Server` исполняет только конкретный tool call, не становится владельцем всего чата.
 
-- [ ] Временный debug-режим для старого совместимого пути.
-  Комментарий: `llm-tools-platform` не должен быть продуктовой моделью. Если он временно нужен для отладки, его нужно скрыть из обычного списка моделей и зафиксировать срок удаления.
+- [ ] Режим долгих инструментов: deep tool возвращает `job_id/status_url`, а форк `Open WebUI` показывает панель, polling, result materialization и cancel.
+  Комментарий: это единственная обязательная причина держать минимальный форк `Open WebUI`.
 
-- [ ] Полное удаление `llm-tools-platform` из пользовательского сценария.
-  Комментарий: целевое состояние - отсутствие псевдомодели в `Open WebUI`. Инструменты должны работать с любой выбранной моделью.
+- [ ] Debug/legacy режим: старые compatibility endpoints скрыты из пользовательского сценария.
+  Комментарий: `llm-tools-platform` можно оставить только как временный диагностический путь с отдельной датой удаления.
 
 ## Задачи реализации
 
-### M-PREFIN.1 - Очистить список моделей
+### M-PREFIN.0 - Ввести чистый backend-контур `backend/app`
+
+- [x] Создать минимальный пакет `backend/app` для целевой реализации.
+  Комментарий: начат первый срез: добавлены `backend/app/clients/openai_compatible.py` и `backend/app/tool_server/server.py`; старый `backend/orchestrator` не переписан.
+
+- [x] Добавить проверочную конфигурацию клиента `OpenAI-compatible`.
+  Комментарий: клиент читает `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL_ID` и предпочитает `current_model_id`, если он передан из контекста инструмента.
+
+- [x] Добавить минимальный каркас `Tool/Workflow Server`.
+  Комментарий: добавлены тестовый `/tools/echo`, рабочий `/tools/analyze_equipment_fast`, accepted route `/tools/analyze_equipment_deep` и экспорт `/tool-server/openapi.json` как проверочный контракт нового слоя.
+
+- [x] Перенести первый рабочий fast-tool в `backend/app`.
+  Комментарий: перенесён текстовый `analyze_equipment_fast`; он использует внешний `OpenAI-compatible` provider, текущую выбранную модель или fallback `LLM_MODEL_ID`, не вызывает `UMS` и не использует старый `execute_orchestration`.
+
+- [x] Добавить минимальный job-контракт для deep tools.
+  Комментарий: добавлены `jobs.py`, `openapi.py`, `GET /tool-jobs/{job_id}`, `GET /tool-jobs/{job_id}/result`, `POST /tool-jobs/{job_id}/cancel`; state переиспользует существующий `orchestrator.tool_job_store`.
+
+- [x] Подключить новый `backend/app` к текущему запуску без поломки совместимых routes.
+  Комментарий: новый clean-контур смонтирован в `orchestrator.agent_api` под `/app-tools`; существующие `/tool-server`, `/tools` и `/tool-jobs` остаются совместимым старым контуром.
+
+Acceptance:
+
+- Новый код добавляется в `backend/app`, а не раздувает `backend/orchestrator`.
+- Старые маршруты остаются рабочими до отдельного migration slice.
+- Первый рабочий tool может быть перенесён без изменения форка `Open WebUI`.
+
+Verification:
+
+- `pytest backend/tests/test_app_clean_contour.py -q`.
+- `python -m py_compile backend/app/clients/openai_compatible.py backend/app/tool_server/server.py backend/app/tool_server/schemas.py backend/app/tool_server/registry.py backend/app/tool_server/handlers.py backend/app/tool_server/jobs.py backend/app/tool_server/openapi.py backend/orchestrator/agent_api.py`.
+- `git diff --check`.
+
+### M-PREFIN.1 - Очистить пользовательский список моделей
 
 - [x] Убрать `llm-tools-platform` из `/v1/models` как обычную пользовательскую модель.
-  Комментарий: выполнено в `agent_api.py`; `/v1/models` теперь возвращает только chat-visible raw catalog.
+  Комментарий: выполнено в текущем backend compatibility path; при переходе на внешний provider этот пункт должен подтверждаться уже на стороне `Open WebUI` provider list.
 
-- [x] Не отдавать модели со статусом `incomplete`, `unsupported` или `ambiguous`.
-  Комментарий: выполнено через фильтрацию `UMS /models`; локальный fallback оставлен консервативным и требует runtime type, path и port.
+- [ ] Не публиковать неполные runtime-записи как chat models.
+  Комментарий: в целевом контуре список моделей приходит от внешнего provider. Неполные локальные записи не должны попадать в `Open WebUI` через bootstrap или ручной import.
 
-- [x] Сохранить диагностический способ увидеть скрытые модели.
-  Комментарий: полный каталог со status/status_reason остаётся в `UMS /models`; пользовательский `/v1/models` его не смешивает со списком выбора.
+- [ ] Зафиксировать debug-инвентарь моделей отдельно от пользовательского списка.
+  Комментарий: diagnostics может жить в operator/admin surface, но не в `Open WebUI` chat selector.
 
 Acceptance:
 
-- `/v1/models` отдаёт только готовые пользовательские `llm` / `vision` модели.
-- Неполные записи видны в админском каталоге, но не выбираются для чата.
+- `Open WebUI` показывает только реальные chat/VL models от настроенных providers.
 - `llm-tools-platform` отсутствует в обычном списке моделей.
+- Debug inventory не подменяет provider list.
 
 Verification:
 
-- `pytest backend/tests/test_agent_api_openai_compat.py -q`
-- `curl -sS http://127.0.0.1:8000/v1/models`
+- `Open WebUI` provider list smoke.
+- `curl` к provider `/v1/models`.
+- `git diff --check`.
 
-### M-PREFIN.2 - Вернуть нативный поток для обычной модели
+### M-PREFIN.2 - Перевести обычный чат на внешний `OpenAI-compatible` provider
 
-- [x] Изменить `/v1/chat/completions`: если `tools` нет, проксировать запрос в raw-контур `UMS`.
-  Комментарий: выполнено через общий raw proxy helper; обычная выбранная модель использует `_request_raw_openai_infer`, `_open_raw_openai_stream` и `_proxy_raw_openai_stream`.
+- [ ] Зафиксировать provider contract в env/compose/native launcher.
+  Комментарий: минимум: `OPENAI_API_BASE_URL`, `OPENAI_API_KEY`, default model. Для backend tools отдельно: `LLM_BASE_URL`, `LLM_MODEL_ID`.
 
-- [x] Не создавать `OrchestrationRequest` для обычного raw-чата.
-  Комментарий: выполнено; plain `/v1/chat/completions` возвращается из raw-ветки до attachment discovery, session docs и `execute_orchestration`.
+- [ ] Зафиксировать inference runtime contract на уровне контейнера.
+  Комментарий: путь к модели, порт, context size, GPU layers, device placement и дополнительные `llama-server` flags задаются в `docker-compose`/`.env`/command, а не через `Open WebUI` или `Tool/Workflow Server`.
 
-- [x] Вернуть потоковую генерацию без искусственного объединения ответа в один chunk.
-  Комментарий: выполнено; stream-ответы raw-моделей проксируются из backend stream без `_stream_openai_compat_response`.
+- [ ] Развести provider URL и runtime flags.
+  Комментарий: `Open WebUI` знает только `OPENAI_API_BASE_URL`/ключ/provider models; flags вроде `LLM_MODEL_FILE`, `LLM_CTX_SIZE`, `LLM_GPU_LAYERS`, `LLM_CUDA_DEVICES` принадлежат контейнеру inference runtime.
+
+- [ ] Убрать backend raw proxy как целевой путь обычного чата.
+  Комментарий: текущий raw proxy полезен как compatibility bridge, но не должен быть новым обязательным слоем.
+
+- [ ] Проверить потоковую выдачу напрямую через provider.
+  Комментарий: цель - вернуть максимально нативное поведение `Open WebUI`, включая streaming и штатные controls.
 
 Acceptance:
 
-- Для `qwen-14b-llm` без `tools` не вызывается `execute_orchestration`.
-- Потоковый ответ содержит несколько SSE-событий от backend модели.
-- Текст ответа не содержит `Timing / Quality`.
+- Обычный вопрос без tools не вызывает backend orchestration.
+- Обычный вопрос без tools не требует `Tool/Workflow Server`.
+- Потоковая выдача идёт из provider без искусственной сборки ответа в один chunk.
+- Ответы не содержат `Timing / Quality`.
+- Админ может сменить модель или runtime-флаги через env/compose restart без изменения `Open WebUI` fork code.
 
 Verification:
 
-- `pytest backend/tests/test_agent_api_openai_compat.py -q`
-- ручной smoke в `Open WebUI` на выбранной raw-модели.
+- live smoke в `Open WebUI`.
+- provider logs: `/v1/chat/completions`.
+- backend logs: отсутствует вызов orchestration для plain chat.
 
-### M-PREFIN.3 - Вынести инструменты в лёгкий исполнительный цикл
+### M-PREFIN.3 - Сделать корректный `Tool/Workflow Server`
 
-- [x] Обработать запросы с `tools` отдельно от plain proxy.
-  Комментарий: выполнено для native tool calling; `/v1/chat/completions` проксирует `tools` в raw-модель, а не в `execute_orchestration`.
+- [x] Зафиксировать начальный server layout.
+  Комментарий: созданы `schemas.py`, `registry.py`, `handlers.py`, `jobs.py`, `openapi.py` и `server.py`.
 
-- [x] Передавать в `LangGraph` только данные конкретного tool call.
-  Комментарий: выполнено на backend-стороне через `OpenAPI Tool Server`; tool endpoint строит payload из конкретного `ToolRequest` и принимает текущий `model_id`.
+- [x] Экспортировать проверочный инструмент через `/tool-server/openapi.json`.
+  Комментарий: добавлен минимальный контракт `echo` и рабочий контракт `analyze_equipment_fast`; следующий шаг - подключить постоянное состояние заданий для deep tools.
 
-- [x] Возвращать результат инструмента обратно в модель как tool result.
-  Комментарий: подтверждено на границе `Open WebUI`: `function_call_output` преобразуется в `role=tool`, после чего финальный ответ снова запрашивается у выбранной модели; backend остаётся исполнителем конкретного tool call.
+- [x] Разделить быстрые и долгие инструменты.
+  Комментарий: быстрые возвращают результат сразу; `analyze_equipment_deep` возвращает `202`/`job_id/status_url` как accepted job.
 
-- [x] Все внутренние LLM-вызовы инструментов резолвить через текущую выбранную модель.
-  Комментарий: backend tool executor применяет `resolved_model_id`, если он передан через `user_inputs.current_model_id` или `X-OpenWebUI-Model-Id`; legacy wrapper `llm-tools-platform` не перекрывает forwarded raw model.
+- [x] Поддержать `GET /tool-jobs/{job_id}`, `GET /tool-jobs/{job_id}/result`, `POST /tool-jobs/{job_id}/cancel`.
+  Комментарий: это базовый контракт для UI polling, materialization и отмены.
 
-- [x] Прокинуть текущую модель из форка `Open WebUI` в `OpenAPI Tool Server`.
-  Комментарий: выполнено в форке `Open WebUI`: наш `OpenAPI Tool Server` получает `X-OpenWebUI-Model-Id` и `user_inputs.current_model_id`; direct smoke подтвердил `model_execution.used_model_ids=["qwen-14b-llm"]`.
+- [ ] Все LLM/VL/RAG-вызовы внутри tools перевести на env-driven clients.
+  Комментарий: для `analyze_equipment_fast` LLM-вызов уже идёт через env-driven `OpenAI-compatible` client; остальные tools остаются следующими срезами.
 
 Acceptance:
 
-- Одна и та же tool logic работает с `qwen-14b-llm`, `qwen-vl-8b` и custom GGUF, если модель поддерживает нужный формат вызова.
-- Инструмент не становится владельцем всей истории чата.
-- История сохраняется в нативном формате `Open WebUI`.
+- Новый инструмент добавляется через registry + schema + handler.
+- `Open WebUI` может проверить и импортировать `OpenAPI Tool Server`.
+- Долгий tool можно отменить, и cancel доходит до backend job state.
+- `Tool/Workflow Server` не отвечает на обычный чат.
 
 Verification:
 
-- `pytest backend/tests/test_agent_api_openai_compat.py -q`
-- `pytest backend/tests/test_openapi_tools_api.py backend/tests/test_tool_job_store.py -q`
-- live smoke: direct `analyze_equipment_deep` и `Playwright` сценарий `openwebui native deep-job equipment confirmed launch`.
+- targeted tests для `/tool-server/openapi.json`.
+- targeted tests для fast/deep/cancel/result contract.
+- live smoke через `Open WebUI` tool picker.
 
-### M-PREFIN.4 - Убрать служебные блоки из `assistant_message`
+### M-PREFIN.4 - Минимизировать форк `Open WebUI` до deep tools only
 
-- [x] Отключить добавление `Timing / Quality` в текст ответа для `OpenAI-compatible` чата.
-  Комментарий: выполнено на границах `/v1/chat/completions`, `OpenAPI Tool Server` completed-result и `tool_jobs` status/result; telemetry footer очищается перед отдачей в `Open WebUI`.
+- [x] Создать ветку форка без runtime model selector.
+  Комментарий: в `/home/seral/HDD/proj/open-webui` создана ветка `anp/deep-tools-only-v0.9.2`; runtime model selector, folder scan и load/status слой сняты обратными коммитами.
 
-- [x] Оставить метрики в логах или отдельном служебном поле.
-  Комментарий: `execute_orchestration` продолжает отдавать `telemetry`/`execution_metadata`; санитизация меняет только пользовательский текст OpenAI-compatible ответа.
+- [x] Оставить поддержку deep-job panel.
+  Комментарий: сохранены deep-job routes/API/store/display/polling/result materialization.
 
-- [x] Добавить регрессию на отсутствие footer в raw-ответе.
-  Комментарий: добавлены регрессии на non-streaming, streaming compat path, completed tool result и persisted `tool_jobs` payload.
+- [x] Оставить cancel path для deep jobs.
+  Комментарий: `Open WebUI` вызывает `/api/v1/deep-jobs/{job_id}/cancel`, который проксирует cancel в `Tool/Workflow Server`.
+
+- [x] Исправить parsing `<details>` для deep-job summary.
+  Комментарий: `fix(deep-jobs): preserve details summary without body` оставлен в ветке deep-tools-only.
+
+- [ ] Убрать из целевого форка все следы runtime model management.
+  Комментарий: дополнительные проверки перед merge: нет `runtime_models`, `RuntimeModelFolderModal`, `ModelLoadStatus`, `enable_agent_navigator_runtime_models`.
 
 Acceptance:
 
-- Новые ответы raw-моделей не содержат `Timing / Quality`.
-- Старые сообщения могут оставаться в базе, но новые не создают повторного загрязнения.
-- Метрики не теряются полностью, если они нужны для диагностики.
+- Форк отличается от upstream только deep tools слоем и необходимыми тестами.
+- Селектор моделей, scan folders, model load/status UX отсутствуют.
+- Удаление/добавление model provider остаётся штатной функцией `Open WebUI`, а не нашей fork-specific логикой.
 
 Verification:
 
-- `pytest backend/tests/test_agent_api_openai_compat.py -q`
-- `rg -n "Timing / Quality" /tmp/openwebui-qdrant-smoke/data` только для старых записей при smoke-проверке.
+- `rg -n "runtime_models|RuntimeModel|enable_agent_navigator_runtime_models" backend src -S` в форке.
+- `pytest backend/open_webui/test/apps/webui/routers/test_deep_jobs.py backend/open_webui/test/utils/test_long_running_tools.py backend/open_webui/test/utils/test_tools_model_context.py -q`.
+- `npm run test:frontend -- src/lib/utils/marked/extension.test.ts --run`.
 
-### M-PREFIN.5 - Оставить `RAG` владельцем `Open WebUI`
+### M-PREFIN.4.1 - Привязать `deep-jobs` к конкретному server/tool contract
 
-- [x] Не дублировать нативный `RAG` в обычном raw-чате.
-  Комментарий: legacy `/v1/chat/completions` больше не ищет вложения, не загружает session docs и не включает `session_rag` для plain chat.
+- [ ] Убрать глобальный implicit fallback `deep-jobs` на `http://127.0.0.1:8000`.
+  Комментарий: текущий форк `Open WebUI` при открытии любого чата опрашивает `/api/v1/chats/{chat_id}/deep-jobs/active`, а backend proxy без явной конфигурации пытается ходить в дефолтный `Tool/Workflow Server` на `127.0.0.1:8000`. Если этот сервер не поднят, обычный чат получает шумные `500`, хотя конкретный `Workspace Tool` или внешний tool server могут вообще не использовать этот контур.
 
-- [x] Для tool calls принимать файлы и источники как входной контекст.
-  Комментарий: explicit `OpenAPI Tool Server` path сохраняет `document_refs`, `session_docs`, `attachments_meta` и нормализацию путей как контракт tools.
+- [ ] Сделать server binding явной частью `deep-job` состояния.
+  Комментарий: `deep-job` должен знать, к какому `tool_server_id` / `base_url` / `tool_name` / `status_url` он относится. Polling active/status/result/cancel не должен угадывать единственный глобальный backend; он должен брать endpoint из сохранённого job snapshot или из connection metadata конкретного tool server.
 
-- [x] Развести knowledge chat и специализированные tools.
-  Комментарий: live smoke `2026-04-27` подтвердил нативный Knowledge/RAG через `Open WebUI` -> `embedding-runtime` -> `Qdrant` -> выбранную `qwen-14b-llm`; specialized tools проверены отдельно через `analyze_equipment_deep` поверх выбранной `qwen-14b-llm`.
+- [ ] Развести `OpenAPI Tool Server`, `Workspace Tool` и legacy `llm-tools-platform` по lifecycle.
+  Комментарий: если job создан через `OpenAPI Tool Server`, панель использует его `status_url` и `cancel_url`; если обычный `Workspace Tool` работает без backend-owned `tool_jobs`, панель `deep-jobs` не должна опрашивать внешний сервер; legacy `llm-tools-platform` не должен оставаться скрытым дефолтом для всех чатов.
+
+- [ ] Добавить graceful degradation для отсутствующего tool server.
+  Комментарий: `GET /api/v1/chats/{chat_id}/deep-jobs/active` при недоступном server должен возвращать `{"job": null}` или явный non-fatal unavailable state, а не `500`. Ошибка подключения к одному tool server не должна ломать открытие чата, список чатов или обычный model response.
+
+- [ ] Зафиксировать конфигурационный контракт для нескольких tool servers.
+  Комментарий: `Open WebUI` должен хранить/получать список tool server connections с `id`, `name`, `base_url`, `auth`, `openapi_url`, enabled-state и health; `deep-jobs` proxy должен работать через этот registry, а не через один process-wide `DEFAULT_TOOL_SERVER_BASE_URL`.
 
 Acceptance:
 
-- При обычном вопросе без tools источники отображаются нативно в `Open WebUI`.
-- При tool call источник истины по файлам не расходится между `Open WebUI`, SQLite и `Qdrant`.
-- Контрольные фразы из старого RAG не повторяются на бытовые сообщения без релевантного retrieval.
+- Открытие чата без активных долгих задач не обращается к несуществующему `127.0.0.1:8000`.
+- Отсутствующий `Tool/Workflow Server` не даёт `500` на `/api/v1/chats/{chat_id}/deep-jobs/active`.
+- Для активной долгой задачи сохранены `tool_server_id`, `tool_name`, `job_id`, `status_url`, `result_url` и `cancel_url`.
+- `Cancel` и polling идут в тот server, который создал конкретный job.
+- `Workspace Tool`, который сам синхронно вызывает внешний сервис, не активирует `deep-jobs` polling без явного backend-owned job contract.
 
 Verification:
 
-- live smoke с файлом в `Open WebUI`.
-- проверка `chat_message.sources` в `webui.db`.
-- проверка коллекций `Qdrant`.
+- targeted tests для `backend/open_webui/routers/deep_jobs.py` и `backend/open_webui/services/deep_jobs.py`: unavailable server -> `job: null`, active job -> correct server URL, cancel -> correct server URL.
+- live smoke: открыть чат при выключенном `Tool/Workflow Server` и убедиться, что нет `500` в `/deep-jobs/active`.
+- live smoke: запустить deep tool с явно подключенного server и проверить `status/result/cancel` по сохранённому `status_url`.
+- `git diff --check`.
 
-### M-PREFIN.6 - Починить переключение тяжёлых моделей в `UMS`
+### M-PREFIN.5 - Убрать `llm-tools-platform` из пользовательского сценария
 
-- [x] При смене тяжёлой модели выгружать текущую тяжёлую модель до проверки допуска новой.
-  Комментарий: `UMS` теперь останавливает уже запущенный `gguf` / `gguf-vl` runtime до расчёта допуска новой тяжёлой модели.
+- [ ] Скрыть compatibility model из `Open WebUI` bootstrap/default config.
+  Комментарий: named tools и `OpenAPI Tool Server` остаются, псевдомодель не нужна.
 
-- [x] Повторно считать доступную видеопамять после выгрузки.
-  Комментарий: после остановки старой модели выполняется новый `_get_gpu_info()`, и только потом считается `llm_admission`.
+- [ ] Зафиксировать срок удаления legacy OpenAI-compatible wrapper path.
+  Комментарий: если wrapper остаётся для диагностики, он должен быть явно debug-only.
 
-- [x] Вернуть понятный статус загрузки и отмены.
-  Комментарий: существующий `model-load-jobs` сохраняет отмену, а при переключении добавлены фазы `releasing_previous_model` и `refreshing_resources`.
-
-- [x] Сделать прогресс `model-load-jobs` монотонным.
-  Комментарий: `UMS` больше не уменьшает `bytes_loaded` / `percent` при просадке RSS-сэмпла, сохраняет последнюю скорость, а `ready` выставляет `100%` и полный `bytes_loaded`.
+- [ ] Убрать служебные блоки из user-facing tool results.
+  Комментарий: `Timing / Quality` и telemetry остаются в logs/metadata, не в тексте ассистента.
 
 Acceptance:
 
-- Переключение `qwen-14b-llm -> qwen-vl-8b` не падает только потому, что старая модель ещё занимает GPU.
-- При неуспешном старте состояние `UMS` остаётся консистентным.
-- Активная модель в статусе совпадает с реально запущенным процессом.
+- Пользователь выбирает обычную модель.
+- Инструменты включаются как tools, а не через специальную модель.
+- Старый wrapper не появляется в onboarding/bootstrap.
 
 Verification:
 
-- `pytest backend/tests/test_unified_model_server_startup.py -q`
-- live check через `/status`, `/models`, `nvidia-smi`.
+- live smoke нового чата.
+- проверка bootstrap export/materialized state.
+- targeted tests по tool result text sanitation.
 
-### M-PREFIN.7 - Нормализовать контуры запуска
+### M-PREFIN.6 - Ввести общий `llm_client` для backend tools
 
-- [x] Не использовать smoke `DATA_DIR` как обычный ручной контур.
-  Комментарий: `smoke` стал явным `Open WebUI` data profile и больше не выбирается по умолчанию; для обычного `--openwebui-dev` используется `dev`, для Docker Compose - `stable`.
+- [x] Добавить backend-конфигурацию и HTTP-вызов клиента для chat/completions.
+  Комментарий: `backend/app/clients/openai_compatible.py` теперь вызывает `/chat/completions` у внешнего `OpenAI-compatible` provider.
 
-- [x] Зафиксировать отдельные профили: smoke, dev, stable local.
-  Комментарий: `run_native` резолвит `dev`, `stable`, `smoke` в отдельные `DATA_DIR` и `QDRANT_COLLECTION_PREFIX`; не-stable профили разрешены только для `--openwebui-dev`.
+- [x] Сделать `LLM_MODEL_ID` fallback, а не единственным источником модели.
+  Комментарий: порядок выбора модели внутри tool: `current_model_id` из `Open WebUI` tool context -> `LLM_MODEL_ID` из env -> configuration error.
 
-- [x] В `run_native` передавать параметры текущего форка `Open WebUI` явно.
-  Комментарий: dev-запуск форка получает явные `DATA_DIR`, `OPENAI_API_BASE_URL`, `RAG_OPENAI_API_BASE_URL`, `QDRANT_URI`, `QDRANT_COLLECTION_PREFIX`; summary печатает выбранный контур.
+- [ ] Добавить backend client для embeddings.
+  Комментарий: клиент читает `EMBEDDER_BASE_URL`, `EMBEDDER_API_KEY`, `EMBEDDER_MODEL_ID`.
+
+- [ ] Добавить backend client для VL/OCR-capable model.
+  Комментарий: client optional; если `VL_BASE_URL`/`VL_MODEL_ID` не заданы, VL tools не регистрируются или деградируют понятно.
+
+- [x] Перевести один fast-tool с legacy inference client на новый `llm_client`.
+  Комментарий: текстовый `analyze_equipment_fast` в `backend/app` больше не зависит от model manager API; документный equipment graph остаётся compatibility path.
 
 Acceptance:
 
-- По команде запуска сразу понятно, какая база, какой `Qdrant` prefix и какой backend API используются.
-- Smoke-контур не смешивается с рабочей историей пользователя.
-- Docker compose после сборки остаётся более простым production-like путём.
+- Workflow не зависит от model manager API.
+- Замена модели делается env-параметрами и рестартом соответствующего сервиса.
+- Инструмент может использовать текущую выбранную модель из `Open WebUI`, а `LLM_MODEL_ID` остаётся fallback для автономного запуска и тестов.
+- Ошибка endpoint возвращает понятную degraded ошибку tool job, а не ломает обычный чат.
 
 Verification:
 
-- `bash -n scripts/run_native.sh`
-- `pytest backend/tests/test_runtime_launcher.py -q`
-- targeted docs/config diff check.
+- targeted tests для client config.
+- targeted workflow test.
+- live smoke одного fast/deep tool.
 
-### M-PREFIN.8 - Разделить `UMS` control-plane и runtime data-plane
+### M-PREFIN.7 - Выделить `RAG-service`
 
-- [x] Зафиксировать целевую роль `UMS` как control-plane.
-  Комментарий: зафиксировано в плане и первом runtime split: `UMS` остаётся владельцем registry/lifecycle/status, а `embedding-runtime` вынесен в отдельный data-plane с health snapshot в `/status`.
+- [ ] Описать `RAG-service` как отдельный контейнер.
+  Комментарий: он владеет ingestion, chunking, embeddings, reranking, `Qdrant` collection operations и embedding-profile checks.
 
-- [x] Развести runtime-сервисы по типам нагрузки.
-  Комментарий: первый фактический split сделан для `/v1/embeddings`; `reranker-runtime` и `document-runtime` остаются отдельными задачами `M-PREFIN.11` и `M-PREFIN.12`.
+- [ ] Зафиксировать env-контракт.
+  Комментарий: минимум: `QDRANT_URL`, `EMBEDDER_BASE_URL`, `EMBEDDER_MODEL_ID`, `RERANKER_BASE_URL`, `RERANKER_MODEL_ID`, `DOCUMENT_RUNTIME_URL`.
 
-- [x] Не превращать `Open WebUI` во второй model manager.
-  Комментарий: `Open WebUI` получает только OpenAI-compatible endpoint `embedding-runtime`; пути, id модели и lifecycle остаются в backend env/native launcher.
+- [ ] Развести Open WebUI native Knowledge и backend specialized tools.
+  Комментарий: обычный вопрос по базе знаний идёт через native Knowledge; deep analysis остаётся tool/job.
 
-- [x] Оставить `Qdrant` только vector storage/search слоем.
-  Комментарий: на этом срезе `Qdrant` не получает model-management обязанностей; metadata-защита от drift оставлена отдельным `M-PREFIN.10`.
+- [ ] Поддержать external/attached `Qdrant` collections с явным embedding profile.
+  Комментарий: внешняя коллекция без профиля не должна использоваться для поиска молча.
 
 Acceptance:
 
-- В плане и конфигурации явно различаются control-plane и data-plane.
-- `UMS` видит health/status runtime-сервисов, но горячий data-path embeddings/reranker/OCR может идти напрямую в соответствующий runtime.
-- У каждого runtime есть собственный failure domain и concurrency policy.
+- `Qdrant` остаётся retrieval storage, а не состоянием tools.
+- `RAG-service` может индексировать и искать без участия обычного chat provider.
+- Смена embedding-модели создаёт новую projection/collection, а не смешивает векторы.
 
 Verification:
 
-- ревизия `scripts/run_native.sh`, `docker-compose.yaml`, `backend/.env.example`;
-- targeted tests по health/status aggregation после реализации.
+- targeted tests projection metadata.
+- live smoke ingest/retrieve.
+- проверка `Qdrant` collection metadata.
 
-### M-PREFIN.9 - Вынести `embedding-runtime` первым
+### M-PREFIN.8 - Выделить `document-runtime`
 
-- [x] Превратить текущий `st_server.py` в полноценный `embedding-runtime`.
-  Комментарий: добавлен отдельный `backend/services/embedding_runtime/server.py`; старый `st_server.py` оставлен совместимым entrypoint и делегирует запуск новому runtime.
+- [ ] Описать `document-runtime` endpoints: `POST /parse`, `POST /ocr`, `GET /health`, `GET /metrics`.
+  Комментарий: `Docling`, `Tika`, OCR/VL extraction и тяжёлые parsing dependencies живут отдельно от chat и tools.
 
-- [x] Добавить минимальные endpoints: `GET /health`, `GET /models`, `POST /v1/embeddings`, `GET /metrics`.
-  Комментарий: endpoints реализованы в standalone FastAPI-приложении; `/v1/embeddings` сохраняет OpenAI-compatible формат.
+- [ ] Зафиксировать pipeline загрузки документа.
+  Комментарий: file upload -> `document-runtime` -> chunker -> embedding -> `Qdrant`.
 
-- [x] Ввести отдельные env-параметры embedding runtime.
-  Комментарий: в `backend/.env.example` добавлены `EMBEDDING_RUNTIME_PORT`, `EMBEDDING_MODEL_ID`, `EMBEDDING_MODEL_PATH`, `EMBEDDING_DEVICE`, `EMBEDDING_DIM`, `EMBEDDING_NORMALIZE`, `EMBEDDING_MAX_BATCH_SIZE`, `EMBEDDING_MAX_CONCURRENCY` с назначением под каждым параметром. Общий runtime-дефолт выровнен на `qwen3-embedding-0.6b`; `labse-embedding` оставлен для специализированных legal/documentation профилей.
-
-- [x] Перенастроить `Open WebUI` RAG embeddings с `UMS` на `embedding-runtime`.
-  Комментарий: `run_native --openwebui-dev` и compose env теперь указывают `RAG_OPENAI_API_BASE_URL` на порт `embedding-runtime`, а не на `UMS`; `RAG_EMBEDDING_MODEL` для общего `Open WebUI Knowledge` задан как `qwen3-embedding-0.6b`.
-
-- [x] Сохранить `UMS` как registry/control-plane для embedding runtime.
-  Комментарий: `/status` `UMS` добавляет `data_planes.embedding_runtime` с base URL, model id и health snapshot; legacy `/v1/embeddings` в `UMS` остаётся совместимым путём, но `Open WebUI` больше не использует его как hot path.
+- [ ] Развести обычный ingestion и deep document analysis.
+  Комментарий: extraction для поиска не равен deep-report; deep-report остаётся отдельным job.
 
 Acceptance:
 
-- `Open WebUI` вызывает `/v1/embeddings` напрямую на `embedding-runtime`.
-- Перезапуск `UMS` не должен останавливать уже запущенный embedding data-plane, если lifecycle явно не завязан на `UMS`.
-- Массовая индексация документов не забивает LLM data-path.
+- Сбой parsing/OCR не убивает LLM runtime.
+- Для больших файлов есть timeout/retry/status.
+- Результат parsing имеет стабильный contract для chunking.
 
 Verification:
 
-- `pytest backend/tests/test_unified_model_server_startup.py -q`
-- новый targeted test для `embedding-runtime` `/health`, `/models`, `/v1/embeddings`;
-- live smoke: загрузка файла в `Open WebUI` и проверка `Qdrant` upsert.
+- targeted tests parse/OCR contract.
+- live smoke PDF/image/invalid file.
+- RSS/timeout check на большом файле.
 
-### M-PREFIN.10 - Описать embedding-контракт коллекций `Qdrant`
+### M-PREFIN.9 - Выделить `reranker-runtime`
 
-- [x] Разделить логическую базу знаний и физическую векторную коллекцию.
-  Комментарий: в backend добавлена active projection для логической коллекции: она хранит физическое имя коллекции `Qdrant`, модель эмбеддинга, размерность и версию. Этот срез фиксирует контракт и не включает UI/переиндексацию.
+- [ ] Проверить фактическую семантику `RAG_RERANKING_ENGINE` в текущем `Open WebUI`.
+  Комментарий: пустое значение нельзя считать disabled без проверки кода.
 
-- [x] Фиксировать embedding metadata на уровне projection.
-  Комментарий: `kb_index_projections` хранит `embedding_model_id`, `embedding_dim`, `embedding_distance`, `embedding_revision`, `normalize`, `embedding_runtime_id`, `chunking_version`, `source_mode`, статус и версию. `embedding_revision` и runtime id пока опциональны, потому что runtime ещё не отдаёт устойчивую ревизию.
+- [ ] Сделать отдельный runtime с `POST /v1/rerank`, `GET /health`, `GET /models`, `GET /metrics`.
+  Комментарий: reranker имеет другой профиль нагрузки, чем embeddings и LLM.
 
-- [x] Проверять metadata перед upsert/search в рамках конкретной projection.
-  Комментарий: `QdrantKnowledgeBaseStore` запрещает запись чанков с другой моделью/размерностью и отклоняет поиск, если `query_embedding_model_id` не совпадает с active projection. `retrieve_merged_chunks` теперь прокидывает модель запроса в store.
-
-- [x] Поддержать управляемые коллекции с переиндексацией в новую projection.
-  Комментарий: добавлен lifecycle `building -> active -> superseded`; reindex может писать чанки в отдельную physical projection через `projection_id`, а поиск остаётся на старой active projection до явного `publish_projection_sync`.
-
-- [x] Поддержать подключение внешних `Qdrant` коллекций как attached knowledge.
-  Комментарий: добавлен `attach_external_projection_sync`; external collection с явным `embedding_model_id`, `embedding_dim`, distance и chunking version становится active projection с `source_mode=attached`.
-
-- [x] Определить поведение при отсутствующей metadata у внешней коллекции.
-  Комментарий: external collection без явного embedding-профиля сохраняется как `needs_profile`; search/indexing запрещены понятной `EmbeddingProjectionMismatch` до ручной привязки профиля.
-
-- [x] Развести несколько embedding-моделей по отдельным физическим коллекциям или named vectors.
-  Комментарий: для managed reindex выбран вариант отдельных физических коллекций: `<base>__<collection_id>__v<version>`. Named vectors оставлены вне текущего среза.
-
-- [x] Сверить текущий конфликт `labse-embedding` против `qwen3-embedding-0.6b`.
-  Комментарий: решено: `qwen3-embedding-0.6b` является canonical для общего retrieval/RAG и `Open WebUI Knowledge`, потому что на тестах даёт более точное извлечение. `labse-embedding` остаётся специализированной моделью для legal/documentation инструмента или отдельного legal-профиля и не должен подставляться в общий RAG по умолчанию.
+- [ ] Подключить `RAG-service` к reranker endpoint.
+  Комментарий: `Open WebUI` может использовать native external reranker, если версия это поддерживает; иначе rerank живёт внутри `RAG-service`.
 
 Acceptance:
 
-- Для каждой логической базы знаний видно, какая active projection используется.
-- Для каждой projection можно объяснить, каким embedding runtime, моделью, размерностью, distance и chunk recipe она сформирована.
-- При смене embedding-модели управляемая база знаний получает новую projection, а не смешивает векторы.
-- Внешняя `Qdrant` коллекция может быть подключена как база знаний только с явным embedding-профилем или в ограниченном режиме инспекции.
-- При несовпадении embedding metadata upsert/search получает понятную ошибку, а не молча портит поиск.
-
-Verification:
-
-- targeted tests для managed projection: publish, reindex с новой embedding-моделью, переключение active projection;
-- targeted tests для attached collection: импорт внешней коллекции с metadata, импорт без metadata, запрет поиска без профиля;
-- live check metadata через `Qdrant` API;
-- smoke на повторную индексацию после смены embedding model.
-
-### M-PREFIN.11 - Вынести `reranker-runtime`
-
-- [ ] Сначала проверить фактическую семантику `RAG_RERANKING_ENGINE` в текущем форке `Open WebUI`.
-  Комментарий: пустое значение может означать local reranking, а не disabled; в коде форка нужно зафиксировать реальное поведение до изменения env.
-
-- [ ] Сделать отдельный `reranker-runtime` с `POST /v1/rerank`, `GET /health`, `GET /models`, `GET /metrics`.
-  Комментарий: reranker имеет другой профиль нагрузки: cross-encoder scoring по парам `query x document`.
-
-- [ ] Подключить `Open WebUI` через внешний reranker endpoint.
-  Комментарий: целевой профиль: `RAG_RERANKING_ENGINE=external`, `RAG_EXTERNAL_RERANKER_URL` указывает на полный `/v1/rerank` endpoint.
-
-- [ ] Оставить `UMS` как registry/status observer для reranker runtime.
-  Комментарий: `UMS` знает модель, health и placement, но не обязательно стоит в горячем rerank data-path.
-
-Acceptance:
-
-- Reranking явно включается или выключается через проверенный конфиг текущего форка.
-- Ошибка reranker runtime деградирует retrieval/rerank слой, но не валит обычный LLM chat.
+- Reranking можно включить/выключить явно.
+- Сбой reranker деградирует качество retrieval, но не валит обычный чат.
 - Метрики reranker отделены от LLM и embeddings.
 
 Verification:
 
-- targeted tests для внешнего reranker adapter;
-- live smoke с включённым и выключенным reranking;
-- проверка latency на top-k rerank.
+- targeted tests rerank adapter.
+- live smoke с включённым/выключенным rerank.
+- latency check на top-k rerank.
 
-### M-PREFIN.12 - Вынести OCR/document parsing в отдельный `document-runtime`
-
-- [ ] Не прогонять OCR/PDF parsing через `UMS`.
-  Комментарий: большие PDF, картинки, таблицы, невалидные файлы и OCR имеют другой failure mode: CPU/RAM pressure, таймауты и утечки памяти.
-
-- [ ] Спроектировать `document-runtime` endpoints: `POST /parse`, `POST /ocr`, `GET /health`, `GET /metrics`.
-  Комментарий: `Docling`, `Tika` и OCR backend должны жить за отдельным retry/timeout/queue контуром.
-
-- [ ] Зафиксировать pipeline загрузки документа.
-  Комментарий: целевой поток: file upload -> `document-runtime` -> chunker -> `embedding-runtime` -> `Qdrant`.
-
-- [ ] Развести обычный `Knowledge` ingestion и специализированные document tools.
-  Комментарий: обычная индексация для поиска не равна глубокому анализу документа; глубокий анализ должен оставаться отдельным tool/job.
-
-Acceptance:
-
-- Сбой parsing/OCR не убивает LLM runtime и embedding runtime.
-- Для больших файлов есть timeout, retry и статус выполнения.
-- Результат parsing имеет стабильный contract для chunking и последующей индексации.
-
-Verification:
-
-- targeted tests для parse/OCR contract;
-- live smoke с PDF, изображением и невалидным файлом;
-- проверка RSS и timeout behavior на больших документах.
-
-### M-PREFIN.13 - Проверить нагрузку и failure domains
+### M-PREFIN.10 - Проверить failure domains
 
 - [ ] Прогнать чат во время массовой индексации.
-  Комментарий: смотреть TTFT, tokens/sec и p95 latency LLM-чата.
+  Комментарий: смотреть TTFT, tokens/sec, p95/p99 LLM latency.
 
 - [ ] Прогнать несколько параллельных uploads.
-  Комментарий: смотреть RSS `UMS`, RSS embedding/document runtime, VRAM, Qdrant insert latency.
-
-- [ ] Проверить перезапуск `UMS`.
-  Комментарий: после split рестарт control-plane не должен валить весь data-plane без явной lifecycle-команды.
+  Комментарий: смотреть RSS `RAG-service`, RSS `document-runtime`, embedding latency, `Qdrant` insert latency.
 
 - [ ] Проверить перезапуск `embedding-runtime`.
   Комментарий: должен деградировать RAG/ingestion, но не обычный LLM chat.
 
 - [ ] Проверить перезапуск `document-runtime`.
-  Комментарий: должен деградировать parsing/OCR и ingestion, но не обычный chat и не уже запущенный LLM inference.
+  Комментарий: должен деградировать parsing/OCR и ingestion, но не обычный chat.
+
+- [ ] Проверить перезапуск `Tool/Workflow Server`.
+  Комментарий: должен остановить/перевести в failed только активные tools, но не ломать plain chat.
 
 Acceptance:
 
@@ -389,118 +389,78 @@ Acceptance:
 
 Verification:
 
-- нагрузочный smoke script или e2e suite;
-- `nvidia-smi`, process RSS, runtime `/metrics`, `Qdrant` latency;
+- нагрузочный smoke script или e2e suite.
+- `nvidia-smi`, process RSS, runtime `/metrics`, `Qdrant` latency.
 - отчёт с p95/p99 и failure-domain выводами.
 
-### M-PREFIN.14 - Перенести сканирование папок моделей в форк `Open WebUI`
+## Архив / отклонённые направления
 
-Контекст: текущий прототип folder-browser проксирует preview папки в `UMS`. Это удобно для быстрого dev-контура, но делает форк `Open WebUI` зависимым от `UMS` даже на уровне простого просмотра файловой системы. Целевое решение: `Open WebUI` сам отвечает за browsing, saved folders, scan/preview и отмену scan; `UMS` остаётся владельцем registry, lifecycle, load/status и строгой повторной валидации выбранного candidate.
+### A-PREFIN.1 - Runtime model management в форке `Open WebUI`
 
-- [x] Зафиксировать `Open WebUI` backend как владельца folder browsing и preview scan.
-  Комментарий: выполнено в форке `Open WebUI`: `browse-folders`, saved folders и `preview/scan` работают локально в `runtime_models.py`; `UMS` используется только для `catalog/register/load/stop/status`.
+Статус: отклонено для целевого `deep-tools-only` форка.
 
-- [x] Перенести saved scan folders из `UMS` state в `Open WebUI` storage.
-  Комментарий: выполнено через `PersistentConfig` `agent_navigator.runtime_models.scan_folders`; состояние хранится в конфиге `Open WebUI`, отдельно от model registry.
+Решение:
 
-- [x] Сделать отменяемый scan job в `Open WebUI` backend.
-  Комментарий: добавлены `scan-jobs` endpoints с `job_id`, `state/status`, progress, result и cancel flag; серверный обход проверяет отмену во время обхода.
+- не переносить folder scan, model registration, model load/status и runtime params в минимальный форк;
+- не делать форк `Open WebUI` вторым model manager;
+- использовать штатные provider settings `Open WebUI` для подключения `OpenAI-compatible` endpoints;
+- если управление локальными моделями понадобится позже, проектировать его отдельным admin/control-plane продуктом, а не смешивать с deep tools UI.
 
-- [x] Добавить frontend-кнопку отмены сканирования.
-  Комментарий: `RuntimeModelFolderModal.svelte` запускает scan job, опрашивает статус и показывает `Cancel`; отмена не затирает последний успешный preview.
+Причина:
 
-- [x] Ввести лимиты scan в `Open WebUI`.
-  Комментарий: добавлены allowlist roots, нормализация путей, защита от symlink escape, `max_depth`, `max_files`, `max_duration`; скрытые папки не сканируются по умолчанию.
+- этот слой снова делает `Open WebUI` зависимым от backend-specific model lifecycle;
+- он расширяет форк за пределы единственной нужной функции: long-running tools UX;
+- он мешает перейти к простой схеме `Open WebUI -> provider`, `Open WebUI -> Tool/Workflow Server`.
 
-- [x] Перенести распознавание candidates в `Open WebUI`.
-  Комментарий: локальный scan распознаёт `GGUF`, `gguf-vl`, `mmproj`, split shards; adapter и `st` остаются `unsupported` и не регистрируются как ready.
+### A-PREFIN.2 - Обязательный backend raw proxy для обычного чата
 
-- [x] Сохранить `UMS` как строгий валидатор регистрации.
-  Комментарий: регистрация по-прежнему идёт через `UMS /models/register`; frontend передаёт candidate payload, а `UMS` повторно валидирует path/runtime/mmproj/shards.
+Статус: legacy bridge, не целевой путь.
 
-- [ ] Описать path mapping для native и Docker.
-  Комментарий: отложено до этапа сборки образа. Сейчас фиксируем только принцип: в native контуре путь обычно общий; в Docker нужно будет проверить реальный volume layout после сборки, а не описывать его заранее.
+Решение:
 
-- [x] Удалить старые `UMS /models/scan-folders`, `/models/browse-folders`, `/models/recommended-folders` и `/models/preview-path`.
-  Комментарий: выполнено после cutover; просмотр папок и preview scan живут в backend форка `Open WebUI`, а `UMS` сохраняет только `catalog/register/load/status` и повторную валидацию registration payload.
+- обычный чат должен идти в `llama-server`, `LiteLLM` или другой provider напрямую из `Open WebUI`;
+- backend raw proxy может оставаться временно для диагностики, но не должен быть обязательной частью production contour.
 
-Acceptance:
+### A-PREFIN.3 - Model manager как обязательный data-path
 
-- Форк `Open WebUI` может открыть browser, просканировать папку и отменить scan без вызова `UMS`.
-- Отмена scan прекращает серверный обход и не оставляет подвисший background task.
-- Регистрация выбранного candidate всё равно проходит через `UMS` и получает отказ при несовпадении path/runtime/metadata.
-- В Docker-контуре явно понятно, какие host/container paths должны совпадать или маппиться.
+Статус: отклонено для целевой архитектуры.
 
-Verification:
+Решение:
 
-- targeted backend tests в форке `Open WebUI` для scan job, cancel, allowlist, symlink escape, limits и candidate extraction;
-- frontend/component или `Playwright` test: запуск scan, cancel, повторный scan, сохранение последнего preview;
-- integration smoke: candidate найден в `Open WebUI`, зарегистрирован через `UMS`, затем модель видна в selector;
-- negative smoke: candidate найден UI, но rejected by `UMS` при недоступном runtime path.
+- model manager может существовать как необязательный operator/control-plane слой;
+- hot path чата, embeddings, reranking, OCR и tools не должен требовать обязательного прохождения через него;
+- замена модели в простом контуре делается env/compose/runtime restart, а не скрытой автоматикой внутри чата.
 
 ## Регрессии, которые нужно покрыть
 
-- [x] Raw-модель без `tools` не вызывает `execute_orchestration`.
-  Комментарий: покрыто `test_agent_api_openai_compat.py`; raw-ветка возвращается до legacy orchestration path.
+- [ ] Plain chat не вызывает backend orchestration.
+  Комментарий: проверять на новом provider path, а не только на старом raw proxy.
 
-- [x] Raw streaming не объединяет весь ответ в один SSE chunk.
-  Комментарий: покрыто streaming-регрессиями и live smoke `2026-04-27`; проверяется последовательность SSE-событий и `[DONE]`.
+- [ ] Deep tool возвращает `job_id/status_url` и отображается как панель в `Open WebUI`.
+  Комментарий: панель должна переживать reload и materialize terminal result.
 
-- [x] `Timing / Quality` не попадает в `assistant_message`.
-  Комментарий: покрыто на API-ответе, tool completed-result и persisted `tool_jobs` status/result; structured telemetry сохраняется отдельно.
+- [ ] Cancel deep tool доходит до `Tool/Workflow Server`.
+  Комментарий: UI cancel -> `/api/v1/deep-jobs/{job_id}/cancel` -> `/tool-jobs/{job_id}/cancel`.
 
-- [x] Модели со статусом `incomplete` не попадают в `/v1/models`.
-  Комментарий: покрыто фильтрацией chat-visible raw catalog и regression tests в OpenAI-compatible слое.
+- [ ] Tool result не содержит `Timing / Quality`.
+  Комментарий: telemetry остаётся structured/log-only.
 
-- [x] Tool loop использует текущий `model_id`.
-  Комментарий: unit-регрессия покрывает forwarded model поверх legacy wrapper, direct smoke подтвердил `resolved_model_id=qwen-14b-llm`.
+- [ ] Tools используют env-driven LLM/RAG clients.
+  Комментарий: tool не должен требовать псевдомодель.
 
-- [x] Heavy model switch выгружает старую модель перед admission новой.
-  Комментарий: покрыто `test_runtime_launcher.py` и `test_unified_model_server_startup.py`; live-switch остаётся отдельной ручной проверкой перед релизом.
-
-- [x] `Open WebUI` embeddings ходят в `embedding-runtime`, а не в `UMS`.
-  Комментарий: native и compose конфигурация переключены на `embedding-runtime`; есть launcher-регрессия на `RAG_OPENAI_API_BASE_URL`.
-
-- [x] Embedding-контракт коллекции блокирует неверный поиск/индексацию.
-  Комментарий: защита работает на уровне active projection конкретной базы знаний. Новая embedding-модель создаёт отдельную building projection/физическую коллекцию, а внешняя коллекция без embedding-профиля получает `needs_profile` и не используется для поиска.
-
-- [ ] `RAG_RERANKING_ENGINE` проверен по текущему форку перед включением external reranker.
-  Комментарий: пустое значение не считать disabled без проверки кода и UI-конфига.
+- [ ] `RAG-service` блокирует поиск по коллекции с несовпадающим embedding profile.
+  Комментарий: особенно важно для external/attached `Qdrant` collections.
 
 - [ ] Перезапуск одного runtime не валит соседние runtime.
-  Комментарий: это основной критерий разделения failure domains.
-
-- [x] Folder scan в `Open WebUI` можно отменить без зависания backend worker.
-  Комментарий: добавлены cancel flag и polling-контур; targeted test покрывает выставление cancel flag, а серверный обход проверяет отмену при сканировании.
-
-- [x] Folder preview не зависит от `UMS`, а registration по-прежнему валидируется в `UMS`.
-  Комментарий: browse/preview/scan выполняются локально в форке `Open WebUI`; `register_model` по-прежнему отправляет payload в `UMS /models/register`.
+  Комментарий: основной критерий корректного разделения контейнеров.
 
 ## Условия завершения
 
-- [x] В обычном `Open WebUI` списке моделей нет `llm-tools-platform`.
-  Комментарий: live smoke `2026-04-27` по `/api/models` вернул реальные `qwen-14b-llm` / `qwen-vl-8b` и нативную `arena-model`; псевдомодели `llm-tools-platform` нет.
-
-- [x] Обычный чат с `qwen-14b-llm` потоковый и без служебного footer.
-  Комментарий: live smoke `2026-04-27` с `stream=true` вернул SSE `data:` chunks и `[DONE]`; служебный `Timing / Quality` не добавляется в текст ассистента.
-
-- [x] Вызовы инструментов работают поверх выбранной модели.
-  Комментарий: `Playwright` smoke `2026-04-27` прошёл для `analyze_equipment_deep`: `Open WebUI` выбрал `qwen-14b-llm`, function output содержит `job_id/status_url`, backend result использует `qwen-14b-llm`, служебный footer не попадает в user-facing текст.
-
-- [x] `RAG` и источники остаются в нативном контуре `Open WebUI`.
-  Комментарий: `OPENWEBUI_SESSION_RAG_HANDOFF` по умолчанию выключен для native и compose; конфиги общего `Open WebUI Knowledge/RAG` выровнены на внешний `embedding-runtime` с `model=qwen3-embedding-0.6b`. Предыдущий live smoke со старой embedding-моделью считается устаревшим и требует повторного прогона после переиндексации коллекции.
-
-- [ ] Старый совместимый путь либо удалён, либо скрыт и помечен как debug-only с датой удаления.
-  Комментарий: нельзя оставлять `llm-tools-platform` как постоянный пользовательский путь.
-
-- [x] `UMS` зафиксирован как control-plane, а не обязательный data-path для embeddings/reranker/OCR.
-  Комментарий: embeddings вынесены в отдельный data-plane; reranker/OCR остаются следующими профильными runtime-срезами.
-
-- [x] `embedding-runtime` вынесен и подключён к `Open WebUI` напрямую.
-  Комментарий: `run_native` стартует отдельный `embedding-runtime`, а `Open WebUI` RAG endpoint смотрит на него напрямую.
-
-- [x] `Qdrant` защищён от silent embedding model drift.
-  Комментарий: каждая логическая база знаний имеет active projection с embedding metadata; managed reindex переключается через publish, а external коллекции без metadata не используются для поиска без ручного связывания профиля.
-
-- [x] Сканирование папок моделей живёт в форке `Open WebUI`, а `UMS` остаётся registry/load/status слоем.
-  Комментарий: старые scan/browse/preview endpoints удалены из `UMS`; регистрация моделей продолжает проходить через строгую валидацию `UMS /models/register`.
+- [ ] Обычный чат в `Open WebUI` работает через внешний `OpenAI-compatible` provider.
+- [ ] Форк `Open WebUI` содержит только deep tools слой и не содержит runtime model selector.
+- [ ] `Tool/Workflow Server` публикует инструменты через `OpenAPI` и поддерживает status/result/cancel.
+- [ ] `llm-tools-platform` отсутствует из пользовательского сценария.
+- [ ] Backend workflows используют env-driven `OpenAI-compatible` clients.
+- [ ] `RAG-service` и `document-runtime` описаны как отдельные контейнеры с env-контрактом.
+- [ ] Native `Open WebUI Knowledge` и specialized tools разведены по ролям.
+- [ ] Failure-domain smoke подтверждает, что обычный чат не зависит от ingestion/parsing/tools runtime.

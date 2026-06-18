@@ -85,6 +85,7 @@ from orchestrator.ui_control_plane import (
 )
 from orchestrator.operator_ui_api import router as operator_ui_router
 from orchestrator.operator_ui_api import enforce_operator_localhost_only, is_operator_surface_path
+from app.tool_server.server import create_tool_server_app
 
 try:
     from services.resource_monitor import get_system_resources
@@ -124,6 +125,11 @@ async def restrict_operator_surface_to_localhost(request: Request, call_next):
 
 
 app.include_router(operator_ui_router)
+app.mount(
+    "/app-tools",
+    create_tool_server_app(route_prefix="/app-tools"),
+    name="clean-tool-server",
+)
 
 _OPERATOR_UI_DIR = Path(__file__).resolve().parents[2] / "prototype" / "operator-ui"
 _OPERATOR_ASSETS_DIR = Path(__file__).resolve().parent / "public"

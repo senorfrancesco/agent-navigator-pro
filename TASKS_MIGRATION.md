@@ -1,4 +1,4 @@
-# TASKS_MIGRATION - llm-tools-platform
+# TASKS_MIGRATION - Open WebUI tools migration
 
 > **Primary operational backlog for migration scope.** Этот файл является каноническим source-of-truth для `Open WebUI` migration, backend tool contracts, upload/document binding, knowledge-base prerequisites и rollout-критериев. `TASKS.md` остаётся общепроектным backlog и хранит только краткие cross-project ссылки и follow-up.
 
@@ -12,6 +12,11 @@
 - `OpenAPI Tool Server` integration path
 - `MCP` как совместимый слой поверх backend contracts
 - backend-first tool contracts вместо перегруженного `/orchestrate`
+- внешний `OpenAI-compatible` model provider path (`llama-server`, `LiteLLM` или другой совместимый backend)
+- минимальный форк `Open WebUI` только для long-running tool UX
+- `Tool/Workflow Server` как исполнитель `LangGraph`-инструментов, а не псевдомодель
+- новый чистый backend-контур `backend/app` для целевых клиентов, server инструментов, workflows, `RAG-service` и `document-runtime`
+- отдельный `RAG-service` для ingestion/retrieval/collection management поверх `Qdrant`
 - upload/document binding и lifecycle документов
 - `Open WebUI Knowledge` / `Qdrant` / retrieval source-of-truth
 - внешний ingestion/parsing contour (`Docling` first, `Tika` fallback)
@@ -24,10 +29,17 @@
 - независимые `compare` / `equipment` улучшения без прямой связи с migration path
 - общий release backlog, не меняющий migration contour
 - ранний rename `backend/open_webui_uploads` без стабилизированного upload contract
+- runtime model selector, folder scan и model load/status UX внутри целевого форка `Open WebUI`
+- обязательный model-manager data-path для обычного чата, embeddings, reranking, OCR или tools
 
-## Current Migration Status (2026-04-10)
+## Current Migration Status (2026-05-05)
 
 - Текущее canonical target direction проекта: `Open WebUI-first`
+- Обновление направления от `2026-05-05`: обычный чат больше не проектируется через обязательный backend raw proxy или model manager. Целевой путь: `Open WebUI -> OpenAI-compatible provider`.
+- Форк `Open WebUI` теперь должен быть `deep-tools-only`: отображение долгих tools, polling, materialization result и cancel. Runtime model selector, folder scan и load/status UX считаются отклонённым направлением для целевого форка.
+- `Tool/Workflow Server` становится отдельным backend surface для `LangGraph`-инструментов. Он публикует `OpenAPI`, ведёт `tool_jobs`, поддерживает status/result/cancel и не отвечает на обычный чат.
+- Новый целевой backend-код должен идти в `backend/app`; старый `backend/orchestrator` остаётся совместимым слоем до поэтапного переноса.
+- `RAG-service` становится отдельным целевым сервисом для parsing/chunking/embeddings/reranking/`Qdrant` collection contract. `Open WebUI Knowledge` остаётся user-facing retrieval shell, а не corpus source-of-truth.
 - `Open WebUI` в репозитории пока всё ещё поднимается как `legacy` docker profile на порту `3001`, но это уже implementation debt, а не product decision
 - `Chainlit` больше не считается target UI; он остаётся только временным compatibility/debug shell до отдельного sunset slice
 - `agent_api.py` уже даёт raw-provider surface, `OpenAPI Tool Server` surface и compatibility `llm-tools-platform` path; дальше нужно не спорить о роли UI, а довести `Knowledge + Qdrant + explicit tools` как согласованный target contour
@@ -54,10 +66,20 @@
 
 - `Open WebUI` считаем canonical primary UI и user-facing shell
 - `Chainlit` оставляем только как временный compatibility/debug shell до sunset slice
-- Основной integration path: `OpenAPI Tool Server`
+- Обычный чат должен идти из `Open WebUI` напрямую во внешний `OpenAI-compatible` provider: `llama-server`, `LiteLLM` или другой совместимый backend
+- Модель, файл весов, context size, GPU layers, device placement и прочие runtime-флаги задаются в контейнере конкретного inference runtime через `docker-compose`, `.env` и command flags; `Open WebUI` видит только provider URL и список моделей
+- Основной integration path для наших инструментов: `OpenAPI Tool Server`
 - `MCP` поддерживается как второй слой, но не как стартовый production path
+- Новый backend-контур реализуется в `backend/app`; `backend/orchestrator` считается совместимым старым слоем и не должен разрастаться новыми целевыми сервисами без отдельного решения
+- `Tool/Workflow Server` исполняет `LangGraph`-графы и long-running jobs, но не становится псевдомоделью и не отвечает на каждое сообщение пользователя
+- Форк `Open WebUI` держим минимальным: только deep-job panel, polling, result materialization и cancel; runtime model selector/folder scan/model load UX не входят в целевой fork scope
+- Model manager может существовать только как необязательный operator/control-plane слой; он не должен быть обязательным data-path для обычного чата, embeddings, reranking, OCR или tools
+- Backend workflows должны обращаться к LLM/VL/RAG через env-driven clients: `LLM_BASE_URL`, `LLM_MODEL_ID`, `VL_BASE_URL`, `RAG_SERVICE_URL`, `EMBEDDER_BASE_URL`, `RERANKER_BASE_URL`
+- `LLM_MODEL_ID` в backend tools является fallback для автономного запуска и тестов; если `Open WebUI` передал `current_model_id` в tool context, инструмент использует текущую выбранную модель
+- `llm-tools-platform` не считается продуктовой моделью; если compatibility path остаётся, он должен быть hidden/debug-only с отдельным сроком удаления
 - Обычный document QA / knowledge chat должен жить нативно в `Open WebUI Knowledge`
 - `Qdrant` считаем canonical vector backend для Knowledge / RAG
+- `RAG-service` становится backend-owned contour для ingestion, parser handoff, chunking, embeddings, reranking, collection metadata и embedding-profile checks
 - production parsing / OCR / table extraction выносятся во внешний ingestion contour (`Docling` first, `Tika` fallback)
 - Бизнес-логика и orchestration policy остаются во внешнем backend, не в `Open WebUI`
 - Для `Open WebUI` вводим четыре явных режима:
@@ -107,6 +129,78 @@
   в `V1` session overlay допускается вне `Qdrant`; в `V2` можно переносить short-lived session docs в `Qdrant` с filtering по `thread_id` / `workspace_id`.
 
 ## Active Migration Phases
+
+### M0.5 — Clean Backend Contour
+
+- [x] M0.5.1 — Создать первый срез `backend/app`
+  Решение: целевой backend-код выносим в новый пакет, чтобы не смешивать новый путь через `OpenAI-compatible` provider со старым совместимым слоем `UMS`/`orchestrator`.
+  Done:
+  - добавлен `backend/app/clients/openai_compatible.py` с env-driven config и правилом `current_model_id -> LLM_MODEL_ID -> configuration error`;
+  - добавлен `backend/app/tool_server/server.py` с минимальным `/tool-server/openapi.json` и проверочным инструментом `/tools/echo`;
+  - добавлен unit-тест `backend/tests/test_app_clean_contour.py`.
+  Verification:
+  - `pytest backend/tests/test_app_clean_contour.py -q`
+  - `python -m py_compile backend/app/clients/openai_compatible.py backend/app/tool_server/server.py`
+
+- [x] M0.5.2 — Перенести первый рабочий fast-tool в `backend/app`
+  Решение: первым переносим текстовый `analyze_equipment_fast`, потому что он проверяет новый LLM-клиент и `OpenAPI Tool Server`, но не тянет document/RAG/Legal Server/отчёты.
+  Done:
+  - добавлен HTTP-вызов `/chat/completions` в `backend/app/clients/openai_compatible.py`;
+  - `backend/app/tool_server` разложен на `schemas.py`, `registry.py`, `handlers.py`, `server.py`;
+  - добавлен `POST /tools/analyze_equipment_fast` без `UMS` и без старого `execute_orchestration`;
+  - route использует `current_model_id`, fallback `LLM_MODEL_ID` и возвращает понятную `503` configuration error.
+  Verification:
+  - `pytest backend/tests/test_app_clean_contour.py -q`
+  - `python -m py_compile backend/app/clients/openai_compatible.py backend/app/tool_server/server.py backend/app/tool_server/schemas.py backend/app/tool_server/registry.py backend/app/tool_server/handlers.py`
+
+- [x] M0.5.3 — Разложить `Tool/Workflow Server` по целевым модулям
+  Решение: в новом `backend/app` фиксируем wire contract долгих tools без переноса реального deep graph.
+  Done:
+  - выделены `backend/app/tool_server/jobs.py` и `backend/app/tool_server/openapi.py`;
+  - добавлен `POST /tools/analyze_equipment_deep` как accepted-job smoke route;
+  - добавлены `GET /tool-jobs/{job_id}`, `GET /tool-jobs/{job_id}/result`, `POST /tool-jobs/{job_id}/cancel`;
+  - job state переиспользует существующий `orchestrator.tool_job_store`, без второго хранилища.
+  Verification:
+  - `pytest backend/tests/test_app_clean_contour.py backend/tests/test_tool_job_store.py -q`
+  - `python -m py_compile backend/app/clients/openai_compatible.py backend/app/tool_server/server.py backend/app/tool_server/schemas.py backend/app/tool_server/registry.py backend/app/tool_server/handlers.py backend/app/tool_server/jobs.py backend/app/tool_server/openapi.py`
+
+- [x] M0.5.4 — Подключить `backend/app` к текущему backend entrypoint
+  Решение: новый clean-контур доступен через текущий `orchestrator.agent_api:app`, но только как shadow-путь под `/app-tools`.
+  Done:
+  - `backend/app/tool_server` принимает `route_prefix` для корректных `status_url` и `result_ref`;
+  - `agent_api` монтирует clean tool server на `/app-tools`;
+  - старые `/tool-server`, `/tools`, `/tool-jobs` не заменяются и остаются compatibility surface.
+  Verification:
+  - `pytest backend/tests/test_app_clean_contour.py backend/tests/test_tool_job_store.py -q`
+  - `python -m py_compile backend/app/clients/openai_compatible.py backend/app/tool_server/server.py backend/app/tool_server/schemas.py backend/app/tool_server/registry.py backend/app/tool_server/handlers.py backend/app/tool_server/jobs.py backend/app/tool_server/openapi.py backend/orchestrator/agent_api.py`
+
+- [x] M0.5.5 — Зафиксировать `deep-tools-only` fork contour
+  Решение: форк `Open WebUI` на ветке `anp/deep-tools-only-v0.9.2` закреплён как слой только для долгих tools, без возврата runtime model selector / folder scan / model registration UX.
+  Done:
+  - добавлены регрессии в форке `Open WebUI`, что deep-job proxy использует `Tool/Workflow Server`, а не `UMS` / model manager env;
+  - покрыто проксирование cancel в `POST /tool-jobs/{job_id}/cancel`;
+  - добавлена проверка отсутствия ANP runtime-management файлов и маршрутов в tracked-коде форка.
+  Verification:
+  - `pytest backend/open_webui/test/apps/webui/routers/test_deep_jobs.py -q`
+  - `pytest backend/open_webui/test/utils/test_long_running_tools.py backend/open_webui/test/utils/test_tools_model_context.py -q`
+  - `python -m py_compile backend/open_webui/routers/deep_jobs.py backend/open_webui/services/deep_jobs.py`
+
+- [ ] M0.5.6 — Ограничить `deep-jobs` polling только backend-owned long-running tools
+  Контекст: live smoke с внешним `Open WebUI Workspace Tool` для видеоанализа показал, что обычный tool может сам отдавать progress через `__event_emitter__`, а `deep-jobs` при этом глобально опрашивает `/api/v1/chats/{chat_id}/deep-jobs/active` и пытается ходить в чужой сервис по `/tool-server/tool-jobs/active/chat/...`. Если сервис не реализует backend-owned `tool_jobs` contract, это даёт шумные `404/500` и не добавляет полезного UI.
+  Нужно сделать:
+  - привязать `deep-jobs` polling к конкретному `tool_server_id` / `tool_name` / `status_url`, сохранённому в accepted job state;
+  - не опрашивать `deep-jobs` для обычных `Workspace Tool`, которые не вернули `job_id/status_url` по backend-owned contract;
+  - заменить connection errors на non-fatal `job: null` или явный unavailable state;
+  - убрать implicit fallback на несуществующий глобальный server вроде `127.0.0.1:8000`.
+  Acceptance:
+  - открытие чата без активной backend-owned long-running job не вызывает чужой `/tool-server/tool-jobs/active/chat/...`;
+  - внешний синхронный `Workspace Tool` может показывать progress через `__event_emitter__` без участия `deep-jobs`;
+  - unavailable `Tool/Workflow Server` не ломает чат и не даёт `500` на `/deep-jobs/active`;
+  - polling/result/cancel идут только в server, который создал конкретный accepted job.
+  Verification:
+  - targeted tests для `backend/open_webui/routers/deep_jobs.py` и `backend/open_webui/services/deep_jobs.py`;
+  - live smoke: открыть чат при выключенном `Tool/Workflow Server` и убедиться, что `/deep-jobs/active` не шумит `500`;
+  - live smoke: запустить настоящий deep tool и проверить `status/result/cancel` по сохранённому `status_url`.
 
 ### M0 — Foundation / Cleanup
 
@@ -215,15 +309,17 @@
   - сохранить единый retrieval source-of-truth для native Knowledge path и backend workflows.
 - [ ] M2.5 — Вынести document parsing / OCR / table extraction во внешний ingestion contour
   Нужно сделать:
-  - определить канонический parser-service path (`Docling` first, `Tika` optional fallback);
+  - определить канонический `document-runtime` path (`Docling` first, `Tika` optional fallback, OCR/VL optional);
   - не делать `Open WebUI` UI-процесс source-of-truth для production parsing;
-  - разделить parsing, embeddings и vector-store lifecycle от chat UI;
-  - определить handoff между `Open WebUI` upload/Knowledge UX и внешним ingestion pipeline.
+  - разделить parsing/OCR, embeddings, reranking и vector-store lifecycle от chat UI;
+  - определить handoff между `Open WebUI` upload/Knowledge UX, `document-runtime` и `RAG-service`;
+  - зафиксировать endpoints `POST /parse`, `POST /ocr`, `GET /health`, `GET /metrics`.
 - [ ] M2.6 — Подготовить corpus admin UI как backend-owned control plane
   Нужно сделать:
   - добавить в operator/admin surface загрузку документов, reindex, delete, verify, collection management;
   - считать `Open WebUI Knowledge` user-facing retrieval shell, но не canonical corpus admin;
-  - зафиксировать versioning, dedup, audit и access rules на стороне backend/admin UI.
+  - зафиксировать versioning, dedup, audit и access rules на стороне backend/admin UI;
+  - управлять external/attached `Qdrant` collections через явный embedding profile, а не через неявное совпадение размерности.
 - [ ] M2.4 — Не делать ранний rename `backend/open_webui_uploads`
   Статус: explicit defer
   Решение:
@@ -498,17 +594,19 @@
 
 - [ ] M3.8 — Подключить canonical `Open WebUI Knowledge + external ingestion + Qdrant` contour
   Нужно сделать:
-  - определить production-ready handoff от user-facing `Open WebUI` uploads/Knowledge UX к внешнему ingestion pipeline;
+  - определить production-ready handoff от user-facing `Open WebUI` uploads/Knowledge UX к `RAG-service` и `document-runtime`;
   - подключить `Qdrant` как canonical vector backend для Knowledge;
-  - определить, какие части corpus metadata и collection lifecycle принадлежат `Open WebUI`, а какие backend/admin contour;
+  - определить, какие части corpus metadata и collection lifecycle принадлежат `Open WebUI`, `RAG-service` и backend/admin contour;
   - зафиксировать retrieval contract так, чтобы follow-up по документу опирался на `document_ref` и `Qdrant`, а не на один сохранённый deep-отчёт;
+  - зафиксировать embedding profile contract для managed и external/attached collections;
   - зафиксировать smoke path для native Knowledge chat на реальных документах без подмены explicit tools.
   Acceptance:
   - обычный вопрос по документу закрывается native Knowledge contour без hidden backend tool routing;
   - retrieval source-of-truth понятен и проверяем;
   - состояние документа и состояние конкретного запуска анализа разведены явно и не смешиваются;
   - parsing/OCR/tables не живут только внутри UI-процесса;
-  - `Qdrant` используется как canonical vector backend, а не side experiment.
+  - `Qdrant` используется как canonical vector backend, а не side experiment;
+  - `RAG-service` может отказать в поиске по коллекции с несовместимым embedding profile вместо silent drift.
   Plan:
   - [Open WebUI-First RAG Architecture Alignment Implementation Plan](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-10-openwebui-first-rag-architecture-plan.md)
   - [Qdrant Knowledge Base Store Plan](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-01-qdrant-knowledge-base-store-plan.md)
@@ -559,11 +657,13 @@
   - prompt/slash scenarios опираются на тот же backend tool catalog.
   Plan:
   - [Open WebUI MCP / OpenAPI / Actions Architecture Plan](/home/seral/HDD/proj/agent-navigator-pro/docs/plans/migration/2026-04-07-openwebui-mcp-tools-actions-architecture-plan.md)
-- [ ] M4.x — Unified Model Catalog / Gateway
+- [ ] M4.x — Optional Model Runtime Control Plane
   Контекст:
-  - public raw model list и runtime inventory сейчас расходятся между `agent_api` и `UMS`;
-  - это cleanup/consistency slice, а не immediate blocker для текущего tool flow.
+  - целевой обычный чат подключается к внешнему `OpenAI-compatible` provider и не требует backend model gateway;
+  - если нужен registry/lifecycle/status для локальных моделей, это должен быть optional operator/control-plane слой, а не обязательный data-path.
   Precondition:
+  - plain chat через внешний provider подтверждён live smoke;
+  - форк `Open WebUI` очищен до deep-tools-only;
   - `M3.5 — Open WebUI Named Tools + Bootstrap` закрыт и eval contour устойчив.
   - `M3.6 — Responsibility Split` и `M3.7 — Open WebUI-native Config` завершены.
   Plan:
@@ -602,16 +702,16 @@
 
 ## Open Tasks / Priorities
 
-1. M3.7 — перенести runtime config инструментов в `Open WebUI`-native bootstrap/config contour
-2. M3.8 — подключить canonical `Open WebUI Knowledge + external ingestion + Qdrant` contour
-3. M2.1 / M2.2 — довести upload/document binding как backend-owned model
-4. M2.5 / M2.6 — вынести parsing/corpus admin в backend-owned ingestion + admin UI contour
-5. M3.9 — принять финальное решение по `ask_document`
-6. M4.2 — оформить `Chainlit -> temporary compatibility/debug shell` и sunset contract
-7. M3.1 — довести `Open WebUI` compose contour до pinned-tag + стабильного runtime smoke
-8. Unified Model Catalog / Gateway — только после закрытия `M3.7`, `M3.8`, `M3.9` и стабилизации primary contour
-9. M4.4 / M4.1 — довести tool registry и MCP/coexistence layer без возврата hidden routing
-10. M3.3 — оставить как regression/smoke checkpoint для legacy `User Tool Server` path, а не как основной продуктовый milestone
+1. Перевести plain chat на внешний `OpenAI-compatible` provider без обязательного backend raw proxy.
+2. Убрать `llm-tools-platform` из пользовательского сценария и оставить его только как hidden/debug compatibility path до удаления.
+3. Расширить env-driven clients для embeddings, VL и `RAG-service`.
+4. M3.8 — подключить canonical `Open WebUI Knowledge + RAG-service + Qdrant` contour.
+5. M2.5 / M2.6 — вынести parsing/corpus admin в `document-runtime` + backend-owned admin UI contour.
+6. M2.1 / M2.2 — довести upload/document binding как backend-owned model.
+7. M3.9 — принять финальное решение по `ask_document`.
+8. M4.2 — оформить `Chainlit -> temporary compatibility/debug shell` и sunset contract.
+9. Optional Model Runtime Control Plane — только после стабилизации provider/tools/RAG contour, не как обязательный data-path.
+10. M4.4 / M4.1 — довести tool registry и MCP/coexistence layer без возврата hidden routing.
 
 ## Risks / Blockers / Workarounds
 
@@ -623,9 +723,15 @@
   Митигатор: единый corpus/retrieval source-of-truth, `M3.8`, `M3.9`, чёткое разделение `Knowledge chat` vs `explicit tools`.
 - Риск: `Open WebUI` станет вторым decision engine через hidden routing между Knowledge и tools.
   Митигатор: четыре явных режима (`plain model` / `native knowledge` / `explicit tools` / `agent mode`) и запрет hidden backend tool routing вне explicit contours.
+- Риск: форк `Open WebUI` снова начнёт разрастаться в model manager.
+  Митигатор: целевой fork scope ограничен deep-job UX; runtime model selector, folder scan и load/status UX вынесены в отклонённое направление в `TASK_MIGRATE_PREFIN.md`.
+- Риск: backend raw proxy снова станет обязательным путём обычного чата.
+  Митигатор: plain chat должен проверяться через внешний `OpenAI-compatible` provider; backend raw proxy допускается только как legacy/debug bridge.
+- Риск: `Tool/Workflow Server` станет второй псевдомоделью.
+  Митигатор: он исполняет только явные tool calls и не отвечает на каждое сообщение пользователя.
 - Risk: follow-up поведение external/community tools в `Open WebUI` легко интерпретировать по тексту ответа неверно.
   Митигатор: использовать `tests/harness/openwebui/openwebui_followup_payload_harness.py` и считать source-of-truth именно второй `POST /api/chat/completions`, а не chat text; contaminated runs с memory/extra tools считаются невалидными.
-- Workaround: пока tool-server contract не готов, можно использовать OpenAI-compatible path только как временный eval contour.
+- Workaround: пока новый provider/tools split не внедрён полностью, старый backend raw proxy можно использовать только как временный debug/eval bridge.
 - Workaround: `backend/open_webui_uploads` остаётся compatibility-name, даже если фактически обслуживает оба UI.
 - Workaround: первый `accepted job` contract для deep tools опирается на process-local background registry; для shared/multi-process rollout это нужно будет заменить на backend-owned persistent job/result store.
 - Workaround: до отдельного proxy/policy slice `legacy Open WebUI` smoke нужно считать dual-URL контуром: browser-side backend probes идут на `127.0.0.1`, а container-side refresh/import может требовать `host.docker.internal` или другой host-reachable адрес, общий и для браузера, и для контейнера.
